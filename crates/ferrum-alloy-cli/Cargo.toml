@@ -1,0 +1,27 @@
+[package]
+name = "ferrum-alloy-cli"
+description = "ferrum-alloy command-line tool: starters, configuration checks, artifact export, offline diagnosis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ferrum-alloy"
+path = "src/main.rs"
+
+[dependencies]
+ferrum-alloy-diagnostics = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true, features = ["parse", "serde", "display"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

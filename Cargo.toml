@@ -1,0 +1,100 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ferrum-alloy",
+    "crates/ferrum-alloy-telemetry",
+    "crates/ferrum-alloy-edge",
+    "crates/ferrum-alloy-diagnostics",
+    "crates/ferrum-alloy-cli",
+    "examples/minimal",
+    "examples/existing-axum",
+    "examples/postgres-api",
+    "examples/edge-observability",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/ferrum-edge/ferrum-alloy"
+homepage = "https://github.com/ferrum-edge/ferrum-alloy"
+# Nothing is published until licensing, naming, and release decisions are approved.
+publish = false
+
+[workspace.dependencies]
+# Internal crates. Paths only; no crate in this workspace is published.
+ferrum-alloy = { path = "crates/ferrum-alloy", default-features = false }
+ferrum-alloy-telemetry = { path = "crates/ferrum-alloy-telemetry", default-features = false }
+ferrum-alloy-edge = { path = "crates/ferrum-alloy-edge", default-features = false }
+ferrum-alloy-diagnostics = { path = "crates/ferrum-alloy-diagnostics" }
+
+# HTTP stack
+axum = { version = "0.8.9", default-features = false }
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", default-features = false }
+hyper-util = { version = "0.1.21", default-features = false }
+tower = { version = "0.5.3", default-features = false }
+tower-http = { version = "0.7.1", default-features = false }
+tower-layer = "0.3.3"
+tower-service = "0.3.3"
+tokio = { version = "1.53.1", default-features = false }
+tokio-util = { version = "0.7.19", default-features = false }
+bytes = "1.12.1"
+futures-util = { version = "0.3.34", default-features = false }
+pin-project-lite = "0.2.17"
+
+# Serialization and configuration
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = { version = "1.1.6", default-features = false }
+time = { version = "0.3.55", default-features = false }
+thiserror = "2.0.21"
+ipnet = "2.12.2"
+getrandom = "0.4.3"
+
+# Observability
+tracing = { version = "0.1.44", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false }
+opentelemetry = { version = "0.33.0", default-features = false }
+opentelemetry_sdk = { version = "0.33.0", default-features = false }
+opentelemetry-otlp = { version = "0.33.0", default-features = false }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
+
+# Optional batteries
+sqlx = { version = "0.9.0", default-features = false }
+utoipa = { version = "6.0.0", default-features = false }
+utoipa-axum = { version = "0.3.0", default-features = false }
+jsonwebtoken = { version = "11.1.0", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
+rustls = { version = "0.23.45", default-features = false }
+tokio-rustls = { version = "0.26.5", default-features = false }
+rustls-pki-types = "1.15.1"
+x509-parser = { version = "0.18.1", default-features = false }
+url = "2.5.8"
+
+# CLI
+clap = { version = "4.6.7", features = ["derive"] }
+
+# Test-only
+tempfile = "3.27.0"
+rcgen = { version = "0.14.10", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.dev.package."*"]
+debug = false
