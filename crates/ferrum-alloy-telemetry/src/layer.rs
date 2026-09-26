@@ -436,6 +436,7 @@ where
             alloy.response.body.outcome = Empty,
             alloy.response.body.bytes = Empty,
             alloy.response.upgraded = Empty,
+            alloy.admission.wait_ms = Empty,
         );
         if let Some(scheme) = request.uri().scheme_str() {
             span.record("url.scheme", scheme);

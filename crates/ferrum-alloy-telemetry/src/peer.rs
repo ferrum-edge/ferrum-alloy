@@ -222,3 +222,55 @@ pub fn peer_info(extensions: &Extensions) -> Option<PeerInfo> {
 
 /// A shared classifier handle.
 pub type SharedClassifier = Arc<dyn TrustClassifier>;
+
+/// Why a peer certificate could not be read.
+#[cfg(feature = "x509")]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PeerCertificateError {
+    /// The DER encoding is invalid.
+    #[error("peer certificate is not valid DER X.509")]
+    Malformed,
+    /// The subject alternative name extension is invalid or duplicated.
+    #[error("peer certificate has an invalid subjectAltName extension")]
+    InvalidSan,
+}
+
+#[cfg(feature = "x509")]
+impl TlsPeer {
+    /// Reads identity from a leaf certificate **that the TLS stack has
+    /// already verified** against configured trust anchors. Pass the leaf of
+    /// the chain rustls reports after a successful handshake with a client
+    /// certificate verifier. Never call this for unverified certificates.
+    ///
+    /// A certificate with more than one `spiffe://` URI SAN yields no SPIFFE
+    /// id (X.509-SVIDs carry exactly one).
+    pub fn from_verified_leaf(der: &[u8]) -> Result<Self, PeerCertificateError> {
+        use x509_parser::extensions::GeneralName;
+        let (rest, certificate) = x509_parser::parse_x509_certificate(der)
+            .map_err(|_| PeerCertificateError::Malformed)?;
+        if !rest.is_empty() {
+            return Err(PeerCertificateError::Malformed);
+        }
+        let mut spiffe_ids = Vec::new();
+        let mut dns_names = Vec::new();
+        if let Some(san) = certificate
+            .subject_alternative_name()
+            .map_err(|_| PeerCertificateError::InvalidSan)?
+        {
+            for name in &san.value.general_names {
+                match name {
+                    GeneralName::URI(uri) if uri.starts_with("spiffe://") => {
+                        spiffe_ids.push((*uri).to_owned());
+                    }
+                    GeneralName::DNSName(dns) => dns_names.push(dns.to_ascii_lowercase()),
+                    _ => {}
+                }
+            }
+        }
+        Ok(Self {
+            client_cert_verified: true,
+            spiffe_id: (spiffe_ids.len() == 1).then(|| spiffe_ids.remove(0)),
+            dns_names,
+        })
+    }
+}

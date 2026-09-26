@@ -15,6 +15,8 @@ axum = ["dep:axum"]
 # Explicit, application-invoked global subscriber initialization helpers.
 subscriber = ["dep:tracing-subscriber"]
 # OpenTelemetry bridge and bounded OTLP/HTTP export.
+# Extract SPIFFE / DNS SAN identity from verified peer certificates.
+x509 = ["dep:x509-parser"]
 otel = [
     "subscriber",
     "dep:opentelemetry",
@@ -37,6 +39,7 @@ tower-service = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 
 axum = { workspace = true, optional = true, features = ["matched-path"] }
+x509-parser = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["std", "fmt", "json", "env-filter", "registry", "ansi", "smallvec"] }
 opentelemetry = { workspace = true, optional = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, optional = true, features = ["trace"] }
@@ -53,6 +56,7 @@ serde_json = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt"] }
+rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
 
 [lints]
 workspace = true

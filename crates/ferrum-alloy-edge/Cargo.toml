@@ -9,9 +9,9 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = []
-# Parse verified peer certificates (SPIFFE URI SAN / DNS SAN) from rustls.
-tls = ["dep:x509-parser", "dep:rustls-pki-types"]
+default = ["axum"]
+# Body and extractor integration for axum routers.
+axum = ["dep:axum"]
 
 [dependencies]
 ferrum-alloy-telemetry = { workspace = true }
@@ -24,15 +24,14 @@ tower-layer = { workspace = true }
 tower-service = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 ipnet = { workspace = true, features = ["serde"] }
-x509-parser = { workspace = true, optional = true }
-rustls-pki-types = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+toml = { workspace = true, features = ["parse", "serde", "display"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
-rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
 
 [lints]
 workspace = true

@@ -11,9 +11,8 @@ publish.workspace = true
 [features]
 default = []
 otel = ["ferrum-alloy-telemetry/otel"]
-edge = ["dep:ferrum-alloy-edge"]
-tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "ferrum-alloy-edge?/tls", "edge-identity"]
-edge-identity = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/tls"]
+edge = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/axum"]
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "ferrum-alloy-telemetry/x509"]
 postgres = ["dep:sqlx"]
 openapi = ["dep:utoipa", "dep:utoipa-axum"]
 jwt = ["dep:jsonwebtoken", "http-client"]
@@ -37,7 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "macros", "time", "sync"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["catch-panic"] }
@@ -49,7 +48,7 @@ ipnet = { workspace = true, features = ["serde"] }
 ferrum-alloy-edge = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { workspace = true, optional = true, features = ["ring", "tls12", "logging"] }
-rustls-pki-types = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true, features = ["std"] }
 sqlx = { workspace = true, optional = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki", "migrate", "macros"] }
 utoipa = { workspace = true, optional = true, features = ["macros"] }
 utoipa-axum = { workspace = true, optional = true }
@@ -58,9 +57,17 @@ reqwest = { workspace = true, optional = true, features = ["rustls-no-provider",
 url = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
-tempfile = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+bytes = { workspace = true }
+http-body-util = { workspace = true, features = ["channel"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
