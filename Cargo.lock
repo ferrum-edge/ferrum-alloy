@@ -767,7 +767,21 @@ dependencies = [
 name = "example-edge-observability"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "bytes",
  "ferrum-alloy",
+ "ferrum-alloy-diagnostics",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

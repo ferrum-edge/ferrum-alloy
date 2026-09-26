@@ -1,0 +1,36 @@
+# Alloy configuration for the Edge end-to-end demo (container paths).
+[service]
+environment = "e2e"
+
+[server]
+# Inside the compose network only; the host reaches it on 127.0.0.1:18443.
+bind = "0.0.0.0:8443"
+
+[server.tls]
+cert_path = "/certs/alloy.pem"
+key_path = "/certs/alloy.key"
+client_ca_path = "/certs/ca.pem"
+# `optional` so direct callers receive a 403 Problem instead of a TLS
+# failure; `gateway_required` below still rejects them.
+client_auth = "optional"
+
+[management]
+bind = "127.0.0.1:9090"
+
+[logging]
+format = "json"
+filter = "info"
+
+[otlp]
+enabled = true
+endpoint = "http://otel-collector:4318/v1/traces"
+scheduled_delay_ms = 500
+
+[trust]
+# Only Ferrum Edge's verified client certificate is trusted for trace
+# context and consumer identity.
+identities = ["spiffe://ferrum.demo/ns/edge/sa/gateway"]
+
+[edge]
+mode = "gateway_required"
+accept_consumer_identity = true

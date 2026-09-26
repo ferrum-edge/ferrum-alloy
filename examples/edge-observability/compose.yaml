@@ -1,0 +1,35 @@
+# Ferrum Edge -> Ferrum Alloy -> instrumented dependency, with both
+# exporting to an OpenTelemetry Collector. No host bind mounts: all inputs
+# are baked into images so this runs the same locally and in CI.
+#
+#   docker compose -f examples/edge-observability/compose.yaml up -d --build
+#   cargo run -p example-edge-observability --bin edge-e2e -- \
+#     --compose examples/edge-observability/compose.yaml --out target/e2e
+name: ferrum-alloy-edge-e2e
+
+x-build: &build
+  context: ../..
+  dockerfile: examples/edge-observability/Dockerfile
+
+services:
+  otel-collector:
+    build: { <<: *build, target: collector }
+
+  alloy:
+    build: { <<: *build, target: alloy }
+    depends_on: [otel-collector]
+    ports:
+      # Direct access from the host, used only to prove bypass rejection.
+      - "127.0.0.1:18443:8443"
+
+  edge:
+    build: { <<: *build, target: edge }
+    depends_on: [alloy, otel-collector]
+    environment:
+      FERRUM_MODE: file
+      FERRUM_FILE_CONFIG_PATH: /config/edge.yaml
+      FERRUM_PROXY_BIND_ADDRESS: 0.0.0.0
+      FERRUM_ADMIN_HTTP_PORT: "0"
+      FERRUM_LOG_LEVEL: info
+    ports:
+      - "127.0.0.1:18000:8000"
