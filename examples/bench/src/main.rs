@@ -30,6 +30,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SpanData, SpanExporter};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
@@ -209,11 +210,18 @@ fn start_server(
                     );
                 }
                 (None, Scenario::AlloyLogs) => {
+                    // Same formatting as `ferrum_alloy::telemetry::init::fmt_layer`
+                    // for `LogFormat::Json`, writing to a sink.
+                    let layer = tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .json()
+                        .with_current_span(true)
+                        .with_span_list(false)
+                        .flatten_event(true)
+                        .with_writer(std::io::sink)
+                        .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
                     let _ = tracing::subscriber::set_global_default(
-                        tracing_subscriber::fmt()
-                            .json()
-                            .with_writer(std::io::sink)
-                            .finish(),
+                        tracing_subscriber::registry().with(layer),
                     );
                 }
                 (None, Scenario::Alloy) => {

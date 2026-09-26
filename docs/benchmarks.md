@@ -17,7 +17,7 @@ target/release/alloy-bench --scenario <scenario> --payload small --connections 3
 |---|---|
 | `plain` | `axum::serve` with the same router, no Alloy |
 | `alloy` | `AlloyApp` defaults (Alloy's server loop, limits, admission, request id, route labels, metrics, telemetry layer); subscriber with no layers |
-| `alloy-logs` | As `alloy`, with a JSON `fmt` subscriber at `info` writing to a sink |
+| `alloy-logs` | As `alloy`, with a JSON `fmt` subscriber at `info` writing to a sink (see the note under *Record batching*) |
 | `otel-sampled` | OpenTelemetry bridge, sampling ratio 1.0, exporter that discards batches |
 | `otel-unsampled` | OpenTelemetry bridge, sampling ratio 0.0 |
 | `otel-unreachable` | Sampling ratio 1.0, OTLP/HTTP to a closed port (200 ms timeout, no retries) |
@@ -49,9 +49,32 @@ The raw results, one JSON line per run, are in `examples/bench/results/2026-09-2
 ## Reading the results
 
 - On a handler that does no work, Alloy's default stack adds about 60 µs at p50 and costs about a quarter of peak throughput. A handler doing real I/O would dilute this, but this run did not measure one.
-- **JSON access logging is the dominant cost**, more than the rest of the stack combined, even though its output goes to a sink. This is a performance finding worth investigating: span-field formatting on every request is the likely cause, but no profile was taken.
+- **JSON access logging was the dominant cost**, more than the rest of the stack combined, even though its output goes to a sink. tracing-subscriber's JSON formatter re-parses and re-serializes all of a span's fields on every `Span::record` call, and the request span was recorded field by field. The batching change below addresses this.
 - An **unreachable collector costs the same as a healthy (discarding) exporter**. Export failures stay off the request path. The harness did not record how many spans the bounded queue dropped.
 - Unsampled OpenTelemetry still costs about 5% relative to `alloy`, for the bridge and the sampling decision.
+
+## Record batching
+
+The request span's fields are now recorded in one `record_all!` call per phase (request start, response headers, finalization) instead of one `record` call per field. Before the change a request made about 10 such calls with default settings; after it, 3 (plus none for disabled optional fields).
+
+The results table above predates this change, and its `alloy-logs` row used tracing-subscriber's default JSON layout. The comparison below instead uses the layout of Alloy's own `init::fmt_layer`: flattened events, current span, no span list.
+
+**Method:**
+
+- The binary was built before and after the change from the same tree.
+- Runs alternated before and after within each scenario, for 5 repetitions, with 32 connections, 5 s per run, HTTP/1.1, and the small payload.
+- The 1-minute load average was **11 to 22** during these runs, higher than for the table above. Absolute numbers are therefore lower, and only the paired ratios are meaningful.
+
+| Scenario | Before (median req/s) | After (median req/s) | After / before, median (range) | p50 before → after |
+|---|---:|---:|---:|---:|
+| `plain` (unchanged code: noise floor) | 129,996 | 125,127 | 0.95 (0.91 – 1.08) | 223 → 226 µs |
+| `alloy` | 86,274 | 93,324 | 1.07 (0.85 – 1.32) | 334 → 311 µs |
+| `alloy-logs` | 47,999 | 57,148 | **1.43 (1.15 – 1.55)** | 643 → 502 µs |
+| `otel-sampled` | 61,720 | 68,467 | 1.10 (0.92 – 1.13) | 440 → 400 µs |
+
+- **JSON logging:** throughput improved by more than the noise floor in every paired run.
+- **Other scenarios:** the changes are within the noise measured on unchanged code, so the only supported claim is that they did not regress.
+- **Raw data:** `examples/bench/results/2026-09-26-macos-m4-record-batching-ab.jsonl`.
 
 ## Discarded run
 

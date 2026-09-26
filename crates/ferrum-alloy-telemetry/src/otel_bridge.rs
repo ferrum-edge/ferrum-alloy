@@ -83,19 +83,16 @@ pub(crate) fn attach(
 
 /// Renames the exported span once the route template is known. A started
 /// span ignores later `otel.name` field updates, so the OpenTelemetry span is
-/// renamed directly.
+/// renamed directly. The caller records the `otel.name` field itself.
 #[cfg(feature = "otel")]
 pub(crate) fn rename(span: &Span, name: String) {
     use opentelemetry::trace::TraceContextExt;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
-    span.record("otel.name", name.as_str());
     span.context().span().update_name(name);
 }
 
 #[cfg(not(feature = "otel"))]
-pub(crate) fn rename(span: &Span, name: String) {
-    span.record("otel.name", name.as_str());
-}
+pub(crate) fn rename(_span: &Span, _name: String) {}
 
 /// Trace id, span id, and sampled flag of `span` as exported through
 /// OpenTelemetry, or `None` when the span is not bridged.

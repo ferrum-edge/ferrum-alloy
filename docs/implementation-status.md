@@ -34,7 +34,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 
 | Area | State |
 |---|---|
-| Benchmarks | A harness exists (`examples/bench`). One local, same-host, interleaved run on a shared machine measured small-payload HTTP/1.1 throughput and latency; see [benchmarks.md](benchmarks.md). Large payloads, h2c, TLS, CPU time, memory, allocations, and a healthy Collector were not validly measured. No regression budget is enforced in CI. |
+| Benchmarks | A harness exists (`examples/bench`). Local, same-host, interleaved runs on a shared machine measured small-payload HTTP/1.1 throughput and latency, and a before/after comparison of span-record batching; see [benchmarks.md](benchmarks.md). Large payloads, h2c, TLS, CPU time, memory, allocations, and a healthy Collector were not validly measured. No regression budget is enforced in CI. |
 | Platforms | Only macOS arm64 was run locally. Linux x86_64, macOS, and Windows results come from hosted CI. |
 | Ferrum Edge versions | Only v0.9.7 is tested. Other releases are unverified. |
 | Service manifest | `ferrum.service_manifest` v1 is PROPOSED. Edge does not consume it. |

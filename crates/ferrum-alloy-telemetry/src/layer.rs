@@ -438,25 +438,30 @@ where
             alloy.response.upgraded = Empty,
             alloy.admission.wait_ms = Empty,
         );
-        if let Some(scheme) = request.uri().scheme_str() {
-            span.record("url.scheme", scheme);
-        }
-        if config.record.url_path {
-            span.record("url.path", request.uri().path());
-        }
-        if config.record.client_address
-            && let Some(addr) = peer_info(request.extensions()).and_then(|p| p.remote_addr)
-        {
-            span.record("client.address", tracing::field::display(addr.ip()));
-        }
-        if config.record.user_agent
-            && let Some(agent) = request
-                .headers()
-                .get(http::header::USER_AGENT)
-                .and_then(|v| v.to_str().ok())
-        {
-            span.record("user_agent.original", agent);
-        }
+        // Fields are recorded in one batch per phase: a JSON `fmt` layer
+        // re-serializes every span field on each `record` call.
+        let scheme = request.uri().scheme_str().map(str::to_owned);
+        let path = config
+            .record
+            .url_path
+            .then(|| request.uri().path().to_owned());
+        let client_address = config
+            .record
+            .client_address
+            .then(|| peer_info(request.extensions()).and_then(|p| p.remote_addr))
+            .flatten()
+            .map(|addr| addr.ip());
+        let user_agent = config
+            .record
+            .user_agent
+            .then(|| {
+                request
+                    .headers()
+                    .get(http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .flatten();
 
         let ids = crate::otel_bridge::attach(
             &span,
@@ -476,8 +481,15 @@ where
                 false,
             ),
         };
-        span.record("trace_id", tracing::field::display(trace_id));
-        span.record("span_id", tracing::field::display(span_id));
+        tracing::record_all!(
+            span,
+            url.scheme = scheme.as_deref(),
+            url.path = path.as_deref(),
+            client.address = client_address.map(tracing::field::display),
+            user_agent.original = user_agent.as_deref(),
+            trace_id = %trace_id,
+            span_id = %span_id,
+        );
 
         let server_timing = match config.server_timing {
             ServerTimingPolicy::Disabled => false,
@@ -708,20 +720,24 @@ impl Finalizer {
         self.status = Some(status);
         self.route = self.route_slot.get().cloned();
         let route = self.route_label().to_owned();
-        self.span
-            .record("http.response.status_code", status.as_u16());
-        self.span
-            .record("alloy.server.time_to_headers_ms", millis(elapsed));
-        if let Some(RouteLabel::Template(template)) = &self.route {
-            self.span.record("http.route", &**template);
-            crate::otel_bridge::rename(&self.span, format!("{} {template}", self.method));
-        }
-        if status.is_server_error() {
-            self.span.record("otel.status_code", "error");
-            self.span.record("error.type", status.as_str());
-        }
-        if status == StatusCode::SWITCHING_PROTOCOLS {
-            self.span.record("alloy.response.upgraded", true);
+        let template = match &self.route {
+            Some(RouteLabel::Template(template)) => Some(&**template),
+            _ => None,
+        };
+        let name = template.map(|template| format!("{} {template}", self.method));
+        let server_error = status.is_server_error();
+        tracing::record_all!(
+            self.span,
+            http.response.status_code = status.as_u16(),
+            alloy.server.time_to_headers_ms = millis(elapsed),
+            http.route = template,
+            otel.name = name.as_deref(),
+            otel.status_code = server_error.then_some("error"),
+            error.type = server_error.then(|| status.as_str()),
+            alloy.response.upgraded = (status == StatusCode::SWITCHING_PROTOCOLS).then_some(true),
+        );
+        if let Some(name) = name {
+            crate::otel_bridge::rename(&self.span, name);
         }
         self.shared
             .metrics
@@ -763,19 +779,16 @@ impl Finalizer {
         let status = self.status.map_or(0, |s| s.as_u16());
         let route = self.route_label().to_owned();
 
-        self.span.record("alloy.server.duration_ms", millis(total));
-        if let Some(body) = body {
-            self.span
-                .record("alloy.server.body_duration_ms", millis(body));
-        }
-        self.span
-            .record("alloy.response.body.outcome", outcome.as_str());
-        self.span
-            .record("alloy.response.body.bytes", self.body_bytes);
-        if matches!(outcome, BodyOutcome::Error | BodyOutcome::ServiceError) {
-            self.span.record("otel.status_code", "error");
-            self.span.record("error.type", outcome.as_str());
-        }
+        let failed = matches!(outcome, BodyOutcome::Error | BodyOutcome::ServiceError);
+        tracing::record_all!(
+            self.span,
+            alloy.server.duration_ms = millis(total),
+            alloy.server.body_duration_ms = body.map(millis),
+            alloy.response.body.outcome = outcome.as_str(),
+            alloy.response.body.bytes = self.body_bytes,
+            otel.status_code = failed.then_some("error"),
+            error.type = failed.then(|| outcome.as_str()),
+        );
 
         let metrics = &self.shared.metrics;
         metrics.record_duration(self.method, &route, status, total);
