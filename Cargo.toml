@@ -10,6 +10,7 @@ members = [
     "examples/existing-axum",
     "examples/postgres-api",
     "examples/edge-observability",
+    "examples/bench",
 ]
 
 [workspace.package]

@@ -764,6 +764,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-bench"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "ferrum-alloy",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "opentelemetry_sdk",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "example-edge-observability"
 version = "0.1.0"
 dependencies = [
@@ -804,6 +822,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "ferrum-alloy",
+ "serde_json",
  "tokio",
 ]
 
@@ -866,6 +885,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "utoipa-axum",
