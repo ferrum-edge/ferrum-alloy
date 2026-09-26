@@ -1,0 +1,21 @@
+# Ferrum Alloy configuration for {{name}}.
+# Precedence: builder overrides > FERRUM_ALLOY_* environment > this file > defaults.
+# Reference: https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/configuration.md
+
+[service]
+environment = "development"
+
+[server]
+# Loopback by default. In a container, bind explicitly, e.g.
+# FERRUM_ALLOY_BIND=0.0.0.0:8080
+bind = "127.0.0.1:8080"
+request_body_limit_bytes = 1048576
+request_timeout_ms = 30000
+
+[management]
+# Health detail and metrics. Keep on loopback, or set
+# FERRUM_ALLOY_MANAGEMENT_TOKEN (32+ characters) before binding elsewhere.
+bind = "127.0.0.1:9090"
+
+[logging]
+format = "compact"

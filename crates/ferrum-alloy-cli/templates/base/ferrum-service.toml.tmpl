@@ -1,0 +1,27 @@
+# Service manifest (PROPOSED contract ferrum.service_manifest v1).
+# `ferrum-alloy edge export --manifest ferrum-service.toml` generates
+# reviewable Ferrum Edge configuration from it. Nothing is applied
+# automatically.
+schema = "ferrum.service_manifest"
+schema_version = "1.0"
+
+[service]
+name = "{{name}}"
+version = "0.1.0"
+
+[api]
+public_path = "/{{name}}"
+service_base_path = "/"
+strip_public_path = true
+
+[upstream]
+host = "127.0.0.1"
+port = 8080
+scheme = "http"
+
+[health]
+path = "/readyz"
+
+[gateway]
+namespace = "ferrum"
+correlation_id = true

@@ -23,6 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+#[cfg(feature = "tls")]
+pub mod pki;
+
 pub const TOKEN: &str = "test-management-token-0123456789abcdef";
 
 /// A config suitable for tests: management enabled with a token.

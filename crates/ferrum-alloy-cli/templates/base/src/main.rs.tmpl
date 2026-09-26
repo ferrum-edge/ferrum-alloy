@@ -1,0 +1,12 @@
+use ferrum_alloy::AlloyApp;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    AlloyApp::new("{{name}}")
+        .version(env!("CARGO_PKG_VERSION"))
+        .config_file("alloy.toml")
+        .router({{crate_name}}::router())
+{{openapi_registration}}        .run()
+        .await?;
+    Ok(())
+}

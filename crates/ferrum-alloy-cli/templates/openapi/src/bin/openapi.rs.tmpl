@@ -1,0 +1,11 @@
+//! Prints this service's OpenAPI document. Used by `ferrum-alloy openapi export`.
+
+fn main() {
+    match {{crate_name}}::openapi().to_pretty_json() {
+        Ok(json) => println!("{json}"),
+        Err(error) => {
+            eprintln!("cannot render OpenAPI: {error}");
+            std::process::exit(1);
+        }
+    }
+}

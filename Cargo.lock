@@ -842,7 +842,9 @@ name = "ferrum-alloy-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ferrum-alloy",
  "ferrum-alloy-diagnostics",
+ "ferrum-alloy-edge",
  "serde",
  "serde_json",
  "tempfile",
