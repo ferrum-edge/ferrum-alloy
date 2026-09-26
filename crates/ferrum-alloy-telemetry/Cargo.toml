@@ -10,7 +10,7 @@ publish.workspace = true
 
 [features]
 default = ["axum", "subscriber"]
-# Read axum's `MatchedPath` route template.
+# Read axum's `MatchedPath` route template and `ConnectInfo` peer address.
 axum = ["dep:axum"]
 # Explicit, application-invoked global subscriber initialization helpers.
 subscriber = ["dep:tracing-subscriber"]
@@ -41,7 +41,7 @@ tower-layer = { workspace = true }
 tower-service = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 
-axum = { workspace = true, optional = true, features = ["matched-path"] }
+axum = { workspace = true, optional = true, features = ["matched-path", "tokio"] }
 x509-parser = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["std", "fmt", "json", "env-filter", "registry", "ansi", "smallvec"] }
 opentelemetry = { workspace = true, optional = true, features = ["trace"] }

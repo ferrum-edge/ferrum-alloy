@@ -231,6 +231,7 @@ async fn timeouts_and_refused_connections_fail_fast() {
         .unwrap()
         .local_addr()
         .unwrap();
+    let started = std::time::Instant::now();
     let error = client
         .execute(
             None,
@@ -244,7 +245,13 @@ async fn timeouts_and_refused_connections_fail_fast() {
         )
         .await
         .unwrap_err();
-    assert!(error.is_connect());
+    // Windows retries refused connections for about two seconds, so the
+    // request timeout can fire before the refusal is reported.
+    assert!(
+        error.is_connect() || (cfg!(windows) && error.is_timeout()),
+        "{error:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
