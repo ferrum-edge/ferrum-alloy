@@ -181,20 +181,14 @@ impl OtelPipeline {
         let timeout = Duration::from_millis(config.timeout_ms);
         let retries = config.max_export_retries;
         let max_request_bytes = config.max_request_bytes;
+        let https = endpoint
+            .as_deref()
+            .is_some_and(|e| e.starts_with("https://"));
         let factory = move || {
             // Build the HTTP client explicitly (on the export thread): the
             // exporter's implicit client depends on how reqwest's TLS
             // features unify across the application and can panic.
-            let tls = {
-                use rustls_platform_verifier::BuilderVerifierExt;
-                rustls::ClientConfig::builder_with_provider(Arc::new(
-                    rustls::crypto::ring::default_provider(),
-                ))
-                .with_safe_default_protocol_versions()
-                .and_then(|builder| builder.with_platform_verifier())
-                .map_err(|e| format!("OTLP TLS configuration: {e}"))?
-                .with_no_client_auth()
-            };
+            let tls = otlp_tls(https)?;
             let client = reqwest::blocking::Client::builder()
                 .tls_backend_preconfigured(tls)
                 .timeout(timeout)
@@ -293,6 +287,27 @@ impl OtelPipeline {
         self.provider
             .shutdown_with_timeout(timeout)
             .map_err(|e| OtelError::Exporter(e.to_string()))
+    }
+}
+
+/// TLS for the OTLP client: the platform trust store. A configured
+/// `https://` endpoint requires it; otherwise (plain HTTP, or an endpoint
+/// from `OTEL_EXPORTER_OTLP_*`) a host without system roots gets an empty
+/// store, so HTTPS exports fail and are counted instead of blocking startup.
+fn otlp_tls(require_roots: bool) -> Result<rustls::ClientConfig, String> {
+    use rustls_platform_verifier::BuilderVerifierExt;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("OTLP TLS configuration: {e}"))?;
+    match builder.clone().with_platform_verifier() {
+        Ok(builder) => Ok(builder.with_no_client_auth()),
+        Err(error) if require_roots => Err(format!(
+            "OTLP endpoint uses https but the platform trust store is unavailable: {error}"
+        )),
+        Err(_) => Ok(builder
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth()),
     }
 }
 

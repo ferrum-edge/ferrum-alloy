@@ -72,13 +72,26 @@ impl AlloyClient {
     /// Builds a client from `[http_client]`.
     pub fn new(settings: &HttpClientSettings) -> Result<Self, AlloyError> {
         use rustls_platform_verifier::BuilderVerifierExt;
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
         .with_safe_default_protocol_versions()
-        .and_then(|builder| builder.with_platform_verifier())
-        .map_err(|e| AlloyError::Integration(format!("http_client TLS: {e}")))?
-        .with_no_client_auth();
+        .map_err(|e| AlloyError::Integration(format!("http_client TLS: {e}")))?;
+        let tls = match builder.clone().with_platform_verifier() {
+            Ok(builder) => builder.with_no_client_auth(),
+            Err(error) => {
+                // Plain-HTTP destinations still work; HTTPS requests fail
+                // certificate verification instead of silently trusting.
+                tracing::warn!(
+                    target: "ferrum_alloy::http_client",
+                    %error,
+                    "platform trust store unavailable; HTTPS requests will fail verification"
+                );
+                builder
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth()
+            }
+        };
         let max_redirects = settings.max_redirects;
         let policy = if max_redirects == 0 {
             redirect::Policy::none()

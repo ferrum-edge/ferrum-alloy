@@ -194,13 +194,23 @@ impl JwtVerifier {
         }
         let tls = {
             use rustls_platform_verifier::BuilderVerifierExt;
-            rustls::ClientConfig::builder_with_provider(Arc::new(
+            let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
             ))
             .with_safe_default_protocol_versions()
-            .and_then(|builder| builder.with_platform_verifier())
-            .map_err(|e| AlloyError::Integration(format!("JWKS TLS: {e}")))?
-            .with_no_client_auth()
+            .map_err(|e| AlloyError::Integration(format!("JWKS TLS: {e}")))?;
+            match builder.clone().with_platform_verifier() {
+                Ok(builder) => builder.with_no_client_auth(),
+                // An https JWKS needs the platform trust store: fail at startup.
+                Err(error) if jwks_url.scheme() == "https" => {
+                    return Err(AlloyError::Integration(format!(
+                        "JWKS TLS: platform trust store unavailable: {error}"
+                    )));
+                }
+                Err(_) => builder
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            }
         };
         let client = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
