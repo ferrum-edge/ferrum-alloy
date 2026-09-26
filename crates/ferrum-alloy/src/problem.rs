@@ -50,6 +50,8 @@ pub enum ProblemKind {
     Unauthorized,
     /// Authenticated but not permitted.
     Forbidden,
+    /// Credentials could not be checked because the key source is unavailable.
+    AuthUnavailable,
     /// The admission limit was reached.
     Overloaded,
     /// Response headers were not produced within the deadline.
@@ -77,6 +79,7 @@ impl ProblemKind {
             Self::MethodNotAllowed => "method-not-allowed",
             Self::Unauthorized => "unauthorized",
             Self::Forbidden => "forbidden",
+            Self::AuthUnavailable => "auth-unavailable",
             Self::Overloaded => "overloaded",
             Self::RequestTimeout => "request-timeout",
             Self::Draining => "draining",
@@ -98,7 +101,7 @@ impl ProblemKind {
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::GatewayRequired => StatusCode::FORBIDDEN,
-            Self::Overloaded | Self::RequestTimeout | Self::Draining => {
+            Self::Overloaded | Self::RequestTimeout | Self::Draining | Self::AuthUnavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -119,6 +122,7 @@ impl ProblemKind {
             Self::MethodNotAllowed => "Method not allowed",
             Self::Unauthorized => "Unauthorized",
             Self::Forbidden => "Forbidden",
+            Self::AuthUnavailable => "Authentication unavailable",
             Self::Overloaded => "Service overloaded",
             Self::RequestTimeout => "Request timed out",
             Self::Draining => "Service is shutting down",
@@ -133,41 +137,37 @@ impl ProblemKind {
     }
 }
 
-/// An RFC 9457 problem.
+/// The serialized members of a problem.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Problem {
-    /// Problem type URI.
+struct Body {
     #[serde(rename = "type")]
-    pub type_uri: String,
-    /// Short summary of the problem type.
-    pub title: String,
-    /// HTTP status code.
-    pub status: u16,
-    /// Explanation specific to this occurrence.
+    type_uri: String,
+    title: String,
+    status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-    /// URI identifying this occurrence.
+    detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub instance: Option<String>,
-    /// Extension members.
+    instance: Option<String>,
     #[serde(flatten)]
-    pub extensions: BTreeMap<String, Value>,
+    extensions: BTreeMap<String, Value>,
     #[serde(skip)]
     headers: Vec<(http::HeaderName, HeaderValue)>,
+}
+
+/// An RFC 9457 problem. Boxed so `Result<T, Problem>` stays small.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Problem(Box<Body>);
+
+impl Serialize for Problem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
 }
 
 impl Problem {
     /// A framework problem of `kind`.
     pub fn new(kind: ProblemKind) -> Self {
-        Self {
-            type_uri: kind.type_uri(),
-            title: kind.title().to_owned(),
-            status: kind.status().as_u16(),
-            detail: None,
-            instance: None,
-            extensions: BTreeMap::new(),
-            headers: Vec::new(),
-        }
+        Self::custom(kind.type_uri(), kind.title(), kind.status())
     }
 
     /// An application-defined problem type.
@@ -176,7 +176,7 @@ impl Problem {
         title: impl Into<String>,
         status: StatusCode,
     ) -> Self {
-        Self {
+        Self(Box::new(Body {
             type_uri: type_uri.into(),
             title: title.into(),
             status: status.as_u16(),
@@ -184,20 +184,20 @@ impl Problem {
             instance: None,
             extensions: BTreeMap::new(),
             headers: Vec::new(),
-        }
+        }))
     }
 
     /// Sets `detail`. Framework code passes sanitized text only.
     #[must_use]
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
+        self.0.detail = Some(detail.into());
         self
     }
 
     /// Sets `instance`.
     #[must_use]
     pub fn with_instance(mut self, instance: impl Into<String>) -> Self {
-        self.instance = Some(instance.into());
+        self.0.instance = Some(instance.into());
         self
     }
 
@@ -209,7 +209,7 @@ impl Problem {
             key.as_str(),
             "type" | "title" | "status" | "detail" | "instance"
         ) {
-            self.extensions.insert(key, value.into());
+            self.0.extensions.insert(key, value.into());
         }
         self
     }
@@ -217,13 +217,40 @@ impl Problem {
     /// Adds a response header (for example `WWW-Authenticate` or `Allow`).
     #[must_use]
     pub fn with_header(mut self, name: http::HeaderName, value: HeaderValue) -> Self {
-        self.headers.push((name, value));
+        self.0.headers.push((name, value));
         self
+    }
+
+    /// Replaces the status.
+    #[must_use]
+    pub fn with_status(mut self, status: StatusCode) -> Self {
+        self.0.status = status.as_u16();
+        self
+    }
+
+    /// The problem type URI.
+    pub fn type_uri(&self) -> &str {
+        &self.0.type_uri
+    }
+
+    /// The title.
+    pub fn title(&self) -> &str {
+        &self.0.title
+    }
+
+    /// The detail, if any.
+    pub fn detail(&self) -> Option<&str> {
+        self.0.detail.as_deref()
+    }
+
+    /// An extension member.
+    pub fn extension(&self, key: &str) -> Option<&Value> {
+        self.0.extensions.get(key)
     }
 
     /// The status as a `StatusCode`.
     pub fn status_code(&self) -> StatusCode {
-        StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+        StatusCode::from_u16(self.0.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
@@ -236,7 +263,6 @@ impl From<ProblemKind> for Problem {
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let headers = self.headers.clone();
         let body = serde_json::to_vec(&self).unwrap_or_else(|_| {
             br#"{"type":"about:blank","title":"Internal server error","status":500}"#.to_vec()
         });
@@ -244,7 +270,7 @@ impl IntoResponse for Problem {
         response
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
-        for (name, value) in headers {
+        for (name, value) in self.0.headers {
             response.headers_mut().append(name, value);
         }
         response

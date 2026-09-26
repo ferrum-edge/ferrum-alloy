@@ -52,10 +52,10 @@ fn json_problem(rejection: &JsonRejection) -> Problem {
         ProblemKind::UnsupportedMediaType => "Expected Content-Type: application/json.".to_owned(),
         _ => sanitize_detail(&rejection.body_text()),
     };
-    let mut problem = Problem::new(kind).with_detail(detail);
+    let problem = Problem::new(kind).with_detail(detail);
     if kind == ProblemKind::MalformedJson && status != http::StatusCode::BAD_REQUEST {
         // Unexpected axum rejection: keep axum's status rather than guessing.
-        problem.status = status.as_u16();
+        return problem.with_status(status);
     }
     problem
 }

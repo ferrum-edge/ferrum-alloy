@@ -1,5 +1,6 @@
 [package]
 name = "example-existing-axum"
+description = "Adding Ferrum Alloy telemetry to an existing Axum application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +8,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-ferrum-alloy = { workspace = true }
+# Only the telemetry crate: no AlloyApp, no config system, no Alloy server.
+ferrum-alloy-telemetry = { workspace = true, features = ["axum"] }
+axum = { workspace = true, features = ["tokio", "http1", "json", "matched-path"] }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal"] }
+tower = { workspace = true, features = ["util"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry"] }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
 
 [lints]
 workspace = true

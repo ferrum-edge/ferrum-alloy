@@ -76,11 +76,15 @@ async fn get_item(Path(id): Path<u64>) -> Result<Json<Item>, Problem> {
     .with_detail(format!("no item with id {id}")))
 }
 
+async fn hello() -> &'static str {
+    concat!("Hello from ", env!("CARGO_PKG_NAME"))
+}
+
 /// The application router. Alloy adds health endpoints, limits, errors,
 /// and telemetry around it; the handlers stay plain Axum.
 pub fn router() -> Router {
     Router::new()
-        .route("/hello", get(|| async { "Hello from {{name}}" }))
+        .route("/hello", get(hello))
         .route("/items", post(create_item))
         .route("/items/{id}", get(get_item))
         .with_state(AppState::default())

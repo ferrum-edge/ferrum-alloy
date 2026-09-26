@@ -503,6 +503,23 @@ fn generated_projects_build_and_pass_their_tests() {
             .status()
             .unwrap();
         assert!(status.success(), "{name}: cargo test failed");
+        // The generated project's own CI runs clippy with -D warnings.
+        let status = Command::new(&cargo)
+            .args(["clippy", "--quiet", "--all-targets", "--", "-D", "warnings"])
+            .current_dir(&target)
+            .env("CARGO_TARGET_DIR", dir.path().join("target"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{name}: cargo clippy -D warnings failed");
+        let status = Command::new(&cargo)
+            .args(["fmt", "--all", "--", "--check"])
+            .current_dir(&target)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "{name}: generated code is not rustfmt-clean"
+        );
         if with.contains(&"openapi") {
             let output = bin()
                 .current_dir(&target)
@@ -531,5 +548,45 @@ fn generated_projects_build_and_pass_their_tests() {
                 .unwrap();
             assert_eq!(code(&check), 0, "{}", stderr(&check));
         }
+    }
+}
+
+#[test]
+fn generated_code_is_rustfmt_clean_for_short_and_long_names() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, with) in [
+        ("ab", vec![]),
+        ("ab-documented", vec!["openapi"]),
+        (
+            "a-rather-long-service-name-that-changes-line-widths",
+            vec![],
+        ),
+        (
+            "a-rather-long-service-name-that-changes-line-widths-oa",
+            vec!["openapi"],
+        ),
+    ] {
+        let target = generate(dir.path(), name, &with);
+        let mut files = Vec::new();
+        for sub in ["src", "src/bin", "tests"] {
+            if let Ok(entries) = std::fs::read_dir(target.join(sub)) {
+                for entry in entries {
+                    let path = entry.unwrap().path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+        let output = Command::new("rustfmt")
+            .args(["--edition", "2024", "--check"])
+            .args(&files)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }

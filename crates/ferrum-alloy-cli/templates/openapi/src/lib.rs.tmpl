@@ -15,9 +15,9 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-/// OpenAPI metadata. Paths are added by `api()`.
+/// OpenAPI metadata (title and version default to the Cargo package).
+/// Paths are added by `api()`.
 #[derive(OpenApi)]
-#[openapi(info(title = "{{name}}", version = "0.1.0"))]
 pub struct ApiDoc;
 
 /// Application state, supplied with `Router::with_state`.

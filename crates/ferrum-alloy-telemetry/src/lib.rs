@@ -22,6 +22,8 @@ pub mod trace_context;
 
 mod otel_bridge;
 
+pub use otel_bridge::exported_ids;
+
 #[cfg(feature = "subscriber")]
 pub mod init;
 

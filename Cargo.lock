@@ -788,21 +788,40 @@ dependencies = [
 name = "example-existing-axum"
 version = "0.1.0"
 dependencies = [
- "ferrum-alloy",
+ "axum",
+ "ferrum-alloy-telemetry",
+ "http-body-util",
+ "serde",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "example-minimal"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "ferrum-alloy",
+ "tokio",
 ]
 
 [[package]]
 name = "example-postgres-api"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "ferrum-alloy",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
 ]
 
 [[package]]
@@ -832,6 +851,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sqlx",
@@ -913,6 +933,9 @@ dependencies = [
  "opentelemetry_sdk",
  "pin-project-lite",
  "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "thiserror",

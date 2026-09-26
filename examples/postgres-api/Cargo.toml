@@ -1,5 +1,6 @@
 [package]
 name = "example-postgres-api"
+description = "A CRUD-style Ferrum Alloy service with PostgreSQL and OpenAPI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +8,21 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-ferrum-alloy = { workspace = true }
+ferrum-alloy = { workspace = true, features = ["postgres", "openapi"] }
+axum = { workspace = true }
+serde = { workspace = true }
+# Runtime-checked queries only: building needs no database and no offline
+# query metadata. `migrate!` embeds the migrations at compile time.
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "migrate", "macros"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing = { workspace = true }
+utoipa = { workspace = true, features = ["macros"] }
+utoipa-axum = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

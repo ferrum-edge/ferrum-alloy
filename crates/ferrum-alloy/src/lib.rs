@@ -23,10 +23,22 @@ mod management;
 
 mod server;
 
+#[cfg(feature = "http-client")]
+pub mod http_client;
 #[cfg(any(feature = "compression", feature = "cors"))]
 mod http_layers;
+#[cfg(feature = "jwt")]
+pub mod jwt;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 #[cfg(feature = "tls")]
 pub mod tls;
+#[cfg(feature = "postgres")]
+pub use sqlx;
+#[cfg(feature = "openapi")]
+pub use utoipa;
+#[cfg(feature = "openapi")]
+pub use utoipa_axum;
 
 pub use app::{AlloyApp, AlloyParts, TelemetryGuard, TelemetryInit};
 pub use config::AlloyConfig;

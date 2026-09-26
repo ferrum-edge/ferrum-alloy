@@ -1,0 +1,226 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Tests (all features)
+        run: cargo test --workspace --all-features --locked
+      - name: Tests (default features)
+        run: cargo test --workspace --locked
+      - name: Doc tests
+        run: cargo test --workspace --all-features --doc --locked
+
+  features:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Independently usable crates
+        run: |
+          set -euxo pipefail
+          cargo check --locked -p ferrum-alloy-diagnostics --all-targets
+          cargo check --locked -p ferrum-alloy-telemetry --no-default-features
+          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features axum
+          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features subscriber
+          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features x509
+          cargo check --locked -p ferrum-alloy-telemetry --features otel
+          cargo check --locked -p ferrum-alloy-edge --no-default-features
+      - name: Each optional integration alone
+        run: |
+          set -euxo pipefail
+          cargo check --locked -p ferrum-alloy --no-default-features
+          for feature in otel edge tls postgres openapi jwt http-client compression cors; do
+            cargo check --locked -p ferrum-alloy --no-default-features --features "$feature"
+          done
+          cargo check --locked -p ferrum-alloy --features full
+      - name: Minimal build has no optional batteries
+        run: |
+          set -euxo pipefail
+          tree=$(cargo tree --locked -p ferrum-alloy --no-default-features -e normal --prefix none)
+          for forbidden in sqlx jsonwebtoken utoipa reqwest opentelemetry rustls ferrum-alloy-edge; do
+            if grep -q "^$forbidden " <<<"$tree"; then
+              echo "::error::$forbidden is in the minimal dependency graph"
+              exit 1
+            fi
+          done
+
+  msrv:
+    name: MSRV (1.94)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo +1.94.0 check --workspace --all-features --locked
+
+  generator:
+    name: Generated projects
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Generate, build, and test starter projects
+        run: cargo test --locked -p ferrum-alloy-cli --test cli -- --ignored --nocapture
+
+  postgres:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: alloy
+          POSTGRES_PASSWORD: alloy
+          POSTGRES_DB: alloy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U alloy"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FERRUM_ALLOY_TEST_DATABASE_URL: postgres://alloy:alloy@127.0.0.1:5432/alloy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Database tests
+        run: cargo test --locked -p ferrum-alloy --features postgres --test postgres -- --include-ignored
+      - name: Example CRUD service against the database
+        run: cargo test --locked -p example-postgres-api -- --include-ignored
+
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  edge-e2e:
+    name: Ferrum Edge end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      COMPOSE_FILE: examples/edge-observability/compose.yaml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Build the driver
+        run: cargo build --locked -p example-edge-observability --bin edge-e2e
+      - name: Build images (Edge v0.9.7, Collector 0.161.0, Alloy)
+        run: docker compose -f "$COMPOSE_FILE" build
+      - name: ferrum-edge validate (v0.9.7) on the generated TLS configuration
+        run: docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge validate -m file -c /config/edge.yaml
+      - name: Start the stack
+        run: docker compose -f "$COMPOSE_FILE" up -d
+      - name: Verify the Edge to Alloy trace path
+        run: ./target/debug/edge-e2e --compose "$COMPOSE_FILE" --out target/e2e
+      - name: Service logs
+        if: always()
+        run: docker compose -f "$COMPOSE_FILE" logs --no-color > target/e2e-logs.txt 2>&1 || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: edge-e2e-evidence
+          path: |
+            target/e2e/
+            target/e2e-logs.txt
+          if-no-files-found: warn
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f "$COMPOSE_FILE" down -v
+
+  edge-config:
+    name: Generated Edge configuration validates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - name: ferrum-edge validate (v0.9.7) on the plain-HTTP fixture
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -e FERRUM_NAMESPACE=retail \
+            -v "$PWD/contracts/fixtures/manifests:/config:ro" \
+            ferrumedge/ferrum-edge@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a \
+            validate -m file -c /config/plain-http.edge.yaml

@@ -1,0 +1,13 @@
+# Local development configuration for the PostgreSQL example.
+# Supply the database URL through the environment:
+#   FERRUM_ALLOY_DATABASE_URL=postgres://alloy:alloy@127.0.0.1:5432/alloy
+[server]
+bind = "127.0.0.1:8080"
+
+[database]
+max_connections = 10
+acquire_timeout_ms = 2000
+statement_timeout_ms = 5000
+
+[logging]
+format = "compact"

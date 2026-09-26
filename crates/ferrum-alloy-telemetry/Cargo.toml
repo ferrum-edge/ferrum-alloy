@@ -23,6 +23,9 @@ otel = [
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:rustls-platform-verifier",
 ]
 
 [dependencies]
@@ -45,6 +48,11 @@ opentelemetry = { workspace = true, optional = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, optional = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, optional = true, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { workspace = true, optional = true, features = ["tracing-log"] }
+# The OTLP exporter's HTTP client is built here with an explicit rustls/ring
+# configuration, so it works however reqwest's TLS features unify.
+reqwest = { workspace = true, optional = true, features = ["blocking", "rustls-no-provider"] }
+rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["matched-path", "tokio", "http1", "json"] }

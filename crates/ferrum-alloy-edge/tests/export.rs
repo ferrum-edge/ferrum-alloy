@@ -174,13 +174,48 @@ fn without_health_checks_the_proxy_targets_the_backend_directly() {
 }
 
 #[test]
-fn file_mode_yaml_matches_snapshot() {
-    let rendered = file_mode_yaml(&resources(&manifest()));
-    let path = fixtures().join("orders-api.edge.yaml");
-    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
-        std::fs::write(&path, &rendered).unwrap();
+fn file_mode_yaml_matches_snapshots() {
+    for name in ["orders-api", "plain-http"] {
+        let manifest = ServiceManifest::from_toml(
+            &std::fs::read_to_string(fixtures().join(format!("{name}.toml"))).unwrap(),
+        )
+        .unwrap();
+        let rendered = file_mode_yaml(&resources(&manifest));
+        let path = fixtures().join(format!("{name}.edge.yaml"));
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            std::fs::write(&path, &rendered).unwrap();
+        }
+        // CI also validates these files with the real `ferrum-edge validate`.
+        assert_eq!(rendered, std::fs::read_to_string(&path).unwrap(), "{name}");
     }
-    assert_eq!(rendered, std::fs::read_to_string(&path).unwrap());
+}
+
+#[test]
+fn service_base_path_and_sampling_map_to_edge_fields() {
+    let manifest = ServiceManifest::from_toml(
+        &std::fs::read_to_string(fixtures().join("plain-http.toml")).unwrap(),
+    )
+    .unwrap();
+    let resources = resources(&manifest);
+    assert_eq!(resources.proxy["backend_path"], "/v1");
+    assert_eq!(
+        resources.proxy["backend_read_timeout_ms"], 0,
+        "0 disables the read timeout for long streams"
+    );
+    let otel = resources
+        .plugin_configs
+        .iter()
+        .find(|p| p["plugin_name"] == "otel_tracing")
+        .unwrap();
+    assert_eq!(otel["config"]["root_sampling"], "ratio");
+    assert_eq!(otel["config"]["root_sampling_ratio"], 0.25);
+    assert!(
+        resources
+            .proxy
+            .get("backend_tls_verify_server_cert")
+            .is_none(),
+        "plain http has no TLS fields"
+    );
 }
 
 #[test]

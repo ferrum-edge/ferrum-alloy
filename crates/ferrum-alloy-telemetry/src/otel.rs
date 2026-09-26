@@ -182,8 +182,28 @@ impl OtelPipeline {
         let retries = config.max_export_retries;
         let max_request_bytes = config.max_request_bytes;
         let factory = move || {
+            // Build the HTTP client explicitly (on the export thread): the
+            // exporter's implicit client depends on how reqwest's TLS
+            // features unify across the application and can panic.
+            let tls = {
+                use rustls_platform_verifier::BuilderVerifierExt;
+                rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .and_then(|builder| builder.with_platform_verifier())
+                .map_err(|e| format!("OTLP TLS configuration: {e}"))?
+                .with_no_client_auth()
+            };
+            let client = reqwest::blocking::Client::builder()
+                .tls_backend_preconfigured(tls)
+                .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| format!("OTLP HTTP client: {e}"))?;
             let mut builder = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
+                .with_http_client(client)
                 .with_protocol(Protocol::HttpBinary)
                 .with_timeout(timeout)
                 .with_retry_policy(RetryPolicy::recommended().with_max_retries(retries))

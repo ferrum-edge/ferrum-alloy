@@ -16,7 +16,7 @@ tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "ferrum-alloy-t
 postgres = ["dep:sqlx"]
 openapi = ["dep:utoipa", "dep:utoipa-axum"]
 jwt = ["dep:jsonwebtoken", "http-client"]
-http-client = ["dep:reqwest", "dep:url"]
+http-client = ["dep:reqwest", "dep:url", "dep:rustls", "dep:rustls-platform-verifier"]
 compression = ["tower-http/compression-gzip", "tower-http/compression-br"]
 cors = ["tower-http/cors"]
 full = ["otel", "edge", "tls", "postgres", "openapi", "jwt", "http-client", "compression", "cors"]
@@ -55,9 +55,15 @@ utoipa-axum = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true, features = ["rust_crypto"] }
 reqwest = { workspace = true, optional = true, features = ["rustls-no-provider", "json"] }
 url = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "migrate"] }
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+tower = { workspace = true, features = ["util"] }
+tracing = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true, features = ["channel"] }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }

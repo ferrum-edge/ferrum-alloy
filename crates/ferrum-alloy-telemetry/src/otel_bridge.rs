@@ -96,3 +96,25 @@ pub(crate) fn rename(span: &Span, name: String) {
 pub(crate) fn rename(span: &Span, name: String) {
     span.record("otel.name", name.as_str());
 }
+
+/// Trace id, span id, and sampled flag of `span` as exported through
+/// OpenTelemetry, or `None` when the span is not bridged.
+pub fn exported_ids(span: &Span) -> Option<(TraceId, SpanId, bool)> {
+    #[cfg(feature = "otel")]
+    {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        let cx = span.context();
+        let span_ref = cx.span();
+        let context = span_ref.span_context();
+        if context.is_valid() {
+            return Some((
+                TraceId(context.trace_id().to_bytes()),
+                SpanId(context.span_id().to_bytes()),
+                context.is_sampled(),
+            ));
+        }
+    }
+    let _ = span;
+    None
+}

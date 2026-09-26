@@ -1,5 +1,6 @@
 [package]
 name = "example-minimal"
+description = "The smallest Ferrum Alloy service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 ferrum-alloy = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
