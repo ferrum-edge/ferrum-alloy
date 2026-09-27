@@ -44,8 +44,8 @@ fn operation_exceeding_its_enclosing_measurement_lists_unproven_claims() {
 
 #[test]
 fn every_fixture_report_finding_lists_unproven_claims() {
-    let reports_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../contracts/fixtures/reports");
+    let reports_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/reports");
     for entry in std::fs::read_dir(&reports_dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_none_or(|extension| extension != "json") {
