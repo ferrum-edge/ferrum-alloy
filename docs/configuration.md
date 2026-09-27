@@ -18,7 +18,7 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 ## Strictness
 
 - Unknown keys and sections are errors (`deny_unknown_fields`).
-- Unknown `FERRUM_ALLOY_*` variables are errors, which catches typos.
+- Unknown `FERRUM_ALLOY_*` variables are errors, which catches typos. The command's own variables (below) are known and ignored.
 - Values must parse:
   - integers must be non-negative;
   - booleans are `true`/`false`/`1`/`0`;
@@ -98,8 +98,16 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS` | `auth.jwt.jwks_max_age_ms` | integer |
 | `FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS` | `auth.jwt.jwks_max_stale_ms` | integer |
 | `FERRUM_ALLOY_CORS_ALLOWED_ORIGINS` | `cors.allowed_origins` | comma list |
+| `FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS` | `diagnostics.max_records` | integer |
+| `FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES` | `diagnostics.max_bytes` | integer |
 
 A test fails when a variable in `config::ENV_VARS` is missing from this table.
+
+Variables of the `ferrum-alloy` command itself (`config::CLI_ENV_VARS`) share the prefix but set no configuration key. Service configuration ignores them instead of rejecting them as unknown, and never reads their values:
+
+| Variable | Used by |
+|---|---|
+| `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` | `ferrum-alloy diagnose --url`: the credential sent to a service's diagnostic retrieval endpoint ([`[diagnostics]`](#diagnostics-feature-diagnostics)) |
 
 ### `RUST_LOG`
 
@@ -176,7 +184,7 @@ Each section below shows a key, its default, and its meaning.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Serve the management listener. |
-| `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`. |
+| `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`, and is refused while diagnostic retrieval is installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)). |
 | `token` | none | Bearer token (at least 32 characters) for `/health`, `/metrics`, and the OpenAPI document. `/livez` and `/readyz` stay unauthenticated. |
 
 #### `[management.rate_limit]`
@@ -187,7 +195,7 @@ An endpoint request is charged to a token bucket of its client and one of the wh
 
 A client is the transport peer address of the connection, never a header such as `X-Forwarded-For`. IPv4-mapped IPv6 addresses count as IPv4. Other IPv6 addresses are keyed by their first `ipv6_prefix_len` bits, because one host usually controls a whole /64. Lower it (down to 48) when one tenant controls more, and raise it (up to 128) when distinct clients share a /64: in Kubernetes, pod addresses of one node often come from a single /64, and behind NAT64 many IPv4 clients arrive from one /96 prefix.
 
-Peers in `exempt_networks` bypass the limits entirely; the default is empty, so loopback peers are limited too. Kubelet probes the pod from its node's address, so add the node network (for example `10.244.0.0/16`, or the node CIDR of your cluster) only when exempting those probes is intended; otherwise a refused probe can restart the pod. Behind a proxy or sidecar, every client is the proxy's address: Istio connects to the application from `127.0.0.6`, and all proxied clients share that address's budgets. Add the sidecar address (for example `127.0.0.6/32`) only if bypassing the limits for every proxied client is intended. IPv4-mapped IPv6 CIDRs are rejected; write their IPv4 equivalent. A network of every address (`0.0.0.0/0`, `::/0`) is refused; set `enabled = false` instead.
+Peers in `exempt_networks` bypass the limits entirely, except on the diagnostic retrieval route, which limits every peer; the default is empty, so loopback peers are limited too. Kubelet probes the pod from its node's address, so add the node network (for example `10.244.0.0/16`, or the node CIDR of your cluster) only when exempting those probes is intended; otherwise a refused probe can restart the pod. Behind a proxy or sidecar, every client is the proxy's address: Istio connects to the application from `127.0.0.6`, and all proxied clients share that address's budgets. Add the sidecar address (for example `127.0.0.6/32`) only if bypassing the limits for every proxied client is intended. IPv4-mapped IPv6 CIDRs are rejected; write their IPv4 equivalent. A network of every address (`0.0.0.0/0`, `::/0`) is refused; set `enabled = false` instead.
 
 Each client table holds at most `max_clients` clients. A client gets an entry only when one of its requests is admitted, so rejected requests never take room. A client whose bucket has refilled completely is indistinguishable from a new one and is forgotten: each request examines the entry examined longest ago, and a newcomer that finds the table full examines a few more. The work per request is bounded, and a table is never swept as a whole. While the endpoint table is full of clients that are still spending their budget, further clients share one per-client budget. While the probe table is full, probes from further clients are served untracked rather than refused. When you serve `AlloyParts::management_router` yourself, insert `PeerInfo` or axum `ConnectInfo`; without either, every request is one unknown client and all of them share one budget.
 
@@ -348,6 +356,19 @@ Refreshes never hold up requests that can be answered from the cache. While the 
 | `request_timeout_ms` | `10000` | Whole-request timeout |
 | `max_redirects` | `0` | Same-origin redirects only. Cross-origin redirects are never followed. |
 | `propagate_trace_context_to` | `[]` | Hosts (exact, or `.suffix`) that receive `traceparent`. Credentials, cookies, and baggage are never forwarded automatically. |
+
+### `[diagnostics]` (feature `diagnostics`)
+
+Bounds of the in-memory evidence that authorized diagnostic retrieval serves ([ADR 0008](adr/0008-tenant-scoped-diagnostic-retrieval.md), [security](security.md#diagnostic-retrieval)). They apply only when the application installs a `DiagnosticsAuthorizer`; without one, no evidence is retained and `GET /diagnostics/v1/requests/{request_id}` does not exist. Only requests the application tagged with a tenant (`TenantTag`) are retained. When a new record would exceed either bound, the oldest records are evicted first.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_records` | `1024` | Most requests retained, `1` to `65536`. |
+| `max_bytes` | `1048576` | Most estimated bytes retained, `4096` to `67108864`. A record is charged a fixed overhead derived from the sizes of the in-memory structures (roughly 330 bytes on 64-bit targets) plus its tenant, twice its request id, and its route template, so one record is at most about 1.5 KiB. The bound is an estimate: allocator overhead and the spare capacity of the queue and index, which never shrink, are not charged, so actual memory use can exceed it somewhat. |
+
+At most 16 records share one tenant and request id, such as the attempts of a retried request; a further one evicts the oldest of them. Retrieval also requires `management.enabled`, `management.rate_limit.enabled`, and a loopback `management.bind`, and `management.rate_limit.exempt_networks` does not apply to the retrieval route. `/metrics` reports `ferrum_alloy_diagnostics_records` and `ferrum_alloy_diagnostics_bytes` (current retention), `ferrum_alloy_diagnostics_stored_total`, `ferrum_alloy_diagnostics_evicted_total{reason="count"|"bytes"|"request_id_limit"}`, `ferrum_alloy_diagnostics_skipped_total{reason="untagged"|"too_large"}`, `ferrum_alloy_diagnostics_retrievals_total{outcome="served"|"not_found"}` (denials count as `not_found`, like the response they get), and `ferrum_alloy_diagnostics_authorizer_failures_total{reason="timeout"|"panic"}`.
+
+The diagnostic retrieval command, `ferrum-alloy diagnose --url`, reads its credential from `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or `--token-file`. That variable belongs to the command, not to service configuration: it is listed in `config::CLI_ENV_VARS`, and loading service configuration ignores it rather than rejecting it as an unknown `FERRUM_ALLOY_*` variable.
 
 ## Checking configuration
 

@@ -120,7 +120,11 @@ pub(crate) fn install_telemetry(
             config.endpoint = endpoint;
             Some(OtelPipeline::otlp(&resource(), &config, metrics)?)
         }
-        Scenario::Plain | Scenario::Alloy | Scenario::AlloyLogs | Scenario::AlloyLogsFmt => None,
+        Scenario::Plain
+        | Scenario::Alloy
+        | Scenario::AlloyLogs
+        | Scenario::AlloyLogsFmt
+        | Scenario::AlloyDiagnostics => None,
     };
     let dispatch = match (&pipeline, scenario) {
         (Some(pipeline), _) => Some(Dispatch::new(registry().with(pipeline.layer()))),
@@ -132,7 +136,7 @@ pub(crate) fn install_telemetry(
             ),
         )),
         (None, Scenario::AlloyLogsFmt) => Some(Dispatch::new(registry().with(json_logs()))),
-        (None, Scenario::Alloy) => Some(Dispatch::new(registry())),
+        (None, Scenario::Alloy | Scenario::AlloyDiagnostics) => Some(Dispatch::new(registry())),
         (None, _) => None,
     };
     let installed = match dispatch {

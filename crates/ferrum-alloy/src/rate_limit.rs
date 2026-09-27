@@ -15,7 +15,9 @@
 //! `ConnectInfo`), never a request header. IPv4-mapped IPv6 addresses count
 //! as IPv4; other IPv6 addresses are keyed by their `ipv6_prefix_len`
 //! prefix, which a single host usually controls entirely. Peers in
-//! `exempt_networks` (empty by default) are not limited at all.
+//! `exempt_networks` (empty by default) are not limited at all, except on
+//! the diagnostic retrieval route, where every peer's authorizer attempts
+//! stay limited.
 //!
 //! Each client table holds at most `max_clients` entries. A client gets an
 //! entry only when a request of it is admitted, so rejected requests never
@@ -433,13 +435,20 @@ impl RateLimiter {
         }
     }
 
-    /// Charges one request from the transport peer `peer` to `budget`.
+    /// Charges one request from the transport peer `peer` to `budget`,
+    /// unless the peer is exempt.
     pub(crate) fn check(&self, peer: Option<IpAddr>, budget: Budget, now: Instant) -> Decision {
         // IPv4-mapped IPv6 addresses are IPv4 clients.
-        let peer = peer.map(|ip| ip.to_canonical());
-        if peer.is_some_and(|ip| self.is_exempt(ip)) {
+        if peer.is_some_and(|ip| self.is_exempt(ip.to_canonical())) {
             return Decision::Allow;
         }
+        self.charge(peer, budget, now)
+    }
+
+    /// Charges one request from the transport peer `peer` to `budget`, even
+    /// when the peer is exempt.
+    pub(crate) fn charge(&self, peer: Option<IpAddr>, budget: Budget, now: Instant) -> Decision {
+        let peer = peer.map(|ip| ip.to_canonical());
         let key = peer.map(|ip| self.client_key(ip));
         let limiter = self.limiter(budget);
         let decision = limiter.table().check(&limiter.policy, key, now);
@@ -521,6 +530,10 @@ fn too_many_requests(wait: Duration) -> Response {
         .into_response()
 }
 
+/// Paths that exempt networks never bypass: diagnostic retrieval, so that no
+/// peer gets unlimited authorizer attempts (ADR 0008).
+const NEVER_EXEMPT_PREFIX: &str = "/diagnostics/";
+
 /// Middleware that enforces `limiter` before any management handler runs,
 /// including the bearer token check.
 pub(crate) async fn enforce(
@@ -528,8 +541,16 @@ pub(crate) async fn enforce(
     request: Request,
     next: Next,
 ) -> Response {
-    let budget = Budget::of(request.uri().path());
-    match limiter.check(peer(&request), budget, Instant::now()) {
+    let path = request.uri().path();
+    let budget = Budget::of(path);
+    let client = peer(&request);
+    let now = Instant::now();
+    let decision = if path.starts_with(NEVER_EXEMPT_PREFIX) {
+        limiter.charge(client, budget, now)
+    } else {
+        limiter.check(client, budget, now)
+    };
+    match decision {
         Decision::Allow => next.run(request).await,
         Decision::Reject { scope, retry_after } => {
             tracing::debug!(
@@ -773,6 +794,14 @@ mod tests {
             assert_eq!(call(&limiter, "10.2.0.1", start), Decision::Allow);
         }
         assert_ne!(call(&limiter, "10.2.0.1", start), Decision::Allow);
+
+        // Charging ignores the exemption.
+        for _ in 0..3 {
+            let decision = limiter.charge(ip("10.1.2.3"), Budget::Endpoints, start);
+            assert_eq!(decision, Decision::Allow);
+        }
+        let decision = limiter.charge(ip("10.1.2.3"), Budget::Endpoints, start);
+        assert_eq!(rejected(decision).0, Scope::Client);
     }
 
     #[test]

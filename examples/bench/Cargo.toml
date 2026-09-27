@@ -12,7 +12,7 @@ name = "alloy-bench"
 path = "src/main.rs"
 
 [dependencies]
-ferrum-alloy = { workspace = true, features = ["otel", "tls"] }
+ferrum-alloy = { workspace = true, features = ["otel", "tls", "diagnostics"] }
 axum = { workspace = true, features = ["tokio", "http1", "http2", "json"] }
 bytes = { workspace = true }
 getrandom = { workspace = true }

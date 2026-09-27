@@ -8,7 +8,8 @@
 //! 4. defaults.
 //!
 //! Invalid supplied configuration is rejected: unknown keys, unknown
-//! `FERRUM_ALLOY_*` variables, unparsable values, and unsafe combinations are
+//! `FERRUM_ALLOY_*` variables (other than the command's own,
+//! [`CLI_ENV_VARS`]), unparsable values, and unsafe combinations are
 //! errors, never silent fallbacks. Every section parses regardless of which
 //! Cargo features are compiled, so enabling a section whose feature is missing
 //! is reported instead of ignored.
@@ -41,6 +42,16 @@ pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The environment variable naming the configuration file.
 pub const CONFIG_FILE_ENV: &str = "FERRUM_ALLOY_CONFIG";
+
+/// The credential `ferrum-alloy diagnose --url` sends to a service's
+/// diagnostic retrieval endpoint. A variable of the command, not of service
+/// configuration (see [`CLI_ENV_VARS`]).
+pub const DIAGNOSTICS_TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
+
+/// `FERRUM_ALLOY_*` variables that belong to the `ferrum-alloy` command
+/// rather than to service configuration. Loading configuration ignores them
+/// instead of rejecting them as unknown, and never reads their values.
+pub const CLI_ENV_VARS: &[&str] = &[DIAGNOSTICS_TOKEN_ENV];
 
 /// A secret value. `Debug`, `Display`, and `Serialize` never reveal it.
 #[derive(Clone, PartialEq, Eq)]
@@ -119,6 +130,9 @@ pub struct AlloyConfig {
     pub auth: AuthSettings,
     /// Outbound HTTP client (feature `http-client`).
     pub http_client: HttpClientSettings,
+    /// Evidence retained for authorized diagnostic retrieval (feature
+    /// `diagnostics`).
+    pub diagnostics: DiagnosticsSettings,
 }
 
 /// Service identity.
@@ -767,6 +781,38 @@ impl Default for HttpClientSettings {
     }
 }
 
+/// Upper bound of `diagnostics.max_records`.
+pub const MAX_DIAGNOSTICS_RECORDS: usize = 65_536;
+
+/// Bounds of `diagnostics.max_bytes`: 4 KiB to 64 MiB.
+pub const DIAGNOSTICS_BYTES: std::ops::RangeInclusive<usize> = 4_096..=64 * 1024 * 1024;
+
+/// Retention of request evidence for authorized diagnostic retrieval
+/// (feature `diagnostics`).
+///
+/// It applies only when the application installs a
+/// `diagnostics::DiagnosticsAuthorizer`; otherwise nothing is retained. The
+/// evidence lives in memory in this process. When either bound would be
+/// exceeded, the oldest records are evicted first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct DiagnosticsSettings {
+    /// Most requests retained.
+    pub max_records: usize,
+    /// Most estimated bytes retained.
+    pub max_bytes: usize,
+}
+
+impl Default for DiagnosticsSettings {
+    fn default() -> Self {
+        Self {
+            max_records: 1_024,
+            max_bytes: 1024 * 1024,
+        }
+    }
+}
+
 /// What kind of value an environment variable holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvKind {
@@ -861,6 +907,8 @@ env_vars! {
     "FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS" => ["auth", "jwt", "jwks_max_age_ms"]: Uint,
     "FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS" => ["auth", "jwt", "jwks_max_stale_ms"]: Uint,
     "FERRUM_ALLOY_CORS_ALLOWED_ORIGINS" => ["cors", "allowed_origins"]: List,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS" => ["diagnostics", "max_records"]: Uint,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES" => ["diagnostics", "max_bytes"]: Uint,
 }
 
 /// Configuration errors.
@@ -1160,7 +1208,10 @@ where
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with("FERRUM_ALLOY_") || name == CONFIG_FILE_ENV {
+        if !name.starts_with("FERRUM_ALLOY_")
+            || name == CONFIG_FILE_ENV
+            || CLI_ENV_VARS.contains(&name)
+        {
             continue;
         }
         let env_error = |message: String| ConfigError::Env {
@@ -1575,6 +1626,20 @@ impl AlloyConfig {
                     }
                 }
             }
+        }
+
+        let diagnostics = &self.diagnostics;
+        if diagnostics.max_records == 0 || diagnostics.max_records > MAX_DIAGNOSTICS_RECORDS {
+            error(format!(
+                "diagnostics.max_records must be within 1..={MAX_DIAGNOSTICS_RECORDS}"
+            ));
+        }
+        if !DIAGNOSTICS_BYTES.contains(&diagnostics.max_bytes) {
+            error(format!(
+                "diagnostics.max_bytes must be within {}..={}",
+                DIAGNOSTICS_BYTES.start(),
+                DIAGNOSTICS_BYTES.end()
+            ));
         }
 
         let mut warn = |message: String| {

@@ -41,13 +41,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - route-template metrics;
   - accounting that ends when the response *body* ends, exactly once;
   - bounded OTLP export with counted loss.
-- **Optional batteries** (Cargo features): `otel`, `tls` (rustls, verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `jwt` (JWKS), `http-client`, `compression`, `cors`.
+- **Optional batteries** (Cargo features): `otel`, `tls` (rustls, verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `jwt` (JWKS), `http-client`, `compression`, `cors`, `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service).
 - **CLI** (`ferrum-alloy`):
   - `new`: starters that compile and pass their own tests;
   - `check`: configuration validation;
   - `openapi export`: with drift detection;
   - `edge export`: Edge file-mode YAML (checked in CI with `ferrum-edge validate`) or a GitForgeOps tree;
-  - `diagnose`: offline, deterministic explanations of evidence.
+  - `diagnose`: deterministic explanations of evidence from files, or of one request's live report fetched from a running service on explicit request.
 
 ## Two ways to adopt it
 

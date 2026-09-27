@@ -16,6 +16,8 @@ use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::config::{AlloyConfig, ConfigIssue, EdgeMode, Overrides};
+#[cfg(feature = "diagnostics")]
+use crate::diagnostics::{EvidenceStore, Retrieval};
 use crate::error::AlloyError;
 use crate::health::{self, HealthCheck, Readiness};
 use crate::lifecycle::{self, Lifecycle};
@@ -63,6 +65,8 @@ pub struct AlloyApp {
     classifier: Option<SharedClassifier>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     openapi: Option<Arc<Vec<u8>>>,
+    #[cfg(feature = "diagnostics")]
+    diagnostics: Option<Arc<dyn crate::diagnostics::DiagnosticsAuthorizer>>,
     prepared: Option<Prepared>,
 }
 
@@ -100,6 +104,8 @@ impl AlloyApp {
             classifier: None,
             shutdown_signal: None,
             openapi: None,
+            #[cfg(feature = "diagnostics")]
+            diagnostics: None,
             prepared: None,
         }
     }
@@ -182,6 +188,23 @@ impl AlloyApp {
         self
     }
 
+    /// Enables authorized, tenant-scoped diagnostic retrieval (ADR 0008).
+    ///
+    /// Requests the application tags with a tenant
+    /// ([`crate::diagnostics::TenantTag`]) are retained in memory within the
+    /// `[diagnostics]` bounds, and `GET /diagnostics/v1/requests/{request_id}`
+    /// on the management listener serves one tenant's evidence to callers
+    /// that `authorizer` admits for that tenant. Startup fails when the
+    /// management listener or its rate limit is disabled.
+    #[cfg(feature = "diagnostics")]
+    pub fn diagnostics_authorizer(
+        mut self,
+        authorizer: impl crate::diagnostics::DiagnosticsAuthorizer,
+    ) -> Self {
+        self.diagnostics = Some(Arc::new(authorizer));
+        self
+    }
+
     /// Loads and validates configuration and initializes telemetry. Call it
     /// before building resources that need configuration (database pools);
     /// later calls return the same configuration.
@@ -246,6 +269,20 @@ impl AlloyApp {
             .map_err(|e| AlloyError::Internal(e.to_string()))?
             .with_classifier(Arc::clone(&classifier))
             .with_metrics(Arc::clone(&prepared.metrics));
+        #[cfg(feature = "diagnostics")]
+        let evidence = match self.diagnostics.take() {
+            Some(authorizer) => {
+                crate::diagnostics::check_config(&config)?;
+                let store = Arc::new(EvidenceStore::new(&config.diagnostics));
+                Some((authorizer, store))
+            }
+            None => None,
+        };
+        #[cfg(feature = "diagnostics")]
+        let telemetry_layer = match &evidence {
+            Some((_, store)) => telemetry_layer.with_evidence_sink(store.clone()),
+            None => telemetry_layer,
+        };
         let readiness = Arc::new(Readiness::new(
             std::mem::take(&mut self.checks),
             Duration::from_millis(config.health.cache_ttl_ms),
@@ -347,6 +384,12 @@ impl AlloyApp {
                     app_stats: Arc::clone(&app_stats),
                     openapi: self.openapi.clone().filter(|_| config.openapi.serve),
                     rate_limiter,
+                    #[cfg(feature = "diagnostics")]
+                    diagnostics: evidence.map(|(authorizer, store)| Retrieval {
+                        authorizer,
+                        store,
+                        service: service_name.clone(),
+                    }),
                 },
                 &config.openapi.path,
             )

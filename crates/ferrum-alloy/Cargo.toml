@@ -25,13 +25,16 @@ jwt = ["dep:jsonwebtoken", "http-client"]
 http-client = ["dep:reqwest", "dep:url", "dep:rustls", "dep:rustls-platform-verifier"]
 compression = ["tower-http/compression-gzip", "tower-http/compression-br"]
 cors = ["tower-http/cors"]
-full = ["otel", "edge", "tls", "postgres", "openapi", "jwt", "http-client", "compression", "cors"]
+# Authorized, tenant-scoped diagnostic retrieval (ADR 0008).
+diagnostics = ["dep:ferrum-alloy-diagnostics"]
+full = ["otel", "edge", "tls", "postgres", "openapi", "jwt", "http-client", "compression", "cors", "diagnostics"]
 
 [dependencies]
 ferrum-alloy-telemetry = { workspace = true, features = ["axum", "subscriber"] }
 axum = { workspace = true, features = ["tokio", "http1", "http2", "json", "query", "matched-path", "original-uri", "form"] }
 bytes = { workspace = true }
-futures-util = { workspace = true }
+# `std`: `FutureExt::catch_unwind` for diagnostic authorizers.
+futures-util = { workspace = true, features = ["std"] }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
@@ -52,6 +55,7 @@ tracing = { workspace = true, features = ["std"] }
 ipnet = { workspace = true, features = ["serde"] }
 
 ferrum-alloy-edge = { workspace = true, optional = true }
+ferrum-alloy-diagnostics = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { workspace = true, optional = true, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { workspace = true, optional = true, features = ["std"] }

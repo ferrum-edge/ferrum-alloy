@@ -12,11 +12,13 @@ use std::task::{Context, Poll};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, State};
-use axum::response::IntoResponse;
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bytes::Bytes;
 use ferrum_alloy::config::AlloyConfig;
+use ferrum_alloy::diagnostics::{DiagnosticsAccess, DiagnosticsRequest, TenantTag};
 use ferrum_alloy::telemetry::otel::OtelPipeline;
 use ferrum_alloy::{AlloyApp, TelemetryInit};
 use hyper::body::Frame;
@@ -87,6 +89,17 @@ pub(crate) fn router() -> Router {
         .route("/large", get(move || std::future::ready(large.clone())))
         .route("/stream", get(stream))
         .route("/stream-long", get(stream_long))
+}
+
+/// Attributes every request to one tenant, so its evidence is retained.
+async fn tag_tenant(tenant: TenantTag, request: Request, next: Next) -> Response {
+    tenant.set("bench");
+    next.run(request).await
+}
+
+/// Retrieval is not measured, so no caller is admitted.
+async fn deny(_: DiagnosticsRequest) -> DiagnosticsAccess {
+    DiagnosticsAccess::Deny
 }
 
 /// Reports the listener's address once the server is ready, or why it
@@ -188,16 +201,24 @@ pub(crate) fn start(
                 serve_plain(listener, tls, stopped(stop)).await;
                 return;
             }
+            let diagnostics = scenario == Scenario::AlloyDiagnostics;
             let mut config = AlloyConfig::default();
-            config.management.enabled = false;
+            // Retrieval needs the management router; it is built but never
+            // served, since only the application listener is measured.
+            config.management.enabled = diagnostics;
             config.server.max_connections = 100_000;
             config.server.tls = tls.map(|tls| tls.alloy);
-            let parts = AlloyApp::new("bench")
-                .router(router())
+            let app = AlloyApp::new("bench")
                 .config(config)
                 .telemetry(TelemetryInit::ApplicationOwned)
-                .shutdown_signal(stopped(stop))
-                .into_parts();
+                .shutdown_signal(stopped(stop));
+            let app = if diagnostics {
+                let router = router().layer(middleware::from_fn(tag_tenant));
+                app.router(router).diagnostics_authorizer(deny)
+            } else {
+                app.router(router())
+            };
+            let parts = app.into_parts();
             match parts {
                 Ok(parts) => {
                     ready.ok();
