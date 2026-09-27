@@ -69,6 +69,7 @@ Options for both commands:
 | `--streams N` | 8 | Streams per HTTP/2 connection, so HTTP/2 uses `concurrency / streams` connections; `concurrency` must be a multiple |
 | `--alloc-counting` | off | Count allocations; see below |
 | `--label TEXT` | none | Recorded as `environment.label`; use it for the host and commit |
+| `--run-id ID` | random | Recorded as `run_id`. `matrix` generates one (a version 4 UUID) and passes it to every run, so the lines of one matrix share it |
 | `--collector-endpoint URL` | stub | OTLP/HTTP traces URL for `otel-collector` |
 
 `matrix` takes `--scenarios`, `--workloads`, and `--transports` (each `all` or a comma-separated list, default `all`), `--reps` (default 5), and `--out` (default stdout). The full matrix has 7 × 4 × 6 = 168 cells, so 5 repetitions at the defaults take about 84 minutes.
@@ -84,19 +85,25 @@ How a run is made:
 
 Each run prints one JSON object on one line. The format is versioned by `schema` (currently `alloy-bench/1`); fields may be added within a version, but a field that changes meaning or is removed bumps it. Unknown values are `null`, never zero.
 
+`alloy-bench/1` is not published yet: no committed result uses it, and nothing consumes it. Until results are committed under it, a scenario's meaning may still change within the version. In particular, what `alloy-logs` measures follows how Alloy formats JSON logs, which may still change; compare `alloy-logs` lines only when they come from the same commit.
+
 | Field | Meaning |
 |---|---|
 | `schema`, `rep` | Format version; repetition index (set by `matrix`, else `null`) |
+| `run_id` | Identifier of the invocation: every line of one `matrix` shares it, and a lone `run` gets its own |
+| `commit` | `GITHUB_SHA` when it is set (GitHub Actions), else `null`; for local runs, put the commit in `--label` |
 | `scenario`, `workload`, `transport` | The cell |
 | `protocol`, `tls`, `mtls` | `http/1.1` or `h2`, and transport security |
 | `concurrency`, `connections`, `streams_per_connection` | Offered load |
 | `server_threads`, `client_threads` | Tokio worker threads of each runtime |
 | `warmup_seconds`, `seconds` | Warm-up and measurement window |
+| `alloc_counting` | Whether allocations were counted; see below |
 | `requests`, `errors` | Requests completed in the window, and failed ones |
+| `error_samples` | The messages of the first 5 client errors of the run (including failed reconnections), so a failing run says why; empty when `errors` is 0 |
 | `connects` | Connections opened during the whole run, including warm-up and the initial ones |
 | `body_bytes` | Response body bytes read in the window |
 | `requests_per_second` | `requests / seconds` |
-| `latency_us` | `p50`, `p90`, `p99`, `p999`, `max` of request latency in µs, from sending the request to reading the whole body (for `cancel`, the first data frame); nearest-rank |
+| `latency_us` | `p50`, `p90`, `p99`, `p999`, `max` of request latency in µs, from sending the request to reading the whole body (for `cancel`, the first data frame); nearest-rank, so `pN` is the value at 1-based rank ⌈N/100 × requests⌉ |
 | `cpu` | On-CPU time in the window by thread role (`service_ns`, `client_ns`, `collector_ns`) and per request (`service_us_per_request`, `client_us_per_request`) |
 | `memory` | `peak_rss_bytes` and `rss_bytes` of the whole process at the end of the run (`scope: "process"`) |
 | `allocations` | With `--alloc-counting`: allocation `calls` and `bytes` in the window, in total and per request, for each role |
@@ -109,7 +116,7 @@ What these measure, and what they do not:
 - **CPU time** comes from `/proc/self/task/*/schedstat`, so it is Linux only; elsewhere `cpu` is `null`. It is summed per thread between the start and the end of the window. A thread that exits inside the window is missing, so the value is a lower bound.
 - **Memory** comes from `/proc/self/status` (Linux only). It covers the whole process, client included, and the peak includes the warm-up. Compare it between cells, not as the service's footprint.
 - **Allocations** are counted by a global allocator in the benchmark binary only, attributed to the role of the allocating thread. Counting adds shared atomic operations to every allocation, which lowers throughput, so it is off by default and **a counting run's throughput and latency must not be compared with a non-counting run's**. Measure allocations in a separate pass.
-- **Span loss** is read from Alloy's own counters (`ferrum_alloy_telemetry_spans_lost_total`, `..._spans_exported_total`). Spans still queued when the window ends are in neither count, and `otel-unreachable` loses spans by `export_failed` when an export fails.
+- **Span loss** is read from Alloy's own counters (`ferrum_alloy_telemetry_spans_lost_total`, `..._spans_exported_total`). Spans still queued when the window ends are in neither count. How `otel-unreachable` loses spans depends on the platform: where a connection to a closed loopback port is refused at once (Linux, macOS), exports fail and spans are lost as `export_failed`; where the connection attempt hangs instead (Windows can), exports may time out and spans may be lost by another reason, such as a full queue.
 
 ## Regression budgets (not yet enforced)
 
@@ -121,7 +128,9 @@ The plan, which stays open in #15:
 2. From that baseline, derive each cell's budget as a ratio to `plain` in the same cell and repetition, not as absolute requests per second, with the noise floor measured on `plain` itself.
 3. Add a scheduled job on that host that runs the matrix and fails when a ratio moves by more than the noise floor.
 
-Until then, no number is quoted without its environment and repetition count, and the harness has no CI job. Its code compiles in the workspace build, and its unit and smoke tests run in the `test` job.
+A budget computed from result lines must use only lines with `errors == 0`, because a run with errors measured something other than the cell (fast failures inflate throughput), and must group lines by `run_id` before pairing a cell with `plain`, so that ratios never mix repetitions from different invocations, hosts, or commits. Only compare lines with the same `alloc_counting`.
+
+Until then, no number is quoted without its environment and repetition count, and the harness has no CI job. Its code compiles in the workspace build, and its unit tests and end-to-end tests (every scenario as a separate `alloy-bench run` process, and a one-cell `matrix` whose output is parsed) run in the `test` job with windows of 0.2 seconds. They check that the harness works, not how fast anything is.
 
 ## Results (2026-09-26, previous harness)
 

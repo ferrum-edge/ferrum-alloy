@@ -1,10 +1,11 @@
 //! Throwaway PKI for the TLS transports, generated per run: a CA, a server
 //! certificate for `localhost` and `127.0.0.1`, and a client certificate.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferrum_alloy::config::{ClientAuth, TlsSettings};
 use rcgen::{
@@ -14,6 +15,7 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use tempfile::TempDir;
 
 use crate::Failure;
 use crate::dims::Transport;
@@ -32,10 +34,10 @@ pub(crate) struct ServerTls {
     pub(crate) alloy: TlsSettings,
 }
 
-/// The generated certificates. PEM files for `AlloyApp` live in a temporary
-/// directory that is removed on drop.
+/// The generated certificates. PEM files for `AlloyApp` live in a private
+/// temporary directory with an unpredictable name, removed on drop.
 pub(crate) struct Pki {
-    dir: PathBuf,
+    _dir: TempDir,
     ca: CertificateDer<'static>,
     ca_path: PathBuf,
     server: Leaf,
@@ -69,23 +71,19 @@ impl Pki {
             ExtendedKeyUsagePurpose::ClientAuth,
         )?;
 
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let name = format!("alloy-bench-{}-{sequence}", std::process::id());
-        let dir = std::env::temp_dir().join(name);
-        std::fs::create_dir_all(&dir)?;
+        let dir = tempfile::Builder::new().prefix("alloy-bench-").tempdir()?;
         let pki = Self {
-            ca_path: dir.join("ca.pem"),
-            server_cert_path: dir.join("server.pem"),
-            server_key_path: dir.join("server-key.pem"),
-            dir,
+            ca_path: dir.path().join("ca.pem"),
+            server_cert_path: dir.path().join("server.pem"),
+            server_key_path: dir.path().join("server-key.pem"),
+            _dir: dir,
             ca: ca_cert.der().clone(),
             server,
             client,
         };
         std::fs::write(&pki.ca_path, ca_cert.pem())?;
         std::fs::write(&pki.server_cert_path, &pki.server.cert_pem)?;
-        std::fs::write(&pki.server_key_path, &pki.server.key_pem)?;
+        write_private(&pki.server_key_path, &pki.server.key_pem)?;
         Ok(pki)
     }
 
@@ -146,10 +144,14 @@ impl Pki {
     }
 }
 
-impl Drop for Pki {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
+/// Creates `path` readable and writable by its owner only (on Unix), and
+/// writes `contents` to it.
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(contents.as_bytes())
 }
 
 fn leaf(
@@ -169,4 +171,26 @@ fn leaf(
         cert_pem: cert.pem(),
         key_pem: key.serialize_pem(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use super::*;
+
+    #[test]
+    fn files_live_in_a_private_directory_removed_on_drop() {
+        let pki = Pki::generate().unwrap();
+        let dir = pki.server_key_path.parent().unwrap().to_path_buf();
+        assert!(pki.ca_path.is_file() && pki.server_cert_path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&pki.server_key_path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        drop(pki);
+        assert!(!dir.exists());
+    }
 }

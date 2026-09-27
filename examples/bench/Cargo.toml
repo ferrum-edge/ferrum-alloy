@@ -15,6 +15,7 @@ path = "src/main.rs"
 ferrum-alloy = { workspace = true, features = ["otel", "tls"] }
 axum = { workspace = true, features = ["tokio", "http1", "http2", "json"] }
 bytes = { workspace = true }
+getrandom = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
@@ -23,15 +24,20 @@ opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
 tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["std", "registry"] }
+tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt", "json"] }
+
+[dev-dependencies]
+toml = { workspace = true, features = ["parse", "serde"] }
 
 # The workspace lints, restated because the workspace forbids unsafe code and
 # this binary needs exactly one exception: its counting global allocator
-# (`src/alloc.rs`). `unsafe_code` is `deny` here so that module alone can allow
-# it. Keep the rest in sync with `[workspace.lints]` in the root manifest.
+# (`src/alloc.rs`). `unsafe_code` is `deny` here so that its `GlobalAlloc` impl
+# alone can expect it. A test in `src/alloc.rs` fails if the rest drifts from
+# `[workspace.lints]` in the root manifest.
 [lints.rust]
 unsafe_code = "deny"
 unreachable_pub = "warn"

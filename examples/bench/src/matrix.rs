@@ -80,11 +80,12 @@ pub(crate) fn dry_run(cells: &[Cell], reps: u32, per_run: Duration) {
 }
 
 /// Runs every repetition of every cell as `alloy-bench run` subprocesses,
-/// appending each result line to `out` (or stdout). Failed runs are
-/// reported and counted; the command fails if any run failed.
+/// all recording `run_id`, appending each result line to `out` (or stdout).
+/// Failed runs are reported and counted; the command fails if any run failed.
 pub(crate) fn execute(
     cells: &[Cell],
     reps: u32,
+    run_id: &str,
     forward: &[String],
     out: Option<&Path>,
 ) -> Result<(), Failure> {
@@ -107,6 +108,7 @@ pub(crate) fn execute(
             );
             let output = Command::new(&exe)
                 .args(cell_args(cell, rep))
+                .args(["--run-id", run_id])
                 .args(forward)
                 .stdin(Stdio::null())
                 .stderr(Stdio::inherit())

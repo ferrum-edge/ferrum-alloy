@@ -69,21 +69,36 @@ impl Load {
     }
 }
 
+/// How many error messages a run keeps, so that a failing run says why.
+pub(crate) const ERROR_SAMPLES: usize = 5;
+
 /// What the workers saw inside the measurement window.
 #[derive(Debug, Default)]
 pub(crate) struct Totals {
     /// Latency of every request that started and finished inside the window.
     pub(crate) latencies_us: Vec<u32>,
     pub(crate) errors: u64,
+    /// The first [`ERROR_SAMPLES`] error messages.
+    pub(crate) error_samples: Vec<String>,
     /// Connections opened during the whole run, including warm-up.
     pub(crate) connects: u64,
     pub(crate) body_bytes: u64,
 }
 
 impl Totals {
+    fn error(&mut self, error: &dyn std::fmt::Display) {
+        self.errors += 1;
+        if self.error_samples.len() < ERROR_SAMPLES {
+            self.error_samples.push(error.to_string());
+        }
+    }
+
     fn merge(&mut self, other: Self) {
         self.latencies_us.extend(other.latencies_us);
         self.errors += other.errors;
+        let room = ERROR_SAMPLES.saturating_sub(self.error_samples.len());
+        let samples = other.error_samples.into_iter().take(room);
+        self.error_samples.extend(samples);
         self.connects += other.connects;
         self.body_bytes += other.body_bytes;
     }
@@ -207,9 +222,9 @@ async fn worker(
                     totals.connects += 1;
                     dialed
                 }
-                Err(_) => {
+                Err(error) => {
                     if Instant::now() >= window_start {
-                        totals.errors += 1;
+                        totals.error(&error);
                     }
                     continue;
                 }
@@ -226,7 +241,7 @@ async fn worker(
                     totals.latencies_us.push(micros);
                     totals.body_bytes += bytes;
                 }
-                Err(_) => totals.errors += 1,
+                Err(error) => totals.error(&error),
             }
         }
         if reuse {
@@ -312,6 +327,25 @@ mod tests {
         assert_eq!(load.streams_per_connection(Transport::H1Tls), 1);
         assert_eq!(load.connections(Transport::H2c), 4);
         assert_eq!(load.streams_per_connection(Transport::H2Mtls), 8);
+    }
+
+    #[test]
+    fn error_samples_keep_the_first_few_messages() {
+        let mut first = Totals::default();
+        let mut second = Totals::default();
+        for index in 0..ERROR_SAMPLES {
+            first.error(&format!("first {index}"));
+            second.error(&format!("second {index}"));
+        }
+        first.error(&"dropped");
+        assert_eq!(first.errors, ERROR_SAMPLES as u64 + 1);
+        assert_eq!(first.error_samples.len(), ERROR_SAMPLES);
+        first.error_samples.truncate(2);
+        first.merge(second);
+        assert_eq!(first.errors, 2 * ERROR_SAMPLES as u64 + 1);
+        assert_eq!(first.error_samples.len(), ERROR_SAMPLES);
+        assert_eq!(first.error_samples[1], "first 1");
+        assert_eq!(first.error_samples[2], "second 0");
     }
 
     #[test]

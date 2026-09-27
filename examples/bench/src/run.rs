@@ -1,5 +1,6 @@
 //! One matrix cell: start the server, drive load, and report one result.
 
+use std::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -32,6 +33,8 @@ pub(crate) struct RunOptions {
     pub(crate) load: Load,
     pub(crate) alloc_counting: bool,
     pub(crate) label: Option<String>,
+    /// Identifies one invocation: every result of a `matrix` shares it.
+    pub(crate) run_id: String,
     /// An external OTLP/HTTP traces endpoint for `otel-collector`, instead of
     /// the in-process stub.
     pub(crate) collector_endpoint: Option<String>,
@@ -238,10 +241,33 @@ pub(crate) fn measure(
     Ok(report(cell, options, environment, measured?))
 }
 
+/// A random identifier for one invocation, formatted as a version 4 UUID.
+pub(crate) fn new_run_id() -> Result<String, Failure> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("cannot generate a run id: {error}"))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut id = String::with_capacity(36);
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
+        let _ = write!(id, "{byte:02x}");
+    }
+    Ok(id)
+}
+
+/// The commit under test, when GitHub Actions names it.
+fn commit() -> Option<String> {
+    std::env::var("GITHUB_SHA").ok().filter(|sha| !sha.is_empty())
+}
+
+/// Nearest-rank percentile: the value at 1-based rank `ceil(p * n)`.
 fn percentile(sorted: &[u32], p: f64) -> Option<u32> {
     let last = sorted.len().checked_sub(1)?;
-    let index = (last as f64 * p).round() as usize;
-    sorted.get(index.min(last)).copied()
+    let rank = (p * sorted.len() as f64).ceil() as usize;
+    sorted.get(rank.saturating_sub(1).min(last)).copied()
 }
 
 /// Growth of a monotonic counter between two samples.
@@ -331,6 +357,8 @@ fn report(
 
     json!({
         "schema": SCHEMA,
+        "run_id": options.run_id,
+        "commit": commit(),
         "rep": options.rep,
         "scenario": cell.scenario.name(),
         "workload": cell.workload.name(),
@@ -345,8 +373,10 @@ fn report(
         "client_threads": server::THREADS,
         "warmup_seconds": load.warmup.as_secs_f64(),
         "seconds": window.as_secs_f64(),
+        "alloc_counting": options.alloc_counting,
         "requests": requests,
         "errors": totals.errors,
+        "error_samples": totals.error_samples,
         "connects": totals.connects,
         "body_bytes": totals.body_bytes,
         "requests_per_second": requests as f64 / window.as_secs_f64().max(f64::EPSILON),
@@ -388,6 +418,7 @@ mod tests {
             },
             alloc_counting: false,
             label: Some("test".into()),
+            run_id: "test-run".into(),
             collector_endpoint: None,
             rep: Some(1),
         }
@@ -437,7 +468,7 @@ mod tests {
         let h1 = run(Scenario::Plain, Workload::Cancel, Transport::H1);
         assert!(h1["connects"].as_u64().unwrap() > 4, "{h1}");
         let h2 = run(Scenario::Plain, Workload::Cancel, Transport::H2c);
-        assert_eq!(h2["connects"], 2, "{h2}");
+        assert_eq!(h2["connects"], h2["connections"], "{h2}");
     }
 
     #[test]
@@ -454,14 +485,84 @@ mod tests {
         }
     }
 
+    /// The result's keys, pinned: renaming or removing one changes what
+    /// `alloy-bench/1` means, so it needs a schema bump, not just this list.
+    #[test]
+    fn result_keys_are_pinned() {
+        let result = run(Scenario::Plain, Workload::Small, Transport::H1);
+        let mut keys: Vec<&str> = result
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let expected = [
+            "alloc_counting",
+            "allocations",
+            "body_bytes",
+            "client_threads",
+            "commit",
+            "concurrency",
+            "connections",
+            "connects",
+            "cpu",
+            "environment",
+            "error_samples",
+            "errors",
+            "latency_us",
+            "memory",
+            "mtls",
+            "otel",
+            "protocol",
+            "rep",
+            "requests",
+            "requests_per_second",
+            "run_id",
+            "scenario",
+            "schema",
+            "seconds",
+            "server_threads",
+            "streams_per_connection",
+            "tls",
+            "transport",
+            "warmup_seconds",
+            "workload",
+        ];
+        assert_eq!(keys, expected, "{result}");
+        let latency = result["latency_us"].as_object().unwrap();
+        let mut latency: Vec<&str> = latency.keys().map(String::as_str).collect();
+        latency.sort_unstable();
+        assert_eq!(latency, ["max", "p50", "p90", "p99", "p999"], "{result}");
+        assert_eq!(result["run_id"], "test-run", "{result}");
+        assert_eq!(result["alloc_counting"], false, "{result}");
+        assert_eq!(result["error_samples"], json!([]), "{result}");
+    }
+
+    #[test]
+    fn run_ids_are_random_version_4_uuids() {
+        let id = new_run_id().unwrap();
+        assert_eq!(id.len(), 36, "{id}");
+        let groups: Vec<usize> = id.split('-').map(str::len).collect();
+        assert_eq!(groups, [8, 4, 4, 4, 12], "{id}");
+        assert_eq!(id.as_bytes()[14], b'4', "{id}");
+        assert!(id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()), "{id}");
+        assert_ne!(id, new_run_id().unwrap());
+    }
+
     #[test]
     fn percentiles_use_the_nearest_rank() {
         assert_eq!(percentile(&[], 0.5), None);
         assert_eq!(percentile(&[7], 0.99), Some(7));
         let sorted: Vec<u32> = (1..=100).collect();
-        assert_eq!(percentile(&sorted, 0.5), Some(51));
+        assert_eq!(percentile(&sorted, 0.0), Some(1));
+        assert_eq!(percentile(&sorted, 0.5), Some(50));
         assert_eq!(percentile(&sorted, 0.99), Some(99));
         assert_eq!(percentile(&sorted, 1.0), Some(100));
+        let ten: Vec<u32> = (1..=10).collect();
+        assert_eq!(percentile(&ten, 0.9), Some(9));
+        assert_eq!(percentile(&ten, 0.95), Some(10));
+        assert_eq!(percentile(&ten, 0.999), Some(10));
     }
 
     #[test]

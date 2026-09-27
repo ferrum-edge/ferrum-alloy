@@ -177,32 +177,36 @@ pub(crate) fn start(
     tls: Option<ServerTls>,
     pipeline: Option<OtelPipeline>,
 ) -> Result<Server, Failure> {
-    spawn(SERVER_THREAD, Role::Service, move |listener, ready, stop| async move {
-        let _pipeline = pipeline;
-        if scenario == Scenario::Plain {
-            ready.ok();
-            let tls = tls.map(|tls| TlsAcceptor::from(tls.rustls));
-            serve_plain(listener, tls, stopped(stop)).await;
-            return;
-        }
-        let mut config = AlloyConfig::default();
-        config.management.enabled = false;
-        config.server.max_connections = 100_000;
-        config.server.tls = tls.map(|tls| tls.alloy);
-        let parts = AlloyApp::new("bench")
-            .router(router())
-            .config(config)
-            .telemetry(TelemetryInit::ApplicationOwned)
-            .shutdown_signal(stopped(stop))
-            .into_parts();
-        match parts {
-            Ok(parts) => {
+    spawn(
+        SERVER_THREAD,
+        Role::Service,
+        move |listener, ready, stop| async move {
+            let _pipeline = pipeline;
+            if scenario == Scenario::Plain {
                 ready.ok();
-                let _ = parts.serve_on(listener, None).await;
+                let tls = tls.map(|tls| TlsAcceptor::from(tls.rustls));
+                serve_plain(listener, tls, stopped(stop)).await;
+                return;
             }
-            Err(error) => ready.fail(error),
-        }
-    })
+            let mut config = AlloyConfig::default();
+            config.management.enabled = false;
+            config.server.max_connections = 100_000;
+            config.server.tls = tls.map(|tls| tls.alloy);
+            let parts = AlloyApp::new("bench")
+                .router(router())
+                .config(config)
+                .telemetry(TelemetryInit::ApplicationOwned)
+                .shutdown_signal(stopped(stop))
+                .into_parts();
+            match parts {
+                Ok(parts) => {
+                    ready.ok();
+                    let _ = parts.serve_on(listener, None).await;
+                }
+                Err(error) => ready.fail(error),
+            }
+        },
+    )
 }
 
 /// The baseline: hyper-util's automatic HTTP/1.1 + HTTP/2 connection
@@ -269,18 +273,22 @@ async fn export(State(stats): State<Arc<CollectorStats>>, body: Bytes) -> impl I
 pub(crate) fn start_collector() -> Result<Collector, Failure> {
     let stats = Arc::new(CollectorStats::default());
     let recorded = Arc::clone(&stats);
-    let server = spawn(COLLECTOR_THREAD, Role::Collector, move |listener, ready, stop| {
-        let app = Router::new()
-            .route("/v1/traces", post(export))
-            .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-            .with_state(recorded);
-        async move {
-            ready.ok();
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(stopped(stop))
-                .await;
-        }
-    })?;
+    let server = spawn(
+        COLLECTOR_THREAD,
+        Role::Collector,
+        move |listener, ready, stop| {
+            let app = Router::new()
+                .route("/v1/traces", post(export))
+                .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+                .with_state(recorded);
+            async move {
+                ready.ok();
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(stopped(stop))
+                    .await;
+            }
+        },
+    )?;
     Ok(Collector {
         endpoint: format!("http://{}/v1/traces", server.addr),
         stats,

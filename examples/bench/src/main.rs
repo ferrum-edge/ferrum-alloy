@@ -58,6 +58,8 @@ options:
   --alloc-counting          count allocations; slows every run, so compare
                             only with other counting runs
   --label TEXT              recorded as environment.label (host, commit, ...)
+  --run-id ID               recorded as run_id (default: random); every run
+                            of one matrix records the same id
   --collector-endpoint URL  otel-collector exports to this OTLP/HTTP traces
                             URL instead of the in-process stub
 
@@ -113,6 +115,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         },
         alloc_counting: false,
         label: None,
+        run_id: String::new(),
         collector_endpoint: None,
         rep: None,
     };
@@ -151,6 +154,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             (_, "--concurrency") => options.load.concurrency = value.parse()?,
             (_, "--streams") => options.load.streams = value.parse()?,
             (_, "--label") => options.label = Some(value.clone()),
+            (_, "--run-id") => options.run_id = value.clone(),
             (_, "--collector-endpoint") => options.collector_endpoint = Some(value.clone()),
             (false, "--scenario") => cell.scenario = Scenario::parse(value)?,
             (false, "--workload") => cell.workload = Workload::parse(value)?,
@@ -171,6 +175,9 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         }
     }
 
+    if options.run_id.is_empty() {
+        options.run_id = run::new_run_id()?;
+    }
     if !matrix {
         options.load.validate(cell.transport)?;
         return Ok(Command::Run { cell, options });
@@ -216,7 +223,7 @@ fn execute(command: Command) -> Result<(), Failure> {
                 matrix::dry_run(&cells, reps, per_run);
                 return Ok(());
             }
-            matrix::execute(&cells, reps, &forward, out.as_deref())
+            matrix::execute(&cells, reps, &options.run_id, &forward, out.as_deref())
         }
     }
 }
@@ -261,6 +268,11 @@ mod tests {
         assert_eq!(options.load.concurrency, 16);
         assert_eq!(options.rep, Some(2));
         assert!(options.alloc_counting);
+        assert_eq!(options.run_id.len(), 36);
+        let Command::Run { options, .. } = parse(&args("run --run-id r1")).unwrap() else {
+            panic!("expected run");
+        };
+        assert_eq!(options.run_id, "r1");
     }
 
     #[test]
@@ -280,10 +292,7 @@ mod tests {
         };
         assert_eq!(cells.len(), 2 * Workload::ALL.len() * 2);
         assert_eq!(reps, 3);
-        assert_eq!(
-            forward.join(" "),
-            "--seconds 2 --label ci --alloc-counting"
-        );
+        assert_eq!(forward.join(" "), "--seconds 2 --label ci --alloc-counting");
         assert_eq!(out, Some(PathBuf::from("r.jsonl")));
         assert!(dry_run);
     }

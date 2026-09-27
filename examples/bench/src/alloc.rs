@@ -5,11 +5,6 @@
 //! reported separately and never compared with non-counting ones. Allocations
 //! are attributed to the [`Role`] of the allocating thread.
 
-#![allow(
-    unsafe_code,
-    reason = "GlobalAlloc is an unsafe trait; every method forwards to System unchanged"
-)]
-
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -121,6 +116,10 @@ fn record(size: usize) {
 // SAFETY: every method forwards its arguments unchanged to `System`, which
 // upholds the `GlobalAlloc` contract; counting touches only atomics and a
 // const-initialized thread-local, and never allocates.
+#[expect(
+    unsafe_code,
+    reason = "GlobalAlloc is an unsafe trait; every method forwards to System unchanged"
+)]
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
@@ -170,6 +169,27 @@ mod tests {
         .unwrap();
         assert!(delta.calls >= 1, "{delta:?}");
         assert!(delta.bytes >= 4096, "{delta:?}");
+    }
+
+    /// The manifest restates `[workspace.lints]` with `unsafe_code` lowered
+    /// from `forbid` to `deny`, so that this module alone can expect it. Any
+    /// other difference is drift.
+    #[test]
+    fn lints_match_the_workspace_except_unsafe_code() {
+        let manifest = |path: &str| {
+            let text = std::fs::read_to_string(path).unwrap();
+            toml::from_str::<toml::Table>(&text).unwrap()
+        };
+        let root = manifest(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"));
+        let bench = manifest(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let mut expected = root["workspace"]["lints"].clone();
+        let rust = expected
+            .get_mut("rust")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        let workspace_level = rust.insert("unsafe_code".into(), "deny".into());
+        assert_eq!(workspace_level, Some("forbid".into()));
+        assert_eq!(bench["lints"], expected);
     }
 
     #[test]
