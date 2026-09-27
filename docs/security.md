@@ -153,7 +153,7 @@ The generated CI pins `actions/checkout` by commit.
 
 - No live, tenant-scoped diagnostic retrieval endpoint. Detailed evidence is available only through telemetry export and offline reports.
 - Upgraded (WebSocket) sessions are not counted against `max_connections` and are not drained. Applications should watch `Lifecycle::shutdown_token`.
-- An HTTP/2 connection that goes idle after its first request is bounded only by keep-alive pings: a peer that keeps answering them keeps its connection slot.
+- An HTTP/2 connection that goes idle after its first request is bounded only by keep-alive pings: a peer that keeps answering them keeps its connection slot ([#35](https://github.com/ferrum-edge/ferrum-alloy/issues/35)).
 - HTTP/2 stream handler tasks are not tracked by the shutdown drain: a handler can still be running after serving returns ([#35](https://github.com/ferrum-edge/ferrum-alloy/issues/35)).
 - No certificate revocation checking.
 - No rate limiting on the management listener.

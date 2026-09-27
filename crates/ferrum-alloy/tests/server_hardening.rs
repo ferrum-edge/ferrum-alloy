@@ -288,7 +288,10 @@ async fn every_connection_is_closed_when_serve_on_returns() {
         "the endless stream was force-closed"
     );
     assert_eq!(
-        server.stats.force_closed_connections.load(Ordering::Relaxed),
+        server
+            .stats
+            .force_closed_connections
+            .load(Ordering::Relaxed),
         1,
         "the force-closed connection is counted"
     );

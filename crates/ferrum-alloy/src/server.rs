@@ -361,15 +361,30 @@ async fn serve_io<I>(
     // Set once the deadline passed without a request: the connection was
     // asked to close and the deadline re-armed as a short grace period.
     let mut closing = false;
+    // A request that arrives during the graceful close gets one bounded
+    // opportunity to finish before the connection is dropped.
+    let mut request_during_close = false;
     let mut draining = false;
     let result = loop {
         tokio::select! {
             result = connection.as_mut() => break result,
             () = deadline.as_mut(), if awaiting_first_request || closing => {
                 awaiting_first_request = false;
-                if first_request.load(Ordering::Acquire) {
+                if request_during_close {
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "connection still open after the request drain budget; dropping");
+                    return;
+                } else if first_request.load(Ordering::Acquire) && closing {
+                    // Hyper keeps an HTTP/2 connection alive while waiting for
+                    // the peer to acknowledge its shutdown ping. Bound that
+                    // wait by the same hard cap used for server draining.
+                    request_during_close = true;
+                    deadline
+                        .as_mut()
+                        .reset(Instant::now() + options.drain_timeout);
+                } else if first_request.load(Ordering::Acquire) {
                     // A request that raced the `GOAWAY` is served like any
-                    // other while the connection finishes.
+                    // other while the connection finishes. No shutdown has
+                    // begun yet, so the normal request path remains open.
                     closing = false;
                 } else if closing {
                     tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "connection still open after the first-request grace period; dropping");
