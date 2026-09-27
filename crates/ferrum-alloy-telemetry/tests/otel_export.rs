@@ -1,7 +1,7 @@
 //! OpenTelemetry export: real exported span relationships, streaming span
 //! end times, sampling, and collector failure behavior.
 
-#![cfg(feature = "otel")]
+#![cfg(all(feature = "otel", feature = "axum"))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

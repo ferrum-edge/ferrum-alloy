@@ -1,6 +1,7 @@
 //! Existing-Axum adoption: application-owned routers, state, middleware,
 //! route templates after matching, early rejections, and duplicate layers.
 
+#![cfg(feature = "axum")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::convert::Infallible;
