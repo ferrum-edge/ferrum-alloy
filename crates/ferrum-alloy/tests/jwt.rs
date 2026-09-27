@@ -338,7 +338,7 @@ fn short_lived(jwks: SocketAddr, max_age_ms: u64, max_stale_ms: u64) -> JwtVerif
     let config = JwtSettings {
         jwks_max_age_ms: max_age_ms,
         jwks_max_stale_ms: max_stale_ms,
-        ..settings(jwks, 500)
+        ..settings(jwks, max_age_ms.min(500))
     };
     JwtVerifier::new(&config).unwrap()
 }
