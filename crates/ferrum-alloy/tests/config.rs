@@ -167,7 +167,10 @@ fn command_variables_are_ignored_not_rejected() {
     let file = format!("{DIAGNOSTICS_TOKEN_ENV}_FILE");
     let vars = env(&[(file.as_str(), "/nonexistent")]);
     let error = load_from(None, vars, &Overrides::default()).unwrap_err();
-    assert!(matches!(&error, ConfigError::Env { name, .. } if *name == file), "{error}");
+    assert!(
+        matches!(&error, ConfigError::Env { name, .. } if *name == file),
+        "{error}"
+    );
 }
 
 #[test]
@@ -836,7 +839,10 @@ fn every_environment_variable_is_documented() {
         );
     }
     for name in CLI_ENV_VARS {
-        assert!(docs.contains(*name), "{name} is missing from docs/configuration.md");
+        assert!(
+            docs.contains(*name),
+            "{name} is missing from docs/configuration.md"
+        );
     }
     assert!(docs.contains("FERRUM_ALLOY_CONFIG"));
 }

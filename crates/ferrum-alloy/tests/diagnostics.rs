@@ -502,7 +502,10 @@ fn startup_requires_a_loopback_management_listener() {
             .into_parts()
             .unwrap_err()
             .to_string();
-        assert!(error.contains("loopback management.bind"), "{bind}: {error}");
+        assert!(
+            error.contains("loopback management.bind"),
+            "{bind}: {error}"
+        );
     }
 
     // Without retrieval, a non-loopback listener with a token is allowed.
