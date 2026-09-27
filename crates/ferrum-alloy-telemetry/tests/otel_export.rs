@@ -44,11 +44,10 @@ fn resource() -> ServiceResource {
 }
 
 fn config() -> OtlpConfig {
-    OtlpConfig {
-        enabled: true,
-        scheduled_delay_ms: 50,
-        ..OtlpConfig::default()
-    }
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.scheduled_delay_ms = 50;
+    config
 }
 
 fn memory_pipeline(config: &OtlpConfig) -> (OtelPipeline, InMemorySpanExporter, Arc<Metrics>) {
@@ -71,11 +70,9 @@ fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a opentelemetry::Value> {
 }
 
 fn telemetry(metrics: Arc<Metrics>, config: TelemetryConfig) -> TelemetryLayer {
-    let peers = TrustedPeers::new(&TrustedPeersConfig {
-        identities: vec![],
-        networks: vec!["10.0.0.0/8".parse().unwrap()],
-    })
-    .unwrap();
+    let mut trust = TrustedPeersConfig::default();
+    trust.networks = vec!["10.0.0.0/8".parse().unwrap()];
+    let peers = TrustedPeers::new(&trust).unwrap();
     TelemetryLayer::new(config)
         .unwrap()
         .with_classifier(Arc::new(peers))
@@ -264,8 +261,8 @@ async fn server_span_ends_after_the_body_not_at_headers() {
         .unwrap()
         .as_millis();
     assert!(
-        headers_after < Duration::from_millis(100),
-        "headers were immediate"
+        span_ms >= headers_after.as_millis() + 100,
+        "span ended at headers ({headers_after:?}) instead of after the body ({span_ms} ms)"
     );
     assert!(
         span_ms >= 140,
@@ -323,10 +320,8 @@ async fn untrusted_context_is_rerooted_and_optionally_linked() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn untrusted_callers_cannot_force_sampling() {
-    let config = OtlpConfig {
-        sampling_ratio: 0.0,
-        ..config()
-    };
+    let mut config = config();
+    config.sampling_ratio = 0.0;
     let (pipeline, exporter, metrics) = memory_pipeline(&config);
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(pipeline.layer()));
@@ -417,12 +412,10 @@ async fn collector_failures_never_fail_requests_and_are_counted() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_full_queue_drops_spans_instead_of_blocking_requests() {
-    let config = OtlpConfig {
-        max_queue_spans: 4,
-        max_export_batch: 1,
-        scheduled_delay_ms: 10,
-        ..config()
-    };
+    let mut config = config();
+    config.max_queue_spans = 4;
+    config.max_export_batch = 1;
+    config.scheduled_delay_ms = 10;
     let metrics = Arc::new(Metrics::default());
     let pipeline = OtelPipeline::with_exporter(&resource(), &config, Arc::clone(&metrics), || {
         Ok(SlowExporter(Duration::from_millis(200)))
@@ -457,10 +450,8 @@ async fn a_full_queue_drops_spans_instead_of_blocking_requests() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn the_byte_budget_bounds_queued_memory() {
-    let config = OtlpConfig {
-        max_queue_bytes: 64,
-        ..config()
-    };
+    let mut config = config();
+    config.max_queue_bytes = 64;
     let (pipeline, exporter, metrics) = memory_pipeline(&config);
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(pipeline.layer()));
@@ -479,10 +470,8 @@ async fn the_byte_budget_bounds_queued_memory() {
 
 #[test]
 fn the_byte_budget_counts_large_event_attributes() {
-    let config = OtlpConfig {
-        max_queue_bytes: 2_048,
-        ..config()
-    };
+    let mut config = config();
+    config.max_queue_bytes = 2_048;
     let (pipeline, exporter, metrics) = memory_pipeline(&config);
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(pipeline.layer()));
@@ -514,24 +503,15 @@ fn the_byte_budget_counts_large_event_attributes() {
 #[test]
 fn invalid_configuration_fails_at_startup() {
     let metrics = Arc::new(Metrics::default());
-    for bad in [
-        OtlpConfig {
-            sampling_ratio: 1.5,
-            ..OtlpConfig::default()
-        },
-        OtlpConfig {
-            endpoint: Some("ftp://collector/v1/traces".into()),
-            ..OtlpConfig::default()
-        },
-        OtlpConfig {
-            endpoint: Some("http://user:secret@collector:4318/v1/traces".into()),
-            ..OtlpConfig::default()
-        },
-        OtlpConfig {
-            max_queue_spans: 0,
-            ..OtlpConfig::default()
-        },
-    ] {
+    let invalid: [fn(&mut OtlpConfig); 4] = [
+        |c| c.sampling_ratio = 1.5,
+        |c| c.endpoint = Some("ftp://collector/v1/traces".into()),
+        |c| c.endpoint = Some("http://user:secret@collector:4318/v1/traces".into()),
+        |c| c.max_queue_spans = 0,
+    ];
+    for change in invalid {
+        let mut bad = OtlpConfig::default();
+        change(&mut bad);
         assert!(
             OtelPipeline::with_exporter(&resource(), &bad, Arc::clone(&metrics), || Ok(
                 InMemorySpanExporter::default()
@@ -552,18 +532,12 @@ fn the_otlp_http_exporter_builds_without_a_collector() {
     // Building must not require connectivity; export failures are runtime
     // telemetry loss, not startup errors.
     let metrics = Arc::new(Metrics::default());
-    let pipeline = OtelPipeline::otlp(
-        &resource(),
-        &OtlpConfig {
-            enabled: true,
-            endpoint: Some("http://127.0.0.1:9/v1/traces".into()),
-            timeout_ms: 200,
-            max_export_retries: 0,
-            ..OtlpConfig::default()
-        },
-        metrics,
-    )
-    .unwrap();
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.endpoint = Some("http://127.0.0.1:9/v1/traces".into());
+    config.timeout_ms = 200;
+    config.max_export_retries = 0;
+    let pipeline = OtelPipeline::otlp(&resource(), &config, metrics).unwrap();
     pipeline.shutdown(Duration::from_secs(2)).unwrap();
 }
 

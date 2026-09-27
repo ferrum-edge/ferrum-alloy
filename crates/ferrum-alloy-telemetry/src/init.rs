@@ -26,6 +26,7 @@ pub enum LogFormat {
 /// Logging configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct LoggingConfig {
     /// Output format.
     pub format: LogFormat,

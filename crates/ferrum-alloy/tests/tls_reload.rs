@@ -19,9 +19,7 @@ use axum::Router;
 use axum::routing::get;
 use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
-use ferrum_alloy::config::{
-    AlloyConfig, ClientAuth, CrlDepth, CrlExpiration, CrlUnknownStatus, TlsSettings,
-};
+use ferrum_alloy::config::{AlloyConfig, ClientAuth, TlsSettings};
 use http::{Request, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use hyper::client::conn::http1::SendRequest;
@@ -50,18 +48,14 @@ impl Pki {
         let server = ca.server();
         let client_ca_path = (client_auth != ClientAuth::None)
             .then(|| pki::write(dir.path(), "ca.pem", &ca.cert_pem));
-        let tls = TlsSettings {
-            cert_path: pki::write(dir.path(), "server.pem", &server.cert_pem),
-            key_path: pki::write(dir.path(), "server.key", &server.key_pem),
-            client_ca_path,
-            client_auth,
-            handshake_timeout_ms: 2_000,
-            client_crl_paths: Vec::new(),
-            client_crl_depth: CrlDepth::default(),
-            client_crl_unknown_status: CrlUnknownStatus::default(),
-            client_crl_expiration: CrlExpiration::default(),
-            reload_interval_ms: RELOAD_INTERVAL_MS,
-        };
+        let mut tls = TlsSettings::new(
+            pki::write(dir.path(), "server.pem", &server.cert_pem),
+            pki::write(dir.path(), "server.key", &server.key_pem),
+        );
+        tls.client_ca_path = client_ca_path;
+        tls.client_auth = client_auth;
+        tls.handshake_timeout_ms = 2_000;
+        tls.reload_interval_ms = RELOAD_INTERVAL_MS;
         Self {
             dir,
             ca,
@@ -322,6 +316,10 @@ async fn invalid_replacements_keep_the_previous_material_serving_and_are_counted
         );
         assert!(
             !metrics.contains("ferrum_alloy_tls_reload_failures_total{listener=\"app\"} 0\n"),
+            "{case}: {metrics}"
+        );
+        assert!(
+            metrics.contains("ferrum_alloy_tls_reload_stalls_total{listener=\"app\"} 0\n"),
             "{case}: {metrics}"
         );
         for gauge in [

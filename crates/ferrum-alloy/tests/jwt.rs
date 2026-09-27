@@ -179,18 +179,16 @@ async fn jwks_server(keys: &[&SigningKey]) -> Jwks {
 }
 
 fn settings(jwks: SocketAddr, refresh_ms: u64) -> JwtSettings {
-    JwtSettings {
-        issuer: "https://issuer.test".into(),
-        audiences: vec!["orders-api".into()],
-        algorithms: vec!["ES256".into()],
-        jwks_url: Some(format!("http://127.0.0.1:{}/jwks", jwks.port())),
-        jwks_min_refresh_interval_ms: refresh_ms,
-        jwks_max_age_ms: 300_000,
-        jwks_max_stale_ms: 300_000,
-        jwks_max_bytes: 64 * 1024,
-        jwks_timeout_ms: 2_000,
-        leeway_seconds: 0,
-    }
+    let mut jwt = JwtSettings::new("https://issuer.test", vec!["orders-api".into()]);
+    jwt.algorithms = vec!["ES256".into()];
+    jwt.jwks_url = Some(format!("http://127.0.0.1:{}/jwks", jwks.port()));
+    jwt.jwks_min_refresh_interval_ms = refresh_ms;
+    jwt.jwks_max_age_ms = 300_000;
+    jwt.jwks_max_stale_ms = 300_000;
+    jwt.jwks_max_bytes = 64 * 1024;
+    jwt.jwks_timeout_ms = 2_000;
+    jwt.leeway_seconds = 0;
+    jwt
 }
 
 fn protected(verifier: &JwtVerifier) -> Router {
@@ -335,11 +333,9 @@ async fn rotated_keys_are_picked_up_after_the_refresh_interval() {
 
 /// A verifier with a short key-set lifetime for the expiry tests.
 fn short_lived(jwks: SocketAddr, max_age_ms: u64, max_stale_ms: u64) -> JwtVerifier {
-    let config = JwtSettings {
-        jwks_max_age_ms: max_age_ms,
-        jwks_max_stale_ms: max_stale_ms,
-        ..settings(jwks, max_age_ms.min(500))
-    };
+    let mut config = settings(jwks, max_age_ms.min(500));
+    config.jwks_max_age_ms = max_age_ms;
+    config.jwks_max_stale_ms = max_stale_ms;
     JwtVerifier::new(&config).unwrap()
 }
 
@@ -406,12 +402,10 @@ async fn cache_control_max_age_shortens_but_never_extends_the_lifetime() {
         let old = SigningKey::new("old");
         let jwks = jwks_server(&[&old]).await;
         *jwks.cache_control.lock().unwrap() = Some(cache_control.into());
-        let verifier = JwtVerifier::new(&JwtSettings {
-            jwks_max_age_ms: max_age_ms,
-            jwks_max_stale_ms: 0,
-            ..settings(jwks.addr, refresh_ms)
-        })
-        .unwrap();
+        let mut config = settings(jwks.addr, refresh_ms);
+        config.jwks_max_age_ms = max_age_ms;
+        config.jwks_max_stale_ms = 0;
+        let verifier = JwtVerifier::new(&config).unwrap();
         let token = old.sign(&claims(), Some("old"));
         assert_eq!(status_of(&verifier, &token).await, 200, "{cache_control}");
         jwks.serve(&[&SigningKey::new("new")]);
@@ -465,13 +459,11 @@ async fn a_zero_grace_period_fails_closed_at_the_max_age() {
 async fn stale_keys_answer_known_kids_without_waiting_for_a_slow_refresh() {
     let key = SigningKey::new("k1");
     let jwks = jwks_server(&[&key]).await;
-    let verifier = JwtVerifier::new(&JwtSettings {
-        jwks_max_age_ms: 300,
-        jwks_max_stale_ms: 60_000,
-        jwks_timeout_ms: 30_000,
-        ..settings(jwks.addr, 20)
-    })
-    .unwrap();
+    let mut config = settings(jwks.addr, 20);
+    config.jwks_max_age_ms = 300;
+    config.jwks_max_stale_ms = 60_000;
+    config.jwks_timeout_ms = 30_000;
+    let verifier = JwtVerifier::new(&config).unwrap();
     let token = key.sign(&claims(), Some("k1"));
     assert_eq!(status_of(&verifier, &token).await, 200);
 

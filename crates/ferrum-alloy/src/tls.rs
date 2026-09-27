@@ -15,9 +15,11 @@
 //! handshakes use. Established connections keep the session they negotiated.
 //! Material that fails validation is never swapped in: the previous material
 //! keeps serving, and the failure is logged and counted once the same files
-//! fail twice in a row. The client authentication policy comes from the
-//! settings, which a reload never changes, so a reload cannot turn client
-//! authentication off.
+//! fail twice in a row. Files that change between the two reads at three
+//! reloads in a row, with no swap or unchanged result in between, keep their
+//! new material from ever being used; that is warned about and counted once.
+//! The client authentication policy comes from the settings, which a reload
+//! never changes, so a reload cannot turn client authentication off.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -227,6 +229,11 @@ const MAX_SETTLE_DELAY: Duration = Duration::from_secs(1);
 /// warned about again this often.
 const CRL_WARNING_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
+/// Reloads in a row, with no swap or unchanged result in between, whose
+/// files changed between the two reads, after which the reload is reported
+/// as stalled.
+const STALLED_AFTER: u32 = 3;
+
 /// What one reload attempt did.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -236,6 +243,11 @@ enum Outcome {
     Unchanged,
     /// The files changed between the two reads; the next attempt retries.
     Changing,
+    /// The files changed between the two reads, for the [`STALLED_AFTER`]th
+    /// reload in a row with no swap or unchanged result in between: a writer
+    /// keeps changing them, so their material is never used. Reported once
+    /// per streak; the next attempt retries.
+    Stalled,
     /// The files could not be read or failed validation, but the previous
     /// attempt did not fail the same way, so a writer still replacing them
     /// may explain it. Not counted; the next attempt retries.
@@ -260,6 +272,9 @@ struct Reloader {
     settle: Duration,
     /// What failed at the previous attempt, if it failed.
     last_failure: Option<Attempt>,
+    /// Attempts since the last swap or unchanged result whose files changed
+    /// between the two reads.
+    changing: u32,
     /// When the CRL expiry was last logged.
     crl_logged_at: Instant,
 }
@@ -270,6 +285,7 @@ impl Reloader {
             tls,
             settle,
             last_failure: None,
+            changing: 0,
             // Loading the material logged it.
             crl_logged_at: Instant::now(),
         }
@@ -279,6 +295,7 @@ impl Reloader {
     /// their material in.
     async fn reload(&mut self, now: UnixTime) -> Outcome {
         let outcome = self.attempt(now).await;
+        let outcome = self.track_changing(outcome);
         match outcome {
             Outcome::Swapped => {
                 self.tls.log_crl_next_update(now, false);
@@ -325,6 +342,28 @@ impl Reloader {
         }
     }
 
+    /// Counts attempts whose files changed between the two reads, until a
+    /// swap or an unchanged result, and turns the [`STALLED_AFTER`]th into
+    /// [`Outcome::Stalled`]. Failures neither count nor reset: a writer
+    /// caught mid-write can make a read fail between two changing reads.
+    fn track_changing(&mut self, outcome: Outcome) -> Outcome {
+        match outcome {
+            Outcome::Changing => {
+                self.changing = self.changing.saturating_add(1);
+                if self.changing == STALLED_AFTER {
+                    Outcome::Stalled
+                } else {
+                    Outcome::Changing
+                }
+            }
+            Outcome::Swapped | Outcome::Unchanged => {
+                self.changing = 0;
+                outcome
+            }
+            _ => outcome,
+        }
+    }
+
     /// A failure is counted only when the previous attempt failed the same
     /// way, so files caught halfway through a replacement are not counted.
     fn failed(&mut self, attempt: Attempt, error: TlsError) -> Outcome {
@@ -360,37 +399,51 @@ pub(crate) async fn reload_until(
         return;
     };
     let mut reloader = Reloader::new(tls, interval.min(MAX_SETTLE_DELAY));
-    // The error last logged at error level. A failure that persists is
-    // counted at every interval, but logged at error level only when it
-    // starts or its error changes.
     let mut logged: Option<String> = None;
     loop {
         tokio::select! {
             () = stop_accepting.cancelled() => return,
             () = tokio::time::sleep(interval) => {}
         }
-        match reloader.reload(UnixTime::now()).await {
-            Outcome::Swapped => {
-                logged = None;
-                stats.tls_reloads.fetch_add(1, Ordering::Relaxed);
-                export_expiry(&reloader.tls, &stats);
-                tracing::info!(target: "ferrum_alloy::tls", "TLS material reloaded; new handshakes use it");
-            }
-            Outcome::Unchanged => logged = None,
-            Outcome::Changing => {
-                tracing::debug!(target: "ferrum_alloy::tls", "TLS files changed while being read; retrying at the next reload");
-            }
-            Outcome::Unconfirmed(error) => {
-                tracing::debug!(target: "ferrum_alloy::tls", %error, "TLS reload failed; retrying at the next reload before counting it, in case the files are still being written");
-            }
-            Outcome::Failed(error) => {
-                stats.tls_reload_failures.fetch_add(1, Ordering::Relaxed);
-                if logged.as_ref() == Some(&error) {
-                    tracing::debug!(target: "ferrum_alloy::tls", %error, "TLS reload failed again; the previous material keeps serving");
-                } else {
-                    tracing::error!(target: "ferrum_alloy::tls", %error, "TLS reload failed; the previous material keeps serving");
-                    logged = Some(error);
-                }
+        let outcome = reloader.reload(UnixTime::now()).await;
+        record(outcome, &reloader.tls, &stats, &mut logged);
+    }
+}
+
+/// Counts and logs the outcome of one reload of `tls`. `logged` is the error
+/// last logged at error level: a failure that persists is counted at every
+/// interval, but logged at error level only when it starts or its error
+/// changes.
+fn record(outcome: Outcome, tls: &TlsServer, stats: &ServerStats, logged: &mut Option<String>) {
+    match outcome {
+        Outcome::Swapped => {
+            *logged = None;
+            stats.tls_reloads.fetch_add(1, Ordering::Relaxed);
+            export_expiry(tls, stats);
+            tracing::info!(target: "ferrum_alloy::tls", "TLS material reloaded; new handshakes use it");
+        }
+        Outcome::Unchanged => *logged = None,
+        Outcome::Changing => {
+            tracing::debug!(target: "ferrum_alloy::tls", "TLS files changed while being read; retrying at the next reload");
+        }
+        Outcome::Stalled => {
+            stats.tls_reload_stalls.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                target: "ferrum_alloy::tls",
+                reloads = STALLED_AFTER,
+                "TLS files changed while being read at every recent reload, so their new material is not used; the previous material keeps serving until the files stop changing between reads"
+            );
+        }
+        Outcome::Unconfirmed(error) => {
+            tracing::debug!(target: "ferrum_alloy::tls", %error, "TLS reload failed; retrying at the next reload before counting it, in case the files are still being written");
+        }
+        Outcome::Failed(error) => {
+            stats.tls_reload_failures.fetch_add(1, Ordering::Relaxed);
+            if logged.as_ref() == Some(&error) {
+                tracing::debug!(target: "ferrum_alloy::tls", %error, "TLS reload failed again; the previous material keeps serving");
+            } else {
+                tracing::error!(target: "ferrum_alloy::tls", %error, "TLS reload failed; the previous material keeps serving");
+                *logged = Some(error);
             }
         }
     }
@@ -1136,5 +1189,93 @@ mod tests {
         handshake(serving(&server), client).unwrap();
         // 2100-01-01T00:00:00Z.
         assert_eq!(server.expiry().crl_next_update, Some(4_102_444_800));
+    }
+
+    /// Collects the messages of warning events. Installed with
+    /// `set_default`, so it sees only events of this thread.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<std::sync::Mutex<Vec<String>>>);
+
+    struct Message<'a>(&'a mut String);
+
+    impl tracing::field::Visit for Message<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut message = String::new();
+                event.record(&mut Message(&mut message));
+                self.0.lock().unwrap().push(message);
+            }
+        }
+    }
+
+    impl Warnings {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    #[test]
+    fn files_that_keep_changing_are_warned_about_and_counted_once_per_streak() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let (server, _, _) = reloadable(dir.path(), ca_path, &issuer);
+        let mut reloader = Reloader::new(server.clone(), Duration::ZERO);
+        let stats = ServerStats::default();
+        let warnings = Warnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut logged = None;
+        let mut reload = |outcome: Outcome| {
+            let outcome = reloader.track_changing(outcome);
+            let stalled = outcome == Outcome::Stalled;
+            record(outcome, &server, &stats, &mut logged);
+            stalled
+        };
+        let stalls = |stats: &ServerStats| stats.tls_reload_stalls.load(Ordering::Relaxed);
+
+        // Two changing reloads are a writer caught mid-write.
+        assert!(!reload(Outcome::Changing));
+        assert!(!reload(Outcome::Changing));
+        assert!(warnings.take().is_empty());
+        // The third in a row is a stall: warned about and counted once.
+        assert!(reload(Outcome::Changing));
+        let warned = warnings.take();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("while being read"), "{warned:?}");
+        assert_eq!(stalls(&stats), 1);
+        // Neither repeated while the streak lasts, nor ended by a failure.
+        assert!(!reload(Outcome::Changing));
+        assert!(!reload(Outcome::Unconfirmed("unreadable".into())));
+        assert!(!reload(Outcome::Changing));
+        assert!(warnings.take().is_empty());
+        assert_eq!(stalls(&stats), 1);
+
+        // A swap or an unchanged result ends the streak; the next one is
+        // reported again.
+        for end in [Outcome::Unchanged, Outcome::Swapped] {
+            let before = stalls(&stats);
+            assert!(!reload(Outcome::Changing));
+            assert!(!reload(end));
+            assert!(!reload(Outcome::Changing));
+            assert!(!reload(Outcome::Changing));
+            assert!(reload(Outcome::Changing));
+            assert_eq!(stalls(&stats), before + 1);
+        }
+        let warned = warnings.take();
+        assert_eq!(warned.len(), 2, "{warned:?}");
     }
 }

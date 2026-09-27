@@ -69,11 +69,10 @@ fn resource() -> ServiceResource {
 }
 
 fn otlp(sampling_ratio: f64) -> OtlpConfig {
-    OtlpConfig {
-        enabled: true,
-        sampling_ratio,
-        ..OtlpConfig::default()
-    }
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.sampling_ratio = sampling_ratio;
+    config
 }
 
 /// JSON access logs formatted by tracing-subscriber's JSON `fmt` layer, written to a sink.
@@ -110,19 +109,15 @@ pub(crate) fn install_telemetry(
             || Ok(DiscardExporter),
         )?),
         Scenario::OtelUnreachable => {
-            let config = OtlpConfig {
-                endpoint: Some("http://127.0.0.1:9/v1/traces".into()),
-                timeout_ms: 200,
-                max_export_retries: 0,
-                ..otlp(1.0)
-            };
+            let mut config = otlp(1.0);
+            config.endpoint = Some("http://127.0.0.1:9/v1/traces".into());
+            config.timeout_ms = 200;
+            config.max_export_retries = 0;
             Some(OtelPipeline::otlp(&resource(), &config, metrics)?)
         }
         Scenario::OtelCollector => {
-            let config = OtlpConfig {
-                endpoint,
-                ..otlp(1.0)
-            };
+            let mut config = otlp(1.0);
+            config.endpoint = endpoint;
             Some(OtelPipeline::otlp(&resource(), &config, metrics)?)
         }
         Scenario::Plain | Scenario::Alloy | Scenario::AlloyLogs | Scenario::AlloyLogsFmt => None,

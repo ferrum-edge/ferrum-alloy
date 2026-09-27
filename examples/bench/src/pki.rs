@@ -109,22 +109,16 @@ impl Pki {
         let chain = vec![self.server.cert.clone()];
         let mut config = builder.with_single_cert(chain, self.server.key.clone_key())?;
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let alloy = TlsSettings {
-            cert_path: self.server_cert_path.clone(),
-            key_path: self.server_key_path.clone(),
-            client_ca_path: mtls.then(|| self.ca_path.clone()),
-            client_auth: if mtls {
-                ClientAuth::Required
-            } else {
-                ClientAuth::None
-            },
-            handshake_timeout_ms: 10_000,
-            client_crl_paths: Vec::new(),
-            client_crl_depth: Default::default(),
-            client_crl_unknown_status: Default::default(),
-            client_crl_expiration: Default::default(),
-            reload_interval_ms: 0,
+        let mut alloy =
+            TlsSettings::new(self.server_cert_path.clone(), self.server_key_path.clone());
+        alloy.client_ca_path = mtls.then(|| self.ca_path.clone());
+        alloy.client_auth = if mtls {
+            ClientAuth::Required
+        } else {
+            ClientAuth::None
         };
+        alloy.handshake_timeout_ms = 10_000;
+        alloy.reload_interval_ms = 0;
         Ok(ServerTls {
             rustls: Arc::new(config),
             alloy,

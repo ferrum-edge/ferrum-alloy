@@ -20,19 +20,14 @@ use tower::{Layer, ServiceExt, service_fn};
 const GATEWAY: &str = "spiffe://ferrum.test/ns/edge/sa/gateway";
 
 fn policy(mode: DeploymentMode, accept: bool) -> EdgePolicy {
-    let peers = TrustedPeers::new(&TrustedPeersConfig {
-        identities: vec![GATEWAY.into()],
-        networks: vec!["10.0.0.0/8".parse().unwrap()],
-    })
-    .unwrap();
-    EdgePolicy::new(
-        EdgePolicyConfig {
-            mode,
-            accept_consumer_identity: accept,
-        },
-        Arc::new(peers),
-    )
-    .with_exempt_paths(vec!["/readyz".into()])
+    let mut trust = TrustedPeersConfig::default();
+    trust.identities = vec![GATEWAY.into()];
+    trust.networks = vec!["10.0.0.0/8".parse().unwrap()];
+    let peers = TrustedPeers::new(&trust).unwrap();
+    let mut config = EdgePolicyConfig::default();
+    config.mode = mode;
+    config.accept_consumer_identity = accept;
+    EdgePolicy::new(config, Arc::new(peers)).with_exempt_paths(vec!["/readyz".into()])
 }
 
 fn request(path: &str, peer: PeerInfo, headers: &[(&str, &str)]) -> Request<Body> {

@@ -145,10 +145,9 @@ Handlers can take `ferrum_alloy_telemetry::RequestContext` (request id, trace id
 To trust a gateway's trace context, pass a classifier:
 
 ```rust
-let peers = TrustedPeers::new(&TrustedPeersConfig {
-    identities: vec!["spiffe://example.org/ns/edge/sa/gateway".into()],
-    networks: vec![],
-})?;
+let mut trust = TrustedPeersConfig::default();
+trust.identities = vec!["spiffe://example.org/ns/edge/sa/gateway".into()];
+let peers = TrustedPeers::new(&trust)?;
 let telemetry = TelemetryLayer::new(config)?.with_classifier(Arc::new(peers));
 ```
 

@@ -53,13 +53,12 @@ fn context() -> RequestContext {
 }
 
 fn client(propagate: &[&str], redirects: usize) -> AlloyClient {
-    AlloyClient::new(&HttpClientSettings {
-        connect_timeout_ms: 1_000,
-        request_timeout_ms: 500,
-        max_redirects: redirects,
-        propagate_trace_context_to: propagate.iter().map(|s| (*s).to_owned()).collect(),
-    })
-    .unwrap()
+    let mut settings = HttpClientSettings::default();
+    settings.connect_timeout_ms = 1_000;
+    settings.request_timeout_ms = 500;
+    settings.max_redirects = redirects;
+    settings.propagate_trace_context_to = propagate.iter().map(|s| (*s).to_owned()).collect();
+    AlloyClient::new(&settings).unwrap()
 }
 
 async fn echo(
@@ -221,13 +220,10 @@ async fn refused_connections_are_reported_as_refusals() {
     // misreported as a timeout. Windows retries a refused connect for about
     // two seconds before reporting it, which the 500 ms request deadline of
     // the shared test client would otherwise cut short.
-    let client = AlloyClient::new(&HttpClientSettings {
-        connect_timeout_ms: 5_000,
-        request_timeout_ms: 10_000,
-        max_redirects: 0,
-        propagate_trace_context_to: Vec::new(),
-    })
-    .unwrap();
+    let mut settings = HttpClientSettings::default();
+    settings.connect_timeout_ms = 5_000;
+    settings.request_timeout_ms = 10_000;
+    let client = AlloyClient::new(&settings).unwrap();
     let closed = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -267,13 +263,8 @@ async fn refused_connections_are_reported_as_refusals() {
 #[test]
 fn invalid_host_rules_are_rejected() {
     for rule in ["http://x", "a/b", "*.example.com", "user@host"] {
-        assert!(
-            AlloyClient::new(&HttpClientSettings {
-                propagate_trace_context_to: vec![rule.into()],
-                ..HttpClientSettings::default()
-            })
-            .is_err(),
-            "{rule}"
-        );
+        let mut settings = HttpClientSettings::default();
+        settings.propagate_trace_context_to = vec![rule.into()];
+        assert!(AlloyClient::new(&settings).is_err(), "{rule}");
     }
 }
