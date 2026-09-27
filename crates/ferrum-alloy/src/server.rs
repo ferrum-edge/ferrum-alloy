@@ -32,8 +32,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::task::{Context, Poll, ready};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
 use axum::Router;
@@ -44,13 +44,13 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
+use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use pin_project_lite::pin_project;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tokio_util::task::TaskTracker;
 use tower::ServiceExt;
 
@@ -58,6 +58,7 @@ use crate::lifecycle::Lifecycle;
 
 /// Connection-level counters.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct ServerStats {
     /// Connections currently open (excluding upgraded sessions).
     pub active_connections: AtomicU64,
@@ -175,13 +176,40 @@ pub(crate) struct ServeOptions {
     pub(crate) tls: Option<crate::tls::TlsServer>,
 }
 
-/// Runs HTTP/2 stream tasks where the drain can wait for them and cancel
-/// them at the budget. Hyper spawns one per request: it runs the handler and
-/// then sends the response body, apart from the connection task.
-#[derive(Clone, Default)]
+/// The HTTP/2 stream tasks of one listener. Hyper spawns one per request:
+/// it runs the handler and then sends the response body, apart from the
+/// connection task. The drain waits for them and cancels them at the budget.
+#[derive(Default)]
+struct Streams {
+    tracker: TaskTracker,
+    token: CancellationToken,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Streams {
+    /// An executor for the stream tasks of one connection. It gets a child
+    /// token, so stream tasks on different connections never share the lock
+    /// behind a token or its wake-up list.
+    fn executor(&self) -> StreamExecutor {
+        StreamExecutor {
+            tracker: self.tracker.clone(),
+            token: self.token.child_token(),
+            cancelled: Arc::clone(&self.cancelled),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.token.cancel();
+    }
+}
+
+/// Spawns the stream tasks of one connection on its listener's [`Streams`].
+#[derive(Clone)]
 struct StreamExecutor {
     tracker: TaskTracker,
-    cancel: CancellationToken,
+    token: CancellationToken,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl<F> hyper::rt::Executor<F> for StreamExecutor
@@ -190,16 +218,49 @@ where
     F::Output: Send + 'static,
 {
     fn execute(&self, future: F) {
-        let cancel = self.cancel.clone();
-        self.tracker.spawn(async move {
-            // Cancelling drops the handler and response body, like aborting
-            // the task would.
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => {}
-                _ = future => {}
-            }
+        self.tracker.spawn(Cancellable {
+            future,
+            wake_on_cancel: self.token.clone().cancelled_owned(),
+            cancelled: Arc::clone(&self.cancelled),
+            registered: None,
         });
+    }
+}
+
+pin_project! {
+    /// A stream task that ends once its listener cancels its streams, which
+    /// drops the handler and response body like aborting the task would.
+    /// It registers for the cancellation wake-up only on its first poll or
+    /// when its waker changes, and otherwise checks an atomic flag, so waking
+    /// a busy stream takes no lock.
+    struct Cancellable<F> {
+        #[pin]
+        future: F,
+        #[pin]
+        wake_on_cancel: WaitForCancellationFutureOwned,
+        cancelled: Arc<AtomicBool>,
+        registered: Option<Waker>,
+    }
+}
+
+impl<F: Future> Future for Cancellable<F> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.project();
+        // The flag is set before the token is cancelled, so the wake-up that
+        // cancellation sends always finds it set.
+        if this.cancelled.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+        let registered = matches!(this.registered, Some(waker) if waker.will_wake(cx.waker()));
+        if !registered {
+            if this.wake_on_cancel.poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            *this.registered = Some(cx.waker().clone());
+        }
+        this.future.poll(cx).map(|_| ())
     }
 }
 
@@ -234,8 +295,7 @@ pub(crate) async fn serve(
     lifecycle: Lifecycle,
     stats: Arc<ServerStats>,
 ) -> io::Result<()> {
-    let streams = StreamExecutor::default();
-    let builder = builder(&options, streams.clone());
+    let streams = Streams::default();
     let permits = Arc::new(Semaphore::new(options.max_connections));
     let mut connections = JoinSet::new();
     let mut backoff = Duration::from_millis(5);
@@ -272,13 +332,14 @@ pub(crate) async fn serve(
             continue;
         };
         let _ = stream.set_nodelay(true);
-        let builder = builder.clone();
+        let executor = streams.executor();
         let app = app.clone();
         let lifecycle = lifecycle.clone();
         let stats = Arc::clone(&stats);
         let options = options.clone();
         connections.spawn(async move {
             let _active = ActiveConnection::open(Arc::clone(&stats), permit);
+            let builder = builder(&options, executor);
             handle(stream, remote, builder, app, &options, &lifecycle, &stats).await;
         });
     }
@@ -309,7 +370,7 @@ pub(crate) async fn serve(
         stats
             .force_closed_streams
             .fetch_add(remaining_streams as u64, Ordering::Relaxed);
-        streams.cancel.cancel();
+        streams.cancel();
         // Aborting a task drops its connection and socket; `shutdown` returns
         // once every task has ended, including aborted tasks still unwinding.
         connections.shutdown().await;
@@ -383,12 +444,14 @@ struct Activity {
 }
 
 impl Activity {
+    // The counts are only compared, never used to publish other data, and
+    // `idle` synchronizes its own wake-up, so relaxed ordering is enough.
     fn started(&self) -> u64 {
-        self.started.load(Ordering::Acquire)
+        self.started.load(Ordering::Relaxed)
     }
 
     fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::Acquire)
+        self.in_flight.load(Ordering::Relaxed)
     }
 }
 
@@ -398,15 +461,15 @@ struct InFlight(Arc<Activity>);
 
 impl InFlight {
     fn start(activity: &Arc<Activity>) -> Self {
-        activity.in_flight.fetch_add(1, Ordering::AcqRel);
-        activity.started.fetch_add(1, Ordering::AcqRel);
+        activity.in_flight.fetch_add(1, Ordering::Relaxed);
+        activity.started.fetch_add(1, Ordering::Relaxed);
         Self(Arc::clone(activity))
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        if self.0.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if self.0.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.0.idle.notify_one();
         }
     }
@@ -581,7 +644,9 @@ async fn serve_io<I>(
                         if started == 0 {
                             stats.first_request_timeouts.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request head within the header read timeout; closing");
-                        } else {
+                        } else if !draining {
+                            // Only an idle close is counted; a connection
+                            // that shutdown already asked to finish is not.
                             stats.idle_timeouts.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request in flight within the idle timeout; closing");
                         }

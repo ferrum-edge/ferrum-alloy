@@ -154,7 +154,9 @@ pub struct ServerConfig {
     /// Time allowed to receive a request head (slow-header protection).
     pub header_read_timeout_ms: u64,
     /// Time a connection may stay open with no request in flight after its
-    /// first request, before it is closed (HTTP/2 `GOAWAY`).
+    /// first request, before it is closed (HTTP/2 `GOAWAY`). Behind a load
+    /// balancer that pools connections, set it above the balancer's idle
+    /// timeout.
     pub idle_timeout_ms: u64,
     /// Deadline for producing response *headers*. Never applied to response
     /// body streaming (SSE) or upgraded connections. `0` disables it.

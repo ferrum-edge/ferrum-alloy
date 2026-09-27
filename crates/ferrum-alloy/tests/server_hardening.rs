@@ -21,7 +21,8 @@ use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
 use ferrum_alloy::config::AlloyConfig;
 use http::{Request, StatusCode};
-use http_body_util::Empty;
+use http_body_util::{BodyExt, Empty};
+use hyper::body::Incoming;
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -148,6 +149,22 @@ async fn frame_types_until_closed(stream: &mut TcpStream) -> Option<Vec<u8>> {
         rest = rest.get(9 + length..).unwrap_or_default();
     }
     Some(types)
+}
+
+/// Reads `body` for `period` and then up to one more data frame, failing if
+/// the stream ends or fails first.
+async fn still_streaming_after(body: &mut Incoming, period: Duration) {
+    let until = Instant::now() + period;
+    loop {
+        let frame = tokio::time::timeout(WITHIN, body.frame())
+            .await
+            .expect("the stream keeps sending")
+            .expect("the stream has not ended")
+            .expect("the stream has not failed");
+        if frame.is_data() && Instant::now() >= until {
+            return;
+        }
+    }
 }
 
 /// One HTTP/1.1 request on a fresh connection; `None` when the connection is
@@ -358,6 +375,88 @@ async fn slow_responses_and_idle_http2_connections_are_not_cut() {
     let slow = format!("http://{}/slow", server.addr);
     let response = sender.send_request(request(&slow)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    server.shutdown().await.unwrap();
+}
+
+/// A request stays in flight until its response body ends, not just until
+/// its handler returns, so a response stream that outlasts the idle timeout
+/// several times over is never cut, on either protocol.
+#[tokio::test]
+async fn long_response_streams_outlive_the_idle_timeout_on_either_protocol() {
+    let server = support::start(AlloyApp::new("hardening").router(router()), idle_limited()).await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = http1::handshake(TokioIo::new(tcp)).await.unwrap();
+    tokio::spawn(connection);
+    let response = sender.send_request(request("/forever")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), http::Version::HTTP_11);
+    let mut http1_body = response.into_body();
+
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let io = TokioIo::new(tcp);
+    let (mut sender, connection) = http2::handshake(TokioExecutor::new(), io).await.unwrap();
+    tokio::spawn(connection);
+    let forever = format!("http://{}/forever", server.addr);
+    let response = sender.send_request(request(&forever)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    let mut http2_body = response.into_body();
+
+    tokio::join!(
+        still_streaming_after(&mut http1_body, IDLE_TIMEOUT * 4),
+        still_streaming_after(&mut http2_body, IDLE_TIMEOUT * 4),
+    );
+    assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    drop((http1_body, http2_body));
+    server.shutdown().await.unwrap();
+}
+
+/// An upgraded (WebSocket) connection leaves Hyper after the `101` response,
+/// so neither the idle timeout nor the header read timeout cuts the session.
+#[tokio::test]
+async fn a_websocket_session_outlives_the_idle_timeout() {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let routes = router().route(
+        "/ws",
+        get(|upgrade: WebSocketUpgrade| async move {
+            upgrade.on_upgrade(|mut socket| async move {
+                while let Some(Ok(message)) = socket.recv().await {
+                    if let Message::Text(text) = message {
+                        let _ = socket
+                            .send(Message::Text(format!("echo:{text}").into()))
+                            .await;
+                    }
+                }
+            })
+        }),
+    );
+    let server = support::start(AlloyApp::new("hardening").router(routes), idle_limited()).await;
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    stream
+        .write_all(
+            b"GET /ws HTTP/1.1\r\nhost: t\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut head = vec![0u8; 1024];
+    let n = stream.read(&mut head).await.unwrap();
+    let text = String::from_utf8_lossy(&head[..n]);
+    assert!(text.starts_with("HTTP/1.1 101"), "{text}");
+    tokio::time::sleep(IDLE_TIMEOUT * 3 + HEADER_READ_TIMEOUT).await;
+    // Masked text frame "hi".
+    let mask = [1u8, 2, 3, 4];
+    let mut frame = vec![0x81, 0x80 | 2];
+    frame.extend_from_slice(&mask);
+    frame.extend(b"hi".iter().zip(mask).map(|(byte, key)| byte ^ key));
+    stream.write_all(&frame).await.unwrap();
+    let mut reply = [0u8; 16];
+    let n = tokio::time::timeout(WITHIN, stream.read(&mut reply))
+        .await
+        .expect("the session answers")
+        .unwrap();
+    assert_eq!(&reply[..n], b"\x81\x07echo:hi");
+    assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    drop(stream);
     server.shutdown().await.unwrap();
 }
 
