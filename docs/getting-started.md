@@ -28,7 +28,20 @@ The generated project contains:
 - a README;
 - a GitHub Actions workflow.
 
-`--with` takes a comma-separated list of `openapi`, `otel`, `edge`, and `tls`, which become Cargo features of the dependency. `openapi` also adds an `openapi` binary and a parity test. CI generates projects, builds them, runs their tests, and runs `clippy -D warnings` and `rustfmt --check` on them.
+`--with` takes a comma-separated list of `openapi`, `otel`, `edge`, `tls`, `postgres`, `jwt`, and `http-client`, which become Cargo features of the dependency. Some also add code:
+
+| Option | Adds |
+|---|---|
+| `openapi` | An `openapi` binary and a parity test |
+| `postgres` | `src/db.rs` (`POST /notes`, `GET /notes/{id}`) over a pool built from `[database]`, the `postgres` readiness check, `migrations/`, a `migrate` subcommand, tests, and a PostgreSQL service container in the generated CI |
+| `jwt` | `src/auth.rs` (`GET /me`) with a verifier built from `[auth.jwt]` and an `Authorize` scope policy, and tests that sign tokens with a local key and serve its JWKS on loopback |
+| `http-client` | `src/upstream.rs` (`GET /upstream`) with the client built from `[http_client]`: explicit timeouts, no redirects, and an empty trace-propagation allow-list, and a test against a local server |
+
+Options combine. CI generates projects with each of them alone and all of them together, builds them, runs their tests, and runs `clippy -D warnings` and `rustfmt --check` on them.
+
+The `postgres` starter never migrates implicitly. `cargo run -- migrate` applies the embedded migrations and exits; run it once per release, before the new version serves traffic. `database.migrate_on_startup = true` migrates at every start instead, which is for local development only. Queries are checked at runtime, so neither building nor CI needs a database or `.sqlx/` offline metadata. Tests that need a database are ignored unless you set `TEST_DATABASE_URL` and pass `--include-ignored`, which the generated CI workflow does.
+
+The `jwt` starter's `alloy.toml` sets the JWKS lifetime explicitly, using the defaults: `jwks_max_age_ms = 300000` (a shorter `Cache-Control: max-age` wins), `jwks_max_stale_ms = 300000`, and `jwks_min_refresh_interval_ms = 60000`. Replace the example issuer, audience, and JWKS URL, or set `FERRUM_ALLOY_JWT_ISSUER`, `FERRUM_ALLOY_JWT_AUDIENCES`, and `FERRUM_ALLOY_JWT_JWKS_URL`.
 
 The generated `Cargo.toml` follows the `main` branch by default. Pass `--alloy-rev <40-character commit>` to pin a commit, or `--alloy-path <checkout>/crates/ferrum-alloy` to use a local checkout.
 

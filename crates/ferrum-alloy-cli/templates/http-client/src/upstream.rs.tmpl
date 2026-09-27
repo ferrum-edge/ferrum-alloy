@@ -1,0 +1,105 @@
+//! Outbound HTTP with the instrumented client configured from
+//! `[http_client]` in `alloy.toml`: explicit connect and request timeouts,
+//! no redirects, and no automatic retries. Trace context is sent only to
+//! hosts listed in `http_client.propagate_trace_context_to` (none by
+//! default), and credentials, cookies, and `baggage` are never added.
+
+use axum::Extension;
+use axum::Router;
+use axum::extract::State;
+use axum::http::{Method, StatusCode};
+use axum::routing::get;
+use ferrum_alloy::Problem;
+use ferrum_alloy::extract::Json;
+use ferrum_alloy::http_client::AlloyClient;
+use ferrum_alloy::telemetry::RequestContext;
+use serde::Serialize;
+
+/// What `GET /upstream` calls when `UPSTREAM_URL` is unset: this service's
+/// own `/hello`.
+pub const DEFAULT_URL: &str = "http://127.0.0.1:8080/hello";
+
+/// The largest upstream body `GET /upstream` reads.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// An outbound dependency, supplied with `Router::with_state`.
+#[derive(Debug, Clone)]
+pub struct Upstream {
+    client: AlloyClient,
+    url: String,
+}
+
+impl Upstream {
+    /// Calls `url` with `client`.
+    pub fn new(client: AlloyClient, url: impl Into<String>) -> Self {
+        Self {
+            client,
+            url: url.into(),
+        }
+    }
+
+    /// Calls `UPSTREAM_URL`, or [`DEFAULT_URL`] when it is unset.
+    pub fn from_env(client: AlloyClient) -> Self {
+        let url = std::env::var("UPSTREAM_URL").unwrap_or_else(|_| DEFAULT_URL.into());
+        Self::new(client, url)
+    }
+}
+
+/// What the upstream answered.
+#[derive(Debug, Serialize)]
+pub struct Reply {
+    /// The upstream's HTTP status.
+    pub status: u16,
+    /// The upstream's body, decoded as UTF-8 (lossily).
+    pub body: String,
+}
+
+fn upstream_failed(detail: &str) -> Problem {
+    Problem::custom(
+        "tag:example.com,2026:{{name}}/problem/upstream-failed",
+        "Upstream request failed",
+        StatusCode::BAD_GATEWAY,
+    )
+    .with_detail(detail)
+}
+
+fn upstream_error(error: &dyn std::error::Error) -> Problem {
+    // Details stay in server logs; clients get a generic problem.
+    tracing::warn!(%error, "upstream request failed");
+    upstream_failed("The upstream could not be reached.")
+}
+
+async fn call_upstream(
+    State(Upstream { client, url }): State<Upstream>,
+    context: Option<Extension<RequestContext>>,
+) -> Result<Json<Reply>, Problem> {
+    let request = client
+        .request(Method::GET, url.as_str())
+        .build()
+        .map_err(|e| upstream_error(&e))?;
+    // The request's context parents the client span; `traceparent` is sent
+    // only when the destination host is on the allow-list.
+    let mut response = client
+        .execute(context.as_deref(), request)
+        .await
+        .map_err(|e| upstream_error(&e))?;
+    let status = response.status().as_u16();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| upstream_error(&e))? {
+        if body.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(upstream_failed("The upstream response is too large."));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Json(Reply {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }))
+}
+
+/// `GET /upstream`, which calls the upstream and reports its answer.
+pub fn router(upstream: Upstream) -> Router {
+    Router::new()
+        .route("/upstream", get(call_upstream))
+        .with_state(upstream)
+}

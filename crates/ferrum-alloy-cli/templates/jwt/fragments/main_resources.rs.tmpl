@@ -1,0 +1,4 @@
+    let Some(jwt) = &config.auth.jwt else {
+        return Err("alloy.toml needs an [auth.jwt] section".into());
+    };
+    let verifier = jwt.verifier()?;

@@ -1,0 +1,19 @@
+//! Starts {{name}}.{{main_doc}}
+
+{{main_uses}}
+use {{crate_name}}::{{main_modules}};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = AlloyApp::new("{{name}}")
+        .version(env!("CARGO_PKG_VERSION"))
+        .config_file("alloy.toml");
+    // Load and validate alloy.toml and FERRUM_ALLOY_* variables, and start
+    // telemetry, before building resources from the configuration.
+    let config = app.prepare()?;
+{{main_resources}}
+    let mut routes = {{crate_name}}::router();
+{{main_routes}}{{main_openapi_document}}    app = app.router(routes){{main_openapi_registration}};
+{{main_readiness}}    app.run().await?;
+    Ok(())
+}

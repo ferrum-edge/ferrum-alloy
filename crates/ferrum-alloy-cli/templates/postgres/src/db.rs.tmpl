@@ -1,0 +1,102 @@
+//! PostgreSQL: handlers over an ordinary `sqlx::PgPool` built from
+//! `[database]` in `alloy.toml`.
+//!
+//! Queries are checked at runtime, so building needs neither a database nor
+//! `.sqlx/` offline metadata. Migrations in `migrations/` are embedded at
+//! build time and applied only by `cargo run -- migrate`.
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use ferrum_alloy::extract::{Json, Path, ValidJson, Validate, ValidationErrors};
+use ferrum_alloy::postgres;
+use ferrum_alloy::{Problem, ProblemKind};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+
+/// Embedded migrations from `migrations/`. Applied only when asked.
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+const INSERT_NOTE: &str = "INSERT INTO notes (body) VALUES ($1) RETURNING id, body";
+const SELECT_NOTE: &str = "SELECT id, body FROM notes WHERE id = $1";
+
+/// A request to create a note.
+#[derive(Debug, Deserialize)]
+pub struct NewNote {
+    /// Note text (1-500 characters).
+    pub body: String,
+}
+
+impl Validate for NewNote {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::default();
+        if self.body.trim().is_empty() || self.body.chars().count() > 500 {
+            errors.add("/body", "must be 1-500 characters");
+        }
+        errors.into_result()
+    }
+}
+
+/// A stored note.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct Note {
+    /// Identifier.
+    pub id: i64,
+    /// Note text.
+    pub body: String,
+}
+
+fn not_found(id: i64) -> Problem {
+    Problem::custom(
+        "tag:example.com,2026:{{name}}/problem/note-not-found",
+        "Note not found",
+        StatusCode::NOT_FOUND,
+    )
+    .with_detail(format!("no note with id {id}"))
+}
+
+fn database_error(error: &sqlx::Error) -> Problem {
+    // Details stay in server logs; clients get a sanitized problem.
+    tracing::error!(%error, "database operation failed");
+    Problem::new(ProblemKind::Internal)
+}
+
+async fn create(
+    State(pool): State<PgPool>,
+    ValidJson(note): ValidJson<NewNote>,
+) -> Result<(StatusCode, Json<Note>), Problem> {
+    // `acquire` measures the pool wait separately from the query.
+    let mut connection = postgres::acquire(&pool)
+        .await
+        .map_err(|e| database_error(&e))?;
+    let created = postgres::query("notes.insert", "INSERT", "INSERT notes")
+        .run_result(
+            sqlx::query_as::<_, Note>(INSERT_NOTE)
+                .bind(&note.body)
+                .fetch_one(&mut *connection),
+        )
+        .await
+        .map_err(|e| database_error(&e))?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn fetch(State(pool): State<PgPool>, Path(id): Path<i64>) -> Result<Json<Note>, Problem> {
+    let note = postgres::query("notes.fetch", "SELECT", "SELECT notes by id")
+        .run_result(
+            sqlx::query_as::<_, Note>(SELECT_NOTE)
+                .bind(id)
+                .fetch_optional(&pool),
+        )
+        .await
+        .map_err(|e| database_error(&e))?;
+    note.map(Json).ok_or_else(|| not_found(id))
+}
+
+/// `POST /notes` and `GET /notes/{id}` over `pool`.
+pub fn router(pool: PgPool) -> Router {
+    Router::new()
+        .route("/notes", post(create))
+        .route("/notes/{id}", get(fetch))
+        .with_state(pool)
+}

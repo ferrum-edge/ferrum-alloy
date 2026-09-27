@@ -1,0 +1,11 @@
+    let database = config.database.clone();
+    let pool = postgres::connect(&database, env!("CARGO_PKG_NAME"))?;
+    if std::env::args().nth(1).as_deref() == Some("migrate") {
+        // The production migration step: run it once per release, before the
+        // new version serves traffic.
+        postgres::migrate(&pool, &db::MIGRATOR).await?;
+        return Ok(());
+    }
+    if database.migrate_on_startup {
+        postgres::migrate(&pool, &db::MIGRATOR).await?;
+    }

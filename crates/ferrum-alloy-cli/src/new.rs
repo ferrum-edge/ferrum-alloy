@@ -26,6 +26,12 @@ pub(crate) enum Integration {
     Edge,
     /// rustls TLS termination.
     Tls,
+    /// PostgreSQL pool, readiness check, and a separate migration step.
+    Postgres,
+    /// JWT bearer verification from `alloy.toml` with an `Authorize` policy.
+    Jwt,
+    /// Instrumented outbound HTTP client with explicit timeouts.
+    HttpClient,
 }
 
 impl Integration {
@@ -35,6 +41,9 @@ impl Integration {
             Self::Otel => "otel",
             Self::Edge => "edge",
             Self::Tls => "tls",
+            Self::Postgres => "postgres",
+            Self::Jwt => "jwt",
+            Self::HttpClient => "http-client",
         }
     }
 }
@@ -116,6 +125,185 @@ const OPENAPI: &[(&str, &str)] = &[
     ),
 ];
 
+const POSTGRES: &[(&str, &str)] = &[
+    (
+        "src/db.rs",
+        include_str!("../templates/postgres/src/db.rs.tmpl"),
+    ),
+    (
+        "tests/db.rs",
+        include_str!("../templates/postgres/tests/db.rs.tmpl"),
+    ),
+    (
+        "migrations/0001_create_notes.sql",
+        include_str!("../templates/postgres/migrations/0001_create_notes.sql.tmpl"),
+    ),
+];
+
+const JWT: &[(&str, &str)] = &[
+    (
+        "src/auth.rs",
+        include_str!("../templates/jwt/src/auth.rs.tmpl"),
+    ),
+    (
+        "tests/auth.rs",
+        include_str!("../templates/jwt/tests/auth.rs.tmpl"),
+    ),
+];
+
+const HTTP_CLIENT: &[(&str, &str)] = &[
+    (
+        "src/upstream.rs",
+        include_str!("../templates/http-client/src/upstream.rs.tmpl"),
+    ),
+    (
+        "tests/upstream.rs",
+        include_str!("../templates/http-client/tests/upstream.rs.tmpl"),
+    ),
+];
+
+/// A `postgres`, `jwt`, or `http-client` starter: the module and files it
+/// adds, and the fragments it inserts into shared files.
+struct Starter {
+    integration: Integration,
+    /// Module in the generated crate. `STARTERS` is sorted by it, which is
+    /// the order rustfmt keeps `mod` declarations and `use` lists in.
+    module: &'static str,
+    files: &'static [(&'static str, &'static str)],
+    dependencies: &'static str,
+    dev_dependencies: &'static str,
+    main_doc: &'static str,
+    main_use: &'static str,
+    main_resources: &'static str,
+    main_route: &'static str,
+    main_readiness: &'static str,
+    alloy: &'static str,
+    readme: &'static str,
+    ci_services: &'static str,
+}
+
+const JWT_STARTER: Starter = Starter {
+    integration: Integration::Jwt,
+    module: "auth",
+    files: JWT,
+    dependencies: "",
+    dev_dependencies: include_str!("../templates/jwt/fragments/dev-dependencies.toml.tmpl"),
+    main_doc: "",
+    main_use: "",
+    main_resources: include_str!("../templates/jwt/fragments/main_resources.rs.tmpl"),
+    main_route: include_str!("../templates/jwt/fragments/main_route.rs.tmpl"),
+    main_readiness: "",
+    alloy: include_str!("../templates/jwt/fragments/alloy.toml.tmpl"),
+    readme: include_str!("../templates/jwt/fragments/README.md.tmpl"),
+    ci_services: "",
+};
+
+const POSTGRES_STARTER: Starter = Starter {
+    integration: Integration::Postgres,
+    module: "db",
+    files: POSTGRES,
+    dependencies: include_str!("../templates/postgres/fragments/dependencies.toml.tmpl"),
+    dev_dependencies: "",
+    main_doc: include_str!("../templates/postgres/fragments/main_doc.rs.tmpl"),
+    main_use: "use ferrum_alloy::postgres;\n",
+    main_resources: include_str!("../templates/postgres/fragments/main_resources.rs.tmpl"),
+    main_route: include_str!("../templates/postgres/fragments/main_route.rs.tmpl"),
+    main_readiness: include_str!("../templates/postgres/fragments/main_readiness.rs.tmpl"),
+    alloy: include_str!("../templates/postgres/fragments/alloy.toml.tmpl"),
+    readme: include_str!("../templates/postgres/fragments/README.md.tmpl"),
+    ci_services: include_str!("../templates/postgres/fragments/ci_services.yml.tmpl"),
+};
+
+const HTTP_CLIENT_STARTER: Starter = Starter {
+    integration: Integration::HttpClient,
+    module: "upstream",
+    files: HTTP_CLIENT,
+    dependencies: "",
+    dev_dependencies: "",
+    main_doc: "",
+    main_use: "use ferrum_alloy::http_client::AlloyClient;\n",
+    main_resources: include_str!("../templates/http-client/fragments/main_resources.rs.tmpl"),
+    main_route: include_str!("../templates/http-client/fragments/main_route.rs.tmpl"),
+    main_readiness: "",
+    alloy: include_str!("../templates/http-client/fragments/alloy.toml.tmpl"),
+    readme: include_str!("../templates/http-client/fragments/README.md.tmpl"),
+    ci_services: "",
+};
+
+const STARTERS: &[Starter] = &[JWT_STARTER, POSTGRES_STARTER, HTTP_CLIENT_STARTER];
+
+/// `src/main.rs` when any starter is chosen.
+const STARTER_MAIN: &str = include_str!("../templates/starters/src/main.rs.tmpl");
+const STARTER_DEPENDENCIES: &str =
+    include_str!("../templates/starters/fragments/dependencies.toml.tmpl");
+const STARTER_DEV_DEPENDENCIES: &str =
+    include_str!("../templates/starters/fragments/dev-dependencies.toml.tmpl");
+const STARTER_OPENAPI_DOCUMENT: &str =
+    include_str!("../templates/starters/fragments/openapi_document.rs.tmpl");
+const STARTER_OPENAPI_README: &str =
+    include_str!("../templates/starters/fragments/README-openapi.md.tmpl");
+
+/// Replacement text for the chosen starters; empty when there are none.
+#[derive(Default)]
+struct StarterText {
+    dependencies: String,
+    dev_dependencies: String,
+    modules: String,
+    main_doc: String,
+    main_uses: String,
+    main_modules: String,
+    main_resources: String,
+    main_routes: String,
+    main_readiness: String,
+    alloy: String,
+    readme: String,
+    ci_services: String,
+    ci_test_args: &'static str,
+}
+
+fn starter_text(chosen: &[&Starter]) -> StarterText {
+    let mut text = StarterText::default();
+    if chosen.is_empty() {
+        return text;
+    }
+    text.dependencies.push_str(STARTER_DEPENDENCIES);
+    text.dev_dependencies.push_str(STARTER_DEV_DEPENDENCIES);
+    let modules: Vec<&str> = chosen.iter().map(|s| s.module).collect();
+    text.main_modules = match modules.as_slice() {
+        [single] => (*single).to_owned(),
+        _ => format!("{{{}}}", modules.join(", ")),
+    };
+    text.main_uses.push_str("use ferrum_alloy::AlloyApp;\n");
+    // rustfmt order: `http_client` before `postgres`.
+    let mut uses: Vec<&str> = chosen.iter().map(|s| s.main_use).collect();
+    uses.sort_unstable();
+    text.main_uses.extend(uses);
+    // The database comes first, so that `cargo run -- migrate` needs no
+    // other resource.
+    let mut resources: Vec<&Starter> = chosen.to_vec();
+    resources.sort_by_key(|s| s.integration != Integration::Postgres);
+    let resources: Vec<&str> = resources.iter().map(|s| s.main_resources).collect();
+    text.main_resources = resources.join("\n");
+    for starter in chosen {
+        text.dependencies.push_str(starter.dependencies);
+        text.dev_dependencies.push_str(starter.dev_dependencies);
+        text.modules.push_str("pub mod ");
+        text.modules.push_str(starter.module);
+        text.modules.push_str(";\n");
+        text.main_doc.push_str(starter.main_doc.trim_end());
+        text.main_routes.push_str(starter.main_route);
+        text.main_readiness.push_str(starter.main_readiness);
+        text.alloy.push_str(starter.alloy);
+        text.readme.push_str(starter.readme);
+        text.ci_services.push_str(starter.ci_services);
+    }
+    text.modules.push('\n');
+    if !text.ci_services.is_empty() {
+        text.ci_test_args = " -- --include-ignored";
+    }
+    text
+}
+
 const RESERVED: &[&str] = &[
     "test",
     "core",
@@ -135,6 +323,10 @@ const RESERVED: &[&str] = &[
     "http",
     "utoipa",
     "utoipa-axum",
+    "sqlx",
+    "tracing",
+    "jsonwebtoken",
+    "rcgen",
 ];
 
 const KEYWORDS: &[&str] = &[
@@ -275,16 +467,60 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
     };
     let openapi = with.contains(&Integration::Openapi);
     let crate_name = args.name.replace('-', "_");
-    let extra_dependencies = if openapi {
+    let chosen: Vec<&Starter> = STARTERS
+        .iter()
+        .filter(|s| with.contains(&s.integration))
+        .collect();
+    let starters = starter_text(&chosen);
+    let openapi_dependencies = if openapi {
         "utoipa = { version = \"6\", features = [\"macros\"] }\nutoipa-axum = \"0.3\"\n"
     } else {
         ""
+    };
+    let extra_dependencies = format!("{openapi_dependencies}{}", starters.dependencies);
+    // `src/bin/openapi.rs` is a second binary, so `cargo run` needs a default.
+    let default_run = if openapi {
+        "default-run = \"{{name}}\"\n"
+    } else {
+        ""
+    };
+    let (openapi_document, openapi_registration, openapi_readme) = if openapi {
+        (
+            STARTER_OPENAPI_DOCUMENT,
+            ".openapi(&document)",
+            STARTER_OPENAPI_README,
+        )
+    } else {
+        ("", "", "")
+    };
+    let readme_starters = if chosen.is_empty() {
+        String::new()
+    } else {
+        format!("{}{openapi_readme}", starters.readme)
     };
     let replacements = [
         ("{{name}}", args.name.as_str()),
         ("{{crate_name}}", crate_name.as_str()),
         ("{{alloy_dependency}}", alloy_dependency.as_str()),
-        ("{{extra_dependencies}}", extra_dependencies),
+        ("{{default_run}}", default_run),
+        ("{{extra_dependencies}}", extra_dependencies.as_str()),
+        (
+            "{{extra_dev_dependencies}}",
+            starters.dev_dependencies.as_str(),
+        ),
+        ("{{starter_modules}}", starters.modules.as_str()),
+        ("{{alloy_starters}}", starters.alloy.as_str()),
+        ("{{readme_starters}}", readme_starters.as_str()),
+        ("{{ci_services}}", starters.ci_services.as_str()),
+        ("{{ci_test_args}}", starters.ci_test_args),
+        ("{{main_doc}}", starters.main_doc.as_str()),
+        ("{{main_uses}}", starters.main_uses.as_str()),
+        ("{{main_modules}}", starters.main_modules.as_str()),
+        ("{{main_resources}}", starters.main_resources.as_str()),
+        ("{{main_routes}}", starters.main_routes.as_str()),
+        ("{{main_openapi_document}}", openapi_document),
+        ("{{main_openapi_registration}}", openapi_registration),
+        ("{{main_readiness}}", starters.main_readiness.as_str()),
         (
             "{{openapi_registration}}",
             if openapi {
@@ -302,9 +538,18 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
             },
         ),
     ];
+    let mut sources: Vec<(&str, &str)> = BASE.to_vec();
+    if openapi {
+        sources.extend_from_slice(OPENAPI);
+    }
+    if !chosen.is_empty() {
+        sources.push(("src/main.rs", STARTER_MAIN));
+    }
+    for starter in &chosen {
+        sources.extend_from_slice(starter.files);
+    }
     let mut files: Vec<(String, String)> = Vec::new();
-    let sources = BASE.iter().chain(if openapi { OPENAPI } else { &[] });
-    for (path, template) in sources {
+    for (path, template) in &sources {
         let mut content = (*template).to_owned();
         // Two passes: some replacements insert other placeholders.
         for _ in 0..2 {

@@ -136,7 +136,7 @@ Rules are deterministic. They run no commands, make no network calls, and use no
 - creates files with `create_new`;
 - downloads nothing.
 
-The generated CI pins `actions/checkout` by commit.
+The generated CI pins `actions/checkout` by commit, and the `postgres` starter's service container by digest. Starters take secrets and endpoints from `alloy.toml` and documented `FERRUM_ALLOY_*` variables. The `jwt` starter trusts keys only from the configured JWKS URL, and the `http-client` starter propagates trace context to no host until one is allow-listed.
 
 ## Threat model
 
