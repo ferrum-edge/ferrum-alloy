@@ -19,6 +19,8 @@ use rustls::server::danger::ClientCertVerifier;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, UnixTime};
 use tokio_rustls::TlsAcceptor;
+use x509_parser::oid_registry::OID_X509_EXT_ISSUER_DISTRIBUTION_POINT;
+use x509_parser::time::ASN1Time;
 
 use crate::config::{ClientAuth, CrlDepth, CrlExpiration, CrlUnknownStatus, TlsSettings};
 
@@ -123,6 +125,7 @@ pub(crate) fn client_verifier(
     }
     let roots = Arc::new(roots);
     let mut crls = Vec::new();
+    let mut summaries = Vec::new();
     for path in &settings.client_crl_paths {
         let file = revocation_lists(path)?;
         // The verifier's own CRL parser, run per file so a rejected file is
@@ -131,13 +134,19 @@ pub(crate) fn client_verifier(
             .with_crls(file.iter().cloned())
             .build()
             .map_err(|e| pem_error(CRL, path, e))?;
-        if settings.client_crl_expiration == CrlExpiration::Enforce {
-            check_not_expired(path, &file, now)?;
+        for crl in &file {
+            summaries.push(CrlSummary::parse(path, crl)?);
         }
         crls.extend(file);
     }
-    let mut verifier = WebPkiClientVerifier::builder_with_provider(roots, Arc::clone(provider))
-        .with_crls(crls);
+    check_one_crl_per_scope(&summaries)?;
+    let now = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+    if settings.client_crl_expiration == CrlExpiration::Enforce {
+        check_not_expired(&summaries, now)?;
+    }
+    log_next_update(&summaries, now);
+    let mut verifier =
+        WebPkiClientVerifier::builder_with_provider(roots, Arc::clone(provider)).with_crls(crls);
     if settings.client_auth == ClientAuth::Optional {
         verifier = verifier.allow_unauthenticated();
     }
@@ -177,28 +186,124 @@ fn revocation_lists(path: &Path) -> Result<Vec<CertificateRevocationListDer<'sta
     Ok(crls)
 }
 
+/// What the startup checks read from one CRL.
+struct CrlSummary<'a> {
+    path: &'a Path,
+    issuer: Vec<u8>,
+    distribution_point: Option<Vec<u8>>,
+    next_update: Option<ASN1Time>,
+}
+
+impl<'a> CrlSummary<'a> {
+    fn parse(path: &'a Path, crl: &CertificateRevocationListDer<'_>) -> Result<Self, TlsError> {
+        let (_, parsed) = x509_parser::parse_x509_crl(crl.as_ref())
+            .map_err(|_| pem_error(CRL, path, "the CRL cannot be parsed"))?;
+        let distribution_point = parsed
+            .extensions()
+            .iter()
+            .find(|extension| extension.oid == OID_X509_EXT_ISSUER_DISTRIBUTION_POINT)
+            .map(|extension| extension.value.to_vec());
+        Ok(Self {
+            path,
+            issuer: parsed.issuer().as_raw().to_vec(),
+            distribution_point,
+            next_update: parsed.next_update(),
+        })
+    }
+
+    /// Whether both CRLs could be the CRL consulted for one certificate.
+    fn overlaps(&self, other: &Self) -> bool {
+        if self.issuer != other.issuer {
+            return false;
+        }
+        match (&self.distribution_point, &other.distribution_point) {
+            (Some(ours), Some(theirs)) => ours == theirs,
+            // A CRL without an issuing distribution point covers every
+            // certificate from its issuer.
+            _ => true,
+        }
+    }
+}
+
+/// Rejects two CRLs that cover the same certificates. The verifier consults
+/// only the first CRL that covers a certificate, so a revocation listed only
+/// in a later one (a newer CRL added during rotation, say) would be missed.
+fn check_one_crl_per_scope(summaries: &[CrlSummary<'_>]) -> Result<(), TlsError> {
+    for (index, later) in summaries.iter().enumerate() {
+        for earlier in &summaries[..index] {
+            if earlier.overlaps(later) {
+                return Err(overlap_error(earlier.path, later.path));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn overlap_error(earlier: &Path, later: &Path) -> TlsError {
+    let message = "two CRLs from the same issuer cover the same certificates, and only the \
+                   first would be consulted; configure one CRL per issuer, or per issuing \
+                   distribution point";
+    if earlier == later {
+        return pem_error(CRL, later, message);
+    }
+    TlsError::Config(format!(
+        "client CRLs {} and {}: {message}",
+        earlier.display(),
+        later.display()
+    ))
+}
+
 /// Rejects a CRL whose `nextUpdate` time is not after `now`, as the
 /// verifier would at handshake time.
-fn check_not_expired(
-    path: &Path,
-    crls: &[CertificateRevocationListDer<'static>],
-    now: UnixTime,
-) -> Result<(), TlsError> {
-    let now = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
-    for crl in crls {
-        let next_update = x509_parser::parse_x509_crl(crl.as_ref())
-            .ok()
-            .and_then(|(_, crl)| crl.next_update())
-            .ok_or_else(|| pem_error(CRL, path, "the CRL's nextUpdate time cannot be read"))?;
+fn check_not_expired(summaries: &[CrlSummary<'_>], now: i64) -> Result<(), TlsError> {
+    for summary in summaries {
+        let Some(next_update) = summary.next_update else {
+            return Err(pem_error(CRL, summary.path, "the CRL has no nextUpdate time"));
+        };
         if next_update.timestamp() <= now {
             return Err(pem_error(
                 CRL,
-                path,
+                summary.path,
                 "the CRL has expired (its nextUpdate time has passed)",
             ));
         }
     }
     Ok(())
+}
+
+/// Warn when the first CRL expires sooner than this.
+const CRL_EXPIRY_WARNING_SECS: i64 = 24 * 60 * 60;
+
+/// Logs the earliest CRL `nextUpdate` time, as a warning when it is less
+/// than a day away. With expiration enforced, an expired CRL fails every
+/// handshake it covers until a fresh CRL is loaded.
+fn log_next_update(summaries: &[CrlSummary<'_>], now: i64) {
+    let earliest = summaries
+        .iter()
+        .filter_map(|summary| Some((summary.path, summary.next_update?)))
+        .min_by_key(|(_, next_update)| *next_update);
+    let Some((path, next_update)) = earliest else {
+        return;
+    };
+    let remaining_secs = next_update.timestamp().saturating_sub(now);
+    let path = path.display();
+    if remaining_secs < CRL_EXPIRY_WARNING_SECS {
+        tracing::warn!(
+            target: "ferrum_alloy::tls",
+            path = %path,
+            next_update = %next_update,
+            remaining_secs,
+            "a client CRL expires within 24 hours or has expired; publish a fresh CRL and restart"
+        );
+    } else {
+        tracing::info!(
+            target: "ferrum_alloy::tls",
+            path = %path,
+            next_update = %next_update,
+            remaining_secs,
+            "earliest client CRL nextUpdate"
+        );
+    }
 }
 
 /// Identity of the verified client certificate on a finished handshake.
@@ -212,5 +317,94 @@ pub(crate) fn peer_identity(connection: &rustls::ServerConnection) -> Option<Tls
             tracing::warn!(target: "ferrum_alloy::tls", %error, "verified client certificate could not be parsed; treating peer as unidentified");
             None
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::path::PathBuf;
+
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateRevocationListParams,
+        ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
+        date_time_ymd,
+    };
+    use rustls::CertificateError;
+
+    use super::*;
+
+    /// 2021-01-01T00:00:00Z, the `nextUpdate` time of the test CRL.
+    const NEXT_UPDATE_SECS: u64 = 1_609_459_200;
+
+    /// A self-signed CA written to `dir` as `ca.pem`, and its issuer.
+    fn ca(dir: &Path) -> (PathBuf, Issuer<'static, KeyPair>) {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let key = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let path = dir.join("ca.pem");
+        std::fs::write(&path, cert.pem()).unwrap();
+        (path, Issuer::new(params, key))
+    }
+
+    fn client_cert(issuer: &Issuer<'static, KeyPair>) -> CertificateDer<'static> {
+        let mut params = CertificateParams::default();
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let key = KeyPair::generate().unwrap();
+        params.signed_by(&key, issuer).unwrap().der().clone()
+    }
+
+    /// An empty CRL from `issuer`, written to `dir` as `ca.crl.pem`, that
+    /// was current from mid-2020 until [`NEXT_UPDATE_SECS`].
+    fn crl(dir: &Path, issuer: &Issuer<'static, KeyPair>) -> PathBuf {
+        let params = CertificateRevocationListParams {
+            this_update: date_time_ymd(2020, 6, 1),
+            next_update: date_time_ymd(2021, 1, 1),
+            crl_number: rcgen::SerialNumber::from(1_u64),
+            issuing_distribution_point: None,
+            revoked_certs: Vec::new(),
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+        let path = dir.join("ca.crl.pem");
+        let pem = params.signed_by(issuer).unwrap().pem().unwrap();
+        std::fs::write(&path, pem).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_crl_that_expires_after_startup_fails_later_handshakes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let client = client_cert(&issuer);
+        let settings = TlsSettings {
+            cert_path: PathBuf::new(),
+            key_path: PathBuf::new(),
+            client_ca_path: Some(ca_path),
+            client_auth: ClientAuth::Required,
+            handshake_timeout_ms: 2_000,
+            client_crl_paths: vec![crl(dir.path(), &issuer)],
+            client_crl_depth: CrlDepth::default(),
+            client_crl_unknown_status: CrlUnknownStatus::default(),
+            client_crl_expiration: CrlExpiration::Enforce,
+        };
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        // Startup in September 2020, while the CRL is current.
+        let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
+        let verifier = client_verifier(&settings, &provider, startup)
+            .unwrap()
+            .unwrap();
+        verifier.verify_client_cert(&client, &[], startup).unwrap();
+
+        let now = UnixTime::now();
+        let expired = CertificateError::ExpiredRevocationListContext {
+            time: now,
+            next_update: UnixTime::since_unix_epoch(Duration::from_secs(NEXT_UPDATE_SECS)),
+        };
+        assert_eq!(
+            verifier.verify_client_cert(&client, &[], now).err(),
+            Some(rustls::Error::InvalidCertificate(expired))
+        );
     }
 }

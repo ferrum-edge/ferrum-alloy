@@ -127,6 +127,29 @@ async fn a_revoked_client_certificate_is_refused_and_others_are_accepted() {
 }
 
 #[tokio::test]
+async fn optional_client_auth_refuses_revoked_certificates_and_accepts_anonymous_clients() {
+    let pki = Pki::new();
+    let revoked = pki.ca.client(CLIENT);
+    let crl_path = pki.file("ca.crl.pem", pki.ca.crl(&[&revoked.serial]).pem().unwrap());
+    let mut config = pki.config(vec![crl_path]);
+    if let Some(tls) = config.server.tls.as_mut() {
+        tls.client_auth = ClientAuth::Optional;
+    }
+    let server = support::start(app(), config).await;
+
+    let refused = get_hello(server.addr, pki::client_config(&pki.ca, Some(&revoked))).await;
+    assert!(
+        refused.is_err(),
+        "optional client auth still refuses a revoked certificate"
+    );
+    let anonymous = get_hello(server.addr, pki::client_config(&pki.ca, None))
+        .await
+        .unwrap();
+    assert_eq!(anonymous, StatusCode::OK);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn der_crl_files_are_read() {
     let pki = Pki::new();
     let revoked = pki.ca.client(CLIENT);
@@ -307,4 +330,46 @@ fn one_bad_file_among_several_is_named() {
     let error = startup_error(pki.config(vec![good.clone(), bad.clone()])).to_string();
     assert!(error.contains(&bad.display().to_string()), "{error}");
     assert!(!error.contains(&good.display().to_string()), "{error}");
+}
+
+#[test]
+fn crls_that_cover_the_same_certificates_fail_startup() {
+    let pki = Pki::new();
+    let full_pem = pki.ca.crl(&[]).pem().unwrap();
+    let newer_pem = pki.ca.crl(&[]).pem().unwrap();
+    let full = pki.file("full.crl.pem", &full_pem);
+    let newer = pki.file("newer.crl.pem", &newer_pem);
+    let partition = pki.file(
+        "partition.crl.pem",
+        pki.ca.partition_crl("http://crl.test/a").pem().unwrap(),
+    );
+
+    // Only the first CRL that covers a certificate is consulted, so a
+    // revocation listed only in the other one would be missed.
+    for (earlier, later) in [(&full, &newer), (&full, &partition), (&partition, &full)] {
+        let error = startup_error(pki.config(vec![earlier.clone(), later.clone()])).to_string();
+        assert!(error.contains("same issuer"), "{error}");
+        assert!(error.contains(&earlier.display().to_string()), "{error}");
+        assert!(error.contains(&later.display().to_string()), "{error}");
+    }
+
+    let both = pki.file("both.crl.pem", format!("{full_pem}{newer_pem}"));
+    let error = startup_error(pki.config(vec![both.clone()])).to_string();
+    assert!(error.contains("same issuer"), "{error}");
+    assert!(error.contains(&both.display().to_string()), "{error}");
+}
+
+#[tokio::test]
+async fn crls_for_different_partitions_of_one_issuer_are_accepted() {
+    let pki = Pki::new();
+    let first = pki.file(
+        "a.crl.pem",
+        pki.ca.partition_crl("http://crl.test/a").pem().unwrap(),
+    );
+    let second = pki.file(
+        "b.crl.pem",
+        pki.ca.partition_crl("http://crl.test/b").pem().unwrap(),
+    );
+    let server = support::start(app(), pki.config(vec![first, second])).await;
+    server.shutdown().await.unwrap();
 }

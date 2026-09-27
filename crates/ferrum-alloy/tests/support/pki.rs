@@ -8,9 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rcgen::{
-    BasicConstraints, CertificateParams, CertificateRevocationList, CertificateRevocationListParams,
-    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
-    RevocationReason, RevokedCertParams, SanType, SerialNumber, date_time_ymd,
+    BasicConstraints, CertificateParams, CertificateRevocationList,
+    CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod,
+    KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, SanType, SerialNumber,
+    date_time_ymd,
 };
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
@@ -72,18 +73,31 @@ impl Ca {
 
     /// A CRL from this CA revoking `revoked`, valid until 2100.
     pub fn crl(&self, revoked: &[&SerialNumber]) -> CertificateRevocationList {
-        self.crl_until(revoked, 2100)
+        self.crl_until(revoked, 2100, None)
     }
 
     /// A CRL from this CA revoking `revoked`, whose `nextUpdate` was in 2021.
     pub fn expired_crl(&self, revoked: &[&SerialNumber]) -> CertificateRevocationList {
-        self.crl_until(revoked, 2021)
+        self.crl_until(revoked, 2021, None)
+    }
+
+    /// An empty CRL from this CA for the partition of its certificates
+    /// published at `uri`, valid until 2100.
+    pub fn partition_crl(&self, uri: &str) -> CertificateRevocationList {
+        let partition = rcgen::CrlIssuingDistributionPoint {
+            distribution_point: rcgen::CrlDistributionPoint {
+                uris: vec![uri.to_owned()],
+            },
+            scope: None,
+        };
+        self.crl_until(&[], 2100, Some(partition))
     }
 
     fn crl_until(
         &self,
         revoked: &[&SerialNumber],
         next_update_year: i32,
+        issuing_distribution_point: Option<rcgen::CrlIssuingDistributionPoint>,
     ) -> CertificateRevocationList {
         let revoked_certs = revoked
             .iter()
@@ -98,7 +112,7 @@ impl Ca {
             this_update: date_time_ymd(2020, 6, 1),
             next_update: date_time_ymd(next_update_year, 1, 1),
             crl_number: next_serial(),
-            issuing_distribution_point: None,
+            issuing_distribution_point,
             revoked_certs,
             key_identifier_method: KeyIdMethod::Sha256,
         };

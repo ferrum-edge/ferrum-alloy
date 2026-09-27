@@ -643,7 +643,9 @@ fn tls_config(extra: &[(&str, &str)]) -> AlloyConfig {
         ("FERRUM_ALLOY_TLS_CLIENT_AUTH", "required"),
     ];
     vars.extend_from_slice(extra);
-    load_from(None, env(&vars), &Overrides::default()).unwrap().0
+    load_from(None, env(&vars), &Overrides::default())
+        .unwrap()
+        .0
 }
 
 #[test]
@@ -657,7 +659,10 @@ fn client_crl_settings_default_to_fail_closed_and_read_the_environment() {
     assert!(config.validate(&["tls"]).unwrap().is_empty());
 
     let config = tls_config(&[
-        ("FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS", "root.crl, intermediate.crl"),
+        (
+            "FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS",
+            "root.crl, intermediate.crl",
+        ),
         ("FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH", "end_entity"),
         ("FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS", "allow"),
         ("FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION", "ignore"),
