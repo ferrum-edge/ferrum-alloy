@@ -27,6 +27,9 @@ pub use otel_bridge::exported_ids;
 #[cfg(feature = "subscriber")]
 pub mod init;
 
+#[cfg(feature = "subscriber")]
+pub mod json;
+
 #[cfg(feature = "otel")]
 pub mod otel;
 

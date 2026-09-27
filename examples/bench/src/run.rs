@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use ferrum_alloy::telemetry::json::JsonLayer;
 use ferrum_alloy::telemetry::metrics::{Metrics, TELEMETRY_LOSS_REASONS};
 use ferrum_alloy::telemetry::otel::{OtelPipeline, OtlpConfig, ServiceResource};
 use opentelemetry_sdk::error::OTelSdkResult;
@@ -75,8 +76,7 @@ fn otlp(sampling_ratio: f64) -> OtlpConfig {
     }
 }
 
-/// JSON access logs formatted like `ferrum_alloy::telemetry::init::fmt_layer`
-/// for `LogFormat::Json`, written to a sink.
+/// JSON access logs formatted by tracing-subscriber's JSON `fmt` layer, written to a sink.
 fn json_logs() -> impl Layer<Registry> + Send + Sync {
     tracing_subscriber::fmt::layer()
         .with_target(true)
@@ -125,11 +125,18 @@ pub(crate) fn install_telemetry(
             };
             Some(OtelPipeline::otlp(&resource(), &config, metrics)?)
         }
-        Scenario::Plain | Scenario::Alloy | Scenario::AlloyLogs => None,
+        Scenario::Plain | Scenario::Alloy | Scenario::AlloyLogs | Scenario::AlloyLogsFmt => None,
     };
     let dispatch = match (&pipeline, scenario) {
         (Some(pipeline), _) => Some(Dispatch::new(registry().with(pipeline.layer()))),
-        (None, Scenario::AlloyLogs) => Some(Dispatch::new(registry().with(json_logs()))),
+        (None, Scenario::AlloyLogs) => Some(Dispatch::new(
+            registry().with(
+                JsonLayer::new()
+                    .with_writer(std::io::sink)
+                    .with_filter(LevelFilter::INFO),
+            ),
+        )),
+        (None, Scenario::AlloyLogsFmt) => Some(Dispatch::new(registry().with(json_logs()))),
         (None, Scenario::Alloy) => Some(Dispatch::new(registry())),
         (None, _) => None,
     };
@@ -244,8 +251,7 @@ pub(crate) fn measure(
 /// A random identifier for one invocation, formatted as a version 4 UUID.
 pub(crate) fn new_run_id() -> Result<String, Failure> {
     let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| format!("cannot generate a run id: {error}"))?;
+    getrandom::fill(&mut bytes).map_err(|error| format!("cannot generate a run id: {error}"))?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let mut id = String::with_capacity(36);
@@ -260,7 +266,9 @@ pub(crate) fn new_run_id() -> Result<String, Failure> {
 
 /// The commit under test, when GitHub Actions names it.
 fn commit() -> Option<String> {
-    std::env::var("GITHUB_SHA").ok().filter(|sha| !sha.is_empty())
+    std::env::var("GITHUB_SHA")
+        .ok()
+        .filter(|sha| !sha.is_empty())
 }
 
 /// Nearest-rank percentile: the value at 1-based rank `ceil(p * n)`.
@@ -546,7 +554,10 @@ mod tests {
         let groups: Vec<usize> = id.split('-').map(str::len).collect();
         assert_eq!(groups, [8, 4, 4, 4, 12], "{id}");
         assert_eq!(id.as_bytes()[14], b'4', "{id}");
-        assert!(id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()), "{id}");
+        assert!(
+            id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()),
+            "{id}"
+        );
         assert_ne!(id, new_run_id().unwrap());
     }
 

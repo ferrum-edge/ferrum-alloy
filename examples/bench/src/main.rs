@@ -63,8 +63,8 @@ options:
   --collector-endpoint URL  otel-collector exports to this OTLP/HTTP traces
                             URL instead of the in-process stub
 
-scenarios:  plain, alloy, alloy-logs, otel-sampled, otel-unsampled,
-            otel-unreachable, otel-collector
+scenarios:  plain, alloy, alloy-logs, alloy-logs-fmt, otel-sampled,
+            otel-unsampled, otel-unreachable, otel-collector
 workloads:  small, large, stream, cancel
 transports: h1, h2c, h1-tls, h2-tls, h1-mtls, h2-mtls
 ";

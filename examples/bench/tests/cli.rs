@@ -86,7 +86,10 @@ fn scenarios() -> Vec<String> {
 fn every_scenario_runs_in_its_own_process() {
     let scenarios = scenarios();
     assert!(scenarios.len() >= 7, "{scenarios:?}");
-    assert!(scenarios.iter().any(|name| name == "plain"), "{scenarios:?}");
+    assert!(
+        scenarios.iter().any(|name| name == "plain"),
+        "{scenarios:?}"
+    );
     for scenario in &scenarios {
         let output = bench(&[
             "run",
@@ -99,7 +102,7 @@ fn every_scenario_runs_in_its_own_process() {
             "--seconds",
             "0.2",
             "--warmup",
-            "0",
+            "0.1",
         ])
         .env_remove("GITHUB_SHA")
         .output()
