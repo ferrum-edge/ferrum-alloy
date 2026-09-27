@@ -5,6 +5,7 @@
 //! (see [`crate::live`]). Every input, live reports included, is read with
 //! `parse_offline` and never treated as authenticated.
 
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -37,7 +38,7 @@ pub(crate) struct DiagnoseArgs {
     list_traces: bool,
     /// Fetch the live report of one request from a running service: the base
     /// URL of its management listener, for example `http://127.0.0.1:9090`.
-    /// The credential comes from `FERRUM_DIAGNOSTICS_TOKEN` or
+    /// The credential comes from `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or
     /// `--token-file`, never from an argument.
     #[arg(long, requires = "request_id")]
     url: Option<String>,
@@ -45,7 +46,7 @@ pub(crate) struct DiagnoseArgs {
     #[arg(long, requires = "url")]
     request_id: Option<String>,
     /// A file holding the credential for `--url`, instead of
-    /// `FERRUM_DIAGNOSTICS_TOKEN`.
+    /// `FERRUM_ALLOY_DIAGNOSTICS_TOKEN`.
     #[arg(long, requires = "url")]
     token_file: Option<PathBuf>,
     /// Whole-request timeout for `--url`, in milliseconds (1 to 120000).
@@ -71,13 +72,41 @@ fn read(path: &PathBuf, max: usize) -> Result<Vec<u8>, CliError> {
     std::fs::read(path).map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))
 }
 
-/// Replaces control characters other than newlines. Reports may come from a
-/// remote service, and none of their text may drive the terminal.
+/// Unicode format characters (general category `Cf`, Unicode 16.0), and the
+/// line and paragraph separators. Bidirectional controls among them can
+/// reorder the text around them, and others hide or join it.
+const FORMAT_CHARACTERS: &[RangeInclusive<char>] = &[
+    '\u{00AD}'..='\u{00AD}',
+    '\u{0600}'..='\u{0605}',
+    '\u{061C}'..='\u{061C}',
+    '\u{06DD}'..='\u{06DD}',
+    '\u{070F}'..='\u{070F}',
+    '\u{0890}'..='\u{0891}',
+    '\u{08E2}'..='\u{08E2}',
+    '\u{180E}'..='\u{180E}',
+    '\u{200B}'..='\u{200F}',
+    '\u{2028}'..='\u{202E}',
+    '\u{2060}'..='\u{206F}',
+    '\u{FEFF}'..='\u{FEFF}',
+    '\u{FFF9}'..='\u{FFFB}',
+    '\u{110BD}'..='\u{110BD}',
+    '\u{110CD}'..='\u{110CD}',
+    '\u{13430}'..='\u{1343F}',
+    '\u{1BCA0}'..='\u{1BCA3}',
+    '\u{1D173}'..='\u{1D17A}',
+    '\u{E0001}'..='\u{E0001}',
+    '\u{E0020}'..='\u{E007F}',
+];
+
+/// Replaces control and format characters other than newlines. Reports may
+/// come from a remote service, and none of their text may drive the
+/// terminal or change how the text around it reads.
 fn printable(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' => c,
             c if c.is_control() => '?',
+            c if FORMAT_CHARACTERS.iter().any(|range| range.contains(&c)) => '?',
             c => c,
         })
         .collect()
@@ -166,4 +195,22 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printable_text_replaces_control_and_format_characters() {
+        // Bidirectional embeddings, overrides, and isolates.
+        let bidi = "a\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}b";
+        assert_eq!(printable(bidi), "a?????????b");
+        let hidden = "\u{200B}\u{200D}\u{200E}\u{200F}\u{061C}\u{FEFF}\u{00AD}\u{E0041}";
+        assert_eq!(printable(hidden), "????????");
+        assert_eq!(printable("\u{2028}\u{2029}"), "??");
+        assert_eq!(printable("\u{1b}[31mred\u{7}\r\u{9b}"), "?[31mred???");
+        let kept = "route /orders/{id}\n\tstatus 503 · 12.5 ms, café 東京 ✓\n";
+        assert_eq!(printable(kept), kept.replace('\t', "?"));
+    }
 }

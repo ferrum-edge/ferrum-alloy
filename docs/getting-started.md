@@ -227,11 +227,11 @@ async fn authorize(request: DiagnosticsRequest) -> DiagnosticsAccess {
 Then, with the credential in the environment or a file:
 
 ```bash
-FERRUM_DIAGNOSTICS_TOKEN=... ferrum-alloy diagnose --url http://127.0.0.1:9090 --request-id <id>
+FERRUM_ALLOY_DIAGNOSTICS_TOKEN=... ferrum-alloy diagnose --url http://127.0.0.1:9090 --request-id <id>
 ferrum-alloy diagnose --url https://ops.example/orders --request-id <id> --token-file token.txt
 ```
 
-Every refusal is the same `404`: a denied caller, another tenant's request, and an unknown or evicted id look alike. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
+Every refusal is the same `404`: a denied caller, another tenant's request, and an unknown or evicted id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
 
 ## Feature matrix
 

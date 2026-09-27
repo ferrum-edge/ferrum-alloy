@@ -8,7 +8,8 @@
 //! 4. defaults.
 //!
 //! Invalid supplied configuration is rejected: unknown keys, unknown
-//! `FERRUM_ALLOY_*` variables, unparsable values, and unsafe combinations are
+//! `FERRUM_ALLOY_*` variables (other than the command's own,
+//! [`CLI_ENV_VARS`]), unparsable values, and unsafe combinations are
 //! errors, never silent fallbacks. Every section parses regardless of which
 //! Cargo features are compiled, so enabling a section whose feature is missing
 //! is reported instead of ignored.
@@ -41,6 +42,16 @@ pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The environment variable naming the configuration file.
 pub const CONFIG_FILE_ENV: &str = "FERRUM_ALLOY_CONFIG";
+
+/// The credential `ferrum-alloy diagnose --url` sends to a service's
+/// diagnostic retrieval endpoint. A variable of the command, not of service
+/// configuration (see [`CLI_ENV_VARS`]).
+pub const DIAGNOSTICS_TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
+
+/// `FERRUM_ALLOY_*` variables that belong to the `ferrum-alloy` command
+/// rather than to service configuration. Loading configuration ignores them
+/// instead of rejecting them as unknown, and never reads their values.
+pub const CLI_ENV_VARS: &[&str] = &[DIAGNOSTICS_TOKEN_ENV];
 
 /// A secret value. `Debug`, `Display`, and `Serialize` never reveal it.
 #[derive(Clone, PartialEq, Eq)]
@@ -1197,7 +1208,10 @@ where
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with("FERRUM_ALLOY_") || name == CONFIG_FILE_ENV {
+        if !name.starts_with("FERRUM_ALLOY_")
+            || name == CONFIG_FILE_ENV
+            || CLI_ENV_VARS.contains(&name)
+        {
             continue;
         }
         let env_error = |message: String| ConfigError::Env {

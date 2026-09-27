@@ -151,10 +151,11 @@ fn diagnose_reads_otlp_exports() {
 }
 
 /// The credential variable of `diagnose --url`.
-const TOKEN_ENV: &str = "FERRUM_DIAGNOSTICS_TOKEN";
+const TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
 
 /// A live report as a service serves it, with a forged `verified` claim
-/// and a request id carrying a terminal escape sequence.
+/// and a request id carrying a terminal escape sequence and a bidirectional
+/// override.
 fn live_report() -> String {
     serde_json::json!({
         "schema": "ferrum.diagnostic_report",
@@ -164,7 +165,7 @@ fn live_report() -> String {
             "method": "live_export",
             "verification": "verified"
         },
-        "subject": { "request_id": "req-7\u{1b}[2J", "service": "orders" },
+        "subject": { "request_id": "req-7\u{1b}[2J\u{202E}", "service": "orders" },
         "observations": [{
             "id": "alloy:00f067aa0ba902b7:time_to_headers",
             "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry" },
@@ -285,6 +286,7 @@ fn diagnose_url_reads_a_token_file_and_keeps_escapes_off_the_terminal() {
     let text = stdout(&output);
     assert!(text.contains("provenance is unverified"), "{text}");
     assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{202E}'), "{text:?}");
     assert!(!text.contains("file-secret-credential"));
 }
 

@@ -6,8 +6,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use ferrum_alloy::config::{
-    AlloyConfig, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus, ENV_VARS,
-    EdgeMode, JwtSettings, Overrides, Secret, TlsSettings, load_from,
+    AlloyConfig, CLI_ENV_VARS, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus,
+    DIAGNOSTICS_TOKEN_ENV, ENV_VARS, EdgeMode, JwtSettings, Overrides, Secret, TlsSettings,
+    load_from,
 };
 
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -149,6 +150,24 @@ fn unknown_keys_and_variables_are_rejected() {
         matches!(&error, ConfigError::Env { name, .. } if name == "FERRUM_ALLOY_BINDD"),
         "{error}"
     );
+}
+
+#[test]
+fn command_variables_are_ignored_not_rejected() {
+    assert!(CLI_ENV_VARS.contains(&DIAGNOSTICS_TOKEN_ENV));
+    for name in CLI_ENV_VARS {
+        assert!(name.starts_with("FERRUM_ALLOY_"), "{name}");
+        assert!(ENV_VARS.iter().all(|var| var.name != *name), "{name}");
+        let vars = env(&[(*name, "a-cli-credential")]);
+        let (config, sources) = load_from(None, vars, &Overrides::default()).unwrap();
+        assert_eq!(config, AlloyConfig::default(), "{name}");
+        assert!(sources.env.is_empty(), "{name}");
+    }
+    // Only the variables themselves: a `_FILE` form is still unknown.
+    let file = format!("{DIAGNOSTICS_TOKEN_ENV}_FILE");
+    let vars = env(&[(file.as_str(), "/nonexistent")]);
+    let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+    assert!(matches!(&error, ConfigError::Env { name, .. } if *name == file), "{error}");
 }
 
 #[test]
@@ -815,6 +834,9 @@ fn every_environment_variable_is_documented() {
             "{} is missing from docs/configuration.md",
             var.name
         );
+    }
+    for name in CLI_ENV_VARS {
+        assert!(docs.contains(*name), "{name} is missing from docs/configuration.md");
     }
     assert!(docs.contains("FERRUM_ALLOY_CONFIG"));
 }

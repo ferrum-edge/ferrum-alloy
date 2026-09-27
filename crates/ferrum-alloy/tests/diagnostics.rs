@@ -1,7 +1,8 @@
 //! Authorized, tenant-scoped diagnostic retrieval (ADR 0008): one uniform
-//! `404` for denied callers, other tenants, and unknown, malformed, or
-//! evicted ids; `no-store`; the management rate limit; bounded retention;
-//! and reports that hold labels and timings only.
+//! `404` for denied callers, failed authorizers, other tenants, and unknown,
+//! malformed, or evicted ids; `no-store`; the management rate limit, which
+//! no peer is exempt from; a loopback management listener; bounded
+//! retention; and reports that hold labels and timings only.
 
 #![cfg(feature = "diagnostics")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -256,11 +257,11 @@ async fn other_tenants_denied_callers_and_unknown_ids_get_the_same_404() {
     let reply = retrieve(&parts, "req-b-1", Some(TOKEN_B)).await;
     assert_eq!(reply.status, StatusCode::OK);
 
+    // Denials are counted with the misses they look like.
     let text = metrics(&parts).await;
-    let denied = r#"ferrum_alloy_diagnostics_retrievals_total{outcome="denied"}"#;
-    assert_eq!(metric(&text, denied), 3);
+    assert!(!text.contains(r#"outcome="denied""#), "{text}");
     let not_found = r#"ferrum_alloy_diagnostics_retrievals_total{outcome="not_found"}"#;
-    assert_eq!(metric(&text, not_found), 7);
+    assert_eq!(metric(&text, not_found), 10);
     let served = r#"ferrum_alloy_diagnostics_retrievals_total{outcome="served"}"#;
     assert_eq!(metric(&text, served), 2);
 }
@@ -378,6 +379,68 @@ async fn the_authorizer_sees_the_transport_peer_and_never_trusts_headers() {
 }
 
 #[tokio::test]
+async fn a_panicking_authorizer_denies_like_any_refusal() {
+    let parts = parts_with(
+        |request: DiagnosticsRequest| {
+            // In the call itself, before any future exists.
+            if request.bearer_token() == Some("panic-now") {
+                panic!("authorizer bug");
+            }
+            async move {
+                if request.bearer_token() == Some("panic-later") {
+                    panic!("authorizer bug");
+                }
+                authorize(request).await
+            }
+        },
+        settings(),
+    );
+    order(&parts, "tenant-a", "req-a-1").await;
+
+    let denied = retrieve(&parts, "req-a-1", None).await;
+    assert_not_found(&denied);
+    for token in ["panic-now", "panic-later", "panic-now"] {
+        let reply = retrieve(&parts, "req-a-1", Some(token)).await;
+        assert_not_found(&reply);
+        assert_eq!(reply.body, denied.body, "{token}");
+        assert_eq!(reply.headers, denied.headers, "{token}");
+    }
+    // The endpoint keeps serving.
+    let reply = retrieve(&parts, "req-a-1", Some(TOKEN_A)).await;
+    assert_eq!(reply.status, StatusCode::OK);
+
+    let text = metrics(&parts).await;
+    assert!(!text.contains("authorizer bug"), "{text}");
+    let panics = r#"ferrum_alloy_diagnostics_authorizer_failures_total{reason="panic"}"#;
+    assert_eq!(metric(&text, panics), 3);
+    let timeouts = r#"ferrum_alloy_diagnostics_authorizer_failures_total{reason="timeout"}"#;
+    assert_eq!(metric(&text, timeouts), 0);
+    let not_found = r#"ferrum_alloy_diagnostics_retrievals_total{outcome="not_found"}"#;
+    assert_eq!(metric(&text, not_found), 4);
+}
+
+#[tokio::test]
+async fn exempt_networks_never_bypass_the_retrieval_rate_limit() {
+    let mut cfg = config();
+    cfg.management.rate_limit.requests_per_second = 1;
+    cfg.management.rate_limit.burst = 2;
+    cfg.management.rate_limit.exempt_networks = vec!["192.0.2.0/24".parse().unwrap()];
+    let parts = parts(cfg);
+    order(&parts, "tenant-a", "req-a-1").await;
+
+    // The exemption holds elsewhere on the listener.
+    for _ in 0..5 {
+        let reply = manage(&parts, operator(), "/metrics", Some(TOKEN)).await;
+        assert_eq!(reply.status, StatusCode::OK);
+    }
+    for _ in 0..2 {
+        assert_not_found(&retrieve(&parts, "guess", Some(TOKEN_A)).await);
+    }
+    let reply = retrieve(&parts, "req-a-1", Some(TOKEN_A)).await;
+    assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn an_authorizer_granting_an_invalid_tenant_denies() {
     let parts = parts_with(
         |_: DiagnosticsRequest| async { DiagnosticsAccess::tenant("tenant a") },
@@ -423,6 +486,33 @@ fn startup_requires_the_management_listener_and_its_rate_limit() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("management.enabled"), "{error}");
+}
+
+#[test]
+fn startup_requires_a_loopback_management_listener() {
+    // The listener has no TLS; the authorizer's credentials would cross the
+    // network in cleartext.
+    for bind in ["0.0.0.0:9090", "192.0.2.10:9090", "[::]:9090"] {
+        let mut cfg = settings();
+        cfg.management.bind = bind.parse().unwrap();
+        let error = app()
+            .diagnostics_authorizer(authorize)
+            .config(cfg)
+            .telemetry(TelemetryInit::ApplicationOwned)
+            .into_parts()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("loopback management.bind"), "{bind}: {error}");
+    }
+
+    // Without retrieval, a non-loopback listener with a token is allowed.
+    let mut cfg = settings();
+    cfg.management.bind = "0.0.0.0:9090".parse().unwrap();
+    let parts = app()
+        .config(cfg)
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .into_parts();
+    assert!(parts.is_ok(), "{:?}", parts.err().map(|e| e.to_string()));
 }
 
 #[tokio::test]

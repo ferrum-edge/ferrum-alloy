@@ -4,9 +4,9 @@
 //! It runs only when invoked with `--url`. It sends one `GET` directly to
 //! the service (no proxy), follows no redirects, bounds the connection time,
 //! the whole request, and the response size, and writes nothing anywhere,
-//! gateways included. The credential comes from `FERRUM_DIAGNOSTICS_TOKEN`
-//! or a file, never from an argument, and goes over plain `http` only to a
-//! loopback address.
+//! gateways included. The credential comes from
+//! `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or a file, never from an argument, and
+//! goes over plain `http` only to a loopback address.
 
 use std::io::Read as _;
 use std::net::IpAddr;
@@ -21,10 +21,9 @@ use reqwest::header::{ACCEPT, RETRY_AFTER};
 
 use crate::error::CliError;
 
-/// Environment variable holding the credential for `--url`. It lacks the
-/// `FERRUM_ALLOY_` prefix on purpose: service configuration reserves that
-/// prefix and rejects unknown variables.
-pub(crate) const TOKEN_ENV: &str = "FERRUM_DIAGNOSTICS_TOKEN";
+/// Environment variable holding the credential for `--url`. Service
+/// configuration knows it as the command's own and ignores it.
+pub(crate) const TOKEN_ENV: &str = ferrum_alloy::config::DIAGNOSTICS_TOKEN_ENV;
 
 /// Largest credential file read.
 const MAX_TOKEN_FILE_BYTES: u64 = 16 * 1024;

@@ -15,9 +15,10 @@
 //!   document marked `Cache-Control: no-store`.
 //!
 //! A denied caller, a malformed, unknown, or evicted id, and another
-//! tenant's id all get the same `404`. A request id is a lookup key, never a
-//! credential. The management token is neither required nor sufficient: the
-//! authorizer decides.
+//! tenant's id all get byte-identical `404` responses, and so does an
+//! authorizer that panics or times out. A request id is a lookup key, never
+//! a credential. The management token is neither required nor sufficient:
+//! the authorizer decides.
 //!
 //! ```no_run
 //! use axum::{Router, routing::get};
@@ -37,9 +38,9 @@
 //!     .router(router)
 //!     .diagnostics_authorizer(|request: DiagnosticsRequest| async move {
 //!         // Verify a tenant-scoped credential here; never trust a header
-//!         // that merely names a tenant.
+//!         // that merely names a tenant. Compare secrets in constant time.
 //!         match request.bearer_token() {
-//!             Some(token) if token == "a-verified-acme-credential" => {
+//!             Some(token) if same(token.as_bytes(), b"a-verified-acme-credential") => {
 //!                 DiagnosticsAccess::tenant("acme")
 //!             }
 //!             _ => DiagnosticsAccess::Deny,
@@ -48,11 +49,17 @@
 //!     .run()
 //!     .await?;
 //! # Ok(()) }
+//!
+//! // Compares two secrets in time that depends only on their lengths.
+//! fn same(a: &[u8], b: &[u8]) -> bool {
+//!     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+//! }
 //! ```
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -71,6 +78,7 @@ use ferrum_alloy_diagnostics::model::{
 use ferrum_alloy_telemetry::evidence::{EvidenceSink, RequestEvidence, valid_tenant};
 use ferrum_alloy_telemetry::trace_context::{SpanId, TraceId};
 use ferrum_alloy_telemetry::{PeerInfo, RequestId};
+use futures_util::FutureExt as _;
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
 pub use ferrum_alloy_telemetry::evidence::TenantTag;
@@ -85,23 +93,43 @@ pub const ROUTE: &str = "/diagnostics/v1/requests/{request_id}";
 pub const AUTHORIZER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Records kept for one tenant and request id, such as the attempts of a
-/// retried request. Further ones are not retained.
+/// retried request. A further one evicts the oldest of them.
 pub const MAX_RECORDS_PER_REQUEST_ID: usize = 16;
 
 /// Longest route template kept. A longer one is dropped from the record.
 pub const MAX_ROUTE_BYTES: usize = 512;
 
-/// Estimated fixed cost of one record: the record, its queue slot, and its
-/// index entry.
-const RECORD_OVERHEAD_BYTES: usize = 256;
+/// Bytes of an `Arc<str>` allocation besides its text: its two reference
+/// counts.
+const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
 
-/// Checks that retrieval can be served as ADR 0008 requires: on the
+/// Estimated fixed cost of one record besides its strings: its queue slot;
+/// an index entry and its hash table control byte, at the table's 7/8
+/// maximum load; the smallest sequence number list; and the reference-count
+/// headers of its tenant and route. It is an estimate, not a measurement:
+/// allocator overhead and the spare capacity of the queue and the index,
+/// which never shrink, are not counted, while an index entry that several
+/// records share is counted for each of them.
+const RECORD_OVERHEAD_BYTES: usize = size_of::<Option<Stored>>()
+    + (size_of::<(Key, Vec<u64>)>() + 1) * 8 / 7
+    + 4 * size_of::<u64>()
+    + 2 * ARC_HEADER_BYTES;
+
+/// Checks that retrieval can be served as ADR 0008 requires: on a loopback
 /// management listener, behind its rate limit.
 pub(crate) fn check_config(config: &AlloyConfig) -> Result<(), ConfigError> {
     let management = &config.management;
     let mut errors: Vec<String> = Vec::new();
     if !management.enabled {
         errors.push("diagnostic retrieval requires management.enabled".into());
+    }
+    // The management listener has no TLS, and the authorizer's credentials
+    // must not cross a network in cleartext.
+    if !management.bind.ip().is_loopback() {
+        errors.push(format!(
+            "diagnostic retrieval requires a loopback management.bind, not {}; terminate TLS in a proxy on the same host instead",
+            management.bind
+        ));
     }
     if !management.rate_limit.enabled {
         errors.push("diagnostic retrieval requires management.rate_limit.enabled".into());
@@ -172,7 +200,8 @@ pub type AuthorizeFuture = Pin<Box<dyn Future<Output = DiagnosticsAccess> + Send
 /// a tenant proves nothing, and neither does knowing a request id or a trace
 /// id.
 pub trait DiagnosticsAuthorizer: Send + Sync + 'static {
-    /// Authorizes one retrieval request. It has [`AUTHORIZER_TIMEOUT`].
+    /// Authorizes one retrieval request. It has [`AUTHORIZER_TIMEOUT`]. A
+    /// panic, like a timeout, denies (unless panics abort the process).
     fn authorize(&self, request: DiagnosticsRequest) -> AuthorizeFuture;
 }
 
@@ -210,22 +239,35 @@ type Key = (Arc<str>, RequestId);
 /// Retained records, oldest first, with an index by tenant and request id.
 #[derive(Debug, Default)]
 struct Ring {
-    /// `records[i]` has sequence number `first_seq + i`.
-    records: VecDeque<Stored>,
+    /// `records[i]` has sequence number `first_seq + i`. `None` is the slot
+    /// of a record evicted out of order; it is never first, and counts
+    /// toward the count bound until it is.
+    records: VecDeque<Option<Stored>>,
     first_seq: u64,
     /// Sequence numbers of each key's records, oldest first.
     index: HashMap<Key, Vec<u64>>,
+    /// Records present.
+    live: usize,
     bytes: usize,
 }
 
 impl Ring {
+    /// Removes the empty slots at the front.
+    fn trim(&mut self) {
+        while matches!(self.records.front(), Some(None)) {
+            self.records.pop_front();
+            self.first_seq = self.first_seq.wrapping_add(1);
+        }
+    }
+
     /// Removes the oldest record. Returns `false` when there is none.
     fn evict_oldest(&mut self) -> bool {
-        let Some(oldest) = self.records.pop_front() else {
+        let Some(Some(oldest)) = self.records.pop_front() else {
             return false;
         };
         let seq = self.first_seq;
         self.first_seq = self.first_seq.wrapping_add(1);
+        self.live = self.live.saturating_sub(1);
         self.bytes = self.bytes.saturating_sub(oldest.bytes);
         let key = (oldest.tenant, oldest.request_id);
         if let Some(seqs) = self.index.get_mut(&key) {
@@ -234,6 +276,27 @@ impl Ring {
                 self.index.remove(&key);
             }
         }
+        self.trim();
+        true
+    }
+
+    /// Removes the oldest record of `key` when it has the most a key may
+    /// have. Returns whether it did.
+    fn evict_oldest_of(&mut self, key: &Key) -> bool {
+        let Some(seqs) = self.index.get_mut(key) else {
+            return false;
+        };
+        if seqs.len() < MAX_RECORDS_PER_REQUEST_ID {
+            return false;
+        }
+        let seq = seqs.remove(0);
+        let offset = usize::try_from(seq.wrapping_sub(self.first_seq)).ok();
+        let slot = offset.and_then(|offset| self.records.get_mut(offset));
+        if let Some(oldest) = slot.and_then(Option::take) {
+            self.live = self.live.saturating_sub(1);
+            self.bytes = self.bytes.saturating_sub(oldest.bytes);
+        }
+        self.trim();
         true
     }
 
@@ -244,7 +307,7 @@ impl Ring {
         seqs.iter()
             .filter_map(|seq| {
                 let offset = usize::try_from(seq.wrapping_sub(self.first_seq)).ok()?;
-                self.records.get(offset).cloned()
+                self.records.get(offset)?.clone()
             })
             .collect()
     }
@@ -255,22 +318,35 @@ impl Ring {
 enum Evicted {
     Count,
     Bytes,
+    RequestIdLimit,
 }
 
 /// Why a finalized request was not retained.
 #[derive(Debug, Clone, Copy)]
 enum Skipped {
     Untagged,
-    RequestIdLimit,
     TooLarge,
 }
 
-/// How a retrieval ended.
+/// How a retrieval ended. A denial is counted as not found, like the
+/// response it gets.
 #[derive(Debug, Clone, Copy)]
 enum Retrieved {
     Served,
-    Denied,
     NotFound,
+}
+
+/// Why the authorizer gave no answer. Each denies.
+#[derive(Debug, Clone, Copy)]
+enum AuthorizerFailure {
+    Timeout,
+    Panic,
+}
+
+/// What the authorizer did.
+enum Answer {
+    Access(DiagnosticsAccess),
+    Failed(AuthorizerFailure),
 }
 
 /// The bounded evidence store: the telemetry layer's sink.
@@ -280,9 +356,10 @@ pub(crate) struct EvidenceStore {
     max_bytes: usize,
     ring: Mutex<Ring>,
     stored: AtomicU64,
-    evicted: [AtomicU64; 2],
-    skipped: [AtomicU64; 3],
-    retrievals: [AtomicU64; 3],
+    evicted: [AtomicU64; 3],
+    skipped: [AtomicU64; 2],
+    retrievals: [AtomicU64; 2],
+    authorizer_failures: [AtomicU64; 2],
 }
 
 impl EvidenceStore {
@@ -295,6 +372,7 @@ impl EvidenceStore {
             evicted: Default::default(),
             skipped: Default::default(),
             retrievals: Default::default(),
+            authorizer_failures: Default::default(),
         }
     }
 
@@ -312,6 +390,11 @@ impl EvidenceStore {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn count_authorizer_failure(&self, reason: AuthorizerFailure) {
+        let counter = &self.authorizer_failures[reason as usize];
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn insert(&self, record: Stored) {
         if record.bytes > self.max_bytes {
             self.count_skipped(Skipped::TooLarge);
@@ -319,16 +402,12 @@ impl EvidenceStore {
         }
         let key = (Arc::clone(&record.tenant), record.request_id.clone());
         let mut ring = self.ring();
-        if ring
-            .index
-            .get(&key)
-            .is_some_and(|seqs| seqs.len() >= MAX_RECORDS_PER_REQUEST_ID)
-        {
-            drop(ring);
-            self.count_skipped(Skipped::RequestIdLimit);
-            return;
+        let mut evicted = [0u64; 3];
+        // The newest records of a request id are kept, so records added
+        // under it earlier cannot keep a later one out.
+        if ring.evict_oldest_of(&key) {
+            evicted[Evicted::RequestIdLimit as usize] += 1;
         }
-        let mut evicted = [0u64; 2];
         loop {
             let reason = if ring.records.len() >= self.max_records {
                 Evicted::Count
@@ -344,9 +423,10 @@ impl EvidenceStore {
         }
         let offset = u64::try_from(ring.records.len()).unwrap_or(u64::MAX);
         let seq = ring.first_seq.wrapping_add(offset);
+        ring.live = ring.live.saturating_add(1);
         ring.bytes = ring.bytes.saturating_add(record.bytes);
         ring.index.entry(key).or_default().push(seq);
-        ring.records.push_back(record);
+        ring.records.push_back(Some(record));
         drop(ring);
         self.stored.fetch_add(1, Ordering::Relaxed);
         for (counter, count) in self.evicted.iter().zip(evicted) {
@@ -364,7 +444,7 @@ impl EvidenceStore {
     /// Records and estimated bytes currently retained.
     pub(crate) fn retained(&self) -> (usize, usize) {
         let ring = self.ring();
-        (ring.records.len(), ring.bytes)
+        (ring.live, ring.bytes)
     }
 
     /// Prometheus text for retention and retrievals.
@@ -400,7 +480,11 @@ impl EvidenceStore {
                 "ferrum_alloy_diagnostics_evicted_total",
                 "Retained records evicted to stay within a bound.",
                 "reason",
-                &[("count", &self.evicted[0]), ("bytes", &self.evicted[1])][..],
+                &[
+                    ("count", &self.evicted[0]),
+                    ("bytes", &self.evicted[1]),
+                    ("request_id_limit", &self.evicted[2]),
+                ][..],
             ),
             (
                 "ferrum_alloy_diagnostics_skipped_total",
@@ -408,18 +492,25 @@ impl EvidenceStore {
                 "reason",
                 &[
                     ("untagged", &self.skipped[0]),
-                    ("request_id_limit", &self.skipped[1]),
-                    ("too_large", &self.skipped[2]),
+                    ("too_large", &self.skipped[1]),
                 ][..],
             ),
             (
                 "ferrum_alloy_diagnostics_retrievals_total",
-                "Diagnostic retrieval requests by outcome.",
+                "Diagnostic retrieval requests by outcome; denials count as not_found.",
                 "outcome",
                 &[
                     ("served", &self.retrievals[0]),
-                    ("denied", &self.retrievals[1]),
-                    ("not_found", &self.retrievals[2]),
+                    ("not_found", &self.retrievals[1]),
+                ][..],
+            ),
+            (
+                "ferrum_alloy_diagnostics_authorizer_failures_total",
+                "Diagnostic retrievals denied because the authorizer timed out or panicked.",
+                "reason",
+                &[
+                    ("timeout", &self.authorizer_failures[0]),
+                    ("panic", &self.authorizer_failures[1]),
                 ][..],
             ),
         ] {
@@ -510,6 +601,21 @@ fn peer(request: &Request) -> Option<PeerInfo> {
     })
 }
 
+/// Asks `authorizer` about `request`, within [`AUTHORIZER_TIMEOUT`]. A panic,
+/// in the call or in the future it returns, is a failure like a timeout, so
+/// it neither drops the connection nor gets a response of its own.
+async fn ask(authorizer: &dyn DiagnosticsAuthorizer, request: DiagnosticsRequest) -> Answer {
+    let Ok(future) = catch_unwind(AssertUnwindSafe(|| authorizer.authorize(request))) else {
+        return Answer::Failed(AuthorizerFailure::Panic);
+    };
+    let future = AssertUnwindSafe(future).catch_unwind();
+    match tokio::time::timeout(AUTHORIZER_TIMEOUT, future).await {
+        Ok(Ok(access)) => Answer::Access(access),
+        Ok(Err(_)) => Answer::Failed(AuthorizerFailure::Panic),
+        Err(_) => Answer::Failed(AuthorizerFailure::Timeout),
+    }
+}
+
 impl Retrieval {
     /// Serves `GET /diagnostics/v1/requests/{request_id}`.
     pub(crate) async fn retrieve(
@@ -520,20 +626,25 @@ impl Retrieval {
         let peer = peer(&request);
         let (parts, _body) = request.into_parts();
         let asked = DiagnosticsRequest::new(peer, parts.headers);
-        let access = tokio::time::timeout(AUTHORIZER_TIMEOUT, self.authorizer.authorize(asked));
-        let tenant = match access.await {
-            Ok(DiagnosticsAccess::Tenant(tenant)) if valid_tenant(&tenant) => tenant,
-            Ok(_) => {
-                self.store.count_retrieval(Retrieved::Denied);
+        let tenant = match ask(self.authorizer.as_ref(), asked).await {
+            Answer::Access(DiagnosticsAccess::Tenant(tenant)) if valid_tenant(&tenant) => tenant,
+            Answer::Access(_) => {
+                self.store.count_retrieval(Retrieved::NotFound);
                 return not_found();
             }
-            Err(_) => {
+            Answer::Failed(failure) => {
+                let what = match failure {
+                    AuthorizerFailure::Timeout => "timed out",
+                    AuthorizerFailure::Panic => "panicked",
+                };
+                // Never the request, its credential, or the panic message.
                 tracing::warn!(
                     target: "ferrum_alloy::diagnostics",
                     timeout_ms = AUTHORIZER_TIMEOUT.as_millis() as u64,
-                    "diagnostics authorizer timed out; the request was denied"
+                    "diagnostics authorizer {what}; the request was denied"
                 );
-                self.store.count_retrieval(Retrieved::Denied);
+                self.store.count_authorizer_failure(failure);
+                self.store.count_retrieval(Retrieved::NotFound);
                 return not_found();
             }
         };
@@ -812,8 +923,68 @@ mod tests {
             store.record(evidence(Some("acme"), "retried"));
         }
         assert_eq!(found(&store, "acme", "retried"), MAX_RECORDS_PER_REQUEST_ID);
-        let limited = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_limit"}"#;
+        let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
         assert_eq!(metric(&store, limited), 24);
+        assert_eq!(store.retained().0, 2 + MAX_RECORDS_PER_REQUEST_ID);
+    }
+
+    #[test]
+    fn records_already_under_a_request_id_cannot_keep_a_later_one_out() {
+        let store = EvidenceStore::new(&settings(1_000, 1024 * 1024));
+        store.record(evidence(Some("acme"), "before"));
+        // Records added first under a request id someone else will use.
+        for _ in 0..MAX_RECORDS_PER_REQUEST_ID {
+            store.record(evidence(Some("acme"), "predicted"));
+        }
+        store.record(evidence(Some("acme"), "after"));
+        let genuine = evidence(Some("acme"), "predicted");
+        let span_id = genuine.span_id;
+        store.record(genuine);
+
+        let records = store.find("acme", id("predicted"));
+        assert_eq!(records.len(), MAX_RECORDS_PER_REQUEST_ID);
+        let newest = records.last().unwrap();
+        assert_eq!(newest.span_id, span_id, "the newest record is kept");
+        assert_eq!(found(&store, "acme", "before"), 1);
+        assert_eq!(found(&store, "acme", "after"), 1);
+        let (records, bytes) = store.retained();
+        assert_eq!(records, 2 + MAX_RECORDS_PER_REQUEST_ID);
+        let each = estimate("acme", &id("predicted"), None);
+        let before = estimate("acme", &id("before"), None);
+        let after = estimate("acme", &id("after"), None);
+        assert_eq!(bytes, each * MAX_RECORDS_PER_REQUEST_ID + before + after);
+    }
+
+    #[test]
+    fn slots_of_records_evicted_out_of_order_count_until_they_are_oldest() {
+        let store = EvidenceStore::new(&settings(20, 1024 * 1024));
+        store.record(evidence(Some("acme"), "first"));
+        for _ in 0..=MAX_RECORDS_PER_REQUEST_ID {
+            store.record(evidence(Some("acme"), "retried"));
+        }
+        // The oldest "retried" record left its slot behind "first", and the
+        // slot counts toward the count bound.
+        assert_eq!(store.ring().records.len(), MAX_RECORDS_PER_REQUEST_ID + 2);
+        assert_eq!(store.retained().0, MAX_RECORDS_PER_REQUEST_ID + 1);
+
+        // Evicting "first" frees the slot after it too.
+        for n in 0..3 {
+            store.record(evidence(Some("acme"), &format!("other-{n}")));
+        }
+        assert_eq!(store.ring().records.len(), MAX_RECORDS_PER_REQUEST_ID + 3);
+        assert_eq!(store.retained().0, MAX_RECORDS_PER_REQUEST_ID + 3);
+        assert_eq!(found(&store, "acme", "first"), 0);
+        assert_eq!(found(&store, "acme", "other-2"), 1);
+        let count = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, count), 1);
+        let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+        assert_eq!(metric(&store, limited), 1);
+        let ring = store.ring();
+        assert!(matches!(ring.records.front(), Some(Some(_))));
+        let indexed: usize = ring.index.values().map(Vec::len).sum();
+        assert_eq!(indexed, ring.live);
+        let present = ring.records.iter().filter(|slot| slot.is_some()).count();
+        assert_eq!(present, ring.live);
     }
 
     #[test]

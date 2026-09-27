@@ -33,7 +33,8 @@ full = ["otel", "edge", "tls", "postgres", "openapi", "jwt", "http-client", "com
 ferrum-alloy-telemetry = { workspace = true, features = ["axum", "subscriber"] }
 axum = { workspace = true, features = ["tokio", "http1", "http2", "json", "query", "matched-path", "original-uri", "form"] }
 bytes = { workspace = true }
-futures-util = { workspace = true }
+# `std`: `FutureExt::catch_unwind` for diagnostic authorizers.
+futures-util = { workspace = true, features = ["std"] }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
