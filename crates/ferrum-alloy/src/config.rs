@@ -27,6 +27,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Maximum configuration file size.
 pub const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Upper bound, in milliseconds, of `auth.jwt.jwks_max_age_ms` and
+/// `auth.jwt.jwks_max_stale_ms`: 24 hours.
+pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// The environment variable naming the configuration file.
 pub const CONFIG_FILE_ENV: &str = "FERRUM_ALLOY_CONFIG";
 
@@ -487,12 +491,14 @@ pub struct JwtSettings {
     pub jwks_min_refresh_interval_ms: u64,
     /// Maximum time a fetched key set is trusted before it must be
     /// revalidated, even for known `kid`s. A `Cache-Control: max-age` on the
-    /// JWKS response shortens it, never extends it.
+    /// JWKS response shortens it, never extends it. At most
+    /// [`MAX_JWKS_LIFETIME_MS`].
     #[serde(default = "default_jwks_max_age_ms")]
     pub jwks_max_age_ms: u64,
-    /// How long an expired key set keeps verifying while refreshes fail.
-    /// After that, verification fails closed with `503 auth-unavailable`.
-    /// `0` fails closed as soon as the key set expires.
+    /// How long an expired key set keeps verifying known `kid`s while it is
+    /// revalidated or while refreshes fail. After that, verification fails
+    /// closed with `503 auth-unavailable`. `0` fails closed as soon as the
+    /// key set expires. At most [`MAX_JWKS_LIFETIME_MS`].
     #[serde(default = "default_jwks_max_stale_ms")]
     pub jwks_max_stale_ms: u64,
     /// Maximum JWKS response size.
@@ -721,10 +727,15 @@ fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError
 }
 
 /// `true` for text that is safe to echo as a key name: a short bare TOML
-/// key. Anything else (quoted keys with URLs, long tokens) is redacted.
+/// key. Anything else (quoted keys with URLs, long tokens) is redacted,
+/// including a bare key over 32 bytes that mixes letters and digits, which
+/// looks more like a token than a key name.
 fn is_plain_key(key: &str) -> bool {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
-    !key.is_empty() && key.len() <= 64 && key.bytes().all(plain)
+    let token_like = key.len() > 32
+        && key.bytes().any(|b| b.is_ascii_alphabetic())
+        && key.bytes().any(|b| b.is_ascii_digit());
+    !key.is_empty() && key.len() <= 64 && !token_like && key.bytes().all(plain)
 }
 
 fn redact_segment(segment: &str) -> &str {
@@ -784,7 +795,7 @@ fn redact_schema_message(message: &str) -> String {
         return if is_plain_key(field) {
             format!("unknown field `{field}`{tail}")
         } else {
-            format!("unknown field (name redacted){tail}")
+            format!("unknown field (key redacted){tail}")
         };
     }
     // Field names in these come from the schema, not from the input.
@@ -1181,6 +1192,12 @@ impl AlloyConfig {
             }
             if jwt.jwks_max_age_ms == 0 {
                 error("auth.jwt.jwks_max_age_ms must be greater than zero".into());
+            }
+            if jwt.jwks_max_age_ms > MAX_JWKS_LIFETIME_MS {
+                error("auth.jwt.jwks_max_age_ms must not exceed 24 hours (86400000)".into());
+            }
+            if jwt.jwks_max_stale_ms > MAX_JWKS_LIFETIME_MS {
+                error("auth.jwt.jwks_max_stale_ms must not exceed 24 hours (86400000)".into());
             }
             if jwt.jwks_min_refresh_interval_ms > jwt.jwks_max_age_ms {
                 error(

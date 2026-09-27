@@ -231,6 +231,13 @@ fn schema_errors_name_keys_but_never_values() {
         assert!(rendered.contains(kind), "{rendered}");
         assert!(rendered.contains(&format!("`{key}`")), "{rendered}");
     }
+    // A long bare key mixing letters and digits looks like a token.
+    let token = "synth4token0123456789abcdefghijklmnop";
+    let path = write(&dir, "token.toml", &format!("[database]\n{token} = 1\n"));
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    let rendered = error.to_string();
+    assert!(!rendered.contains(token), "{rendered}");
+    assert!(rendered.contains("(key redacted)"), "{rendered}");
     // The expected type or variants still come through.
     let path = write(&dir, "variant.toml", "[logging]\nformat = \"xml\"\n");
     let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
@@ -265,6 +272,26 @@ fn jwt_key_lifetime_settings_are_validated() {
     let (config, _) = load_from(None, env(&zero), &Overrides::default()).unwrap();
     let error = config.validate(&["jwt"]).unwrap_err().to_string();
     assert!(error.contains("greater than zero"), "{error}");
+
+    // Both bounds are capped at 24 hours.
+    let mut long = jwt.to_vec();
+    long.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "86400001"));
+    long.push(("FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS", "86400001"));
+    let (config, _) = load_from(None, env(&long), &Overrides::default()).unwrap();
+    let error = config.validate(&["jwt"]).unwrap_err().to_string();
+    assert!(
+        error.contains("jwks_max_age_ms must not exceed 24 hours"),
+        "{error}"
+    );
+    assert!(
+        error.contains("jwks_max_stale_ms must not exceed 24 hours"),
+        "{error}"
+    );
+    let mut day = jwt.to_vec();
+    day.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "86400000"));
+    day.push(("FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS", "86400000"));
+    let (config, _) = load_from(None, env(&day), &Overrides::default()).unwrap();
+    config.validate(&["jwt"]).unwrap();
 }
 
 #[test]

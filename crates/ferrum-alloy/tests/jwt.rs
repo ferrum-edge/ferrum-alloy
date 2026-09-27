@@ -90,6 +90,8 @@ struct Jwks {
     cache_control: Arc<Mutex<Option<String>>>,
     /// Response status; set a 5xx to simulate an outage.
     status: Arc<Mutex<StatusCode>>,
+    /// How long each response is held back.
+    delay: Arc<Mutex<Duration>>,
     fetches: Arc<AtomicUsize>,
 }
 
@@ -101,6 +103,22 @@ impl Jwks {
     fn fetches(&self) -> usize {
         self.fetches.load(Ordering::SeqCst)
     }
+
+    fn set_delay(&self, delay: Duration) {
+        *self.delay.lock().unwrap() = delay;
+    }
+
+    /// Waits until the JWKS has been requested `count` times, for fetches
+    /// that run in the background.
+    async fn wait_for_fetches(&self, count: usize) {
+        for _ in 0..500 {
+            if self.fetches() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("expected {count} JWKS fetches, saw {}", self.fetches());
+    }
 }
 
 fn key_set(keys: &[&SigningKey]) -> String {
@@ -111,24 +129,31 @@ async fn jwks_server(keys: &[&SigningKey]) -> Jwks {
     let body = Arc::new(Mutex::new(key_set(keys)));
     let cache_control = Arc::new(Mutex::new(None::<String>));
     let status = Arc::new(Mutex::new(StatusCode::OK));
+    let delay = Arc::new(Mutex::new(Duration::ZERO));
     let fetches = Arc::new(AtomicUsize::new(0));
-    let (b, c, s, f) = (
+    let (b, c, s, d, f) = (
         Arc::clone(&body),
         Arc::clone(&cache_control),
         Arc::clone(&status),
+        Arc::clone(&delay),
         Arc::clone(&fetches),
     );
     let app = Router::new().route(
         "/jwks",
         get(move || {
-            let (b, c, s, f) = (
+            let (b, c, s, d, f) = (
                 Arc::clone(&b),
                 Arc::clone(&c),
                 Arc::clone(&s),
+                Arc::clone(&d),
                 Arc::clone(&f),
             );
             async move {
                 f.fetch_add(1, Ordering::SeqCst);
+                let delay = *d.lock().unwrap();
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
                 let status = *s.lock().unwrap();
                 let mut response = (status, b.lock().unwrap().clone()).into_response();
                 if let Some(value) = c.lock().unwrap().clone() {
@@ -148,6 +173,7 @@ async fn jwks_server(keys: &[&SigningKey]) -> Jwks {
         body,
         cache_control,
         status,
+        delay,
         fetches,
     }
 }
@@ -368,19 +394,24 @@ async fn a_replaced_key_with_the_same_kid_is_picked_up_after_the_max_age() {
 
 #[tokio::test]
 async fn cache_control_max_age_shortens_but_never_extends_the_lifetime() {
-    // (Cache-Control, configured max age ms, sleep ms)
-    for (cache_control, max_age_ms, sleep_ms) in [
+    // (Cache-Control, configured max age ms, refresh interval ms, sleep ms)
+    for (cache_control, max_age_ms, refresh_ms, sleep_ms) in [
         // max-age=1 under a 60 s maximum: revalidated after 1 s.
-        ("public, max-age=1", 60_000, 1_300),
+        ("public, max-age=1", 60_000, 20, 1_300),
         // max-age=3600 over a 600 ms maximum: the maximum wins.
-        ("max-age=3600", 600, 900),
-        // no-store: bounded below by the 20 ms refresh interval.
-        ("no-store", 60_000, 100),
+        ("max-age=3600", 600, 20, 900),
+        // no-store: bounded below by the 250 ms refresh interval.
+        ("no-store", 60_000, 250, 600),
     ] {
         let old = SigningKey::new("old");
         let jwks = jwks_server(&[&old]).await;
         *jwks.cache_control.lock().unwrap() = Some(cache_control.into());
-        let verifier = short_lived(jwks.addr, max_age_ms, 0);
+        let verifier = JwtVerifier::new(&JwtSettings {
+            jwks_max_age_ms: max_age_ms,
+            jwks_max_stale_ms: 0,
+            ..settings(jwks.addr, refresh_ms)
+        })
+        .unwrap();
         let token = old.sign(&claims(), Some("old"));
         assert_eq!(status_of(&verifier, &token).await, 200, "{cache_control}");
         jwks.serve(&[&SigningKey::new("new")]);
@@ -398,12 +429,13 @@ async fn failed_refreshes_serve_stale_keys_only_within_the_grace_period() {
     let token = || key.sign(&claims(), Some("k1"));
     assert_eq!(status_of(&verifier, &token()).await, 200);
 
-    // Expired but within the grace period: the refresh fails and the stale
-    // set keeps verifying.
+    // Expired but within the grace period: the stale set keeps verifying
+    // while the background refresh fails.
     *jwks.status.lock().unwrap() = StatusCode::INTERNAL_SERVER_ERROR;
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(status_of(&verifier, &token()).await, 200);
-    assert_eq!(jwks.fetches(), 2, "the expired set was revalidated");
+    jwks.wait_for_fetches(2).await;
+    assert_eq!(status_of(&verifier, &token()).await, 200);
 
     // Past max age + grace: fail closed with 503.
     tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -427,6 +459,72 @@ async fn a_zero_grace_period_fails_closed_at_the_max_age() {
     *jwks.status.lock().unwrap() = StatusCode::SERVICE_UNAVAILABLE;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(status_of(&verifier, &token).await, 503);
+}
+
+#[tokio::test]
+async fn stale_keys_answer_known_kids_without_waiting_for_a_slow_refresh() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&JwtSettings {
+        jwks_max_age_ms: 300,
+        jwks_max_stale_ms: 60_000,
+        jwks_timeout_ms: 30_000,
+        ..settings(jwks.addr, 20)
+    })
+    .unwrap();
+    let token = key.sign(&claims(), Some("k1"));
+    assert_eq!(status_of(&verifier, &token).await, 200);
+
+    // The JWKS becomes very slow and the cached set goes stale.
+    jwks.set_delay(Duration::from_secs(20));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for _ in 0..5 {
+        let request = status_of(&verifier, &token);
+        let answered = tokio::time::timeout(Duration::from_secs(5), request).await;
+        assert_eq!(
+            answered.expect("a known kid does not wait for the refresh"),
+            200
+        );
+    }
+    jwks.wait_for_fetches(2).await;
+    assert_eq!(jwks.fetches(), 2, "one background refresh");
+}
+
+#[tokio::test]
+async fn a_refresh_outlives_the_caller_that_started_it() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    jwks.set_delay(Duration::from_millis(1_000));
+    // A long refresh interval: an attempt that was never recorded would lock
+    // every caller out for a minute.
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let token = key.sign(&claims(), Some("k1"));
+
+    // The first caller gives up while the fetch is in flight.
+    let gave_up = tokio::time::timeout(Duration::from_millis(100), verifier.verify(&token)).await;
+    assert!(gave_up.is_err(), "the first caller was cancelled mid-fetch");
+
+    // The fetch still completes and its keys are recorded for later callers.
+    jwks.wait_for_fetches(1).await;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(jwks.fetches(), 1, "the cancelled caller's refresh was kept");
+}
+
+#[tokio::test]
+async fn a_slow_successful_refresh_is_used_even_past_its_lifetime() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    // Every fetch takes longer than the 100 ms key-set lifetime.
+    jwks.set_delay(Duration::from_millis(500));
+    let verifier = short_lived(jwks.addr, 100, 0);
+    let token = key.sign(&claims(), Some("k1"));
+    let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
+    assert_eq!(status, 200, "first fetch: {body}");
+    let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
+    assert_eq!(status, 200, "revalidation: {body}");
+    assert_eq!(jwks.fetches(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -533,6 +631,17 @@ fn unsafe_jwt_settings_are_rejected() {
     let mut no_max_age = base.clone();
     no_max_age.jwks_max_age_ms = 0;
     assert!(JwtVerifier::new(&no_max_age).is_err());
+    let day_ms = 24 * 60 * 60 * 1000;
+    let mut long_max_age = base.clone();
+    long_max_age.jwks_max_age_ms = day_ms + 1;
+    assert!(JwtVerifier::new(&long_max_age).is_err());
+    let mut long_max_stale = base.clone();
+    long_max_stale.jwks_max_stale_ms = day_ms + 1;
+    assert!(JwtVerifier::new(&long_max_stale).is_err());
+    let mut day = base.clone();
+    day.jwks_max_age_ms = day_ms;
+    day.jwks_max_stale_ms = day_ms;
+    assert!(JwtVerifier::new(&day).is_ok(), "24 hours is allowed");
     let mut inverted = base;
     inverted.jwks_max_age_ms = 500;
     assert!(
