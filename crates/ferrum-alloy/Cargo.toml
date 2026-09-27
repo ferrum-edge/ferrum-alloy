@@ -29,16 +29,16 @@ jwt = ["dep:jsonwebtoken", "http-client"]
 http-client = ["dep:reqwest", "dep:url", "dep:rustls", "dep:rustls-platform-verifier"]
 compression = ["tower-http/compression-gzip", "tower-http/compression-br"]
 cors = ["tower-http/cors"]
-# Authorized, tenant-scoped diagnostic retrieval (ADR 0008).
-diagnostics = ["dep:ferrum-alloy-diagnostics"]
+# Authorized, tenant-scoped diagnostic retrieval (ADR 0008). `futures-util/std`:
+# `FutureExt::catch_unwind` for diagnostic authorizers.
+diagnostics = ["dep:ferrum-alloy-diagnostics", "futures-util/std"]
 full = ["otel", "edge", "tls", "postgres", "openapi", "openapi-ui", "jwt", "http-client", "compression", "cors", "diagnostics"]
 
 [dependencies]
 ferrum-alloy-telemetry = { workspace = true, features = ["axum", "subscriber"] }
 axum = { workspace = true, features = ["tokio", "http1", "http2", "json", "query", "matched-path", "original-uri", "form"] }
 bytes = { workspace = true }
-# `std`: `FutureExt::catch_unwind` for diagnostic authorizers.
-futures-util = { workspace = true, features = ["std"] }
+futures-util = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
