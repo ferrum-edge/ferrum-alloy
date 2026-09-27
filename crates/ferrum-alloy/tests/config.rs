@@ -295,6 +295,83 @@ fn jwt_key_lifetime_settings_are_validated() {
 }
 
 #[test]
+fn management_rate_limits_are_validated() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert!(limit.enabled, "on by default");
+    assert_eq!((limit.requests_per_second, limit.burst), (10, 20));
+    assert_eq!(limit.max_clients, 1_024);
+    assert_eq!(limit.ipv6_prefix_len, 64);
+    assert!(limit.exempt_networks.is_empty());
+    config.validate(NO_FEATURES).unwrap();
+
+    let bad = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST", "5"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST", "0"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS", "65537"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN", "32"),
+        (
+            "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS",
+            "10.0.0.0/8, ::/0",
+        ),
+    ];
+    let (config, _) = load_from(None, env(&bad), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert_eq!(limit.burst, 5);
+    assert_eq!(limit.exempt_networks.len(), 2);
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    for expected in [
+        "probe_burst must be greater than zero",
+        "management.rate_limit.max_clients must be within 1..=65536",
+        "management.rate_limit.ipv6_prefix_len must be within 48..=128",
+        "management.rate_limit.exempt_networks must not contain",
+    ] {
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+
+    let vars = [(
+        "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS",
+        "::ffff:10.0.0.0/104",
+    )];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("must use IPv4 CIDRs instead of IPv4-mapped IPv6 CIDRs"),
+        "{error}"
+    );
+
+    // The table must hold every client the listener admits at once.
+    let vars = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST", "300"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS", "299"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("max_clients must be at least management.rate_limit.global_burst"),
+        "{error}"
+    );
+    let vars = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN", "56"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS", ""),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert_eq!(limit.ipv6_prefix_len, 56);
+    assert!(
+        limit.exempt_networks.is_empty(),
+        "exemptions can be removed"
+    );
+    config.validate(NO_FEATURES).unwrap();
+
+    // Limits that are not enforced are not checked.
+    let mut off = bad.to_vec();
+    off.push(("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED", "false"));
+    let (config, _) = load_from(None, env(&off), &Overrides::default()).unwrap();
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
 fn lists_and_secret_files_are_supported() {
     let dir = tempfile::tempdir().unwrap();
     let secret = write(&dir, "token", "0123456789abcdef0123456789abcdef\n");
@@ -464,6 +541,7 @@ fn env_var_table_maps_to_real_config_paths() {
             ferrum_alloy::config::EnvKind::Bool => "false",
             ferrum_alloy::config::EnvKind::List => match var.name {
                 "FERRUM_ALLOY_TRUSTED_NETWORKS" => "10.0.0.0/8",
+                "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => "10.0.0.0/8",
                 _ => "a,b",
             },
             _ => match var.name {

@@ -54,6 +54,8 @@ pub enum ProblemKind {
     AuthUnavailable,
     /// The admission limit was reached.
     Overloaded,
+    /// The client or listener exceeded its request rate limit.
+    RateLimited,
     /// Response headers were not produced within the deadline.
     RequestTimeout,
     /// The service is draining for shutdown.
@@ -81,6 +83,7 @@ impl ProblemKind {
             Self::Forbidden => "forbidden",
             Self::AuthUnavailable => "auth-unavailable",
             Self::Overloaded => "overloaded",
+            Self::RateLimited => "rate-limited",
             Self::RequestTimeout => "request-timeout",
             Self::Draining => "draining",
             Self::GatewayRequired => "gateway-required",
@@ -99,6 +102,7 @@ impl ProblemKind {
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RouteNotFound => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::GatewayRequired => StatusCode::FORBIDDEN,
             Self::Overloaded | Self::RequestTimeout | Self::Draining | Self::AuthUnavailable => {
@@ -124,6 +128,7 @@ impl ProblemKind {
             Self::Forbidden => "Forbidden",
             Self::AuthUnavailable => "Authentication unavailable",
             Self::Overloaded => "Service overloaded",
+            Self::RateLimited => "Too many requests",
             Self::RequestTimeout => "Request timed out",
             Self::Draining => "Service is shutting down",
             Self::GatewayRequired => "Gateway required",
