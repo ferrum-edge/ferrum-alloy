@@ -17,7 +17,8 @@ target/release/alloy-bench --scenario <scenario> --payload small --connections 3
 |---|---|
 | `plain` | `axum::serve` with the same router, no Alloy |
 | `alloy` | `AlloyApp` defaults (Alloy's server loop, limits, admission, request id, route labels, metrics, telemetry layer); subscriber with no layers |
-| `alloy-logs` | As `alloy`, with a JSON `fmt` subscriber at `info` writing to a sink (see the note under *Record batching*) |
+| `alloy-logs` | As `alloy`, with Alloy's JSON log layer at `info` writing to a sink. Every result on this page predates that layer and was measured with tracing-subscriber's JSON `fmt` layer instead (see *Record batching* and *Alloy JSON layer*). |
+| `alloy-logs-fmt` | As `alloy-logs`, formatted by tracing-subscriber's JSON `fmt` layer with the same line layout. Added with the Alloy JSON layer and not yet measured. |
 | `otel-sampled` | OpenTelemetry bridge, sampling ratio 1.0, exporter that discards batches |
 | `otel-unsampled` | OpenTelemetry bridge, sampling ratio 0.0 |
 | `otel-unreachable` | Sampling ratio 1.0, OTLP/HTTP to a closed port (200 ms timeout, no retries) |
@@ -75,6 +76,16 @@ The results table above predates this change, and its `alloy-logs` row used trac
 - **JSON logging:** throughput improved by more than the noise floor in every paired run.
 - **Other scenarios:** the changes are within the noise measured on unchanged code, so the only supported claim is that they did not regress.
 - **Raw data:** `examples/bench/results/2026-09-26-macos-m4-record-batching-ab.jsonl`.
+
+## Alloy JSON layer
+
+`init::fmt_layer` now formats `json` logs with Alloy's own layer, `ferrum_alloy_telemetry::json::JsonLayer`, instead of tracing-subscriber's JSON `fmt` layer. The line layout is unchanged; see [configuration](configuration.md#logging).
+
+**Why it should be cheaper:** tracing-subscriber keeps a span's fields as one JSON string. Each `record` call parses that string into a map, adds the new values, and serializes the whole map again. Each event parses the current span's string once more to embed it. Alloy's layer keeps every span field as its rendered JSON value in a span extension, so recording renders only the new values and an event copies stored bytes. Each event is rendered once, into a reused per-thread buffer, and written with one `write_all`. For the request span this removes three parse-and-reserialize passes per request (one per `record_all!` phase) and one parse for every event logged inside it, including the access event.
+
+**Expected effect:** a smaller gap between `alloy-logs` and `alloy`. This is an expectation from the removed work, **not a measurement**. No profile or benchmark was run for this change.
+
+**How to measure it:** both formatters are in the same binary, so one build is enough. Interleave `alloy-logs-fmt` (before) with `alloy-logs` (after) within each repetition, and include `plain` as the noise floor, with the method used under *Record batching*. Profile both scenarios before quoting where the remaining time goes.
 
 ## Discarded run
 
