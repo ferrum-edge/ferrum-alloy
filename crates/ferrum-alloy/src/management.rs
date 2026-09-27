@@ -4,12 +4,17 @@
 //! OpenAPI document require `Authorization: Bearer <management.token>` when a
 //! token is configured; configuration validation refuses a non-loopback
 //! management bind without a token. Every response is `no-store`.
+//!
+//! Requests are rate-limited per client and per listener before any handler
+//! or token check runs, with a separate budget for the probes (see
+//! [`crate::rate_limit`]).
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
@@ -18,7 +23,17 @@ use crate::config::Secret;
 use crate::health::{self, Readiness};
 use crate::lifecycle::Lifecycle;
 use crate::problem::{Problem, ProblemKind};
+use crate::rate_limit::{self, RateLimiter};
 use crate::server::ServerStats;
+
+/// Liveness probe path of the management listener.
+const LIVENESS_PATH: &str = "/livez";
+
+/// Readiness probe path of the management listener.
+const READINESS_PATH: &str = "/readyz";
+
+/// Probe paths, rate-limited separately from the rest of the listener.
+pub(crate) const PROBE_PATHS: [&str; 2] = [LIVENESS_PATH, READINESS_PATH];
 
 #[derive(Clone)]
 pub(crate) struct ManagementState {
@@ -29,6 +44,7 @@ pub(crate) struct ManagementState {
     pub(crate) version: Option<String>,
     pub(crate) app_stats: Arc<ServerStats>,
     pub(crate) openapi: Option<Arc<Vec<u8>>>,
+    pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Constant-time comparison of equal-length byte strings. Length differences
@@ -71,9 +87,9 @@ fn no_store(mut response: Response) -> Response {
 
 pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
     let mut router = Router::new()
-        .route("/livez", get(|| async { health::liveness() }))
+        .route(LIVENESS_PATH, get(|| async { health::liveness() }))
         .route(
-            "/readyz",
+            READINESS_PATH,
             get(|State(state): State<ManagementState>| async move {
                 health::readiness(&state.readiness, &state.lifecycle).await
             }),
@@ -104,6 +120,9 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
                     }
                     let mut text = state.lifecycle.metrics().render_prometheus();
                     text.push_str(&state.app_stats.render_prometheus("app"));
+                    if let Some(limiter) = &state.rate_limiter {
+                        text.push_str(&limiter.render_prometheus());
+                    }
                     no_store(
                         (
                             StatusCode::OK,
@@ -133,9 +152,16 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
             ),
         );
     }
-    router
+    let limiter = state.rate_limiter.clone();
+    let router = router
         .fallback(|| async { Problem::new(ProblemKind::RouteNotFound).into_response() })
-        .with_state(state)
+        .with_state(state);
+    let Some(limiter) = limiter else {
+        return router;
+    };
+    // Outermost, so it also covers the fallback and `405` responses.
+    let layer = middleware::from_fn_with_state(limiter, rate_limit::enforce);
+    router.layer(layer)
 }
 
 pub(crate) fn openapi_response(document: Option<&Vec<u8>>) -> Response {

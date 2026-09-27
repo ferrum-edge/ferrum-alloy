@@ -61,6 +61,16 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_MANAGEMENT_ENABLED` | `management.enabled` | bool |
 | `FERRUM_ALLOY_MANAGEMENT_BIND` | `management.bind` | `IP:port` |
 | `FERRUM_ALLOY_MANAGEMENT_TOKEN` (`_FILE`) | `management.token` | secret |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED` | `management.rate_limit.enabled` | bool |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_REQUESTS_PER_SECOND` | `management.rate_limit.requests_per_second` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST` | `management.rate_limit.burst` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_REQUESTS_PER_SECOND` | `management.rate_limit.global_requests_per_second` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST` | `management.rate_limit.global_burst` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_REQUESTS_PER_SECOND` | `management.rate_limit.probe_requests_per_second` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST` | `management.rate_limit.probe_burst` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_GLOBAL_REQUESTS_PER_SECOND` | `management.rate_limit.probe_global_requests_per_second` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_GLOBAL_BURST` | `management.rate_limit.probe_global_burst` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS` | `management.rate_limit.max_clients` | integer |
 | `FERRUM_ALLOY_LOG_FORMAT` | `logging.format` | `json` / `pretty` / `compact` |
 | `FERRUM_ALLOY_LOG_FILTER` | `logging.filter` | `EnvFilter` directives |
 | `FERRUM_ALLOY_OTLP_ENABLED` | `otlp.enabled` | bool |
@@ -154,6 +164,29 @@ Each section below shows a key, its default, and its meaning.
 | `enabled` | `true` | Serve the management listener. |
 | `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`. |
 | `token` | none | Bearer token (at least 32 characters) for `/health`, `/metrics`, and the OpenAPI document. `/livez` and `/readyz` stay unauthenticated. |
+
+#### `[management.rate_limit]`
+
+Every request to the management listener is rate-limited before any handler or token check runs, so failed token attempts count too. Requests are charged to one of two budgets: **probes** (`/livez` and `/readyz`) and **endpoints** (every other path, including unknown ones). Traffic to one budget never throttles the other, so kubelet and Edge health probes keep working while `/metrics` is saturated.
+
+Each budget is a token bucket for the whole listener plus one per client. A request is admitted only when both buckets hold a token, and a rejected request consumes neither, so one client over its limit cannot drain the listener budget for the others. A rejected request gets `429` Problem Details (`tag:ferrumedge.com,2026:alloy/problem/rate-limited`) with `Retry-After` (whole seconds until a token is available) and `Cache-Control: no-store`.
+
+A client is the transport peer address of the connection, never a header such as `X-Forwarded-For`. IPv6 clients are keyed by their /64 prefix; IPv4-mapped IPv6 addresses count as IPv4. At most `max_clients` clients are tracked individually. A client whose buckets have refilled completely is forgotten when room is needed, and at least once a minute. While the table is full of active clients, further clients share one per-client budget. When you serve `AlloyParts::management_router` yourself, insert `PeerInfo` or axum `ConnectInfo`; requests without either share that same budget.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Enforce the limits. When `false`, the other keys are not validated. |
+| `requests_per_second` | `10` | Sustained endpoint requests per second from one client. |
+| `burst` | `20` | Endpoint requests one client may send at once. |
+| `global_requests_per_second` | `100` | Sustained endpoint requests per second from all clients together. |
+| `global_burst` | `200` | Endpoint requests all clients together may send at once. |
+| `probe_requests_per_second` | `20` | Sustained probe requests per second from one client. |
+| `probe_burst` | `40` | Probe requests one client may send at once. |
+| `probe_global_requests_per_second` | `200` | Sustained probe requests per second from all clients together. |
+| `probe_global_burst` | `400` | Probe requests all clients together may send at once. |
+| `max_clients` | `1024` | Clients tracked individually, `1` to `1000000`. |
+
+Every rate and burst must be greater than zero when `enabled` is `true`. Rejections are counted in `ferrum_alloy_management_rate_limited_total{budget="probes"|"endpoints",scope="client"|"shared"|"global"}` on `/metrics`, where `scope` names the empty bucket: the client's own, the shared one for clients beyond `max_clients`, or the listener's. `ferrum_alloy_management_rate_limit_clients` is the number of clients currently tracked. The application listener, including its own `/livez` and `/readyz`, is not affected.
 
 ### `[health]`
 

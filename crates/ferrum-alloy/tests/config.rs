@@ -295,6 +295,39 @@ fn jwt_key_lifetime_settings_are_validated() {
 }
 
 #[test]
+fn management_rate_limits_are_validated() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert!(limit.enabled, "on by default");
+    assert_eq!((limit.requests_per_second, limit.burst), (10, 20));
+    assert_eq!(limit.max_clients, 1_024);
+    config.validate(NO_FEATURES).unwrap();
+
+    let vars = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST", "5"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST", "0"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS", "1000001"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    assert_eq!(config.management.rate_limit.burst, 5);
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("probe_burst must be greater than zero"),
+        "{error}"
+    );
+    assert!(
+        error.contains("management.rate_limit.max_clients"),
+        "{error}"
+    );
+
+    // Limits that are not enforced are not checked.
+    let mut off = vars.to_vec();
+    off.push(("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED", "false"));
+    let (config, _) = load_from(None, env(&off), &Overrides::default()).unwrap();
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
 fn lists_and_secret_files_are_supported() {
     let dir = tempfile::tempdir().unwrap();
     let secret = write(&dir, "token", "0123456789abcdef0123456789abcdef\n");

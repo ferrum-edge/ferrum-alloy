@@ -252,6 +252,8 @@ pub struct ManagementConfig {
     pub bind: SocketAddr,
     /// Bearer token for detailed health, metrics, and OpenAPI.
     pub token: Option<Secret>,
+    /// Request rate limits.
+    pub rate_limit: ManagementRateLimit,
 }
 
 impl Default for ManagementConfig {
@@ -260,6 +262,61 @@ impl Default for ManagementConfig {
             enabled: true,
             bind: SocketAddr::from(([127, 0, 0, 1], 9090)),
             token: None,
+            rate_limit: ManagementRateLimit::default(),
+        }
+    }
+}
+
+/// Upper bound of `management.rate_limit.max_clients`.
+pub const MAX_RATE_LIMIT_CLIENTS: usize = 1_000_000;
+
+/// Request rate limits of the management listener.
+///
+/// Probes (`/livez` and `/readyz`) and every other path have separate
+/// budgets, so traffic to one never throttles the other. Each budget is a
+/// token bucket for the whole listener plus one per client. A client is the
+/// transport peer address (an IPv6 address by its /64 prefix), never a
+/// request header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ManagementRateLimit {
+    /// Enforce the limits.
+    pub enabled: bool,
+    /// Sustained requests per second from one client, other than probes.
+    pub requests_per_second: u32,
+    /// Requests one client may send at once, other than probes.
+    pub burst: u32,
+    /// Sustained requests per second from all clients together, other than
+    /// probes.
+    pub global_requests_per_second: u32,
+    /// Requests all clients together may send at once, other than probes.
+    pub global_burst: u32,
+    /// Sustained probe requests per second from one client.
+    pub probe_requests_per_second: u32,
+    /// Probe requests one client may send at once.
+    pub probe_burst: u32,
+    /// Sustained probe requests per second from all clients together.
+    pub probe_global_requests_per_second: u32,
+    /// Probe requests all clients together may send at once.
+    pub probe_global_burst: u32,
+    /// Clients tracked individually. When the table is full, clients not in
+    /// it share one per-client budget.
+    pub max_clients: usize,
+}
+
+impl Default for ManagementRateLimit {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            requests_per_second: 10,
+            burst: 20,
+            global_requests_per_second: 100,
+            global_burst: 200,
+            probe_requests_per_second: 20,
+            probe_burst: 40,
+            probe_global_requests_per_second: 200,
+            probe_global_burst: 400,
+            max_clients: 1_024,
         }
     }
 }
@@ -618,6 +675,16 @@ env_vars! {
     "FERRUM_ALLOY_MANAGEMENT_ENABLED" => ["management", "enabled"]: Bool,
     "FERRUM_ALLOY_MANAGEMENT_BIND" => ["management", "bind"]: Str,
     "FERRUM_ALLOY_MANAGEMENT_TOKEN" => ["management", "token"]: Secret,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED" => ["management", "rate_limit", "enabled"]: Bool,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_REQUESTS_PER_SECOND" => ["management", "rate_limit", "requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST" => ["management", "rate_limit", "burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_REQUESTS_PER_SECOND" => ["management", "rate_limit", "global_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST" => ["management", "rate_limit", "global_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_REQUESTS_PER_SECOND" => ["management", "rate_limit", "probe_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST" => ["management", "rate_limit", "probe_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_GLOBAL_REQUESTS_PER_SECOND" => ["management", "rate_limit", "probe_global_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_GLOBAL_BURST" => ["management", "rate_limit", "probe_global_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS" => ["management", "rate_limit", "max_clients"]: Uint,
     "FERRUM_ALLOY_LOG_FORMAT" => ["logging", "format"]: Str,
     "FERRUM_ALLOY_LOG_FILTER" => ["logging", "filter"]: Str,
     "FERRUM_ALLOY_OTLP_ENABLED" => ["otlp", "enabled"]: Bool,
@@ -1124,6 +1191,43 @@ impl AlloyConfig {
             }
             if management.bind == server.bind {
                 error("management.bind must differ from server.bind".into());
+            }
+            let rate = &management.rate_limit;
+            if rate.enabled {
+                for (name, value) in [
+                    (
+                        "management.rate_limit.requests_per_second",
+                        rate.requests_per_second,
+                    ),
+                    ("management.rate_limit.burst", rate.burst),
+                    (
+                        "management.rate_limit.global_requests_per_second",
+                        rate.global_requests_per_second,
+                    ),
+                    ("management.rate_limit.global_burst", rate.global_burst),
+                    (
+                        "management.rate_limit.probe_requests_per_second",
+                        rate.probe_requests_per_second,
+                    ),
+                    ("management.rate_limit.probe_burst", rate.probe_burst),
+                    (
+                        "management.rate_limit.probe_global_requests_per_second",
+                        rate.probe_global_requests_per_second,
+                    ),
+                    (
+                        "management.rate_limit.probe_global_burst",
+                        rate.probe_global_burst,
+                    ),
+                ] {
+                    if value == 0 {
+                        error(format!("{name} must be greater than zero"));
+                    }
+                }
+                if rate.max_clients == 0 || rate.max_clients > MAX_RATE_LIMIT_CLIENTS {
+                    error(format!(
+                        "management.rate_limit.max_clients must be within 1..={MAX_RATE_LIMIT_CLIENTS}"
+                    ));
+                }
             }
         }
 
