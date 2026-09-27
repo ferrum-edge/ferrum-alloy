@@ -16,7 +16,8 @@ RUN mkdir -p /out/certs /out/collector \
  && ./target/debug/gen-demo-certs /out/certs \
  && chmod 0644 /out/certs/* \
  && ./target/debug/ferrum-alloy check --no-env --config examples/edge-observability/alloy.toml --features otel,tls,edge \
- && ./target/debug/ferrum-alloy edge export --manifest examples/edge-observability/ferrum-service.toml --output /out/edge.yaml
+ && ./target/debug/ferrum-alloy edge export --manifest examples/edge-observability/ferrum-service.toml --output /out/edge.export.yaml \
+ && ./target/debug/gen-e2e-edge-config examples/edge-observability/ferrum-service.toml /out/edge.export.yaml /out/edge.yaml
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS alloy
 COPY --from=build /src/target/debug/edge-demo-api /usr/local/bin/edge-demo-api

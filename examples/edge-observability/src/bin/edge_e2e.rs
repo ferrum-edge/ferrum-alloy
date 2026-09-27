@@ -8,17 +8,28 @@
 //! Every assertion is about evidence the components actually exported:
 //! span parentage, identity, and timing attributes read from the
 //! collector's OTLP/JSON file. Nothing is inferred from a mock.
+//!
+//! Besides the happy path it drives the attempt and connection cases: a
+//! gateway retry, a cold and a reused gateway connection, concurrent HTTP/2
+//! streams, a client cancelling mid-body, and a refused backend connection.
+//! Their faults come from inside the compose network (Alloy routes in
+//! `src/main.rs`, proxies from `src/bin/gen_e2e_edge_config.rs`), never from
+//! changes to the host's network.
 
 #![allow(clippy::print_stdout, reason = "command-line test driver")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use ferrum_alloy_diagnostics::model::{DiagnosticReport, Producer, ProducerKind};
+use ferrum_alloy_diagnostics::catalog;
+use ferrum_alloy_diagnostics::model::{
+    Availability, DiagnosticReport, Finding, Leg, Observation, ObservationKind, Producer,
+    ProducerKind, Scope, Trust,
+};
 use ferrum_alloy_diagnostics::otlp::{self, ImportLimits};
 use ferrum_alloy_diagnostics::render::render_text;
 use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
@@ -27,7 +38,7 @@ use http_body_util::{BodyExt, Empty};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 
-type Failure = Box<dyn std::error::Error>;
+type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 fn fail(message: impl Into<String>) -> Failure {
     message.into().into()
@@ -133,6 +144,94 @@ async fn tls_get(
     })
 }
 
+/// Starts a streamed request, reads its first body frame, then closes the
+/// connection: a client cancelling mid-body. Returns the response head and
+/// the number of body bytes read.
+async fn cancel_mid_body(addr: SocketAddr, path: &str) -> Result<(Reply, usize), Failure> {
+    let stream = tokio::net::TcpStream::connect(addr).await?;
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    let connection = tokio::spawn(connection);
+    let request = Request::get(path)
+        .header("host", "localhost")
+        .body(Empty::<Bytes>::new())?;
+    let response = sender.send_request(request).await?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body = response.into_body();
+    let first = body.frame().await.transpose()?;
+    let read = first
+        .and_then(|frame| frame.into_data().ok())
+        .map_or(0, |data| data.len());
+    // Dropping the connection task closes the socket mid-body.
+    connection.abort();
+    Ok((
+        Reply {
+            status,
+            headers,
+            body: String::new(),
+        },
+        read,
+    ))
+}
+
+/// Concurrent requests in the HTTP/2 multiplexing case.
+const STREAMS: usize = 6;
+
+/// Responses from the attempt and connection cases.
+struct Cases {
+    /// `/retry/flaky/{key}`: Alloy fails the first attempt with a 503.
+    retry: Reply,
+    /// The first request through `e2e-reuse`, on a new gateway connection.
+    cold: Reply,
+    /// Sequential requests after `cold`, through the same proxy.
+    later: Vec<Reply>,
+    /// Concurrent requests through `e2e-reuse`.
+    concurrent: Vec<Reply>,
+    /// A long event stream the client abandoned after the first frame.
+    cancelled: Reply,
+    cancelled_bytes: usize,
+    /// `e2e-refused`: nothing listens on the backend port.
+    refused: Reply,
+}
+
+async fn attempt_cases(edge: SocketAddr) -> Result<Cases, Failure> {
+    // A fresh key per run, so a rerun against the same stack fails once again.
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let retry = plain_get(edge, &format!("/retry/flaky/run-{run}")).await?;
+
+    let cold = plain_get(edge, "/reuse/conn").await?;
+    let mut later = Vec::new();
+    for _ in 0..3 {
+        later.push(plain_get(edge, "/reuse/conn").await?);
+    }
+
+    let path = format!("/reuse/gather/{STREAMS}");
+    let mut tasks = Vec::new();
+    for _ in 0..STREAMS {
+        let path = path.clone();
+        tasks.push(tokio::spawn(async move { plain_get(edge, &path).await }));
+    }
+    let mut concurrent = Vec::new();
+    for task in tasks {
+        concurrent.push(task.await??);
+    }
+
+    let (cancelled, cancelled_bytes) = cancel_mid_body(edge, "/orders/events/long").await?;
+    let refused = plain_get(edge, "/refused/items/7").await?;
+    Ok(Cases {
+        retry,
+        cold,
+        later,
+        concurrent,
+        cancelled,
+        cancelled_bytes,
+        refused,
+    })
+}
+
 fn compose(args: &Args, command: &[&str]) -> Result<(), Failure> {
     // `DOCKER_COMPOSE` may name a standalone binary (e.g. `docker-compose`).
     let program = std::env::var("DOCKER_COMPOSE").unwrap_or_else(|_| "docker compose".to_owned());
@@ -166,9 +265,9 @@ fn header(reply: &Reply, name: &str) -> Result<String, Failure> {
         })
 }
 
-/// Spans of one trace from the raw OTLP/JSON, keyed by span id.
-fn raw_spans(text: &str, trace_id: &str) -> BTreeMap<String, Value> {
-    let mut spans = BTreeMap::new();
+/// Every span in the raw OTLP/JSON, tagged with its service and scope.
+fn all_spans(text: &str) -> Vec<Value> {
+    let mut spans = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -184,24 +283,66 @@ fn raw_spans(text: &str, trace_id: &str) -> BTreeMap<String, Value> {
                 .to_owned();
             for scope in resource["scopeSpans"].as_array().into_iter().flatten() {
                 for span in scope["spans"].as_array().into_iter().flatten() {
-                    if span["traceId"]
-                        .as_str()
-                        .map(str::to_ascii_lowercase)
-                        .as_deref()
-                        == Some(trace_id)
-                    {
-                        let mut span = span.clone();
-                        span["x-service"] = json!(service);
-                        span["x-scope"] = scope["scope"]["name"].clone();
-                        if let Some(id) = span["spanId"].as_str() {
-                            spans.insert(id.to_ascii_lowercase(), span);
-                        }
-                    }
+                    let mut span = span.clone();
+                    span["x-service"] = json!(service);
+                    span["x-scope"] = scope["scope"]["name"].clone();
+                    spans.push(span);
                 }
             }
         }
     }
     spans
+}
+
+fn lower(span: &Value, key: &str) -> String {
+    span[key].as_str().unwrap_or_default().to_ascii_lowercase()
+}
+
+/// Spans of one trace from the raw OTLP/JSON, keyed by span id.
+fn raw_spans(text: &str, trace_id: &str) -> BTreeMap<String, Value> {
+    all_spans(text)
+        .into_iter()
+        .filter(|span| lower(span, "traceId") == trace_id)
+        .map(|span| (lower(&span, "spanId"), span))
+        .filter(|(id, _)| !id.is_empty())
+        .collect()
+}
+
+/// The trace of the newest Edge SERVER span for `proxy`, for a response that
+/// carried no `traceparent`. Only used for proxies that receive a single
+/// request per run; the newest span keeps a rerun against the same stack from
+/// matching an earlier run's trace.
+fn proxy_trace(text: &str, proxy: &str) -> Option<String> {
+    all_spans(text)
+        .iter()
+        .filter(|span| {
+            span["x-scope"] == EDGE_SCOPE
+                && span["kind"] == 2
+                && attr_str(span, "gateway.proxy.id") == proxy
+        })
+        .max_by_key(|span| nanos(span, "startTimeUnixNano"))
+        .map(|span| lower(span, "traceId"))
+}
+
+const EDGE_SCOPE: &str = "ferrum-edge";
+const ALLOY_SCOPE: &str = "ferrum-alloy-telemetry";
+
+/// SERVER spans of one producer scope, oldest first. Start times are only
+/// compared within one producer.
+fn servers<'a>(spans: &'a BTreeMap<String, Value>, scope: &str) -> Vec<&'a Value> {
+    let mut found: Vec<&Value> = spans
+        .values()
+        .filter(|s| s["x-scope"] == scope && s["kind"] == 2)
+        .collect();
+    found.sort_by_key(|s| nanos(s, "startTimeUnixNano"));
+    found
+}
+
+fn nanos(span: &Value, key: &str) -> u64 {
+    match &span[key] {
+        Value::String(s) => s.parse().unwrap_or(0),
+        other => other.as_u64().unwrap_or(0),
+    }
 }
 
 fn attr(span: &Value, key: &str) -> Option<Value> {
@@ -340,9 +481,15 @@ async fn main() -> Result<(), Failure> {
         format!("{}", probe.status),
     );
 
-    // 4. Collect exported spans.
+    // 4. Attempt and connection cases. Every fault comes from inside the
+    //    compose network: an Alloy route that fails its first attempt, a
+    //    backend alias only one proxy uses, and a port where nothing listens.
+    let cases = attempt_cases(args.edge).await?;
+
+    // 5. Collect exported spans.
     let traces_path = args.out.join("traces.jsonl");
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut settling = false;
     let text = loop {
         compose(
             &args,
@@ -363,10 +510,24 @@ async fn main() -> Result<(), Failure> {
             .filter(|s| s["kind"] == 2)
             .count()
             >= 2;
-        if has_edge && has_alloy && has_events {
-            break text;
+        let base = has_edge && has_alloy && has_events;
+        let waiting = pending(&cases, &text);
+        if base && waiting.is_empty() {
+            if settling {
+                break text;
+            }
+            // Exact-count checks need any late duplicate too: allow one more
+            // export and flush interval before the final read.
+            settling = true;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            continue;
         }
         if Instant::now() > deadline {
+            if base {
+                // The affected checks fail with the details below.
+                println!("spans still missing for: {}", waiting.join(", "));
+                break text;
+            }
             return Err(fail(format!(
                 "spans did not arrive (edge={has_edge}, alloy={has_alloy}, events={has_events})"
             )));
@@ -374,7 +535,7 @@ async fn main() -> Result<(), Failure> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     };
 
-    // 5. Verify relationships for the item request.
+    // 6. Verify relationships for the item request.
     let spans = raw_spans(&text, &item_trace);
     let edge_servers: Vec<&Value> = spans
         .values()
@@ -474,7 +635,7 @@ async fn main() -> Result<(), Failure> {
         format!("{edge_ttfb:.1} ms"),
     );
 
-    // 6. Streaming: the Alloy span covers the body, not just headers.
+    // 7. Streaming: the Alloy span covers the body, not just headers.
     let event_spans = raw_spans(&text, &events_trace);
     if let Some(stream) = event_spans
         .values()
@@ -496,7 +657,7 @@ async fn main() -> Result<(), Failure> {
         check.that("stream: Alloy span exported", false, "missing");
     }
 
-    // 7. Offline diagnosis of the exported evidence.
+    // 8. Offline diagnosis of the exported evidence.
     let collector = Producer {
         kind: ProducerKind::Collector,
         name: "edge-e2e".into(),
@@ -538,7 +699,597 @@ async fn main() -> Result<(), Failure> {
         render_text(&diagnosis, &findings, &[]),
     )?;
     println!("{}", render_text(&diagnosis, &findings, &[]));
+
+    // 9. Attempt and connection cases: exported spans and their diagnosis.
+    let evidence = Evidence {
+        text: &text,
+        out: &args.out,
+    };
+    check_retry(&mut check, &evidence, &cases.retry);
+    check_connections(&mut check, &evidence, &cases);
+    check_concurrency(&mut check, &evidence, &cases.concurrent);
+    check_cancellation(&mut check, &evidence, &cases);
+    check_refused(&mut check, &evidence, &cases.refused);
     report(&args, &check)
+}
+
+fn collector() -> Producer {
+    Producer {
+        kind: ProducerKind::Collector,
+        name: "edge-e2e".into(),
+        version: None,
+        instance: None,
+    }
+}
+
+/// Exported spans, and where per-case diagnoses are kept.
+struct Evidence<'a> {
+    text: &'a str,
+    out: &'a Path,
+}
+
+impl Evidence<'_> {
+    /// Imports one trace, adds `extra` client observations, runs the rules,
+    /// and saves the report as `diagnosis-<label>.json`.
+    fn diagnose(
+        &self,
+        label: &str,
+        trace: &str,
+        extra: Vec<Observation>,
+    ) -> Result<(DiagnosticReport, Vec<Finding>), String> {
+        let mut diagnosis = otlp::import(
+            self.text,
+            Some(trace),
+            collector(),
+            &ImportLimits::default(),
+        )
+        .map_err(|e| e.to_string())?;
+        diagnosis.observations.extend(extra);
+        let findings = analyze(&diagnosis, &Thresholds::default());
+        diagnosis.findings.clone_from(&findings);
+        let json = serde_json::to_string_pretty(&diagnosis).map_err(|e| e.to_string())?;
+        std::fs::write(self.out.join(format!("diagnosis-{label}.json")), json)
+            .map_err(|e| e.to_string())?;
+        Ok((diagnosis, findings))
+    }
+}
+
+/// A response header the client observed, as diagnosis input.
+fn client_header(name: &str, value: &str) -> Observation {
+    Observation {
+        id: "client:response-header".into(),
+        producer: Producer {
+            kind: ProducerKind::Client,
+            name: "edge-e2e".into(),
+            version: None,
+            instance: None,
+        },
+        kind: ObservationKind::Event,
+        name: catalog::CLIENT_RESPONSE_HEADER.into(),
+        availability: Availability::Measured,
+        value: None,
+        unit: None,
+        boundaries: None,
+        clock: None,
+        interval: None,
+        scope: Scope {
+            leg: Leg::ClientToGateway,
+            service: None,
+            gateway: None,
+            attempt: None,
+        },
+        span: None,
+        attributes: BTreeMap::from([
+            ("header".to_owned(), name.to_owned()),
+            ("value".to_owned(), value.to_owned()),
+        ]),
+        trust: Trust::Unverified,
+        evidence_ref: None,
+        unrecognized: BTreeMap::new(),
+    }
+}
+
+fn codes(findings: &[Finding]) -> String {
+    findings
+        .iter()
+        .map(|f| format!("{} ({})", f.code, f.confidence.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn confirmed(findings: &[Finding]) -> Vec<&str> {
+    findings
+        .iter()
+        .filter(|f| f.confidence.as_str() == "confirmed")
+        .map(|f| f.code.as_str())
+        .collect()
+}
+
+/// The trace id and parent span id Edge echoed in `traceparent`.
+fn echoed(reply: &Reply) -> Option<(String, String)> {
+    let value = header(reply, "traceparent").ok()?;
+    parse_traceparent(&value).ok()
+}
+
+fn body_json(reply: &Reply) -> Value {
+    serde_json::from_str(&reply.body).unwrap_or(Value::Null)
+}
+
+fn span_id(span: &Value) -> String {
+    lower(span, "spanId")
+}
+
+fn parent_id(span: &Value) -> String {
+    lower(span, "parentSpanId")
+}
+
+/// Cases whose spans have not all arrived yet.
+fn pending(cases: &Cases, text: &str) -> Vec<String> {
+    let trace_of = |reply: &Reply| echoed(reply).map(|(trace, _)| trace);
+    let refused = trace_of(&cases.refused).or_else(|| proxy_trace(text, "e2e-refused"));
+    let mut wanted = vec![
+        ("retry".to_owned(), trace_of(&cases.retry), 2),
+        ("cold".to_owned(), trace_of(&cases.cold), 1),
+        ("cancel".to_owned(), trace_of(&cases.cancelled), 1),
+        ("refused".to_owned(), refused, 0),
+    ];
+    for (index, reply) in cases.later.iter().chain(&cases.concurrent).enumerate() {
+        wanted.push((format!("request {index}"), trace_of(reply), 1));
+    }
+    wanted
+        .into_iter()
+        .filter(|(_, trace, alloy)| {
+            let Some(trace) = trace else {
+                return true;
+            };
+            let spans = raw_spans(text, trace);
+            servers(&spans, EDGE_SCOPE).is_empty() || servers(&spans, ALLOY_SCOPE).len() < *alloy
+        })
+        .map(|(label, _, _)| label)
+        .collect()
+}
+
+/// Every timing attribute the tested Edge and Alloy releases put on a SERVER
+/// span. Each is request-scoped; neither producer measures connection setup
+/// (`docs/measurement-semantics.md`).
+const REQUEST_TIMINGS: &[&str] = &[
+    "gateway.latency.total_ms",
+    "gateway.latency.backend_ttfb_ms",
+    "gateway.latency.backend_total_ms",
+    "gateway.latency.processing_ms",
+    "gateway.overhead_ms",
+    "gateway.plugin_execution_ms",
+    "alloy.server.time_to_headers_ms",
+    "alloy.server.body_duration_ms",
+    "alloy.server.duration_ms",
+    "alloy.admission.wait_ms",
+];
+
+/// What diagnosis lists as missing when it cannot rule out connection setup.
+const SETUP_MISSING: &str = "gateway connection setup timing";
+
+/// Evidence that would charge a connection-setup phase to one request: a
+/// SERVER-span timing outside the request-scoped set, an observation the
+/// catalog does not define, a confirmed finding, or an unattributed interval
+/// that does not list setup timing as missing evidence. Unknown is not zero:
+/// setup must stay unmeasured, never appear as a value.
+fn setup_charges(
+    spans: &[&Value],
+    diagnosis: &DiagnosticReport,
+    findings: &[Finding],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for span in spans {
+        for attribute in span["attributes"].as_array().into_iter().flatten() {
+            let key = attribute["key"].as_str().unwrap_or_default();
+            if key.ends_with("_ms") && !REQUEST_TIMINGS.contains(&key) {
+                problems.push(format!("span timing {key}"));
+            }
+        }
+    }
+    for observation in &diagnosis.observations {
+        if !catalog::is_known(&observation.name) {
+            problems.push(format!("observation {}", observation.name));
+        }
+    }
+    for finding in findings {
+        if finding.confidence.as_str() == "confirmed" {
+            problems.push(format!("{} is confirmed", finding.code));
+        }
+        let lists_setup = finding.missing_evidence.iter().any(|m| m == SETUP_MISSING);
+        if finding.code == "alloy.gateway.unattributed_interval" && !lists_setup {
+            problems.push(format!("{} does not list {SETUP_MISSING}", finding.code));
+        }
+    }
+    problems
+}
+
+/// Edge's default fixed retry backoff (`docs/retry.md` in Ferrum Edge).
+const RETRY_BACKOFF_MS: f64 = 100.0;
+
+/// Diagnosis codes that compare gateway and service timings.
+const COMPARISONS: &[&str] = &[
+    "alloy.gateway.unattributed_interval",
+    "alloy.gateway.timings_not_comparable",
+    "alloy.evidence.service_exceeds_gateway",
+];
+
+/// A retried request: two Alloy SERVER spans under one Edge SERVER span, and
+/// a diagnosis that reports several attempts without splitting the gateway's
+/// measurement between them.
+fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
+    check.that(
+        "retry: the client received the recovered response",
+        reply.status == StatusCode::OK && reply.body == "recovered",
+        format!("{} {}", reply.status, reply.body),
+    );
+    let Some((trace, parent)) = echoed(reply) else {
+        check.that("retry: Edge echoed a traceparent", false, "missing");
+        return;
+    };
+    let spans = raw_spans(evidence.text, &trace);
+    let edges = servers(&spans, EDGE_SCOPE);
+    let attempts = servers(&spans, ALLOY_SCOPE);
+    check.that(
+        "retry: one Edge SERVER span and two Alloy SERVER spans",
+        edges.len() == 1 && attempts.len() == 2,
+        format!("edge {}, alloy {}", edges.len(), attempts.len()),
+    );
+    let parents: Vec<String> = attempts.iter().copied().map(parent_id).collect();
+    check.that(
+        "retry: both attempts are children of the same Edge SERVER span",
+        attempts.len() == 2
+            && edges.iter().all(|s| span_id(s) == parent)
+            && parents.iter().all(|p| *p == parent),
+        format!("parents {}; echoed {parent}", parents.join(", ")),
+    );
+    let statuses: Vec<String> = attempts
+        .iter()
+        .map(|s| attr_str(s, "http.response.status_code"))
+        .collect();
+    check.that(
+        "retry: the first attempt answered 503 and the second 200",
+        statuses == ["503", "200"],
+        statuses.join(", "),
+    );
+    let request_id = header(reply, "x-request-id").unwrap_or_default();
+    let carried = attempts.iter().all(|s| {
+        attr_str(s, "alloy.trace.parent") == "accepted_remote"
+            && attr_str(s, "alloy.peer.trust") == "verified_identity"
+            && attr_str(s, "alloy.request_id") == request_id
+    });
+    check.that(
+        "retry: every attempt carried the gateway's trace context and request id",
+        attempts.len() == 2 && carried,
+        format!("request id {request_id}"),
+    );
+    let edge_ttfb = edges
+        .first()
+        .and_then(|s| attr_f64(s, "gateway.latency.backend_ttfb_ms"))
+        .unwrap_or(-1.0);
+    // The attempts ran one after the other, separated by the backoff, so
+    // Edge's single measurement is at least their sum plus the backoff.
+    let headers: Vec<f64> = attempts
+        .iter()
+        .filter_map(|s| attr_f64(s, "alloy.server.time_to_headers_ms"))
+        .collect();
+    let floor = headers.iter().sum::<f64>() + RETRY_BACKOFF_MS;
+    check.that(
+        "retry: Edge backend time-to-headers covers both attempts and the backoff",
+        headers.len() == 2 && edge_ttfb >= floor,
+        format!("Edge {edge_ttfb:.1} ms; attempts {headers:?} ms; floor {floor:.1} ms"),
+    );
+    match evidence.diagnose("retry", &trace, Vec::new()) {
+        Ok((diagnosis, findings)) => {
+            let compared: Vec<&str> = findings
+                .iter()
+                .map(|f| f.code.as_str())
+                .filter(|code| COMPARISONS.contains(code))
+                .collect();
+            let multiple = findings
+                .iter()
+                .any(|f| f.code == "alloy.gateway.multiple_service_attempts");
+            check.that(
+                "retry: diagnosis reports multiple attempts and compares no timings",
+                multiple && compared.is_empty(),
+                codes(&findings),
+            );
+            let scoped = diagnosis
+                .observations
+                .iter()
+                .filter(|o| o.scope.attempt.is_some())
+                .count();
+            let cited = findings
+                .iter()
+                .flat_map(|f| &f.evidence)
+                .filter(|e| e.attempt.is_some())
+                .count();
+            let per_attempt = scoped + cited;
+            check.that(
+                "retry: diagnosis invents no per-attempt breakdown or confirmed finding",
+                per_attempt == 0 && confirmed(&findings).is_empty(),
+                format!(
+                    "{per_attempt} attempt-scoped values; confirmed: {}",
+                    confirmed(&findings).join(", ")
+                ),
+            );
+        }
+        Err(error) => check.that("retry: diagnosis imported", false, error),
+    }
+}
+
+/// A cold and a reused gateway connection: the service's own view of its
+/// connection tells them apart, and neither request's evidence carries a
+/// connection-setup value. The service counts every request per connection,
+/// on any route, so a connection that already carried main-proxy traffic or a
+/// health check does not pass as cold.
+fn check_connections(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases) {
+    let earlier = |reply: &Reply| body_json(reply)["earlier_requests"].as_u64();
+    check.that(
+        "reuse: the first request's gateway connection carried no earlier request",
+        cases.cold.status == StatusCode::OK && earlier(&cases.cold) == Some(0),
+        format!("{} {}", cases.cold.status, cases.cold.body),
+    );
+    let reused = cases
+        .later
+        .iter()
+        .find(|&reply| earlier(reply).is_some_and(|n| n > 0));
+    check.that(
+        "reuse: a later request reused a gateway connection",
+        reused.is_some(),
+        cases
+            .later
+            .iter()
+            .map(|reply| reply.body.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    for (label, reply) in [("cold", Some(&cases.cold)), ("reused", reused)] {
+        let Some(reply) = reply else {
+            continue;
+        };
+        let Some((trace, parent)) = echoed(reply) else {
+            check.that(&format!("reuse: {label} traceparent"), false, "missing");
+            continue;
+        };
+        let spans = raw_spans(evidence.text, &trace);
+        let edges = servers(&spans, EDGE_SCOPE);
+        let services = servers(&spans, ALLOY_SCOPE);
+        check.that(
+            &format!("reuse: the {label} request has one Edge and one child Alloy SERVER span"),
+            edges.len() == 1
+                && services.len() == 1
+                && edges.iter().all(|s| span_id(s) == parent)
+                && services.iter().all(|s| parent_id(s) == parent),
+            format!("edge {}, alloy {}", edges.len(), services.len()),
+        );
+        let name = if label == "cold" {
+            "reuse: the cold request's connection setup stays unmeasured, not zero"
+        } else {
+            "reuse: no connection setup is charged to the reused request"
+        };
+        match evidence.diagnose(&format!("reuse-{label}"), &trace, Vec::new()) {
+            Ok((diagnosis, findings)) => {
+                let both: Vec<&Value> = edges.iter().chain(&services).copied().collect();
+                let problems = setup_charges(&both, &diagnosis, &findings);
+                let detail = if problems.is_empty() {
+                    codes(&findings)
+                } else {
+                    problems.join("; ")
+                };
+                check.that(name, problems.is_empty(), detail);
+            }
+            Err(error) => check.that(name, false, error),
+        }
+    }
+}
+
+/// Concurrent requests that Edge multiplexed as HTTP/2 streams to Alloy.
+fn check_concurrency(check: &mut Check, evidence: &Evidence<'_>, replies: &[Reply]) {
+    let bodies: Vec<Value> = replies.iter().map(body_json).collect();
+    let peaks: Vec<u64> = bodies
+        .iter()
+        .map(|b| b["peak_in_flight"].as_u64().unwrap_or(0))
+        .collect();
+    let full = u64::try_from(STREAMS).unwrap_or(u64::MAX);
+    check.that(
+        "http2: all concurrent requests were inside Alloy at the same time",
+        replies.len() == STREAMS
+            && replies.iter().all(|r| r.status == StatusCode::OK)
+            && peaks.iter().all(|&p| p == full),
+        format!("peaks {peaks:?}"),
+    );
+    let connections: BTreeSet<&str> = bodies.iter().filter_map(|b| b["remote"].as_str()).collect();
+    check.that(
+        "http2: concurrent requests shared gateway connections",
+        bodies.iter().all(|b| b["remote"].is_string())
+            && !connections.is_empty()
+            && connections.len() < STREAMS,
+        format!("{} connection(s) for {STREAMS} requests", connections.len()),
+    );
+
+    let mut problems = Vec::new();
+    let mut streams: Vec<Value> = Vec::new();
+    let mut setup = Vec::new();
+    for (index, reply) in replies.iter().enumerate() {
+        let Some((trace, parent)) = echoed(reply) else {
+            problems.push(format!("request {index}: no traceparent"));
+            continue;
+        };
+        let spans = raw_spans(evidence.text, &trace);
+        let edges = servers(&spans, EDGE_SCOPE);
+        let services = servers(&spans, ALLOY_SCOPE);
+        let counts = (edges.len(), services.len());
+        match (edges.as_slice(), services.as_slice()) {
+            ([edge], [service]) if span_id(edge) == parent && parent_id(service) == parent => {
+                streams.push((*service).clone());
+            }
+            _ => problems.push(format!("request {index}: edge and alloy spans {counts:?}")),
+        }
+        match evidence.diagnose(&format!("http2-{index}"), &trace, Vec::new()) {
+            Ok((diagnosis, findings)) => {
+                let both: Vec<&Value> = edges.iter().chain(&services).copied().collect();
+                setup.extend(setup_charges(&both, &diagnosis, &findings));
+            }
+            Err(error) => setup.push(error),
+        }
+    }
+    check.that(
+        "http2: each stream has one Edge and one child Alloy SERVER span",
+        problems.is_empty() && streams.len() == STREAMS,
+        problems.join("; "),
+    );
+    let versions: Vec<String> = streams
+        .iter()
+        .map(|s| attr_str(s, "network.protocol.version"))
+        .collect();
+    check.that(
+        "http2: Edge reached Alloy over HTTP/2 for every stream",
+        streams.len() == STREAMS && versions.iter().all(|v| v == "2"),
+        versions.join(", "),
+    );
+    // Start and end times come from one Alloy process, so they share a clock.
+    let latest_start = streams
+        .iter()
+        .map(|s| nanos(s, "startTimeUnixNano"))
+        .max()
+        .unwrap_or(0);
+    let earliest_end = streams
+        .iter()
+        .map(|s| nanos(s, "endTimeUnixNano"))
+        .min()
+        .unwrap_or(0);
+    check.that(
+        "http2: the Alloy SERVER spans overlap in time",
+        streams.len() == STREAMS && latest_start > 0 && latest_start < earliest_end,
+        format!("latest start {latest_start}, earliest end {earliest_end}"),
+    );
+    check.that(
+        "http2: no connection setup is charged to a multiplexed request",
+        setup.is_empty(),
+        setup.join("; "),
+    );
+}
+
+/// Length of `/events/long`: 40 events, one every 100 ms.
+const LONG_STREAM_MS: f64 = 4_000.0;
+
+/// A client that leaves mid-body: Alloy finalizes the request once, as
+/// `cancelled`, well before the stream would have ended.
+fn check_cancellation(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases) {
+    let reply = &cases.cancelled;
+    check.that(
+        "cancel: the stream had started when the client left",
+        reply.status == StatusCode::OK && cases.cancelled_bytes > 0,
+        format!("{}, {} bytes read", reply.status, cases.cancelled_bytes),
+    );
+    let Some((trace, parent)) = echoed(reply) else {
+        check.that("cancel: Edge echoed a traceparent", false, "missing");
+        return;
+    };
+    let spans = raw_spans(evidence.text, &trace);
+    let edges = servers(&spans, EDGE_SCOPE);
+    let services = servers(&spans, ALLOY_SCOPE);
+    let outcomes: Vec<String> = services
+        .iter()
+        .map(|s| attr_str(s, "alloy.response.body.outcome"))
+        .collect();
+    let edge_attr = |key: &str| edges.first().map(|s| attr_str(s, key)).unwrap_or_default();
+    let detail = format!(
+        "outcomes [{}]; Edge client.disconnected={}, body.completed={}",
+        outcomes.join(", "),
+        edge_attr("gateway.client.disconnected"),
+        edge_attr("gateway.body.completed")
+    );
+    check.that(
+        "cancel: Edge recorded that the client disconnected",
+        edge_attr("gateway.client.disconnected") == "true",
+        detail.clone(),
+    );
+    check.that(
+        "cancel: Alloy recorded the request exactly once, as cancelled",
+        outcomes == ["cancelled"] && services.iter().all(|s| parent_id(s) == parent),
+        detail,
+    );
+    let body_ms = services
+        .first()
+        .and_then(|s| attr_f64(s, "alloy.server.body_duration_ms"))
+        .unwrap_or(-1.0);
+    check.that(
+        "cancel: the body ended mid-stream",
+        (0.0..LONG_STREAM_MS * 0.75).contains(&body_ms),
+        format!("{body_ms:.1} ms of a {LONG_STREAM_MS:.0} ms stream"),
+    );
+    match evidence.diagnose("cancel", &trace, Vec::new()) {
+        Ok((_, findings)) => {
+            let incomplete = findings
+                .iter()
+                .filter(|f| f.code == "alloy.response.body_incomplete")
+                .count();
+            check.that(
+                "cancel: diagnosis reports one incomplete body and nothing confirmed",
+                incomplete == 1 && confirmed(&findings).is_empty(),
+                codes(&findings),
+            );
+        }
+        Err(error) => check.that("cancel: diagnosis imported", false, error),
+    }
+}
+
+/// What the `connection_failure` token must not be read as (rule `alloy.r007`).
+const NOT_DOWN: &str = "that the service is down";
+
+/// A refused backend connection: Edge's gateway error token and error class,
+/// no service span, and a diagnosis that does not blame the service.
+fn check_refused(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
+    let token = header(reply, "x-gateway-error").unwrap_or_default();
+    check.that(
+        "refused: Edge answered with the connection_failure gateway error",
+        reply.status.is_server_error() && token == "connection_failure",
+        format!("{} X-Gateway-Error: {token}", reply.status),
+    );
+    let trace = echoed(reply)
+        .map(|(trace, _)| trace)
+        .or_else(|| proxy_trace(evidence.text, "e2e-refused"));
+    let Some(trace) = trace else {
+        check.that("refused: Edge exported a SERVER span", false, "missing");
+        return;
+    };
+    let spans = raw_spans(evidence.text, &trace);
+    let edges = servers(&spans, EDGE_SCOPE);
+    let services = servers(&spans, ALLOY_SCOPE);
+    let class = edges
+        .first()
+        .map(|s| attr_str(s, "gateway.error.class"))
+        .unwrap_or_default();
+    check.that(
+        "refused: one Edge SERVER span with an error class and no Alloy span",
+        edges.len() == 1 && services.is_empty() && !class.is_empty(),
+        format!(
+            "edge {}, alloy {}, gateway.error.class {class}",
+            edges.len(),
+            services.len()
+        ),
+    );
+    let observed = client_header("X-Gateway-Error", &token);
+    match evidence.diagnose("refused", &trace, vec![observed]) {
+        Ok((_, findings)) => {
+            let explained = findings.iter().any(|f| {
+                f.code == "alloy.edge.gateway_error_token"
+                    && f.confidence.as_str() == "likely"
+                    && f.does_not_prove.iter().any(|d| d == NOT_DOWN)
+            });
+            let classified = findings
+                .iter()
+                .any(|f| f.code == "alloy.edge.gateway_error_class");
+            check.that(
+                "refused: diagnosis explains the failure without blaming the service",
+                explained && classified && confirmed(&findings).is_empty(),
+                codes(&findings),
+            );
+        }
+        Err(error) => check.that("refused: diagnosis imported", false, error),
+    }
 }
 
 fn report(args: &Args, check: &Check) -> Result<(), Failure> {
