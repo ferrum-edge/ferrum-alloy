@@ -17,7 +17,7 @@ Every timing Alloy exposes, whether as a span attribute, metric, log field, `Ser
 |---|---|
 | `measured` | A value exists. |
 | `unavailable` | The producer supports the measurement but has no value for this request. For example, Edge exports `-1` for `backend_ttfb` on a rejected request. |
-| `unsupported` | The producer version cannot measure it. For example, Edge v0.9.7 has no per-attempt timing. |
+| `unsupported` | The producer version cannot measure it. For example, Edge v0.9.8 has no per-attempt timing. |
 | `not_applicable` | The phase did not happen. For example, a reused connection has no TLS handshake. |
 | `not_sampled` | The trace was not sampled. |
 | `export_pending` | Recorded but not yet exported. |
@@ -62,7 +62,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.
 
-## Ferrum Edge measurements (v0.9.7)
+## Ferrum Edge measurements (v0.9.8 and v0.9.7)
 
 These come from Edge's own spans and logs. Alloy imports them without reinterpreting them. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
 
@@ -72,8 +72,8 @@ These come from Edge's own spans and logs. Alloy imports them without reinterpre
 | `edge.backend.time_to_headers` (`gateway.latency.backend_ttfb_ms`) | First backend dispatch | Response headers available | **All attempts and retry backoff** | For **buffered** responses (`gateway.response.streamed = false`), it equals the full backend exchange including the body. `-1` means unknown, and Alloy records it as `unavailable`. |
 | `edge.backend.total` (`gateway.latency.backend_total_ms`) | First backend dispatch | Body fully buffered | Buffered responses only | Omitted when streaming. |
 | `edge.plugin_execution` | — | — | Cumulative plugin time | Not an interval; never subtracted from anything. |
-| Connection acquisition / DNS / TCP / TLS setup | — | — | — | **Unsupported** in v0.9.7. |
-| Per-attempt response-header wait | — | — | — | **Unsupported** in v0.9.7. |
+| Connection acquisition / DNS / TCP / TLS setup | — | — | — | **Unsupported** in v0.9.8 and v0.9.7. |
+| Per-attempt response-header wait | — | — | — | **Unsupported** in v0.9.8 and v0.9.7. |
 
 HTTP/2 connection setup would be connection-scoped. If Edge ever exports it, Alloy must not charge it to each multiplexed stream; it should be linked as connection-level evidence. A pooled request has no setup phase and is `not_applicable`, not zero.
 
@@ -97,7 +97,7 @@ The result is an **unattributed residual**, never "network latency". It can incl
 - intermediaries;
 - response header transfer (streamed) or body transfer and flow control (buffered).
 
-Because Edge v0.9.7 records no attempt identity, a residual is at most `likely`.
+Because Edge v0.9.8 and v0.9.7 record no attempt identity, a residual is at most `likely`.
 
 A **negative** residual is not clamped to zero. It is reported as `conflicting_evidence` (`alloy.evidence.service_exceeds_gateway`), and the comparison is suppressed.
 

@@ -426,6 +426,29 @@ fn newer_minor_version_preserves_unknown_fields_without_interpreting_them() {
 }
 
 #[test]
+fn request_timeout_token_is_recognized_and_capped_at_likely() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("gateway-error-token.json")).unwrap();
+    report["observations"][0]["attributes"]["value"] = serde_json::json!("request_timeout");
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.edge.gateway_error_token");
+    assert_eq!(finding.confidence, Confidence::Likely);
+    assert!(finding.explanation.contains("before any backend held"));
+    for claim in [
+        "that the service received the request",
+        "which gateway phase used up the deadline",
+    ] {
+        assert!(
+            finding.does_not_prove.iter().any(|d| d == claim),
+            "missing {claim:?}"
+        );
+    }
+}
+
+#[test]
 fn analysis_and_rendering_are_deterministic() {
     for name in [
         "db-operation-dominates.json",

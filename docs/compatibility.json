@@ -1,5 +1,5 @@
 {
-  "$comment": "Tested Alloy-Edge pairing. docs/compatibility.md is the human-readable record. Values here must match .github/workflows/ci.yml and examples/edge-observability/Dockerfile (checked by crates/ferrum-alloy-edge/tests/pairing.rs).",
+  "$comment": "Tested Alloy-Edge pairing. docs/compatibility.md is the human-readable record. edge is the contract baseline; edge_support.tested lists every release CI tests, newest first. Values here must match .github/workflows/ci.yml, examples/edge-observability/Dockerfile, and docs/compatibility.md (checked by crates/ferrum-alloy-edge/tests/pairing.rs). .github/workflows/edge-bump.yml proposes new releases.",
   "record_version": 1,
   "status": "development",
   "alloy": {
@@ -7,10 +7,25 @@
     "published": false
   },
   "edge": {
-    "release": "v0.9.7",
-    "source_commit": "8fed1346ce2e267eb69c03683cb89ea44d785e0b",
-    "image": "ferrumedge/ferrum-edge@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a",
+    "release": "v0.9.8",
+    "source_commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+    "image": "ferrumedge/ferrum-edge@sha256:e5b204f9448d4ec210a57dbd2badece5f4359d5d544522fa48dcdfeef033b385",
     "mode": "file"
+  },
+  "edge_support": {
+    "policy": "The latest Ferrum Edge release and the release before it. Older releases are unsupported.",
+    "tested": [
+      {
+        "release": "v0.9.8",
+        "source_commit": "e27f2109216352c3fe9e67a7014611f3f66daa91",
+        "image": "ferrumedge/ferrum-edge@sha256:e5b204f9448d4ec210a57dbd2badece5f4359d5d544522fa48dcdfeef033b385"
+      },
+      {
+        "release": "v0.9.7",
+        "source_commit": "8fed1346ce2e267eb69c03683cb89ea44d785e0b",
+        "image": "ferrumedge/ferrum-edge@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a"
+      }
+    ]
   },
   "collector": {
     "image": "otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1",

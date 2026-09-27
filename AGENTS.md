@@ -31,7 +31,7 @@ Local cargo runs are permitted in this repository; hosted CI remains the source 
 - Timing fields must be defined in `docs/measurement-semantics.md` and `crates/ferrum-alloy-diagnostics/src/catalog.rs` before they are exposed. Unknown is not zero. Never sum nested durations. Never call a residual "network latency".
 - Diagnosis rules stay deterministic, with no network and no AI. Every finding lists `does_not_prove`. Offline input never yields `confirmed`.
 - New `FERRUM_ALLOY_*` variables go in `config::ENV_VARS` and `docs/configuration.md`; a test enforces this.
-- Changing the pinned Edge image means updating `docs/compatibility.json`, `docs/compatibility.md`, the CI workflow, the demo Dockerfile, and `contract::EDGE_*`; `crates/ferrum-alloy-edge/tests/pairing.rs` enforces this.
+- Changing the pinned Edge image means updating `docs/compatibility.json` (its `edge_support.tested` list is CI's Edge matrix), `docs/compatibility.md`, the demo Dockerfile, `contract::EDGE_*`, and the `*.edge.yaml` fixture headers; `crates/ferrum-alloy-edge/tests/pairing.rs` enforces this. The support window is the latest Edge release plus the previous one. `.github/workflows/edge-bump.yml` proposes new releases.
 - Snapshots (`*.expected.txt`, `*.edge.yaml`) regenerate with `UPDATE_SNAPSHOTS=1`. Review the diff.
 
 ## PRs

@@ -23,7 +23,9 @@ services:
       - "127.0.0.1:18443:8443"
 
   edge:
-    build: { <<: *build, target: edge }
+    # EDGE_IMAGE, when set in the environment, overrides the Dockerfile's
+    # default Edge image (CI's support-window matrix).
+    build: { <<: *build, target: edge, args: [EDGE_IMAGE] }
     depends_on: [alloy, otel-collector]
     environment:
       FERRUM_MODE: file

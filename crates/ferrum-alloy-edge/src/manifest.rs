@@ -4,7 +4,7 @@
 //! **Status: PROPOSED contract.** No Ferrum product consumes this manifest
 //! yet. `ferrum-alloy edge export` turns it into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing* schema
-//! (verified against Edge v0.9.7). Nexus and Foundry consumption is future
+//! (verified against Edge v0.9.8). Nexus and Foundry consumption is future
 //! work; field names may change before any consumer implements them.
 
 use std::collections::BTreeSet;

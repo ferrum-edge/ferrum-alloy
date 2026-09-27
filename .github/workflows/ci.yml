@@ -256,12 +256,35 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
+  edge-support:
+    name: Edge support window
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tested: ${{ steps.read.outputs.tested }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - name: Read the tested Edge releases
+        id: read
+        # Every Edge image the jobs below run comes from this list (newest
+        # first), so a release bump never edits this workflow.
+        run: |
+          tested=$(jq -ce '.edge_support.tested | select(length > 0)' docs/compatibility.json)
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
+
   edge-e2e:
-    name: Ferrum Edge end-to-end
+    name: Ferrum Edge end-to-end (${{ matrix.edge.release }})
+    needs: edge-support
+    strategy:
+      fail-fast: false
+      matrix:
+        edge: ${{ fromJSON(needs.edge-support.outputs.tested) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       COMPOSE_FILE: examples/edge-observability/compose.yaml
+      # Build argument of the demo Dockerfile's edge stage (compose.yaml).
+      EDGE_IMAGE: ${{ matrix.edge.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -270,9 +293,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build the driver
         run: cargo build --locked -p example-edge-observability --bin edge-e2e
-      - name: Build images (Edge v0.9.7, Collector 0.161.0, Alloy)
+      - name: Build images (Edge ${{ matrix.edge.release }}, Collector 0.161.0, Alloy)
         run: docker compose -f "$COMPOSE_FILE" build
-      - name: ferrum-edge validate (v0.9.7) on the generated TLS configuration
+      - name: ferrum-edge validate (${{ matrix.edge.release }}) on the generated TLS configuration
         run: docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge validate -m file -c /config/edge.yaml
       - name: Start the stack
         run: docker compose -f "$COMPOSE_FILE" up -d
@@ -285,7 +308,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: edge-e2e-evidence
+          name: edge-e2e-evidence-${{ matrix.edge.release }}
           path: |
             target/e2e/
             target/e2e-logs.txt
@@ -295,16 +318,23 @@ jobs:
         run: docker compose -f "$COMPOSE_FILE" down -v
 
   edge-config:
-    name: Generated Edge configuration validates
+    name: Generated Edge configuration validates (${{ matrix.edge.release }})
+    needs: edge-support
+    strategy:
+      fail-fast: false
+      matrix:
+        edge: ${{ fromJSON(needs.edge-support.outputs.tested) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - name: ferrum-edge validate (v0.9.7) on the plain-HTTP fixture
+      - name: ferrum-edge validate (${{ matrix.edge.release }}) on the plain-HTTP fixture
+        env:
+          EDGE_IMAGE: ${{ matrix.edge.image }}
         run: |
           set -euxo pipefail
           docker run --rm \
             -e FERRUM_NAMESPACE=retail \
             -v "$PWD/contracts/fixtures/manifests:/config:ro" \
-            ferrumedge/ferrum-edge@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a \
+            "$EDGE_IMAGE" \
             validate -m file -c /config/plain-http.edge.yaml
