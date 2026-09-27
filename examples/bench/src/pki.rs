@@ -119,6 +119,10 @@ impl Pki {
                 ClientAuth::None
             },
             handshake_timeout_ms: 10_000,
+            client_crl_paths: Vec::new(),
+            client_crl_depth: Default::default(),
+            client_crl_unknown_status: Default::default(),
+            client_crl_expiration: Default::default(),
         };
         Ok(ServerTls {
             rustls: Arc::new(config),

@@ -59,6 +59,10 @@ fn pki() -> Pki {
         client_ca_path: Some(pki::write(dir.path(), "ca.pem", &ca.cert_pem)),
         client_auth: ClientAuth::Optional,
         handshake_timeout_ms: 2_000,
+        client_crl_paths: Vec::new(),
+        client_crl_depth: Default::default(),
+        client_crl_unknown_status: Default::default(),
+        client_crl_expiration: Default::default(),
     };
     Pki { _dir: dir, ca, tls }
 }
