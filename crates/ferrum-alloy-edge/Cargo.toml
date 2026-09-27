@@ -6,7 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["axum", "api-gateway", "tracing", "trust", "observability"]
+categories = ["web-programming::http-server", "network-programming"]
 publish.workspace = true
+# Packaged files (docs/release.md). Tests read repository fixtures outside
+# this crate, so they stay out.
+include = ["/src/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
 
 [features]
 default = ["axum"]
