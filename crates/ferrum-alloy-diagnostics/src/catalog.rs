@@ -54,7 +54,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         name: ALLOY_TIME_TO_HEADERS,
         start: "alloy.middleware_entry",
         end: "alloy.response_headers_produced",
-        meaning: "Alloy telemetry middleware entry until the inner service returned response headers to Hyper. Excludes accept, TLS handshake, and request-head parsing before the service was called.",
+        meaning: "Alloy telemetry middleware entry until the inner service returned response headers to Hyper. Excludes accept, TLS handshake, and request-head parsing before the service was called. Its interval ends at the server span start plus this duration, never at the span end, which is body finalization.",
     },
     CatalogEntry {
         name: ALLOY_BODY_DURATION,

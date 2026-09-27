@@ -32,7 +32,7 @@ All are measured by `ferrum-alloy-telemetry`'s layer in the service process, wit
 
 | Name | Start | End | Unit | Exposed as | Limitations |
 |---|---|---|---|---|---|
-| `alloy.server.time_to_headers` | The outermost Alloy telemetry layer is called (`alloy.middleware_entry`) | The inner service returns response headers to Hyper (`alloy.response_headers_produced`) | ms (span), s (metric) | `alloy.server.time_to_headers_ms`; `ferrum_alloy_server_time_to_headers_seconds`; `Server-Timing: alloy;dur=` (opt-in) | Excludes accept, TLS handshake, HTTP/2 stream setup, request-head parsing, and any kernel or Hyper queueing before the service was called. Includes everything inside the layer: admission wait, request-body reads performed before responding, handler work. |
+| `alloy.server.time_to_headers` | The outermost Alloy telemetry layer is called (`alloy.middleware_entry`) | The inner service returns response headers to Hyper (`alloy.response_headers_produced`) | ms (span), s (metric) | `alloy.server.time_to_headers_ms`; `ferrum_alloy_server_time_to_headers_seconds`; `Server-Timing: alloy;dur=` (opt-in) | Excludes accept, TLS handshake, HTTP/2 stream setup, request-head parsing, and any kernel or Hyper queueing before the service was called. Includes everything inside the layer: admission wait, request-body reads performed before responding, handler work. The request's OpenTelemetry span starts at middleware entry but ends at body finalization, so the span end is **not** the headers boundary. Diagnosis derives the header-phase interval as span start plus this duration (see [Dominance](#dominance-of-an-instrumented-operation)). |
 | `alloy.server.body_duration` | Headers produced | Body finalized: final frame handed to Hyper, body error, or drop (`alloy.response_body_finalized`) | ms | `alloy.server.body_duration_ms` | Frames handed to Hyper, not bytes received by the client. Flow control and client read speed affect it. |
 | `alloy.server.duration` | Middleware entry | Body finalized | ms / s | `alloy.server.duration_ms`; `http_server_request_duration_seconds` | Covers streaming. The OpenTelemetry span for the request ends at the same point, because the span is entered during body polls and stamped at finalization. |
 | `alloy.admission.wait` | Admission layer entered | Permit granted or refused | ms | `alloy.admission.wait_ms` | Only when `server.max_in_flight_requests > 0`. The permit is released at response headers; streaming bodies do not hold it. |
@@ -105,7 +105,18 @@ Default reporting thresholds are ≥ 50 ms and ≥ 20 % of the gateway measureme
 
 ## Dominance of an instrumented operation
 
-Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers. Services whose time to headers is under 5 ms are skipped. It never adds operations together. Nesting is validated by the parent-span chain plus same-instance wall-clock intervals (1 ms slack). Without interval proof, the finding stays `likely` and records the missing evidence. An operation longer than an enclosing interval it claims to be inside is `conflicting_evidence`.
+Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers. Services whose time to headers is under 5 ms are skipped. It never adds operations together.
+
+The comparison is limited to the **header phase**. Diagnostic imports give `alloy.server.time_to_headers` an interval that starts at the Alloy SERVER span's start (middleware entry) and ends at that start plus `alloy.server.time_to_headers_ms`. This adds a local duration to one timestamp of the same span; no two timestamps are subtracted. The interval never ends at the span's end, because the span stays open through the response body. If the duration is missing, or ends more than 1 ms after the span ends, the header-phase interval is unknown and none is made up.
+
+Descendants of the service span (parent-span chain) are placed against that interval using same-instance wall-clock intervals only (`service.instance.id`, 1 ms slack):
+
+| Placement | Treatment |
+|---|---|
+| Inside the header phase | Compared. The finding is `likely` from offline evidence (`confirmed` only from verified producers over a verified collection path). An operation that reports a longer duration than the time to headers enclosing it is `conflicting_evidence` (`alloy.evidence.operation_exceeds_enclosing`). |
+| Starts at or after the end of the header phase (for example, work done while the body streams) | Not compared. It cannot explain time that had already passed before it started. |
+| Starts before the end of the header phase but does not fit inside it | Not compared. Part of its duration belongs to the body, and the rule does not split durations. |
+| Unknown: no header-phase interval, no operation interval, or different or unnamed instances | Compared only when no operation is placed inside the header phase. The finding is `unknown`, lists the missing interval evidence, and states in `does_not_prove` that the operation may have run during the response body. |
 
 ## Clock skew
 
