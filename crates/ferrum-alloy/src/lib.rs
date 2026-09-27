@@ -20,6 +20,7 @@ pub mod problem;
 
 mod app;
 mod management;
+mod rate_limit;
 
 mod server;
 
