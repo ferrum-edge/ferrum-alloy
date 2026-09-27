@@ -372,11 +372,7 @@ async fn heuristically_cacheable_responses_withhold_request_specific_headers() {
     // and Last-Modified is only an input to the heuristic, not a requirement.
     for code in [200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501] {
         let status = StatusCode::from_u16(code).unwrap();
-        for headers in [
-            &[][..],
-            &[LAST_MODIFIED][..],
-            &[("etag", "\"v1\"")][..],
-        ] {
+        for headers in [&[][..], &[LAST_MODIFIED][..], &[("etag", "\"v1\"")][..]] {
             assert!(
                 !adds_request_specific_headers(get_request(&[]), status, headers).await,
                 "{code} {headers:?}"
