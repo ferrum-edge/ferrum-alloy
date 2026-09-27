@@ -50,7 +50,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 - Scheduled long-running fuzzing. CI runs a 60-second smoke run per target; longer runs are manual (see [testing.md](testing.md)).
 - Service-side HTTP/3, gRPC tooling, and WebSocket message tracing.
 - Tenant or namespace authorization (application responsibility by design).
-- Publishing to crates.io, and any release process.
+- Publishing to crates.io. CI packages the four library crates and the CLI (examples excluded) without publishing, and [release.md](release.md) holds the release checklist and the open owner decisions.
 
 ## Cross-repository dependencies
 

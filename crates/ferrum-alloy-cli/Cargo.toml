@@ -6,7 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["axum", "cli", "scaffolding", "api-gateway", "diagnostics"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
 publish.workspace = true
+# Packaged files (docs/release.md). The embedded project templates must ship:
+# `src/new.rs` compiles them in with `include_str!`. Tests read repository
+# fixtures outside this crate, so they stay out.
+include = ["/src/**", "/templates/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
 
 [[bin]]
 name = "ferrum-alloy"

@@ -202,6 +202,90 @@ jobs:
         # may not be detected.
         run: cargo deny --locked --manifest-path fuzz/Cargo.toml check -A advisory-not-detected
 
+  package:
+    name: Package dry run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CRATES: >-
+        ferrum-alloy-diagnostics ferrum-alloy-telemetry ferrum-alloy-edge
+        ferrum-alloy ferrum-alloy-cli
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Package every library and CLI crate
+        # Nothing is uploaded: `cargo package` never publishes, and every crate
+        # stays `publish = false` (docs/release.md). The crates depend on each
+        # other and none is in a registry, so Cargo can neither generate a
+        # packaged Cargo.lock nor verify a crate against its siblings (it
+        # resolves them from crates.io). --exclude-lockfile and --no-verify
+        # skip both; the next step builds the packaged sources instead.
+        run: |
+          set -euxo pipefail
+          args=()
+          for crate in $CRATES; do
+            args+=(-p "$crate")
+          done
+          cargo package --locked --no-verify --exclude-lockfile "${args[@]}"
+      - name: Check the packaged files
+        run: |
+          set -euxo pipefail
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "ferrum-alloy") | .version')
+          for crate in $CRATES; do
+            file="target/package/$crate-$version.crate"
+            for path in Cargo.toml README.md LICENSE LICENSE-COMMERCIAL.md; do
+              tar -xzOf "$file" "$crate-$version/$path" > /dev/null
+            done
+            # The license files are symlinks to the repository's; the package
+            # must carry their contents.
+            tar -xzOf "$file" "$crate-$version/LICENSE" | cmp - LICENSE
+            tar -xzOf "$file" "$crate-$version/LICENSE-COMMERCIAL.md" | cmp - LICENSE-COMMERCIAL.md
+          done
+          # Every committed CLI template ships, including dot-directories.
+          diff \
+            <(git ls-files crates/ferrum-alloy-cli/templates \
+              | sed "s|^crates/ferrum-alloy-cli/|ferrum-alloy-cli-$version/|" | sort) \
+            <(tar -tzf "target/package/ferrum-alloy-cli-$version.crate" \
+              | grep "^ferrum-alloy-cli-$version/templates/" | grep -v '/$' | sort)
+      - name: Build the packaged sources on their own
+        # Unpack the packages into a new workspace, outside this one, whose
+        # [patch.crates-io] points each registry dependency on a sibling at
+        # its unpacked package. This catches a file a crate needs but does not
+        # package, such as an include_str! template. The committed lockfile
+        # keeps third-party versions as tested.
+        run: |
+          set -euxo pipefail
+          root="$RUNNER_TEMP/packaged"
+          mkdir -p "$root"
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "ferrum-alloy") | .version')
+          {
+            echo '[workspace]'
+            echo 'resolver = "3"'
+            echo 'members = ["ferrum-alloy*"]'
+            echo '[patch.crates-io]'
+          } > "$root/Cargo.toml"
+          for crate in $CRATES; do
+            tar -xzf "target/package/$crate-$version.crate" -C "$root"
+            echo "$crate = { path = \"$crate-$version\" }" >> "$root/Cargo.toml"
+          done
+          cp Cargo.lock "$root/"
+          cat "$root/Cargo.toml"
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          cargo check --manifest-path "$root/Cargo.toml" --workspace --all-features
+          cargo check --manifest-path "$root/Cargo.toml" --workspace
+          # A sibling must resolve to its unpacked package, never to a
+          # registry crate of the same name.
+          if awk '/^name = /{name=$3} /^source = / && name ~ /^"ferrum-alloy/{found=1} END{exit !found}' \
+            "$root/Cargo.lock"; then
+            echo "::error::a ferrum-alloy crate resolved from a registry"
+            exit 1
+          fi
+
   fuzz-smoke:
     name: Fuzz smoke
     runs-on: ubuntu-latest

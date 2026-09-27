@@ -6,7 +6,7 @@ Ferrum Alloy is a batteries-included toolkit for Rust API services built on [Axu
 
 It works on its own. Behind [Ferrum Edge](https://ferrumedge.com/) it gains a verified, shared request story: which gateway span a service span belongs to, whether the gateway's identity was cryptographically verified, and what the evidence does and does not prove about where time went.
 
-> **Status: in development (pre-release).** Nothing is published to crates.io. APIs and contracts may change. See [docs/implementation-status.md](docs/implementation-status.md) for exactly what is implemented and tested.
+> **Status: in development (pre-release).** Nothing is published to crates.io; see [release readiness](docs/release.md). APIs and contracts may change. See [docs/implementation-status.md](docs/implementation-status.md) for exactly what is implemented and tested.
 
 ```rust
 use axum::{Router, routing::get};
@@ -79,6 +79,7 @@ See [docs/getting-started.md](docs/getting-started.md).
 - [Implementation status](docs/implementation-status.md)
 - [Testing](docs/testing.md): property tests and fuzz targets for untrusted input
 - [Benchmarks](docs/benchmarks.md): local, same-host overhead measurements and their limits
+- [Release readiness](docs/release.md): packaging checks, the release checklist, and open owner decisions
 
 ## Development
 
