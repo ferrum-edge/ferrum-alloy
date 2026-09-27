@@ -208,7 +208,7 @@ Diagnosis is offline and deterministic. It explains only the supplied evidence, 
 |---|---|---|
 | (none) | App builder, config, problems, health, limits, server, telemetry, metrics | axum, hyper, hyper-util, tokio, tower-http (catch-panic), tracing-subscriber |
 | `otel` | OTLP/HTTP trace export with a bounded processor | opentelemetry 0.33, opentelemetry-otlp, tracing-opentelemetry 0.34, reqwest (blocking), rustls |
-| `tls` | rustls listener, client-certificate identity | rustls (ring), tokio-rustls, x509-parser |
+| `tls` | rustls listener, client-certificate identity | rustls (ring), tokio-rustls, x509-parser, zeroize |
 | `edge` | Ferrum Edge trust modes, consumer identity handoff | ferrum-alloy-edge |
 | `postgres` | SQLx pool, readiness, measured acquisition, migrations | sqlx 0.9 (postgres, rustls/ring) |
 | `openapi` | Serve a registered utoipa document; re-exports utoipa and utoipa-axum | utoipa 6, utoipa-axum 0.3 |

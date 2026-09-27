@@ -1,7 +1,8 @@
 //! TLS material reload over real TLS: a rotated certificate and key, client
 //! CA bundle, or CRL is picked up by new handshakes without a restart,
-//! established connections keep their session, and invalid replacements
-//! leave the previous material serving and are counted.
+//! established connections keep their session, sessions are not resumed
+//! across a reload, and invalid replacements leave the previous material
+//! serving and are counted.
 
 #![cfg(feature = "tls")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -25,6 +26,7 @@ use http::{Request, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
+use rustls::HandshakeKind;
 use rustls_pki_types::CertificateDer;
 use support::pki::{self, Ca, Leaf};
 
@@ -98,6 +100,8 @@ struct Connection {
     sender: SendRequest<Empty<Bytes>>,
     /// The leaf certificate the server presented.
     server_cert: CertificateDer<'static>,
+    /// Whether the handshake resumed an earlier session.
+    handshake_kind: Option<HandshakeKind>,
 }
 
 async fn connect(
@@ -113,6 +117,7 @@ async fn connect(
         .await
         .map_err(|e| e.to_string())?;
     let server_cert = stream.get_ref().1.peer_certificates().unwrap()[0].clone();
+    let handshake_kind = stream.get_ref().1.handshake_kind();
     let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|e| e.to_string())?;
@@ -120,6 +125,7 @@ async fn connect(
     Ok(Connection {
         sender,
         server_cert,
+        handshake_kind,
     })
 }
 
@@ -210,6 +216,11 @@ async fn a_rotated_client_ca_refuses_old_client_certificates_and_accepts_new_one
         probe(server.addr, Arc::clone(&new)).await.is_err(),
         "the new client CA is not trusted before the reload"
     );
+    // Until the reload, the old certificate resumes its session, so the
+    // refusal after it shows that the reload dropped the session cache.
+    let resumed = connect(server.addr, Arc::clone(&old)).await.unwrap();
+    assert_eq!(resumed.handshake_kind, Some(HandshakeKind::Resumed));
+    drop(resumed);
 
     replace(pki.tls.client_ca_path.as_ref().unwrap(), &new_ca.cert_pem);
     wait_for(&server.stats.tls_reloads, 1).await;
@@ -239,6 +250,11 @@ async fn a_serial_added_to_the_crl_is_refused_after_the_reload() {
     let config = pki::client_config(&pki.ca, Some(&client));
     let (_, status) = probe(server.addr, Arc::clone(&config)).await.unwrap();
     assert_eq!(status, StatusCode::OK);
+    // Until the reload, the certificate resumes its session, so the refusal
+    // after it shows that the reload dropped the session cache.
+    let resumed = connect(server.addr, Arc::clone(&config)).await.unwrap();
+    assert_eq!(resumed.handshake_kind, Some(HandshakeKind::Resumed));
+    drop(resumed);
 
     replace(&crl_path, pki.ca.crl(&[&client.serial]).pem().unwrap());
     wait_for(&server.stats.tls_reloads, 1).await;
@@ -255,7 +271,11 @@ async fn a_serial_added_to_the_crl_is_refused_after_the_reload() {
 
 #[tokio::test]
 async fn invalid_replacements_keep_the_previous_material_serving_and_are_counted() {
-    for case in ["mismatched key", "unparsable CRL", "two CRLs from one issuer"] {
+    for case in [
+        "mismatched key",
+        "unparsable CRL",
+        "two CRLs from one issuer",
+    ] {
         let pki = Pki::new(ClientAuth::Required);
         let revoked = pki.ca.client(CLIENT);
         let valid = pki.ca.client(CLIENT);
@@ -304,6 +324,12 @@ async fn invalid_replacements_keep_the_previous_material_serving_and_are_counted
             !metrics.contains("ferrum_alloy_tls_reload_failures_total{listener=\"app\"} 0\n"),
             "{case}: {metrics}"
         );
+        for gauge in [
+            "ferrum_alloy_tls_server_cert_not_after_timestamp_seconds{",
+            "ferrum_alloy_tls_client_crl_next_update_timestamp_seconds{",
+        ] {
+            assert!(metrics.contains(gauge), "{case}: {metrics}");
+        }
         server.shutdown().await.unwrap();
     }
 }
