@@ -18,7 +18,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 | JSON logs (`subscriber`) | Alloy's JSON log layer: one line per event, span fields stored as rendered values, output identical to tracing-subscriber's JSON formatter in the layout Alloy uses | `ferrum-alloy-telemetry/tests/json_log.rs` compares every line with tracing-subscriber's formatter, covers escaping of every character and of non-UTF-8 bytes, and pins the access-event line with a snapshot. The performance effect is not yet measured (see [benchmarks](benchmarks.md#alloy-json-layer)). |
 | Metrics | Bounded Prometheus text output with loss counters | `lifecycle.rs`, `app_core.rs` |
 | OTLP export (`otel`) | Explicit pipeline, bounded span processor with counted drops, no global provider installed by constructors, conflict detection with an existing global subscriber | `otel_export.rs`, `telemetry_conflict.rs` |
-| TLS (`tls`) | rustls with the `ring` provider passed explicitly, optional or required client auth against a configured CA | `gateway_mtls.rs` |
+| TLS (`tls`) | rustls with the `ring` provider passed explicitly, optional or required client auth against a configured CA, client certificate revocation against configured CRLs (chain or end-entity depth, fail-closed unknown status and expiry) | `gateway_mtls.rs`, `client_crl.rs` |
 | Ferrum Edge (`edge`) | `standalone`, `gateway_preferred`, `gateway_required` modes; `GatewayContext`; consumer identity accepted only from a verified identity; manifest; file-mode and GitForgeOps YAML export | `ferrum-alloy-edge/tests/{export,policy,pairing}.rs`, e2e |
 | Real gateway e2e | Ferrum Edge v0.9.7 (pinned digest) → Alloy over HTTPS + mTLS, Collector, 19 checks | `examples/edge-observability/src/bin/edge_e2e.rs`: **passed locally** (all 19). CI job `edge-e2e`: see the CI checks. |
 | Generated Edge configuration | Validated by the real `ferrum-edge validate` for both TLS and plain fixtures | CI job `edge-config`; passed locally |
@@ -45,7 +45,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 ## Not implemented
 
 - A live diagnostics endpoint. `diagnose` is offline and file-based only.
-- Certificate revocation (CRL/OCSP) checks for client certificates.
+- OCSP checks for client certificates, and CRL reload without a restart.
 - TLS certificate hot reload.
 - Scheduled long-running fuzzing. CI runs a 60-second smoke run per target; longer runs are manual (see [testing.md](testing.md)).
 - Service-side HTTP/3, gRPC tooling, and WebSocket message tracing.

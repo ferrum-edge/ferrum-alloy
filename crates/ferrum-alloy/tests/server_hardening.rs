@@ -991,6 +991,10 @@ mod tls {
             client_ca_path: None,
             client_auth: ClientAuth::None,
             handshake_timeout_ms: HANDSHAKE_TIMEOUT_MS,
+            client_crl_paths: Vec::new(),
+            client_crl_depth: Default::default(),
+            client_crl_unknown_status: Default::default(),
+            client_crl_expiration: Default::default(),
         });
         config.shutdown.drain_timeout_ms = drain_timeout_ms;
         Tls {

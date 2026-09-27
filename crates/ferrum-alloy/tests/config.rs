@@ -6,7 +6,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use ferrum_alloy::config::{
-    AlloyConfig, ConfigError, ENV_VARS, EdgeMode, Overrides, Secret, load_from,
+    AlloyConfig, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus, ENV_VARS,
+    EdgeMode, Overrides, Secret, load_from,
 };
 
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -632,6 +633,87 @@ fn warnings_flag_risky_but_valid_choices() {
     );
 }
 
+/// A TLS configuration with required client authentication, plus `extra`
+/// variables.
+fn tls_config(extra: &[(&str, &str)]) -> AlloyConfig {
+    let mut vars = vec![
+        ("FERRUM_ALLOY_TLS_CERT_PATH", "c"),
+        ("FERRUM_ALLOY_TLS_KEY_PATH", "k"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CA_PATH", "ca.pem"),
+        ("FERRUM_ALLOY_TLS_CLIENT_AUTH", "required"),
+    ];
+    vars.extend_from_slice(extra);
+    load_from(None, env(&vars), &Overrides::default())
+        .unwrap()
+        .0
+}
+
+#[test]
+fn client_crl_settings_default_to_fail_closed_and_read_the_environment() {
+    let config = tls_config(&[]);
+    let tls = config.server.tls.as_ref().unwrap();
+    assert!(tls.client_crl_paths.is_empty());
+    assert_eq!(tls.client_crl_depth, CrlDepth::Chain);
+    assert_eq!(tls.client_crl_unknown_status, CrlUnknownStatus::Deny);
+    assert_eq!(tls.client_crl_expiration, CrlExpiration::Enforce);
+    assert!(config.validate(&["tls"]).unwrap().is_empty());
+
+    let config = tls_config(&[
+        (
+            "FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS",
+            "root.crl, intermediate.crl",
+        ),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH", "end_entity"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS", "allow"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION", "ignore"),
+    ]);
+    let tls = config.server.tls.as_ref().unwrap();
+    let expected: Vec<PathBuf> = vec!["root.crl".into(), "intermediate.crl".into()];
+    assert_eq!(tls.client_crl_paths, expected);
+    assert_eq!(tls.client_crl_depth, CrlDepth::EndEntity);
+    assert_eq!(tls.client_crl_unknown_status, CrlUnknownStatus::Allow);
+    assert_eq!(tls.client_crl_expiration, CrlExpiration::Ignore);
+    let warnings = config.validate(&["tls"]).unwrap();
+    let text: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(
+        text.iter().any(|w| w.contains("unknown_status = allow")),
+        "{text:?}"
+    );
+    assert!(
+        text.iter().any(|w| w.contains("expiration = ignore")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn client_crl_settings_are_validated() {
+    let mut config = tls_config(&[("FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS", "ca.crl")]);
+    if let Some(tls) = config.server.tls.as_mut() {
+        tls.client_auth = ClientAuth::None;
+        tls.client_ca_path = None;
+    }
+    let error = config.validate(&["tls"]).unwrap_err().to_string();
+    assert!(
+        error.contains("server.tls.client_crl_paths is set but client_auth is none"),
+        "{error}"
+    );
+
+    for (name, value) in [
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH", "end_entity"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS", "allow"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION", "ignore"),
+    ] {
+        let error = tls_config(&[(name, value)])
+            .validate(&["tls"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("has no effect without client_crl_paths"),
+            "{name}: {error}"
+        );
+    }
+}
+
 #[test]
 fn every_environment_variable_is_documented() {
     let docs = std::fs::read_to_string(
@@ -668,6 +750,9 @@ fn env_var_table_maps_to_real_config_paths() {
                 "FERRUM_ALLOY_SERVER_TIMING" => "disabled",
                 "FERRUM_ALLOY_EDGE_MODE" => "standalone",
                 "FERRUM_ALLOY_TLS_CLIENT_AUTH" => "none",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH" => "end_entity",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS" => "allow",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION" => "ignore",
                 _ => "value",
             },
         };

@@ -897,6 +897,7 @@ dependencies = [
  "url",
  "utoipa",
  "utoipa-axum",
+ "x509-parser",
 ]
 
 [[package]]

@@ -226,6 +226,53 @@ pub struct TlsSettings {
     /// TLS handshake timeout.
     #[serde(default = "default_handshake_timeout_ms")]
     pub handshake_timeout_ms: u64,
+    /// PEM or DER certificate revocation lists (CRLs) checked against
+    /// client certificates. Empty disables revocation checking.
+    #[serde(default)]
+    pub client_crl_paths: Vec<PathBuf>,
+    /// Which client certificates have their revocation status checked.
+    #[serde(default)]
+    pub client_crl_depth: CrlDepth,
+    /// How a certificate is treated when no configured CRL covers it.
+    #[serde(default)]
+    pub client_crl_unknown_status: CrlUnknownStatus,
+    /// Whether a CRL past its `nextUpdate` time is rejected.
+    #[serde(default)]
+    pub client_crl_expiration: CrlExpiration,
+}
+
+/// Which certificates of a client chain are checked against the CRLs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrlDepth {
+    /// The leaf and every intermediate. Trust anchors are never checked.
+    #[default]
+    Chain,
+    /// Only the leaf.
+    EndEntity,
+}
+
+/// Policy for a certificate whose revocation status no configured CRL
+/// determines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrlUnknownStatus {
+    /// Refuse the handshake.
+    #[default]
+    Deny,
+    /// Accept the certificate.
+    Allow,
+}
+
+/// Policy for a CRL whose `nextUpdate` time has passed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrlExpiration {
+    /// Fail startup, and refuse handshakes once a loaded CRL expires.
+    #[default]
+    Enforce,
+    /// Keep using the CRL.
+    Ignore,
 }
 
 fn default_handshake_timeout_ms() -> u64 {
@@ -692,6 +739,10 @@ env_vars! {
     "FERRUM_ALLOY_TLS_KEY_PATH" => ["server", "tls", "key_path"]: Str,
     "FERRUM_ALLOY_TLS_CLIENT_CA_PATH" => ["server", "tls", "client_ca_path"]: Str,
     "FERRUM_ALLOY_TLS_CLIENT_AUTH" => ["server", "tls", "client_auth"]: Str,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS" => ["server", "tls", "client_crl_paths"]: List,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH" => ["server", "tls", "client_crl_depth"]: Str,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS" => ["server", "tls", "client_crl_unknown_status"]: Str,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION" => ["server", "tls", "client_crl_expiration"]: Str,
     "FERRUM_ALLOY_SHUTDOWN_READINESS_GRACE_MS" => ["shutdown", "readiness_grace_ms"]: Uint,
     "FERRUM_ALLOY_SHUTDOWN_DRAIN_TIMEOUT_MS" => ["shutdown", "drain_timeout_ms"]: Uint,
     "FERRUM_ALLOY_MANAGEMENT_ENABLED" => ["management", "enabled"]: Bool,
@@ -1241,6 +1292,29 @@ impl AlloyConfig {
             if tls.client_auth == ClientAuth::None && tls.client_ca_path.is_some() {
                 error("server.tls.client_ca_path is set but client_auth is none".into());
             }
+            if tls.client_auth == ClientAuth::None && !tls.client_crl_paths.is_empty() {
+                error("server.tls.client_crl_paths is set but client_auth is none".into());
+            }
+            if tls.client_crl_paths.is_empty() {
+                for (name, changed) in [
+                    (
+                        "server.tls.client_crl_depth",
+                        tls.client_crl_depth != CrlDepth::default(),
+                    ),
+                    (
+                        "server.tls.client_crl_unknown_status",
+                        tls.client_crl_unknown_status != CrlUnknownStatus::default(),
+                    ),
+                    (
+                        "server.tls.client_crl_expiration",
+                        tls.client_crl_expiration != CrlExpiration::default(),
+                    ),
+                ] {
+                    if changed {
+                        error(format!("{name} has no effect without client_crl_paths"));
+                    }
+                }
+            }
         }
 
         let management = &self.management;
@@ -1430,6 +1504,16 @@ impl AlloyConfig {
         }
         if self.trust.identities.is_empty() && !self.trust.networks.is_empty() {
             warn("trust relies on network boundaries only; prefer verified mTLS identities for gateway metadata".into());
+        }
+        if let Some(tls) = &server.tls
+            && !tls.client_crl_paths.is_empty()
+        {
+            if tls.client_crl_unknown_status == CrlUnknownStatus::Allow {
+                warn("server.tls.client_crl_unknown_status = allow accepts client certificates that no configured CRL covers".into());
+            }
+            if tls.client_crl_expiration == CrlExpiration::Ignore {
+                warn("server.tls.client_crl_expiration = ignore keeps using CRLs past their nextUpdate time".into());
+            }
         }
         if self.database.migrate_on_startup {
             warn("database.migrate_on_startup runs migrations from every replica at startup; prefer a separate migration step in production".into());

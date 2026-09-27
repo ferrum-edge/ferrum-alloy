@@ -58,6 +58,10 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_TLS_KEY_PATH` | `server.tls.key_path` | path |
 | `FERRUM_ALLOY_TLS_CLIENT_CA_PATH` | `server.tls.client_ca_path` | path |
 | `FERRUM_ALLOY_TLS_CLIENT_AUTH` | `server.tls.client_auth` | `none` / `optional` / `required` |
+| `FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS` | `server.tls.client_crl_paths` | comma list of paths |
+| `FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH` | `server.tls.client_crl_depth` | `chain` / `end_entity` |
+| `FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS` | `server.tls.client_crl_unknown_status` | `deny` / `allow` |
+| `FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION` | `server.tls.client_crl_expiration` | `enforce` / `ignore` |
 | `FERRUM_ALLOY_SHUTDOWN_READINESS_GRACE_MS` | `shutdown.readiness_grace_ms` | integer |
 | `FERRUM_ALLOY_SHUTDOWN_DRAIN_TIMEOUT_MS` | `shutdown.drain_timeout_ms` | integer |
 | `FERRUM_ALLOY_MANAGEMENT_ENABLED` | `management.enabled` | bool |
@@ -152,6 +156,10 @@ Each section below shows a key, its default, and its meaning.
 | `client_ca_path` | none | CA bundle for client certificates |
 | `client_auth` | `none` | `none`, `optional`, or `required` client certificates |
 | `handshake_timeout_ms` | `10000` | TLS handshake timeout. Handshakes still in progress when shutdown starts are abandoned. |
+| `client_crl_paths` | `[]` | Certificate revocation lists (CRLs) checked against client certificates during the handshake; a revoked certificate fails the handshake. Each file holds one DER CRL, or any number of PEM `X509 CRL` sections. Empty disables revocation checking. Provide exactly one CRL per issuing CA (a full CRL; combine partitioned CRLs into one), because the verifier consults only the first CRL whose issuer matches; two CRLs with the same issuer fail startup. Requires `client_auth` `optional` or `required`; setting the other `client_crl_*` keys without it is an error. Files are read once at startup: a missing, unreadable, or unparsable file, a file without a CRL, or (with `client_crl_expiration = "enforce"`) an expired CRL fails startup with an error that names the file and never quotes it. To pick up a new CRL, restart. The earliest `nextUpdate` time is logged at startup, as a warning when it is less than 24 hours away. |
+| `client_crl_depth` | `chain` | Which certificates are checked: `chain` checks the leaf and every intermediate the client presents, `end_entity` only the leaf. Trust anchors from `client_ca_path` are never checked, so an intermediate placed in `client_ca_path` is never checked either. With `chain`, supply a CRL from each issuing CA, including the root's CRL for its intermediates. |
+| `client_crl_unknown_status` | `deny` | A certificate whose issuer has no CRL in `client_crl_paths` has an unknown status. `deny` fails the handshake; `allow` accepts the certificate, and `ferrum-alloy check` warns about it. |
+| `client_crl_expiration` | `enforce` | A CRL is expired once its `nextUpdate` time has passed. `enforce` fails startup on an expired CRL and fails handshakes once a loaded CRL expires, until a fresh CRL is loaded; `ignore` keeps using the stale CRL, and `ferrum-alloy check` warns about it. |
 
 ### `[shutdown]`
 
