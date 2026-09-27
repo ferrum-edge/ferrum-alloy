@@ -1,0 +1,16 @@
+# libFuzzer dictionary for the config_file target: the text serde and toml
+# put around a supplied value or key, and the canary the target looks for.
+expected=", expected "
+expected_one_of=", expected one of "
+no_fields=", there are no fields"
+in_path="\x0Ain `"
+newline="\x0A"
+toml_newline="\\n"
+backtick="`"
+quote="\""
+unknown_variant="unknown variant `"
+unknown_field="unknown field `"
+canary="fuzz:canary/0123456789"
+section_logging="[logging]"
+section_database="[database]"
+key_format="format = "

@@ -245,6 +245,64 @@ fn schema_errors_name_keys_but_never_values() {
 }
 
 #[test]
+fn schema_errors_ignore_text_inside_unknown_variants_and_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let variant = "x, expected hunter2\ny";
+    let files = [
+        (
+            "[logging]\nformat = \"x, expected hunter2\\ny\"\n",
+            "unknown variant (value redacted), expected one of `json`",
+            "(at `logging.format`)",
+        ),
+        (
+            "[database]\n\"x`, expected hunter2\\n\" = 1\n",
+            "unknown field (key redacted), expected one of `url`",
+            "(at `database`)",
+        ),
+        (
+            "\"x`, expected hunter2\\n\" = 1\n",
+            "unknown field (key redacted), expected one of `service`",
+            "",
+        ),
+        (
+            "[database]\n\"x`, there are no fields\\nin `hunter2\" = 1\n",
+            "unknown field (key redacted), expected one of `url`",
+            "(at `database`)",
+        ),
+    ];
+    let mut errors = Vec::new();
+    for (text, message, at) in files {
+        let path = write(&dir, "echo.toml", text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        errors.push((error, message, at));
+    }
+    let vars = env(&[("FERRUM_ALLOY_LOG_FORMAT", variant)]);
+    let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+    errors.push((
+        error,
+        "unknown variant (value redacted), expected one of `json`",
+        "(at `logging.format`)",
+    ));
+    for (error, message, at) in errors {
+        let rendered = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(matches!(error, ConfigError::Schema(_)), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(rendered.contains(message), "{rendered}");
+        assert!(rendered.contains(at), "{rendered}");
+    }
+    // A short bare key is still named, with the schema's own key list.
+    let path = write(&dir, "typo.toml", "[database]\nurll = 1\n");
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("unknown field `urll`, expected one of `url`"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn jwt_key_lifetime_settings_are_validated() {
     let jwt = [
         ("FERRUM_ALLOY_JWT_ISSUER", "https://issuer.test"),

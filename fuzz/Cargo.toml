@@ -1,8 +1,10 @@
 # cargo-fuzz targets for Ferrum Alloy's untrusted-input parsers.
 #
 # This crate is its own workspace and is excluded from the main one, so
-# workspace builds, the MSRV check, and `cargo deny` are unaffected. It needs a
-# nightly toolchain and cargo-fuzz; see docs/testing.md.
+# workspace builds and the MSRV check are unaffected. Its committed Cargo.lock
+# keeps shared dependencies at the workspace's versions and is checked by
+# `cargo deny` separately. It needs a nightly toolchain and cargo-fuzz; see
+# docs/testing.md.
 [package]
 name = "ferrum-alloy-fuzz"
 version = "0.0.0"

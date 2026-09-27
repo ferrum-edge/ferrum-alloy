@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # Property tests draw the same cases on every run, so a failure reproduces.
+  # Explore other cases locally with a different or unset seed (docs/testing.md).
+  PROPTEST_RNG_SEED: "20260927"
 
 jobs:
   fmt:
@@ -121,7 +124,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo +1.94.0 check --workspace --all-features --locked
+      - run: cargo +1.94.0 check --workspace --all-targets --all-features --locked
 
   generator:
     name: Generated projects
@@ -193,6 +196,11 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+      - name: Fuzz crate dependencies
+        # The fuzz crate is its own workspace with its own lockfile. Alloy's
+        # optional batteries are off there, so an advisory ignored for them
+        # may not be detected.
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check -A advisory-not-detected
 
   fuzz-smoke:
     name: Fuzz smoke
@@ -211,10 +219,13 @@ jobs:
           toolchain: ${{ env.FUZZ_TOOLCHAIN }}
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - name: Start from the audited workspace lockfile
-        # Shared dependencies keep the versions `cargo deny` checks; cargo adds
-        # libfuzzer-sys and drops what the fuzz crate does not use.
-        run: cp Cargo.lock fuzz/Cargo.lock
+      - name: Check the committed fuzz lockfile
+        # cargo-fuzz has no --locked flag. Resolve first and fail, showing the
+        # difference, if fuzz/Cargo.lock would change.
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- fuzz/Cargo.lock
+          cargo "+$FUZZ_TOOLCHAIN" fetch --manifest-path fuzz/Cargo.toml --locked
       - name: Build fuzz targets
         run: cargo "+$FUZZ_TOOLCHAIN" fuzz build
       - name: Run each target for ${{ env.FUZZ_SECONDS }} seconds
@@ -225,8 +236,12 @@ jobs:
             target="$1"
             shift
             mkdir -p "$root/fuzz/corpus/$target"
+            dict=()
+            if [ -f "$root/fuzz/dicts/$target.dict" ]; then
+              dict=("-dict=$root/fuzz/dicts/$target.dict")
+            fi
             cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target" "$root/fuzz/corpus/$target" "$@" -- \
-              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048
+              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 "${dict[@]}"
           }
           run traceparent "$root/fuzz/seeds/traceparent"
           run request_id "$root/fuzz/seeds/request_id"

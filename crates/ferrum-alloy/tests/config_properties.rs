@@ -30,17 +30,23 @@ const INVALID_ENV: &[&str] = &[
 ];
 
 /// Secret-holding variables.
-const SECRET_ENV: &[&str] = &[
-    "FERRUM_ALLOY_MANAGEMENT_TOKEN",
-    "FERRUM_ALLOY_DATABASE_URL",
-];
+const SECRET_ENV: &[&str] = &["FERRUM_ALLOY_MANAGEMENT_TOKEN", "FERRUM_ALLOY_DATABASE_URL"];
 
-/// A value no schema text contains, that parses as no number or boolean, and
-/// that needs no escaping inside a TOML basic string.
-const SECRET: &str = "SYNTH:[A-Za-z0-9/@+=._~-]{4,40}";
+/// A value no schema text contains and that parses as no number or boolean.
+/// It may hold a newline, a backtick, or `, expected `, the text around a
+/// supplied value in serde's messages.
+const SECRET: &str = "SYNTH:([A-Za-z0-9/@+=._~-]|, expected |\n|`){4,40}";
 
 fn env(name: &str, value: &str) -> Vec<(OsString, OsString)> {
     vec![(OsString::from(name), OsString::from(value))]
+}
+
+/// `value` escaped for a TOML basic string.
+fn toml_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 proptest! {
@@ -51,7 +57,8 @@ proptest! {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("alloy.toml");
-        std::fs::write(&path, INVALID_FILES[file].replace("{secret}", &secret)).unwrap();
+        let text = INVALID_FILES[file].replace("{secret}", &toml_escape(&secret));
+        std::fs::write(&path, text).unwrap();
         let Err(error) = load_from(Some(&path), Vec::new(), &Overrides::default()) else {
             return Err(TestCaseError::fail(format!("accepted {:?}", INVALID_FILES[file])));
         };
@@ -81,6 +88,7 @@ proptest! {
         let vars = env(SECRET_ENV[name], &secret);
         let (config, _sources) = load_from(None, vars, &Overrides::default()).unwrap();
         prop_assert!(!config.redacted_toml().contains(&secret));
-        prop_assert!(!format!("{config:?}").contains(&secret));
+        let debug = format!("{config:?}");
+        prop_assert!(!debug.contains(&secret), "debug output leaked the secret");
     }
 }
