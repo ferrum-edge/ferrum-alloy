@@ -6,10 +6,11 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Body;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use ferrum_alloy::config::JwtSettings;
 use ferrum_alloy::jwt::{JwtVerifier, Principal};
@@ -85,22 +86,57 @@ fn claims() -> Value {
 struct Jwks {
     addr: SocketAddr,
     body: Arc<Mutex<String>>,
+    /// `Cache-Control` sent with the JWKS, if any.
+    cache_control: Arc<Mutex<Option<String>>>,
+    /// Response status; set a 5xx to simulate an outage.
+    status: Arc<Mutex<StatusCode>>,
     fetches: Arc<AtomicUsize>,
 }
 
+impl Jwks {
+    fn serve(&self, keys: &[&SigningKey]) {
+        *self.body.lock().unwrap() = key_set(keys);
+    }
+
+    fn fetches(&self) -> usize {
+        self.fetches.load(Ordering::SeqCst)
+    }
+}
+
+fn key_set(keys: &[&SigningKey]) -> String {
+    json!({ "keys": keys.iter().map(|k| k.jwk()).collect::<Vec<_>>() }).to_string()
+}
+
 async fn jwks_server(keys: &[&SigningKey]) -> Jwks {
-    let body = Arc::new(Mutex::new(
-        json!({ "keys": keys.iter().map(|k| k.jwk()).collect::<Vec<_>>() }).to_string(),
-    ));
+    let body = Arc::new(Mutex::new(key_set(keys)));
+    let cache_control = Arc::new(Mutex::new(None::<String>));
+    let status = Arc::new(Mutex::new(StatusCode::OK));
     let fetches = Arc::new(AtomicUsize::new(0));
-    let (b, f) = (Arc::clone(&body), Arc::clone(&fetches));
+    let (b, c, s, f) = (
+        Arc::clone(&body),
+        Arc::clone(&cache_control),
+        Arc::clone(&status),
+        Arc::clone(&fetches),
+    );
     let app = Router::new().route(
         "/jwks",
         get(move || {
-            let (b, f) = (Arc::clone(&b), Arc::clone(&f));
+            let (b, c, s, f) = (
+                Arc::clone(&b),
+                Arc::clone(&c),
+                Arc::clone(&s),
+                Arc::clone(&f),
+            );
             async move {
                 f.fetch_add(1, Ordering::SeqCst);
-                b.lock().unwrap().clone()
+                let status = *s.lock().unwrap();
+                let mut response = (status, b.lock().unwrap().clone()).into_response();
+                if let Some(value) = c.lock().unwrap().clone() {
+                    response
+                        .headers_mut()
+                        .insert(http::header::CACHE_CONTROL, value.parse().unwrap());
+                }
+                response
             }
         }),
     );
@@ -110,6 +146,8 @@ async fn jwks_server(keys: &[&SigningKey]) -> Jwks {
     Jwks {
         addr,
         body,
+        cache_control,
+        status,
         fetches,
     }
 }
@@ -121,6 +159,8 @@ fn settings(jwks: SocketAddr, refresh_ms: u64) -> JwtSettings {
         algorithms: vec!["ES256".into()],
         jwks_url: Some(format!("http://127.0.0.1:{}/jwks", jwks.port())),
         jwks_min_refresh_interval_ms: refresh_ms,
+        jwks_max_age_ms: 300_000,
+        jwks_max_stale_ms: 300_000,
         jwks_max_bytes: 64 * 1024,
         jwks_timeout_ms: 2_000,
         leeway_seconds: 0,
@@ -267,6 +307,148 @@ async fn rotated_keys_are_picked_up_after_the_refresh_interval() {
     assert_eq!(jwks.fetches.load(Ordering::SeqCst), 2);
 }
 
+/// A verifier with a short key-set lifetime for the expiry tests.
+fn short_lived(jwks: SocketAddr, max_age_ms: u64, max_stale_ms: u64) -> JwtVerifier {
+    let config = JwtSettings {
+        jwks_max_age_ms: max_age_ms,
+        jwks_max_stale_ms: max_stale_ms,
+        ..settings(jwks, 20)
+    };
+    JwtVerifier::new(&config).unwrap()
+}
+
+async fn status_of(verifier: &JwtVerifier, token: &str) -> StatusCode {
+    call(&protected(verifier), Some(token)).await.0
+}
+
+#[tokio::test]
+async fn removed_keys_stop_verifying_after_the_max_age() {
+    let old = SigningKey::new("old");
+    let jwks = jwks_server(&[&old]).await;
+    let verifier = short_lived(jwks.addr, 600, 0);
+    let token = || old.sign(&claims(), Some("old"));
+    assert_eq!(status_of(&verifier, &token()).await, 200);
+
+    // The issuer retires `old`. Within the max age the cached set is used.
+    let new = SigningKey::new("new");
+    jwks.serve(&[&new]);
+    assert_eq!(status_of(&verifier, &token()).await, 200);
+    assert_eq!(jwks.fetches(), 1, "fresh keys are cached");
+
+    // After the max age, the known kid alone forces revalidation, and the
+    // removed key is no longer trusted.
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(status_of(&verifier, &token()).await, 401);
+    assert_eq!(jwks.fetches(), 2, "expired keys are revalidated");
+    for _ in 0..3 {
+        assert_eq!(status_of(&verifier, &token()).await, 401);
+    }
+    let fresh = new.sign(&claims(), Some("new"));
+    assert_eq!(status_of(&verifier, &fresh).await, 200);
+    assert_eq!(jwks.fetches(), 2, "the refreshed set is cached again");
+}
+
+#[tokio::test]
+async fn a_replaced_key_with_the_same_kid_is_picked_up_after_the_max_age() {
+    let first = SigningKey::new("k1");
+    let jwks = jwks_server(&[&first]).await;
+    let verifier = short_lived(jwks.addr, 600, 0);
+    let first_token = first.sign(&claims(), Some("k1"));
+    assert_eq!(status_of(&verifier, &first_token).await, 200);
+
+    let second = SigningKey::new("k1");
+    jwks.serve(&[&second]);
+    let second_token = second.sign(&claims(), Some("k1"));
+    assert_eq!(status_of(&verifier, &second_token).await, 401, "cached");
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(status_of(&verifier, &second_token).await, 200);
+    assert_eq!(status_of(&verifier, &first_token).await, 401);
+    assert_eq!(jwks.fetches(), 2);
+}
+
+#[tokio::test]
+async fn cache_control_max_age_shortens_but_never_extends_the_lifetime() {
+    // (Cache-Control, configured max age ms, sleep ms)
+    for (cache_control, max_age_ms, sleep_ms) in [
+        // max-age=1 under a 60 s maximum: revalidated after 1 s.
+        ("public, max-age=1", 60_000, 1_300),
+        // max-age=3600 over a 600 ms maximum: the maximum wins.
+        ("max-age=3600", 600, 900),
+        // no-store: bounded below by the 20 ms refresh interval.
+        ("no-store", 60_000, 100),
+    ] {
+        let old = SigningKey::new("old");
+        let jwks = jwks_server(&[&old]).await;
+        *jwks.cache_control.lock().unwrap() = Some(cache_control.into());
+        let verifier = short_lived(jwks.addr, max_age_ms, 0);
+        let token = old.sign(&claims(), Some("old"));
+        assert_eq!(status_of(&verifier, &token).await, 200, "{cache_control}");
+        jwks.serve(&[&SigningKey::new("new")]);
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        assert_eq!(status_of(&verifier, &token).await, 401, "{cache_control}");
+        assert_eq!(jwks.fetches(), 2, "{cache_control}");
+    }
+}
+
+#[tokio::test]
+async fn failed_refreshes_serve_stale_keys_only_within_the_grace_period() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = short_lived(jwks.addr, 300, 1_500);
+    let token = || key.sign(&claims(), Some("k1"));
+    assert_eq!(status_of(&verifier, &token()).await, 200);
+
+    // Expired but within the grace period: the refresh fails and the stale
+    // set keeps verifying.
+    *jwks.status.lock().unwrap() = StatusCode::INTERNAL_SERVER_ERROR;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(status_of(&verifier, &token()).await, 200);
+    assert_eq!(jwks.fetches(), 2, "the expired set was revalidated");
+
+    // Past max age + grace: fail closed with 503.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let (status, body, _) = call(&protected(&verifier), Some(&token())).await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("auth-unavailable"), "{body}");
+
+    // The issuer recovers: the next request refreshes and succeeds.
+    *jwks.status.lock().unwrap() = StatusCode::OK;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(status_of(&verifier, &token()).await, 200);
+}
+
+#[tokio::test]
+async fn a_zero_grace_period_fails_closed_at_the_max_age() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = short_lived(jwks.addr, 300, 0);
+    let token = key.sign(&claims(), Some("k1"));
+    assert_eq!(status_of(&verifier, &token).await, 200);
+    *jwks.status.lock().unwrap() = StatusCode::SERVICE_UNAVAILABLE;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(status_of(&verifier, &token).await, 503);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_requests_on_an_expired_set_refresh_once() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = short_lived(jwks.addr, 400, 0);
+    let token = key.sign(&claims(), Some("k1"));
+    verifier.verify(&token).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+        let (verifier, token) = (verifier.clone(), token.clone());
+        tasks.spawn(async move { verifier.verify(&token).await.is_ok() });
+    }
+    while let Some(accepted) = tasks.join_next().await {
+        assert!(accepted.unwrap());
+    }
+    assert_eq!(jwks.fetches(), 2, "one refresh for all callers");
+}
+
 #[tokio::test]
 async fn kid_less_tokens_need_an_unambiguous_key_set() {
     let a = SigningKey::new("a");
@@ -345,7 +527,16 @@ fn unsafe_jwt_settings_are_rejected() {
     let mut hmac = base.clone();
     hmac.algorithms = vec!["HS256".into()];
     assert!(JwtVerifier::new(&hmac).is_err());
-    let mut none = base;
+    let mut none = base.clone();
     none.algorithms = vec!["none".into()];
     assert!(JwtVerifier::new(&none).is_err());
+    let mut no_max_age = base.clone();
+    no_max_age.jwks_max_age_ms = 0;
+    assert!(JwtVerifier::new(&no_max_age).is_err());
+    let mut inverted = base;
+    inverted.jwks_max_age_ms = 500;
+    assert!(
+        JwtVerifier::new(&inverted).is_err(),
+        "the max age cannot be shorter than the refresh interval"
+    );
 }

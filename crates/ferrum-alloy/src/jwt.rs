@@ -11,6 +11,12 @@
 //!   verify it;
 //! * JWKS refreshes are single-flight, rate-limited (also for unknown
 //!   `kid`s), time-bounded, size-bounded, and never follow redirects;
+//! * a fetched key set is trusted for a bounded lifetime
+//!   (`jwks_max_age_ms`, shortened by the response's `Cache-Control:
+//!   max-age`) and then revalidated even for known `kid`s, so a key removed
+//!   from the JWKS stops verifying;
+//! * while refreshes fail, an expired key set keeps verifying for at most
+//!   `jwks_max_stale_ms`, then verification fails closed;
 //! * a JWKS outage is `503 auth-unavailable`, not `401`.
 //!
 //! Authentication proves who the caller is; [`Authorize`] is where the
@@ -108,7 +114,34 @@ struct Key {
 
 struct KeyState {
     keys: Arc<Vec<Key>>,
+    /// When the current keys were requested; `None` before the first
+    /// successful fetch.
+    fetched_at: Option<Instant>,
+    /// How long the current keys are fresh.
+    lifetime: Duration,
     last_attempt: Option<Instant>,
+    /// Completed refresh attempts, successful or not.
+    attempts: u64,
+}
+
+/// A snapshot of the cached key set.
+struct Cached {
+    keys: Arc<Vec<Key>>,
+    freshness: Freshness,
+    /// [`KeyState::attempts`] when the snapshot was taken.
+    attempts: u64,
+}
+
+/// How much the cached key set may be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Freshness {
+    /// Within its lifetime.
+    Fresh,
+    /// Expired, but within `jwks_max_stale_ms`: usable only while refreshes
+    /// fail or are rate limited.
+    Stale,
+    /// Never fetched, or past the stale bound: never used.
+    Expired,
 }
 
 struct Inner {
@@ -120,6 +153,8 @@ struct Inner {
     client: reqwest::Client,
     max_bytes: usize,
     min_refresh: Duration,
+    max_age: Duration,
+    max_stale: Duration,
     state: RwLock<KeyState>,
     refresh: tokio::sync::Mutex<()>,
 }
@@ -182,6 +217,17 @@ impl JwtVerifier {
                 "auth.jwt requires issuer and audiences".into(),
             ));
         }
+        if settings.jwks_max_age_ms == 0 {
+            return Err(AlloyError::Integration(
+                "auth.jwt.jwks_max_age_ms must be greater than zero".into(),
+            ));
+        }
+        if settings.jwks_min_refresh_interval_ms > settings.jwks_max_age_ms {
+            return Err(AlloyError::Integration(
+                "auth.jwt.jwks_min_refresh_interval_ms must not exceed auth.jwt.jwks_max_age_ms"
+                    .into(),
+            ));
+        }
         let algorithms = settings
             .algorithms
             .iter()
@@ -228,24 +274,85 @@ impl JwtVerifier {
                 client,
                 max_bytes: settings.jwks_max_bytes,
                 min_refresh: Duration::from_millis(settings.jwks_min_refresh_interval_ms),
+                max_age: Duration::from_millis(settings.jwks_max_age_ms),
+                max_stale: Duration::from_millis(settings.jwks_max_stale_ms),
                 state: RwLock::new(KeyState {
                     keys: Arc::new(Vec::new()),
+                    fetched_at: None,
+                    lifetime: Duration::ZERO,
                     last_attempt: None,
+                    attempts: 0,
                 }),
                 refresh: tokio::sync::Mutex::new(()),
             }),
         })
     }
 
-    fn keys(&self) -> Arc<Vec<Key>> {
-        self.inner
-            .state
-            .read()
-            .map(|s| Arc::clone(&s.keys))
-            .unwrap_or_default()
+    /// The cached keys and how far they may be trusted. A poisoned lock
+    /// yields no keys.
+    fn cached(&self) -> Cached {
+        let Ok(state) = self.inner.state.read() else {
+            return Cached {
+                keys: Arc::default(),
+                freshness: Freshness::Expired,
+                attempts: 0,
+            };
+        };
+        let stale_until = state.lifetime.saturating_add(self.inner.max_stale);
+        let freshness = match state.fetched_at.map(|at| at.elapsed()) {
+            Some(age) if age < state.lifetime => Freshness::Fresh,
+            Some(age) if age < stale_until => Freshness::Stale,
+            _ => Freshness::Expired,
+        };
+        Cached {
+            keys: Arc::clone(&state.keys),
+            freshness,
+            attempts: state.attempts,
+        }
     }
 
-    async fn fetch(&self) -> Result<Vec<Key>, AuthError> {
+    /// The freshness lifetime of a JWKS response: `Cache-Control: max-age`
+    /// minus `Age` when present, else `jwks_max_age_ms`, bounded below by
+    /// `jwks_min_refresh_interval_ms` and above by `jwks_max_age_ms`.
+    /// `no-cache` and `no-store` count as `max-age=0`.
+    fn lifetime(&self, headers: &http::HeaderMap) -> Duration {
+        let mut max_age: Option<u64> = None;
+        for value in headers.get_all(http::header::CACHE_CONTROL) {
+            let Ok(value) = value.to_str() else {
+                continue;
+            };
+            for directive in value.split(',').map(str::trim) {
+                let seconds = if directive.eq_ignore_ascii_case("no-cache")
+                    || directive.eq_ignore_ascii_case("no-store")
+                {
+                    Some(0)
+                } else {
+                    match directive.split_once('=') {
+                        Some((name, seconds)) if name.trim().eq_ignore_ascii_case("max-age") => {
+                            seconds.trim().trim_matches('"').parse::<u64>().ok()
+                        }
+                        _ => None,
+                    }
+                };
+                // Several directives: the most conservative wins.
+                if let Some(seconds) = seconds {
+                    max_age = Some(max_age.map_or(seconds, |current| current.min(seconds)));
+                }
+            }
+        }
+        let age = headers
+            .get(http::header::AGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map_or(Duration::ZERO, Duration::from_secs);
+        let lifetime = max_age.map_or(self.inner.max_age, Duration::from_secs);
+        lifetime
+            .saturating_sub(age)
+            .min(self.inner.max_age)
+            .max(self.inner.min_refresh)
+    }
+
+    async fn fetch(&self) -> Result<(Vec<Key>, Duration), AuthError> {
         let mut response = self
             .inner
             .client
@@ -256,6 +363,7 @@ impl JwtVerifier {
         if !response.status().is_success() {
             return Err(AuthError::KeysUnavailable);
         }
+        let lifetime = self.lifetime(response.headers());
         if response
             .content_length()
             .is_some_and(|len| len > self.inner.max_bytes as u64)
@@ -285,31 +393,54 @@ impl JwtVerifier {
                 })
             })
             .collect();
-        Ok(keys)
+        Ok((keys, lifetime))
     }
 
     /// Refreshes keys at most once per `jwks_min_refresh_interval_ms`.
-    /// Returns `false` when a refresh was not attempted (rate limited).
-    async fn refresh(&self) -> Result<bool, AuthError> {
+    /// `seen` is [`Cached::attempts`] from the caller's snapshot: callers
+    /// that queued behind an attempt use its outcome instead of fetching
+    /// again. Returns `false` when no refresh was attempted.
+    ///
+    /// A failed refresh keeps the previous keys and their fetch time, so
+    /// they age out on schedule.
+    async fn refresh(&self, seen: u64) -> Result<bool, AuthError> {
         let _guard = self.inner.refresh.lock().await;
-        let recently = self
-            .inner
-            .state
-            .read()
-            .ok()
-            .and_then(|s| s.last_attempt)
-            .is_some_and(|at| at.elapsed() < self.inner.min_refresh);
-        if recently {
+        let skip = match self.inner.state.read() {
+            Ok(state) => {
+                let recent = state.last_attempt.map(|at| at.elapsed());
+                state.attempts != seen || recent.is_some_and(|age| age < self.inner.min_refresh)
+            }
+            // A poisoned lock never refreshes; `cached` already fails closed.
+            Err(_) => true,
+        };
+        if skip {
             return Ok(false);
         }
+        // Recorded before the fetch, so a cancelled fetch still counts
+        // against the rate limit. Age is measured from here too, so fetch
+        // latency counts against the lifetime.
+        let started = Instant::now();
         if let Ok(mut state) = self.inner.state.write() {
-            state.last_attempt = Some(Instant::now());
+            state.last_attempt = Some(started);
         }
-        let keys = self.fetch().await?;
-        if let Ok(mut state) = self.inner.state.write() {
-            state.keys = Arc::new(keys);
+        let fetched = self.fetch().await;
+        let Ok(mut state) = self.inner.state.write() else {
+            return Err(AuthError::KeysUnavailable);
+        };
+        state.attempts = state.attempts.wrapping_add(1);
+        match fetched {
+            Ok((keys, lifetime)) => {
+                state.keys = Arc::new(keys);
+                state.fetched_at = Some(started);
+                state.lifetime = lifetime;
+                Ok(true)
+            }
+            Err(error) => {
+                drop(state);
+                tracing::warn!(target: "ferrum_alloy::jwt", "JWKS refresh failed");
+                Err(error)
+            }
         }
-        Ok(true)
     }
 
     fn select<'k>(
@@ -341,17 +472,21 @@ impl JwtVerifier {
             return Err(AuthError::Invalid("algorithm not allowed"));
         }
         let kid = header.kid.as_deref();
-        let mut keys = self.keys();
-        if Self::select(&keys, kid)?.is_none() {
-            // Unknown kid or no keys yet: refresh (rate limited) once.
-            let attempted = self.refresh().await;
-            keys = self.keys();
-            if keys.is_empty() {
+        let cached = self.cached();
+        let mut keys = cached.keys;
+        if cached.freshness != Freshness::Fresh || Self::select(&keys, kid)?.is_none() {
+            // Expired keys, unknown kid, or no keys yet: refresh (single
+            // flight, rate limited) once. Stale keys stay usable only while
+            // the refresh fails or is rate limited.
+            let attempted = self.refresh(cached.attempts).await;
+            let refreshed = self.cached();
+            if refreshed.freshness == Freshness::Expired || refreshed.keys.is_empty() {
                 return Err(match attempted {
                     Err(error) => error,
                     Ok(_) => AuthError::KeysUnavailable,
                 });
             }
+            keys = refreshed.keys;
         }
         let key = Self::select(&keys, kid)?.ok_or(AuthError::Invalid("unknown signing key"))?;
         let mut validation = Validation::new(header.alg);

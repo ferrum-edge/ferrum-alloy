@@ -480,9 +480,21 @@ pub struct JwtSettings {
     /// JWKS URL (https, or http to loopback only).
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Minimum interval between JWKS refreshes.
+    /// Minimum interval between JWKS refresh attempts, whatever triggers
+    /// them (expiry or unknown `kid`). Also the lower bound of the key-set
+    /// lifetime.
     #[serde(default = "default_jwks_refresh_ms")]
     pub jwks_min_refresh_interval_ms: u64,
+    /// Maximum time a fetched key set is trusted before it must be
+    /// revalidated, even for known `kid`s. A `Cache-Control: max-age` on the
+    /// JWKS response shortens it, never extends it.
+    #[serde(default = "default_jwks_max_age_ms")]
+    pub jwks_max_age_ms: u64,
+    /// How long an expired key set keeps verifying while refreshes fail.
+    /// After that, verification fails closed with `503 auth-unavailable`.
+    /// `0` fails closed as soon as the key set expires.
+    #[serde(default = "default_jwks_max_stale_ms")]
+    pub jwks_max_stale_ms: u64,
     /// Maximum JWKS response size.
     #[serde(default = "default_jwks_max_bytes")]
     pub jwks_max_bytes: usize,
@@ -499,6 +511,12 @@ fn default_algorithms() -> Vec<String> {
 }
 fn default_jwks_refresh_ms() -> u64 {
     60_000
+}
+fn default_jwks_max_age_ms() -> u64 {
+    300_000
+}
+fn default_jwks_max_stale_ms() -> u64 {
+    300_000
 }
 fn default_jwks_max_bytes() -> usize {
     256 * 1024
@@ -611,6 +629,8 @@ env_vars! {
     "FERRUM_ALLOY_JWT_ISSUER" => ["auth", "jwt", "issuer"]: Str,
     "FERRUM_ALLOY_JWT_AUDIENCES" => ["auth", "jwt", "audiences"]: List,
     "FERRUM_ALLOY_JWT_JWKS_URL" => ["auth", "jwt", "jwks_url"]: Str,
+    "FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS" => ["auth", "jwt", "jwks_max_age_ms"]: Uint,
+    "FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS" => ["auth", "jwt", "jwks_max_stale_ms"]: Uint,
     "FERRUM_ALLOY_CORS_ALLOWED_ORIGINS" => ["cors", "allowed_origins"]: List,
 }
 
@@ -625,12 +645,20 @@ pub enum ConfigError {
         /// Reason.
         message: String,
     },
-    /// The file is not valid TOML.
-    #[error("configuration file {path} is not valid TOML: {message}")]
+    /// The file is not valid TOML. The message never quotes the file's
+    /// contents, which may hold secrets.
+    #[error(
+        "configuration file {path} is not valid TOML{}: {message}",
+        location_suffix(.line, .column)
+    )]
     Syntax {
         /// File path.
         path: PathBuf,
-        /// Parser message.
+        /// 1-based line of the error, when known.
+        line: Option<usize>,
+        /// 1-based column (in characters) of the error, when known.
+        column: Option<usize>,
+        /// Parser message, without source excerpts.
         message: String,
     },
     /// An environment variable is unknown or invalid.
@@ -641,12 +669,131 @@ pub enum ConfigError {
         /// Reason.
         message: String,
     },
-    /// The merged configuration does not match the schema.
+    /// The merged configuration does not match the schema. The message
+    /// names keys and expected types, never the supplied values.
     #[error("invalid configuration: {0}")]
     Schema(String),
     /// Semantic validation failed.
     #[error("invalid configuration:\n  - {}", .0.join("\n  - "))]
     Invalid(Vec<String>),
+}
+
+fn location_suffix(line: &Option<usize>, column: &Option<usize>) -> String {
+    match (*line, *column) {
+        (Some(line), Some(column)) => format!(" at line {line}, column {column}"),
+        (Some(line), None) => format!(" at line {line}"),
+        _ => String::new(),
+    }
+}
+
+/// 1-based line and column (in characters) of byte `offset` in `text`.
+fn line_column(text: &str, offset: usize) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    let before = bytes.get(..offset.min(bytes.len())).unwrap_or_default();
+    let line_start = before
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1);
+    let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+    let current = before.get(line_start..).unwrap_or_default();
+    let column = String::from_utf8_lossy(current).chars().count() + 1;
+    (line, column)
+}
+
+/// A TOML syntax error without the source excerpt that
+/// `toml::de::Error`'s `Display` prints: the offending line may hold a
+/// secret. Only the parser's own message and the location are kept.
+fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError {
+    let (line, column) = match error.span() {
+        Some(span) => {
+            let (line, column) = line_column(text, span.start);
+            (Some(line), Some(column))
+        }
+        None => (None, None),
+    };
+    let message = error.message().lines().next().unwrap_or_default();
+    ConfigError::Syntax {
+        path: path.to_owned(),
+        line,
+        column,
+        message: message.to_owned(),
+    }
+}
+
+/// `true` for text that is safe to echo as a key name: a short bare TOML
+/// key. Anything else (quoted keys with URLs, long tokens) is redacted.
+fn is_plain_key(key: &str) -> bool {
+    let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    !key.is_empty() && key.len() <= 64 && key.bytes().all(plain)
+}
+
+fn redact_segment(segment: &str) -> &str {
+    if is_plain_key(segment) {
+        segment
+    } else {
+        "<redacted>"
+    }
+}
+
+/// Rewrites a serde/toml schema error so it names keys and expected types
+/// but never a supplied value. serde's standard messages quote the value
+/// (`invalid type: string "postgres://u:pw@db", expected ...`), and
+/// `toml::de::Error`'s `Display` appends the key path.
+fn schema_error(error: &toml::de::Error) -> ConfigError {
+    let first = error.message().lines().next().unwrap_or_default();
+    let mut message = redact_schema_message(first);
+    // With no source input, `Display` ends with "in `a.b.c`" when the
+    // failing key is known.
+    let rendered = error.to_string();
+    let path = rendered
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("in `"))
+        .and_then(|rest| rest.strip_suffix('`'));
+    if let Some(path) = path {
+        let segments: Vec<&str> = path.split('.').map(redact_segment).collect();
+        message.push_str(&format!(" (at `{}`)", segments.join(".")));
+    }
+    ConfigError::Schema(message)
+}
+
+/// The `", expected ..."` part of a serde message, or nothing. The value
+/// comes first and the schema's expectation last, so the last separator is
+/// the real one even when the value contains the same text.
+fn expectation(message: &str) -> &str {
+    match message.rfind(", expected ") {
+        Some(at) => message.get(at..).unwrap_or_default(),
+        None => "",
+    }
+}
+
+fn redact_schema_message(message: &str) -> String {
+    for kind in ["invalid type", "invalid value", "unknown variant"] {
+        if message.starts_with(kind) {
+            return format!("{kind} (value redacted){}", expectation(message));
+        }
+    }
+    if let Some(rest) = message.strip_prefix("unknown field `") {
+        let end = rest
+            .rfind("`, expected ")
+            .or_else(|| rest.rfind("`, there are no fields"));
+        let (field, tail) = match end.and_then(|end| rest.split_at_checked(end)) {
+            Some((field, tail)) => (field, tail.strip_prefix('`').unwrap_or(tail)),
+            None => ("", ""),
+        };
+        return if is_plain_key(field) {
+            format!("unknown field `{field}`{tail}")
+        } else {
+            format!("unknown field (name redacted){tail}")
+        };
+    }
+    // Field names in these come from the schema, not from the input.
+    for kind in ["missing field `", "duplicate field `", "invalid length "] {
+        if message.starts_with(kind) {
+            return message.to_owned();
+        }
+    }
+    "a value does not match the expected type or format".to_owned()
 }
 
 /// Where configuration values came from.
@@ -724,10 +871,7 @@ pub fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
         )));
     }
     let text = std::fs::read_to_string(path).map_err(|e| read_error(e.to_string()))?;
-    toml::from_str(&text).map_err(|e| ConfigError::Syntax {
-        path: path.to_owned(),
-        message: e.to_string(),
-    })
+    toml::from_str(&text).map_err(|e| syntax_error(path, &text, &e))
 }
 
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
@@ -854,7 +998,7 @@ where
     merge(&mut merged, overrides.values.clone());
     let config: AlloyConfig = toml::Value::Table(merged)
         .try_into()
-        .map_err(|e: toml::de::Error| ConfigError::Schema(e.to_string()))?;
+        .map_err(|e: toml::de::Error| schema_error(&e))?;
     let sources = ConfigSources {
         file: file_path,
         env: env_applied,
@@ -1034,6 +1178,15 @@ impl AlloyConfig {
                         "auth.jwt.algorithms: {algorithm:?} is not an accepted asymmetric algorithm"
                     ));
                 }
+            }
+            if jwt.jwks_max_age_ms == 0 {
+                error("auth.jwt.jwks_max_age_ms must be greater than zero".into());
+            }
+            if jwt.jwks_min_refresh_interval_ms > jwt.jwks_max_age_ms {
+                error(
+                    "auth.jwt.jwks_min_refresh_interval_ms must not exceed auth.jwt.jwks_max_age_ms"
+                        .into(),
+                );
             }
             match &jwt.jwks_url {
                 None => error("auth.jwt.jwks_url is required".into()),

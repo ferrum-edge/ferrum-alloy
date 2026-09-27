@@ -164,6 +164,110 @@ fn invalid_values_are_rejected_not_defaulted() {
 }
 
 #[test]
+fn syntax_errors_report_the_location_without_the_source_line() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text, secret) in [
+        (
+            "token.toml",
+            "[management]\ntoken = \"SYNTHETIC-TOKEN-0123456789ABCDEF\" extra\n",
+            "SYNTHETIC-TOKEN",
+        ),
+        (
+            "database.toml",
+            "[database]\nurl = \"postgres://u:SYNTHETIC-PASSWORD@db/x\" extra\n",
+            "SYNTHETIC-PASSWORD",
+        ),
+    ] {
+        let path = write(&dir, name, text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(!format!("{error:?}").contains(secret), "{error:?}");
+        assert!(rendered.contains(name), "names the file: {rendered}");
+        assert!(rendered.contains("at line 2, column "), "{rendered}");
+        let ConfigError::Syntax { line, column, .. } = &error else {
+            panic!("expected a syntax error, got {error}");
+        };
+        assert_eq!(*line, Some(2));
+        assert!(column.is_some_and(|c| c > 1), "{column:?}");
+    }
+}
+
+#[test]
+fn schema_errors_name_keys_but_never_values() {
+    let dir = tempfile::tempdir().unwrap();
+    for (text, secret, kind, key) in [
+        (
+            "[management]\ntoken = 4242424242\n",
+            "4242424242",
+            "invalid type",
+            "management.token",
+        ),
+        (
+            "[server]\nmax_connections = \"SYNTH-S1\"\n",
+            "SYNTH-S1",
+            "invalid type",
+            "server.max_connections",
+        ),
+        (
+            "[server.tls]\ncert_path = \"c\"\nkey_path = \"k\"\nclient_auth = \"SYNTH-S2\"\n",
+            "SYNTH-S2",
+            "unknown variant",
+            "server.tls.client_auth",
+        ),
+        (
+            "[database]\n\"postgres://u:SYNTH-S3@db/x\" = 1\n",
+            "SYNTH-S3",
+            "unknown field",
+            "database",
+        ),
+    ] {
+        let path = write(&dir, "schema.toml", text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(matches!(error, ConfigError::Schema(_)), "{rendered}");
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(!format!("{error:?}").contains(secret), "{error:?}");
+        assert!(rendered.contains(kind), "{rendered}");
+        assert!(rendered.contains(&format!("`{key}`")), "{rendered}");
+    }
+    // The expected type or variants still come through.
+    let path = write(&dir, "variant.toml", "[logging]\nformat = \"xml\"\n");
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    assert!(error.to_string().contains("expected one of"), "{error}");
+}
+
+#[test]
+fn jwt_key_lifetime_settings_are_validated() {
+    let jwt = [
+        ("FERRUM_ALLOY_JWT_ISSUER", "https://issuer.test"),
+        ("FERRUM_ALLOY_JWT_AUDIENCES", "orders-api"),
+        ("FERRUM_ALLOY_JWT_JWKS_URL", "https://issuer.test/jwks"),
+    ];
+    let (config, _) = load_from(None, env(&jwt), &Overrides::default()).unwrap();
+    let settings = config.auth.jwt.as_ref().unwrap();
+    assert_eq!(settings.jwks_max_age_ms, 300_000, "bounded by default");
+    assert_eq!(settings.jwks_max_stale_ms, 300_000);
+    config.validate(&["jwt"]).unwrap();
+
+    let mut vars = jwt.to_vec();
+    vars.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "1000"));
+    vars.push(("FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS", "0"));
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let settings = config.auth.jwt.as_ref().unwrap();
+    assert_eq!(settings.jwks_max_age_ms, 1_000);
+    assert_eq!(settings.jwks_max_stale_ms, 0);
+    let error = config.validate(&["jwt"]).unwrap_err().to_string();
+    assert!(error.contains("must not exceed"), "{error}");
+
+    let mut zero = jwt.to_vec();
+    zero.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "0"));
+    let (config, _) = load_from(None, env(&zero), &Overrides::default()).unwrap();
+    let error = config.validate(&["jwt"]).unwrap_err().to_string();
+    assert!(error.contains("greater than zero"), "{error}");
+}
+
+#[test]
 fn lists_and_secret_files_are_supported() {
     let dir = tempfile::tempdir().unwrap();
     let secret = write(&dir, "token", "0123456789abcdef0123456789abcdef\n");
