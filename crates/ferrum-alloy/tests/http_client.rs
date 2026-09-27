@@ -207,7 +207,7 @@ async fn redirects_are_same_origin_only() {
 }
 
 #[tokio::test]
-async fn timeouts_and_refused_connections_fail_fast() {
+async fn request_timeouts_fail_fast() {
     let addr = server(None).await;
     let client = client(&[], 0);
     let started = std::time::Instant::now();
@@ -224,9 +224,24 @@ async fn timeouts_and_refused_connections_fail_fast() {
         )
         .await
         .unwrap_err();
-    assert!(error.is_timeout());
+    assert!(error.is_timeout(), "{error:?}");
+    assert!(!error.is_connect(), "{error:?}");
     assert!(started.elapsed() < Duration::from_secs(2));
+}
 
+#[tokio::test]
+async fn refused_connections_are_reported_as_refusals() {
+    // Deadlines well above the refusal time, so a refusal can never be
+    // misreported as a timeout. Windows retries a refused connect for about
+    // two seconds before reporting it, which the 500 ms request deadline of
+    // the shared test client would otherwise cut short.
+    let client = AlloyClient::new(&HttpClientSettings {
+        connect_timeout_ms: 5_000,
+        request_timeout_ms: 10_000,
+        max_redirects: 0,
+        propagate_trace_context_to: Vec::new(),
+    })
+    .unwrap();
     let closed = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -245,13 +260,22 @@ async fn timeouts_and_refused_connections_fail_fast() {
         )
         .await
         .unwrap_err();
-    // Windows retries refused connections for about two seconds, so the
-    // request timeout can fire before the refusal is reported.
+    let mut refused = false;
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            refused |= io.kind() == std::io::ErrorKind::ConnectionRefused;
+        }
+        source = cause.source();
+    }
+    assert!(error.is_connect(), "{error:?}");
+    assert!(!error.is_timeout(), "{error:?}");
     assert!(
-        error.is_connect() || (cfg!(windows) && error.is_timeout()),
-        "{error:?}"
+        refused,
+        "no ConnectionRefused in the error chain: {error:?}"
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // The refusal arrives before the connect deadline on every platform.
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
