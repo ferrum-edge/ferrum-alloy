@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
 use axum::extract::{Path, Request, State};
+use axum::http::header::CACHE_CONTROL;
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use ferrum_alloy_telemetry::{
     Metrics, RecordRouteLayer, RequestContext, TelemetryConfig, TelemetryConfigError,
@@ -35,11 +36,17 @@ async fn visit(
     State(state): State<AppState>,
     Path(name): Path<String>,
     context: RequestContext,
-) -> String {
+) -> impl IntoResponse {
     let count = state.visits.fetch_add(1, Ordering::Relaxed) + 1;
-    format!(
-        "hello {name} (visit {count}, request {})",
-        context.request_id
+    // The body is specific to this request, so shared caches must not store
+    // it. Marking it `private` also lets Alloy echo the request id, which it
+    // withholds from responses a shared cache may store.
+    (
+        [(CACHE_CONTROL, "private")],
+        format!(
+            "hello {name} (visit {count}, request {})",
+            context.request_id
+        ),
     )
 }
 

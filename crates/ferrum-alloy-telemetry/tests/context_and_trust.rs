@@ -20,7 +20,7 @@ use ferrum_alloy_telemetry::{
     AcceptPolicy, PeerTrust, RequestContext, ServerTimingPolicy, TelemetryConfig, TelemetryLayer,
     TraceDecision,
 };
-use http::{HeaderMap, Request, Response};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::Empty;
 use tower::{Layer, ServiceExt, service_fn};
 
@@ -36,6 +36,15 @@ async fn run(
     request: Request<Empty<Bytes>>,
     response_headers: &[(&'static str, &'static str)],
 ) -> (Seen, Response<()>) {
+    run_with_status(layer, request, StatusCode::OK, response_headers).await
+}
+
+async fn run_with_status(
+    layer: TelemetryLayer,
+    request: Request<Empty<Bytes>>,
+    status: StatusCode,
+    response_headers: &[(&'static str, &'static str)],
+) -> (Seen, Response<()>) {
     let seen = Arc::new(Mutex::new(None));
     let captured = Arc::clone(&seen);
     let response_headers: Vec<_> = response_headers.to_vec();
@@ -48,6 +57,7 @@ async fn run(
                 headers: req.headers().clone(),
             });
             let mut response = Response::new(Empty::<Bytes>::new());
+            *response.status_mut() = status;
             for (name, value) in response_headers {
                 response.headers_mut().insert(name, value.parse().unwrap());
             }
@@ -248,7 +258,7 @@ async fn valid_request_ids_are_kept_and_echoed() {
     let (seen, response) = run(
         TelemetryLayer::new(TelemetryConfig::default()).unwrap(),
         request,
-        &[],
+        &[("cache-control", "no-store")],
     )
     .await;
     assert_eq!(seen.context.request_id.as_str(), "edge-req.42_A-b");
@@ -320,22 +330,177 @@ async fn request_specific_headers_are_withheld_from_shared_cacheable_responses()
     assert!(timing.starts_with("alloy;dur="), "{timing}");
 }
 
+const NO_STORE: &[(&str, &str)] = &[("cache-control", "no-store")];
+const LAST_MODIFIED: (&str, &str) = ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT");
+
+/// Runs one request with `Server-Timing` always on and reports whether the
+/// layer added its request-specific headers, checking that the id echo and
+/// `Server-Timing` follow one decision and that a withheld pair is counted.
+async fn adds_request_specific_headers(
+    request: Request<Empty<Bytes>>,
+    status: StatusCode,
+    response_headers: &[(&'static str, &'static str)],
+) -> bool {
+    let mut config = TelemetryConfig::default();
+    config.server_timing = ServerTimingPolicy::Always;
+    let layer = TelemetryLayer::new(config).unwrap();
+    let metrics = layer.metrics();
+    let (_, response) = run_with_status(layer, request, status, response_headers).await;
+    let echoed = response.headers().contains_key("x-request-id");
+    assert_eq!(
+        echoed,
+        response.headers().contains_key("server-timing"),
+        "{status} {response_headers:?}"
+    );
+    assert_eq!(
+        metrics.header_suppressions.get("shared_cacheable"),
+        u64::from(!echoed),
+        "{status} {response_headers:?}"
+    );
+    echoed
+}
+
+fn get_request(headers: &[(&str, &str)]) -> Request<Empty<Bytes>> {
+    let mut all = vec![("x-request-id", "r1")];
+    all.extend_from_slice(headers);
+    request_from("203.0.113.9:1", None, &all)
+}
+
+#[tokio::test]
+async fn heuristically_cacheable_responses_withhold_request_specific_headers() {
+    // RFC 9111 §4.2.2: these statuses are storable without explicit freshness,
+    // and Last-Modified is only an input to the heuristic, not a requirement.
+    for code in [200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501] {
+        let status = StatusCode::from_u16(code).unwrap();
+        for headers in [
+            &[][..],
+            &[LAST_MODIFIED][..],
+            &[("etag", "\"v1\"")][..],
+        ] {
+            assert!(
+                !adds_request_specific_headers(get_request(&[]), status, headers).await,
+                "{code} {headers:?}"
+            );
+        }
+        let mut head = get_request(&[]);
+        *head.method_mut() = Method::HEAD;
+        assert!(
+            !adds_request_specific_headers(head, status, &[]).await,
+            "HEAD {code}"
+        );
+    }
+    // Directives that allow storage with revalidation do not prevent it.
+    for directive in ["no-cache", "must-revalidate", "private=\"set-cookie\""] {
+        let headers = [("cache-control", directive)];
+        assert!(
+            !adds_request_specific_headers(get_request(&[]), StatusCode::OK, &headers).await,
+            "{directive}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_freshness_withholds_request_specific_headers_for_any_status() {
+    for headers in [
+        &[("cache-control", "public, max-age=60")][..],
+        &[("cache-control", "max-age=60")][..],
+        &[("cache-control", "s-maxage=60")][..],
+        &[("expires", "Wed, 21 Oct 2037 07:28:00 GMT")][..],
+    ] {
+        for status in [StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR] {
+            assert!(
+                !adds_request_specific_headers(get_request(&[]), status, headers).await,
+                "{status} {headers:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_prohibitions_keep_request_specific_headers() {
+    for directive in [
+        "no-store",
+        "private",
+        "Private, max-age=60",
+        "public, no-store, max-age=60",
+    ] {
+        let headers = [("cache-control", directive), LAST_MODIFIED];
+        assert!(
+            adds_request_specific_headers(get_request(&[]), StatusCode::OK, &headers).await,
+            "{directive}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn statuses_and_methods_that_are_not_storable_keep_request_specific_headers() {
+    for code in [201, 302, 400, 403, 500, 503] {
+        let status = StatusCode::from_u16(code).unwrap();
+        assert!(
+            adds_request_specific_headers(get_request(&[]), status, &[LAST_MODIFIED]).await,
+            "{code}"
+        );
+    }
+    for method in [Method::POST, Method::PUT, Method::DELETE] {
+        let mut request = get_request(&[]);
+        *request.method_mut() = method.clone();
+        assert!(
+            adds_request_specific_headers(request, StatusCode::OK, &[LAST_MODIFIED]).await,
+            "{method}"
+        );
+    }
+    let mut post = get_request(&[]);
+    *post.method_mut() = Method::POST;
+    let headers = [("cache-control", "public, max-age=60")];
+    assert!(
+        !adds_request_specific_headers(post, StatusCode::OK, &headers).await,
+        "POST with explicit freshness is storable"
+    );
+}
+
+#[tokio::test]
+async fn authenticated_requests_keep_headers_unless_shared_storage_is_explicit() {
+    let authorized = || get_request(&[("authorization", "Bearer token")]);
+    for headers in [
+        &[][..],
+        &[LAST_MODIFIED][..],
+        &[("cache-control", "max-age=60")][..],
+    ] {
+        assert!(
+            adds_request_specific_headers(authorized(), StatusCode::OK, headers).await,
+            "{headers:?}"
+        );
+    }
+    for directive in [
+        "public, max-age=60",
+        "s-maxage=60",
+        "must-revalidate, max-age=60",
+    ] {
+        let headers = [("cache-control", directive)];
+        assert!(
+            !adds_request_specific_headers(authorized(), StatusCode::OK, &headers).await,
+            "{directive}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn server_timing_is_off_by_default_and_trusted_only_when_configured() {
     let request = request_from("10.0.0.5:1", None, &[]);
-    let (_, response) = run(trusted_layer(TelemetryConfig::default()), request, &[]).await;
+    let layer = trusted_layer(TelemetryConfig::default());
+    let (_, response) = run(layer, request, NO_STORE).await;
     assert!(!response.headers().contains_key("server-timing"));
 
     let mut config = TelemetryConfig::default();
     config.server_timing = ServerTimingPolicy::TrustedPeers;
     let request = request_from("203.0.113.9:1", None, &[]);
-    let (_, response) = run(trusted_layer(config.clone()), request, &[]).await;
+    let (_, response) = run(trusted_layer(config.clone()), request, NO_STORE).await;
     assert!(
         !response.headers().contains_key("server-timing"),
         "untrusted caller"
     );
     let request = request_from("10.0.0.5:1", None, &[]);
-    let (_, response) = run(trusted_layer(config), request, &[]).await;
+    let (_, response) = run(trusted_layer(config), request, NO_STORE).await;
     assert!(
         response.headers().contains_key("server-timing"),
         "trusted gateway"

@@ -179,10 +179,10 @@ Each section below shows a key, its default, and its meaning.
 |---|---|---|
 | `request_id.header` | `x-request-id` | Correlation header. Must not be a reserved name (`authorization`, `traceparent`, `x-consumer-username`, …). |
 | `request_id.accept_incoming` | `any` | Whose incoming ids are kept, after validation: at most 256 bytes of `[A-Za-z0-9._-]`, matching Ferrum Edge's `correlation_id` plugin. |
-| `request_id.echo_in_response` | `true` | Echo the id on responses that shared caches cannot store. |
+| `request_id.echo_in_response` | `true` | Echo the id on responses that shared caches cannot store. A bare GET 200 or 404 is heuristically cacheable and gets no echo unless the application marks it `Cache-Control: private` or `no-store` (see [security](security.md#response-headers-and-caches)). |
 | `trace_context.accept_incoming` | `trusted_peers` | Whose `traceparent` becomes the parent. Others are re-rooted. |
 | `trace_context.link_untrusted_parent` | `false` | Link a re-rooted untrusted context as a span link. |
-| `server_timing` | `disabled` | `Server-Timing: alloy;dur=…` on non-cacheable responses: `trusted_peers` or `always`. |
+| `server_timing` | `disabled` | `Server-Timing: alloy;dur=…` on responses shared caches cannot store, under the same rule as the request id echo: `trusted_peers` or `always`. |
 | `record.url_path` / `record.client_address` / `record.user_agent` | `false` | Optional span attributes that may carry personal or high-cardinality data. |
 | `access_log` | `true` | One `ferrum_alloy::access` event per finalized request. |
 
