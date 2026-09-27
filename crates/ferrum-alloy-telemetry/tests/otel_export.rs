@@ -478,6 +478,40 @@ async fn the_byte_budget_bounds_queued_memory() {
 }
 
 #[test]
+fn the_byte_budget_counts_large_event_attributes() {
+    let config = OtlpConfig {
+        max_queue_bytes: 2_048,
+        ..config()
+    };
+    let (pipeline, exporter, metrics) = memory_pipeline(&config);
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(pipeline.layer()));
+
+    let small_span = tracing::info_span!("small_budget_test");
+    {
+        let _entered = small_span.enter();
+        tracing::info!(payload = "small", "small_event");
+    }
+    drop(small_span);
+
+    let large_payload = "x".repeat(65_536);
+    let large_span = tracing::info_span!("large_budget_test");
+    {
+        let _entered = large_span.enter();
+        tracing::info!(payload = large_payload.as_str(), "large_event");
+    }
+    drop(large_span);
+
+    pipeline.force_flush().unwrap();
+
+    assert!(metrics.telemetry_spans_lost.get("byte_budget") >= 1);
+    let spans = exporter.get_finished_spans().unwrap();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].name, "small_budget_test");
+    pipeline.shutdown(Duration::from_secs(2)).unwrap();
+}
+
+#[test]
 fn invalid_configuration_fails_at_startup() {
     let metrics = Arc::new(Metrics::default());
     for bad in [
