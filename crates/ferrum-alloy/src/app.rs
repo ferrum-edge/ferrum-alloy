@@ -419,6 +419,13 @@ impl std::fmt::Debug for AlloyParts {
 }
 
 impl AlloyParts {
+    /// Connection counters of the application listener, as rendered on the
+    /// management `/metrics` endpoint. They stay readable after serving
+    /// returns.
+    pub fn app_stats(&self) -> Arc<ServerStats> {
+        Arc::clone(&self.app_stats)
+    }
+
     /// Binds the configured addresses and serves until shutdown.
     pub async fn serve(self) -> Result<(), AlloyError> {
         let app = TcpListener::bind(self.config.server.bind)
@@ -446,10 +453,13 @@ impl AlloyParts {
     /// Serves on already-bound listeners (useful for tests and socket
     /// activation).
     ///
-    /// After shutdown it returns only once every connection on both listeners
-    /// is closed: connections still open when `shutdown.drain_timeout_ms`
-    /// runs out are force-closed first. Upgraded (WebSocket) sessions are not
-    /// connections here; see [`Lifecycle::shutdown_token`].
+    /// After shutdown it returns only once every connection socket on both
+    /// listeners is closed: connections still open when
+    /// `shutdown.drain_timeout_ms` runs out are force-closed first, and it
+    /// also waits for their aborted tasks to finish unwinding. HTTP/2 stream
+    /// handler tasks are not yet tracked by the drain and may still be
+    /// running (ferrum-edge/ferrum-alloy#35). Upgraded (WebSocket) sessions
+    /// are not connections here; see [`Lifecycle::shutdown_token`].
     pub async fn serve_on(
         mut self,
         app_listener: TcpListener,

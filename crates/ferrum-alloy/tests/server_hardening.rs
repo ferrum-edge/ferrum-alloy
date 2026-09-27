@@ -9,6 +9,7 @@ mod support;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -29,6 +30,10 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_millis(300);
 /// slow CI hosts do not flake; the defects it catches never resolve at all.
 const WITHIN: Duration = Duration::from_secs(5);
 const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+/// An empty SETTINGS frame: with the preface, a valid HTTP/2 connection with
+/// no request.
+const H2_EMPTY_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+const H2_GOAWAY: u8 = 0x7;
 
 fn router() -> Router {
     Router::new()
@@ -82,6 +87,30 @@ async fn closed_by_server<S: AsyncRead + Unpin>(stream: &mut S) -> bool {
         }
     };
     tokio::time::timeout(WITHIN, closed).await.is_ok()
+}
+
+/// Reads HTTP/2 frames until the server closes `stream` and returns their
+/// types, or `None` when it is still open after [`WITHIN`].
+async fn frame_types_until_closed(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut received = Vec::new();
+    let read_all = async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+            }
+        }
+    };
+    tokio::time::timeout(WITHIN, read_all).await.ok()?;
+    let mut types = Vec::new();
+    let mut rest = received.as_slice();
+    while rest.len() >= 9 {
+        let length = u32::from_be_bytes([0, rest[0], rest[1], rest[2]]) as usize;
+        types.push(rest[3]);
+        rest = rest.get(9 + length..).unwrap_or_default();
+    }
+    Some(types)
 }
 
 /// One HTTP/1.1 request on a fresh connection; `None` when the connection is
@@ -153,13 +182,41 @@ async fn an_http2_connection_without_a_request_is_closed() {
     let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
     let mut idle = TcpStream::connect(server.addr).await.unwrap();
     idle.write_all(H2_PREFACE).await.unwrap();
-    // An empty SETTINGS frame: a valid HTTP/2 connection with no request.
-    idle.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+    idle.write_all(H2_EMPTY_SETTINGS).await.unwrap();
     assert!(
         closed_by_server(&mut idle).await,
         "an HTTP/2 connection that never sends HEADERS is closed"
     );
     assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    server.shutdown().await.unwrap();
+}
+
+/// A client that pre-warmed an HTTP/2 connection learns from `GOAWAY` that
+/// it is closing, so a request it sends at that moment can be retried
+/// safely instead of meeting a bare reset.
+#[tokio::test]
+async fn an_http2_connection_without_a_request_is_sent_goaway() {
+    let server = support::start(AlloyApp::new("hardening").router(router()), hardened()).await;
+    let mut idle = TcpStream::connect(server.addr).await.unwrap();
+    idle.write_all(H2_PREFACE).await.unwrap();
+    idle.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    let started = Instant::now();
+    let frames = frame_types_until_closed(&mut idle)
+        .await
+        .expect("the idle HTTP/2 connection is closed");
+    let elapsed = started.elapsed();
+    assert!(
+        frames.contains(&H2_GOAWAY),
+        "GOAWAY is sent before the connection closes (frame types: {frames:?})"
+    );
+    assert!(
+        elapsed >= HEADER_READ_TIMEOUT / 2,
+        "closed by the header read timeout, not at once ({elapsed:?})"
+    );
+    assert_eq!(
+        server.stats.first_request_timeouts.load(Ordering::Relaxed),
+        1
+    );
     server.shutdown().await.unwrap();
 }
 
@@ -229,6 +286,17 @@ async fn every_connection_is_closed_when_serve_on_returns() {
     assert!(
         closed_by_server(&mut stream).await,
         "the endless stream was force-closed"
+    );
+    assert_eq!(
+        server.stats.force_closed_connections.load(Ordering::Relaxed),
+        1,
+        "the force-closed connection is counted"
+    );
+    // The counter reaches `/metrics` under its documented name.
+    let text = server.stats.render_prometheus("app");
+    assert!(
+        text.contains("ferrum_alloy_force_closed_connections_total{listener=\"app\"} 1\n"),
+        "{text}"
     );
 }
 

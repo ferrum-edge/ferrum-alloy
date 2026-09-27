@@ -6,13 +6,19 @@
 //! timeout also bounds the time from a ready connection (after any TLS
 //! handshake) to its first request head, whatever the protocol, so a peer
 //! that sends nothing or only part of the HTTP/2 preface cannot keep a
-//! connection slot.
+//! connection slot. An established HTTP/2 connection is sent `GOAWAY` at
+//! that deadline, so a client can retry elsewhere, and is closed shortly
+//! after.
 //!
 //! On shutdown it stops accepting, abandons unfinished TLS handshakes, asks
 //! every connection to finish (HTTP/1.1 `Connection: close` after the current
 //! response, HTTP/2 `GOAWAY`), waits up to the drain budget for in-flight
 //! requests and response streams, then force-closes the rest. The listener
-//! returns only after every connection task has ended.
+//! returns only after every connection task has ended, including aborted
+//! tasks that are still unwinding, so every connection socket is closed by
+//! then. HTTP/2 stream handler tasks run separately from their connection
+//! task and are not yet tracked by the drain
+//! (ferrum-edge/ferrum-alloy#35).
 //!
 //! Upgraded connections (WebSocket) leave Hyper's control after the `101`
 //! response: they are not counted against the connection limit and are not
@@ -36,7 +42,8 @@ use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
+use tokio::time::Instant;
 use tower::ServiceExt;
 
 use crate::lifecycle::Lifecycle;
@@ -52,6 +59,9 @@ pub struct ServerStats {
     pub tls_handshake_failures: AtomicU64,
     /// Connections force-closed after the drain budget.
     pub force_closed_connections: AtomicU64,
+    /// Connections closed because no request head arrived within the header
+    /// read timeout.
+    pub first_request_timeouts: AtomicU64,
 }
 
 impl ServerStats {
@@ -82,6 +92,12 @@ impl ServerStats {
                 "counter",
                 "Connections force-closed after the drain budget.",
                 &self.force_closed_connections,
+            ),
+            (
+                "ferrum_alloy_first_request_timeouts_total",
+                "counter",
+                "Connections closed without a request head within the header read timeout.",
+                &self.first_request_timeouts,
             ),
         ] {
             out.push_str(&format!(
@@ -171,7 +187,12 @@ pub(crate) async fn serve(
             biased;
             () = lifecycle.stop_accepting().cancelled() => break,
             // Reap finished connection tasks so the set stays small.
-            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                if let Some(error) = joined.err().filter(JoinError::is_panic) {
+                    tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "connection task panicked");
+                }
+                continue;
+            }
             accepted = listener.accept() => accepted,
         };
         let (stream, remote) = match accepted {
@@ -224,7 +245,7 @@ pub(crate) async fn serve(
             .force_closed_connections
             .fetch_add(remaining as u64, Ordering::Relaxed);
         // Aborting a task drops its connection and socket; `shutdown` returns
-        // once every task has ended.
+        // once every task has ended, including aborted tasks still unwinding.
         connections.shutdown().await;
     }
     Ok(())
@@ -269,15 +290,38 @@ async fn handle(
             remote_addr: Some(remote),
             tls: crate::tls::peer_identity(stream.get_ref().1),
         };
-        serve_io(stream, peer, builder, app, options, lifecycle).await;
+        serve_io(stream, peer, builder, app, options, lifecycle, stats).await;
         return;
     }
-    let _ = stats;
     let peer = PeerInfo {
         remote_addr: Some(remote),
         tls: None,
     };
-    serve_io(stream, peer, builder, app, options, lifecycle).await;
+    serve_io(stream, peer, builder, app, options, lifecycle, stats).await;
+}
+
+/// Records that the connection received a request. Hyper calls a service on
+/// the connection task as soon as it has parsed a request head, for both
+/// protocols, before any stream task is spawned, so the flag is set before
+/// the connection task next checks it.
+#[derive(Clone)]
+struct MarkFirstRequest<S> {
+    inner: S,
+    seen: Arc<AtomicBool>,
+}
+
+impl<S, R> hyper::service::Service<R> for MarkFirstRequest<S>
+where
+    S: hyper::service::Service<R>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn call(&self, request: R) -> Self::Future {
+        self.seen.store(true, Ordering::Release);
+        self.inner.call(request)
+    }
 }
 
 async fn serve_io<I>(
@@ -287,14 +331,13 @@ async fn serve_io<I>(
     app: Router,
     options: &ServeOptions,
     lifecycle: &Lifecycle,
+    stats: &ServerStats,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let remote = peer.remote_addr;
     let first_request = Arc::new(AtomicBool::new(false));
-    let seen = Arc::clone(&first_request);
     let service = app.map_request(move |request: http::Request<Incoming>| {
-        seen.store(true, Ordering::Release);
         let mut request = request.map(Body::new);
         request.extensions_mut().insert(peer.clone());
         if let Some(remote) = remote {
@@ -302,26 +345,51 @@ async fn serve_io<I>(
         }
         request
     });
-    let connection =
-        builder.serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(service));
+    let service = MarkFirstRequest {
+        inner: TowerToHyperService::new(service),
+        seen: Arc::clone(&first_request),
+    };
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
     tokio::pin!(connection);
     // Protocol detection waits for enough bytes to rule out the HTTP/2
     // preface before either protocol starts, Hyper's HTTP/1 header timer
     // starts only after detection, and HTTP/2 has no request-head timer. This
-    // deadline covers all of it: no request head by then closes the
-    // connection. Once a request arrived, it no longer applies.
-    let first_request_deadline = tokio::time::sleep(options.header_read_timeout);
-    tokio::pin!(first_request_deadline);
+    // deadline covers all of it. Once a request arrived, it no longer applies.
+    let deadline = tokio::time::sleep(options.header_read_timeout);
+    tokio::pin!(deadline);
     let mut awaiting_first_request = true;
+    // Set once the deadline passed without a request: the connection was
+    // asked to close and the deadline re-armed as a short grace period.
+    let mut closing = false;
     let mut draining = false;
     let result = loop {
         tokio::select! {
             result = connection.as_mut() => break result,
-            () = first_request_deadline.as_mut(), if awaiting_first_request => {
+            () = deadline.as_mut(), if awaiting_first_request || closing => {
                 awaiting_first_request = false;
-                if !first_request.load(Ordering::Acquire) {
-                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request head within the header read timeout; closing");
+                if first_request.load(Ordering::Acquire) {
+                    // A request that raced the `GOAWAY` is served like any
+                    // other while the connection finishes.
+                    closing = false;
+                } else if closing {
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "connection still open after the first-request grace period; dropping");
                     return;
+                } else {
+                    stats.first_request_timeouts.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request head within the header read timeout; closing");
+                    // During protocol detection or on an idle HTTP/1.1
+                    // connection this ends the connection at once. An
+                    // established HTTP/2 connection is sent `GOAWAY` first,
+                    // so a request already on the wire is either served or
+                    // refused in a way the client can safely retry. The grace
+                    // period bounds the wait for the connection to end.
+                    closing = true;
+                    if !draining {
+                        draining = true;
+                        connection.as_mut().graceful_shutdown();
+                    }
+                    let grace = options.header_read_timeout.min(Duration::from_secs(1));
+                    deadline.as_mut().reset(Instant::now() + grace);
                 }
             }
             () = lifecycle.drain_connections().cancelled(), if !draining => {
