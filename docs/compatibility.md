@@ -45,8 +45,23 @@ client ──HTTP/1.1──▶ Ferrum Edge ──HTTPS + mTLS (SPIFFE SVID-style
 | Edge → Collector | OTLP/HTTP **JSON** (`POST /v1/traces`) |
 | Alloy → Collector | OTLP/HTTP **protobuf** (`POST /v1/traces`) |
 | Trust mode | `gateway_required`; `trust.identities = ["spiffe://ferrum.demo/ns/edge/sa/gateway"]`; `server.tls.client_auth = optional` |
+| Edge connection pool | `FERRUM_POOL_WARMUP_ENABLED=false`, `FERRUM_POOL_HTTP2_CONNECTIONS_PER_HOST=1`, so connection identity is deterministic. Edge's defaults are not exercised. |
 
-What that job verifies is listed in [ADR 0007](adr/0007-real-gateway-integration-testing.md). The first local run passed all 19 checks.
+What that job verifies is listed in [ADR 0007](adr/0007-real-gateway-integration-testing.md). The first local run passed the original 19 checks. The attempt and connection cases below were added afterwards and are verified by CI, bringing the job to 46 named checks.
+
+### Attempt and connection cases
+
+Both supported releases run every case; none is gated by release. The extra proxies come from `gen-e2e-edge-config`, which appends them to the unchanged `ferrum-alloy edge export` output, and every fault is produced inside the compose network.
+
+| Case | How it is produced | What is checked |
+|---|---|---|
+| Retry | Alloy's `/flaky/{key}` fails the first attempt with `503`; proxy `e2e-retry` retries `503` once (`retry` block, default 100 ms backoff). | Two Alloy SERVER spans with the same Edge parent (`503`, then `200`), Edge `backend_ttfb` covering both attempts and the backoff, and a diagnosis that reports `alloy.gateway.multiple_service_attempts`, compares no timings, assigns nothing to an attempt, and confirms nothing. |
+| Cold and reused connection | Proxy `e2e-reuse` uses the `alloy-reuse` alias; Alloy's `/conn` reports the connection a request arrived on. | The first request opened a connection, a later one reused one, and neither request's spans or diagnosis carry a connection-setup value. |
+| Concurrent HTTP/2 streams | Six concurrent requests through `e2e-reuse`; Alloy's `/gather/6` waits until all six are in the handler. | Six overlapping Alloy SERVER spans over HTTP/2, each under its own Edge span, on fewer than six connections, with no setup charged to any stream. |
+| Client cancellation mid-body | The driver closes its connection after the first frame of a 4 s event stream. | One Alloy SERVER span with outcome `cancelled`, ended mid-stream, and one `alloy.response.body_incomplete` finding. |
+| Refused connection | Proxy `e2e-refused` targets a port on the Alloy container with no listener. | `X-Gateway-Error: connection_failure`, an Edge span with `gateway.error.class` and no Alloy span, and a `likely` diagnosis that does not claim the service is down. |
+
+Not covered: an upstream reset after a connection is established, and per-attempt timing, which Edge v0.9.8 and v0.9.7 do not record.
 
 ## Component versions
 

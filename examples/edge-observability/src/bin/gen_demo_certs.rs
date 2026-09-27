@@ -2,7 +2,8 @@
 //!
 //! * `ca.pem`: the demo CA (trusted by both Alloy and Edge);
 //! * `alloy.pem` / `alloy.key`: Alloy's server certificate
-//!   (DNS `alloy`, `localhost`, IP `127.0.0.1`);
+//!   (DNS `alloy`, `alloy-reuse`, `localhost`, IP `127.0.0.1`; `alloy-reuse`
+//!   is a compose network alias for the connection-reuse case);
 //! * `edge-client.pem` / `edge-client.key`: the certificate Edge presents to
 //!   Alloy, with the SPIFFE URI SAN `spiffe://ferrum.demo/ns/edge/sa/gateway`.
 //!
@@ -42,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.distinguished_name.push(DnType::CommonName, "alloy");
     server.subject_alt_names = vec![
         SanType::DnsName("alloy".try_into()?),
+        SanType::DnsName("alloy-reuse".try_into()?),
         SanType::DnsName("localhost".try_into()?),
         SanType::IpAddress("127.0.0.1".parse()?),
     ];
