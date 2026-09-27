@@ -140,7 +140,7 @@ let app = Router::new().fallback_service(telemetry.layer(router)); // outermost
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 ```
 
-Handlers can take `ferrum_alloy_telemetry::RequestContext` (request id, trace id, span id, trust, trace decision). Nothing installs a global subscriber. To export traces, compose `ferrum_alloy_telemetry::otel::OtelPipeline::layer()` into your own subscriber (feature `otel`).
+Handlers can take `ferrum_alloy_telemetry::RequestContext` (request id, trace id, span id, trust, trace decision). Tests that call handlers without the telemetry layer build one with `RequestContext::new(trace_id, span_id, sampled)`, an untrusted root context, rather than a struct literal: new fields may be added. Nothing installs a global subscriber. To export traces, compose `ferrum_alloy_telemetry::otel::OtelPipeline::layer()` into your own subscriber (feature `otel`).
 
 To trust a gateway's trace context, pass a classifier:
 

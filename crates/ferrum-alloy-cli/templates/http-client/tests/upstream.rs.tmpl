@@ -9,9 +9,7 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::routing::get;
 use ferrum_alloy::config::{HttpClientSettings, Overrides, load_from};
 use ferrum_alloy::http_client::AlloyClient;
-use ferrum_alloy::telemetry::PeerTrust;
-use ferrum_alloy::telemetry::context::{RequestContext, TraceDecision};
-use ferrum_alloy::telemetry::request_id::{RequestId, RequestIdSource};
+use ferrum_alloy::telemetry::context::RequestContext;
 use ferrum_alloy::telemetry::trace_context::{SpanId, TraceId};
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -54,19 +52,7 @@ async fn local_upstream() -> Url {
 
 /// A request context like the one the telemetry layer inserts in service.
 fn context() -> RequestContext {
-    RequestContext {
-        request_id: RequestId::generate(),
-        request_id_source: RequestIdSource::Generated,
-        trace_id: TraceId([0x11; 16]),
-        span_id: SpanId([0x22; 8]),
-        sampled: true,
-        exported: false,
-        trace_decision: TraceDecision::Root,
-        remote_parent: None,
-        tracestate: None,
-        peer_trust: PeerTrust::Untrusted,
-        span: tracing::Span::none(),
-    }
+    RequestContext::new(TraceId([0x11; 16]), SpanId([0x22; 8]), true)
 }
 
 /// Calls `GET /upstream` with a request context, so that trace context
