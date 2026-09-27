@@ -273,7 +273,7 @@ jobs:
             tar -xzf "target/package/$crate-$version.crate" -C "$root"
             echo "$crate = { path = \"$crate-$version\" }" >> "$root/Cargo.toml"
           done
-          cp Cargo.lock rust-toolchain.toml "$root/"
+          cp Cargo.lock "$root/"
           cat "$root/Cargo.toml"
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
           cargo check --manifest-path "$root/Cargo.toml" --workspace --all-features
