@@ -164,6 +164,34 @@ fn invalid_values_are_rejected_not_defaulted() {
 }
 
 #[test]
+fn idle_timeout_defaults_to_a_minute_reads_the_environment_and_rejects_zero() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.server.idle_timeout_ms, 60_000);
+
+    let (config, sources) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_IDLE_TIMEOUT_MS", "1500")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.server.idle_timeout_ms, 1_500);
+    assert_eq!(sources.env, vec!["FERRUM_ALLOY_IDLE_TIMEOUT_MS"]);
+    config.validate(NO_FEATURES).unwrap();
+
+    let (config, _) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_IDLE_TIMEOUT_MS", "0")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("server.idle_timeout_ms must be greater than zero"),
+        "{error}"
+    );
+}
+
+#[test]
 fn syntax_errors_report_the_location_without_the_source_line() {
     let dir = tempfile::tempdir().unwrap();
     for (name, text, secret) in [
