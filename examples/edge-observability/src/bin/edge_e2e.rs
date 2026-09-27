@@ -308,16 +308,19 @@ fn raw_spans(text: &str, trace_id: &str) -> BTreeMap<String, Value> {
         .collect()
 }
 
-/// The trace of the Edge SERVER span for `proxy`, for a response that carried
-/// no `traceparent`. Only used for proxies that receive a single request.
+/// The trace of the newest Edge SERVER span for `proxy`, for a response that
+/// carried no `traceparent`. Only used for proxies that receive a single
+/// request per run; the newest span keeps a rerun against the same stack from
+/// matching an earlier run's trace.
 fn proxy_trace(text: &str, proxy: &str) -> Option<String> {
     all_spans(text)
         .iter()
-        .find(|span| {
+        .filter(|span| {
             span["x-scope"] == EDGE_SCOPE
                 && span["kind"] == 2
                 && attr_str(span, "gateway.proxy.id") == proxy
         })
+        .max_by_key(|span| nanos(span, "startTimeUnixNano"))
         .map(|span| lower(span, "traceId"))
 }
 
@@ -964,14 +967,17 @@ fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
         .first()
         .and_then(|s| attr_f64(s, "gateway.latency.backend_ttfb_ms"))
         .unwrap_or(-1.0);
-    let longest = attempts
+    // The attempts ran one after the other, separated by the backoff, so
+    // Edge's single measurement is at least their sum plus the backoff.
+    let headers: Vec<f64> = attempts
         .iter()
         .filter_map(|s| attr_f64(s, "alloy.server.time_to_headers_ms"))
-        .fold(-1.0, f64::max);
+        .collect();
+    let floor = headers.iter().sum::<f64>() + RETRY_BACKOFF_MS;
     check.that(
         "retry: Edge backend time-to-headers covers both attempts and the backoff",
-        longest >= 0.0 && edge_ttfb >= longest && edge_ttfb >= RETRY_BACKOFF_MS,
-        format!("Edge {edge_ttfb:.1} ms; longest attempt time to headers {longest:.1} ms"),
+        headers.len() == 2 && edge_ttfb >= floor,
+        format!("Edge {edge_ttfb:.1} ms; attempts {headers:?} ms; floor {floor:.1} ms"),
     );
     match evidence.diagnose("retry", &trace, Vec::new()) {
         Ok((diagnosis, findings)) => {
@@ -1014,18 +1020,20 @@ fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
 
 /// A cold and a reused gateway connection: the service's own view of its
 /// connection tells them apart, and neither request's evidence carries a
-/// connection-setup value.
+/// connection-setup value. The service counts every request per connection,
+/// on any route, so a connection that already carried main-proxy traffic or a
+/// health check does not pass as cold.
 fn check_connections(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases) {
-    let position = |reply: &Reply| body_json(reply)["request_on_connection"].as_u64();
+    let earlier = |reply: &Reply| body_json(reply)["earlier_requests"].as_u64();
     check.that(
-        "reuse: the first request arrived on a new gateway connection",
-        cases.cold.status == StatusCode::OK && position(&cases.cold) == Some(1),
+        "reuse: the first request's gateway connection carried no earlier request",
+        cases.cold.status == StatusCode::OK && earlier(&cases.cold) == Some(0),
         format!("{} {}", cases.cold.status, cases.cold.body),
     );
     let reused = cases
         .later
         .iter()
-        .find(|&reply| position(reply).is_some_and(|n| n > 1));
+        .find(|&reply| earlier(reply).is_some_and(|n| n > 0));
     check.that(
         "reuse: a later request reused a gateway connection",
         reused.is_some(),
@@ -1091,10 +1099,7 @@ fn check_concurrency(check: &mut Check, evidence: &Evidence<'_>, replies: &[Repl
             && peaks.iter().all(|&p| p == full),
         format!("peaks {peaks:?}"),
     );
-    let connections: BTreeSet<&str> = bodies
-        .iter()
-        .filter_map(|b| b["remote"].as_str())
-        .collect();
+    let connections: BTreeSet<&str> = bodies.iter().filter_map(|b| b["remote"].as_str()).collect();
     check.that(
         "http2: concurrent requests shared gateway connections",
         bodies.iter().all(|b| b["remote"].is_string())
@@ -1195,6 +1200,11 @@ fn check_cancellation(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases)
         outcomes.join(", "),
         edge_attr("gateway.client.disconnected"),
         edge_attr("gateway.body.completed")
+    );
+    check.that(
+        "cancel: Edge recorded that the client disconnected",
+        edge_attr("gateway.client.disconnected") == "true",
+        detail.clone(),
     );
     check.that(
         "cancel: Alloy recorded the request exactly once, as cancelled",

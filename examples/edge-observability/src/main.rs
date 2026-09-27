@@ -16,7 +16,9 @@
 //! * `/flaky/{key}` answers `503` to the first request for a key and `200`
 //!   afterwards, so a gateway retry reaches the service twice.
 //! * `/conn` reports the gateway connection (remote socket address) the
-//!   request arrived on and how many requests that connection has carried.
+//!   request arrived on and how many earlier requests that connection
+//!   carried. A middleware over the whole application router counts every
+//!   request, the main proxy's traffic and health checks included.
 //! * `/gather/{n}` holds each request until `n` of them are inside the handler
 //!   at once (or 5 s pass), then reports the peak and the connection.
 //! * `/events/long` streams for about 4 s, long enough to cancel mid-body.
@@ -28,10 +30,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
@@ -104,7 +108,7 @@ const MAX_PROBE_ENTRIES: usize = 4096;
 struct Probes {
     /// Keys whose first request already failed.
     failed_once: Arc<Mutex<HashSet<String>>>,
-    /// Requests carried so far by each gateway connection.
+    /// Requests carried so far by each gateway connection, on every route.
     per_connection: Arc<Mutex<HashMap<SocketAddr, u64>>>,
     /// `/gather` requests currently inside the handler.
     gathering: Arc<AtomicUsize>,
@@ -128,6 +132,30 @@ impl Probes {
     }
 }
 
+/// This request's 1-based position among every request its connection
+/// carried.
+#[derive(Clone, Copy)]
+struct Position(u64);
+
+/// Counts every request per gateway connection before any route sees it, so
+/// requests to other paths (main-proxy traffic, `/readyz` health checks)
+/// count too.
+async fn count_requests(
+    State(probes): State<Probes>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let remote = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    if let Some(remote) = remote {
+        let position = Position(probes.count(remote));
+        request.extensions_mut().insert(position);
+    }
+    next.run(request).await
+}
+
 async fn flaky(State(probes): State<Probes>, Path(key): Path<String>) -> Response {
     let first = {
         let mut failed = lock(&probes.failed_once);
@@ -147,17 +175,17 @@ async fn flaky(State(probes): State<Probes>, Path(key): Path<String>) -> Respons
 struct ConnectionView {
     /// The gateway's socket address as this service saw it.
     remote: String,
-    /// 1-based position of this request on that connection.
-    request_on_connection: u64,
+    /// Requests, to any route, that connection carried before this one.
+    earlier_requests: u64,
 }
 
 async fn connection(
-    State(probes): State<Probes>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    Extension(Position(position)): Extension<Position>,
 ) -> Json<ConnectionView> {
     Json(ConnectionView {
         remote: remote.to_string(),
-        request_on_connection: probes.count(remote),
+        earlier_requests: position.saturating_sub(1),
     })
 }
 
@@ -166,7 +194,7 @@ struct GatherView {
     /// Most `/gather` requests this one saw inside the handler at once.
     peak_in_flight: usize,
     remote: String,
-    request_on_connection: u64,
+    earlier_requests: u64,
 }
 
 /// Decrements the in-flight count even when the request is cancelled.
@@ -182,8 +210,8 @@ async fn gather(
     State(probes): State<Probes>,
     Path(expected): Path<usize>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    Extension(Position(position)): Extension<Position>,
 ) -> Json<GatherView> {
-    let request_on_connection = probes.count(remote);
     let expected = expected.clamp(1, 32);
     let mut peak = probes.gathering.fetch_add(1, Ordering::SeqCst) + 1;
     let _guard = Gathering(Arc::clone(&probes.gathering));
@@ -197,12 +225,13 @@ async fn gather(
     Json(GatherView {
         peak_in_flight: peak,
         remote: remote.to_string(),
-        request_on_connection,
+        earlier_requests: position.saturating_sub(1),
     })
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let probes = Probes::default();
     let router = Router::new()
         .route("/hello", get(|| async { "hello from behind Ferrum Edge" }))
         .route("/items/{id}", get(get_item))
@@ -211,11 +240,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/flaky/{key}", get(flaky))
         .route("/conn", get(connection))
         .route("/gather/{n}", get(gather))
-        .with_state(Probes::default());
-    AlloyApp::new("edge-demo-api")
+        .with_state(probes.clone());
+    let mut parts = AlloyApp::new("edge-demo-api")
         .version(env!("CARGO_PKG_VERSION"))
         .router(router)
-        .run()
-        .await?;
+        .into_parts()?;
+    // Outermost, so health checks and requests Alloy rejects count too.
+    let counted = middleware::from_fn_with_state(probes, count_requests);
+    parts.router = parts.router.layer(counted);
+    parts.serve().await?;
     Ok(())
 }
