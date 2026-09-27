@@ -60,6 +60,7 @@ pub enum AcceptPolicy {
 /// Request id handling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct RequestIdConfig {
     /// Header carrying the id (lowercase). Defaults to `x-request-id`, the
     /// Ferrum Edge `correlation_id` default.
@@ -84,6 +85,7 @@ impl Default for RequestIdConfig {
 /// Incoming W3C trace context handling.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct TraceContextConfig {
     /// Whose `traceparent` becomes the parent. Defaults to trusted peers.
     pub accept_incoming: AcceptPolicy,
@@ -109,6 +111,7 @@ pub enum ServerTimingPolicy {
 /// Optional span attributes that can carry personal or high-cardinality data.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct RecordConfig {
     /// Record `url.path` (raw path; may contain identifiers).
     pub url_path: bool,
@@ -121,6 +124,7 @@ pub struct RecordConfig {
 /// Telemetry layer configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct TelemetryConfig {
     /// Request id handling.
     pub request_id: RequestIdConfig,

@@ -308,25 +308,18 @@ impl AlloyApp {
         }
         #[cfg(feature = "edge")]
         {
-            let policy = ferrum_alloy_edge::EdgePolicy::new(
-                ferrum_alloy_edge::EdgePolicyConfig {
-                    mode: match config.edge.mode {
-                        EdgeMode::Standalone => ferrum_alloy_edge::DeploymentMode::Standalone,
-                        EdgeMode::GatewayPreferred => {
-                            ferrum_alloy_edge::DeploymentMode::GatewayPreferred
-                        }
-                        EdgeMode::GatewayRequired => {
-                            ferrum_alloy_edge::DeploymentMode::GatewayRequired
-                        }
-                    },
-                    accept_consumer_identity: config.edge.accept_consumer_identity,
-                },
-                Arc::clone(&classifier),
-            )
-            .with_exempt_paths(vec![
-                config.health.liveness_path.clone(),
-                config.health.readiness_path.clone(),
-            ]);
+            let mut policy_config = ferrum_alloy_edge::EdgePolicyConfig::default();
+            policy_config.mode = match config.edge.mode {
+                EdgeMode::Standalone => ferrum_alloy_edge::DeploymentMode::Standalone,
+                EdgeMode::GatewayPreferred => ferrum_alloy_edge::DeploymentMode::GatewayPreferred,
+                EdgeMode::GatewayRequired => ferrum_alloy_edge::DeploymentMode::GatewayRequired,
+            };
+            policy_config.accept_consumer_identity = config.edge.accept_consumer_identity;
+            let policy = ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier))
+                .with_exempt_paths(vec![
+                    config.health.liveness_path.clone(),
+                    config.health.readiness_path.clone(),
+                ]);
             app = app.layer(ferrum_alloy_edge::EdgeLayer::new(policy));
         }
         #[cfg(not(feature = "edge"))]
@@ -637,18 +630,17 @@ impl TelemetryGuard {
                 instance_id: None,
                 environment: Some(config.service.environment.clone()),
             };
-            let otlp = ferrum_alloy_telemetry::otel::OtlpConfig {
-                enabled: true,
-                endpoint: config.otlp.endpoint.clone(),
-                timeout_ms: config.otlp.timeout_ms,
-                max_export_retries: config.otlp.max_export_retries,
-                sampling_ratio: config.otlp.sampling_ratio,
-                max_queue_spans: config.otlp.max_queue_spans,
-                max_queue_bytes: config.otlp.max_queue_bytes,
-                max_export_batch: config.otlp.max_export_batch,
-                max_request_bytes: config.otlp.max_request_bytes,
-                scheduled_delay_ms: config.otlp.scheduled_delay_ms,
-            };
+            let mut otlp = ferrum_alloy_telemetry::otel::OtlpConfig::default();
+            otlp.enabled = true;
+            otlp.endpoint = config.otlp.endpoint.clone();
+            otlp.timeout_ms = config.otlp.timeout_ms;
+            otlp.max_export_retries = config.otlp.max_export_retries;
+            otlp.sampling_ratio = config.otlp.sampling_ratio;
+            otlp.max_queue_spans = config.otlp.max_queue_spans;
+            otlp.max_queue_bytes = config.otlp.max_queue_bytes;
+            otlp.max_export_batch = config.otlp.max_export_batch;
+            otlp.max_request_bytes = config.otlp.max_request_bytes;
+            otlp.scheduled_delay_ms = config.otlp.scheduled_delay_ms;
             let pipeline = init::init_logging_and_otel(&config.logging, &resource, &otlp, metrics)
                 .map_err(|e| AlloyError::Telemetry(e.to_string()))?;
             return Ok(Self {

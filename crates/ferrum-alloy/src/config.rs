@@ -14,6 +14,13 @@
 //! is reported instead of ignored.
 //!
 //! Secrets are held in [`Secret`] and never printed.
+//!
+//! The configuration structs are `#[non_exhaustive]`, so adding a setting is
+//! not a breaking change. Outside this crate, start from `Default` (or
+//! [`TlsSettings::new`] and [`JwtSettings::new`], whose sections have
+//! required fields) and assign the fields to change. The enums are
+//! `#[non_exhaustive]` too, so a `match` on them outside this crate needs a
+//! wildcard arm.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -78,6 +85,7 @@ impl<'de> Deserialize<'de> for Secret {
 /// Complete Alloy configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct AlloyConfig {
     /// Service identity.
     pub service: ServiceConfig,
@@ -116,6 +124,7 @@ pub struct AlloyConfig {
 /// Service identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ServiceConfig {
     /// Service name. The builder's name is an explicit override.
     pub name: Option<String>,
@@ -138,6 +147,7 @@ impl Default for ServiceConfig {
 /// Application listener configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ServerConfig {
     /// Listen address. Defaults to loopback; bind `0.0.0.0` explicitly in
     /// containers.
@@ -199,6 +209,7 @@ impl Default for ServerConfig {
 /// Client certificate policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ClientAuth {
     /// No client certificates.
     #[default]
@@ -212,6 +223,7 @@ pub enum ClientAuth {
 /// TLS listener settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TlsSettings {
     /// PEM certificate chain.
     pub cert_path: PathBuf,
@@ -246,9 +258,30 @@ pub struct TlsSettings {
     pub reload_interval_ms: u64,
 }
 
+impl TlsSettings {
+    /// Settings for the given certificate chain and private key, with every
+    /// other setting at its default, as when only `cert_path` and `key_path`
+    /// are configured.
+    pub fn new(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+            client_ca_path: None,
+            client_auth: ClientAuth::default(),
+            handshake_timeout_ms: default_handshake_timeout_ms(),
+            client_crl_paths: Vec::new(),
+            client_crl_depth: CrlDepth::default(),
+            client_crl_unknown_status: CrlUnknownStatus::default(),
+            client_crl_expiration: CrlExpiration::default(),
+            reload_interval_ms: default_reload_interval_ms(),
+        }
+    }
+}
+
 /// Which certificates of a client chain are checked against the CRLs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrlDepth {
     /// The leaf and every intermediate. Trust anchors are never checked.
     #[default]
@@ -261,6 +294,7 @@ pub enum CrlDepth {
 /// determines.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrlUnknownStatus {
     /// Refuse the handshake.
     #[default]
@@ -272,6 +306,7 @@ pub enum CrlUnknownStatus {
 /// Policy for a CRL whose `nextUpdate` time has passed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrlExpiration {
     /// Fail startup, and refuse handshakes once a loaded CRL expires.
     #[default]
@@ -295,6 +330,7 @@ const TLS_RELOAD_INTERVAL_MS: std::ops::RangeInclusive<u64> = 100..=24 * 60 * 60
 /// Graceful shutdown budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ShutdownConfig {
     /// After a shutdown signal, keep accepting while readiness reports
     /// `draining`, so load balancers stop routing first.
@@ -318,6 +354,7 @@ impl Default for ShutdownConfig {
 /// Management listener.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManagementConfig {
     /// Serve the management listener.
     pub enabled: bool,
@@ -357,6 +394,7 @@ pub const RATE_LIMIT_IPV6_PREFIX_LENS: std::ops::RangeInclusive<u8> = 48..=128;
 /// limited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManagementRateLimit {
     /// Enforce the limits.
     pub enabled: bool,
@@ -404,6 +442,7 @@ impl Default for ManagementRateLimit {
 /// Health endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HealthConfig {
     /// Also serve minimal liveness/readiness on the application listener
     /// (for gateway health checks). They take precedence over app routes.
@@ -433,6 +472,7 @@ impl Default for HealthConfig {
 /// OpenTelemetry OTLP/HTTP export settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct OtlpSettings {
     /// Export traces.
     pub enabled: bool,
@@ -476,6 +516,7 @@ impl Default for OtlpSettings {
 /// How the service relates to Ferrum Edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EdgeMode {
     /// No gateway assumptions; direct requests work normally.
     #[default]
@@ -489,6 +530,7 @@ pub enum EdgeMode {
 /// Ferrum Edge integration settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct EdgeSettings {
     /// Deployment mode.
     pub mode: EdgeMode,
@@ -500,6 +542,7 @@ pub struct EdgeSettings {
 /// CORS settings. Nothing is permitted unless listed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct CorsSettings {
     /// Enable CORS handling.
     pub enabled: bool,
@@ -518,6 +561,7 @@ pub struct CorsSettings {
 /// Compression settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct CompressionSettings {
     /// Enable response compression. Compressing responses that mix secrets
     /// with attacker-reflected input enables BREACH-style attacks; enable it
@@ -539,6 +583,7 @@ impl Default for CompressionSettings {
 /// OpenAPI serving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct OpenApiSettings {
     /// Serve the registered document on the management listener.
     pub serve: bool,
@@ -561,6 +606,7 @@ impl Default for OpenApiSettings {
 /// PostgreSQL pool settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct DatabaseSettings {
     /// Connection URL (secret).
     pub url: Option<Secret>,
@@ -602,6 +648,7 @@ impl Default for DatabaseSettings {
 /// Authentication settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct AuthSettings {
     /// JWT bearer verification.
     pub jwt: Option<JwtSettings>,
@@ -610,6 +657,7 @@ pub struct AuthSettings {
 /// JWT verification policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct JwtSettings {
     /// Required `iss`.
     pub issuer: String,
@@ -649,6 +697,26 @@ pub struct JwtSettings {
     pub leeway_seconds: u64,
 }
 
+impl JwtSettings {
+    /// A policy requiring `issuer` and accepting `audiences`, with every
+    /// other setting at its default, as when only `issuer` and `audiences`
+    /// are configured. `jwks_url` must still be set.
+    pub fn new(issuer: impl Into<String>, audiences: Vec<String>) -> Self {
+        Self {
+            issuer: issuer.into(),
+            audiences,
+            algorithms: default_algorithms(),
+            jwks_url: None,
+            jwks_min_refresh_interval_ms: default_jwks_refresh_ms(),
+            jwks_max_age_ms: default_jwks_max_age_ms(),
+            jwks_max_stale_ms: default_jwks_max_stale_ms(),
+            jwks_max_bytes: default_jwks_max_bytes(),
+            jwks_timeout_ms: default_jwks_timeout_ms(),
+            leeway_seconds: default_leeway(),
+        }
+    }
+}
+
 fn default_algorithms() -> Vec<String> {
     vec!["RS256".to_owned()]
 }
@@ -674,6 +742,7 @@ fn default_leeway() -> u64 {
 /// Outbound HTTP client settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HttpClientSettings {
     /// Connection establishment timeout.
     pub connect_timeout_ms: u64,

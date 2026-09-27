@@ -966,7 +966,7 @@ async fn a_hanging_http2_handler_is_cancelled_at_the_drain_budget() {
 mod tls {
     use super::*;
 
-    use ferrum_alloy::config::{ClientAuth, TlsSettings};
+    use ferrum_alloy::config::TlsSettings;
 
     use crate::support::pki::{self, Ca};
 
@@ -985,18 +985,13 @@ mod tls {
         let ca = Ca::new("hardening-test-ca");
         let server = ca.server();
         let mut config = hardened();
-        config.server.tls = Some(TlsSettings {
-            cert_path: pki::write(dir.path(), "server.pem", &server.cert_pem),
-            key_path: pki::write(dir.path(), "server.key", &server.key_pem),
-            client_ca_path: None,
-            client_auth: ClientAuth::None,
-            handshake_timeout_ms: HANDSHAKE_TIMEOUT_MS,
-            client_crl_paths: Vec::new(),
-            client_crl_depth: Default::default(),
-            client_crl_unknown_status: Default::default(),
-            client_crl_expiration: Default::default(),
-            reload_interval_ms: 0,
-        });
+        let mut tls = TlsSettings::new(
+            pki::write(dir.path(), "server.pem", &server.cert_pem),
+            pki::write(dir.path(), "server.key", &server.key_pem),
+        );
+        tls.handshake_timeout_ms = HANDSHAKE_TIMEOUT_MS;
+        tls.reload_interval_ms = 0;
+        config.server.tls = Some(tls);
         config.shutdown.drain_timeout_ms = drain_timeout_ms;
         Tls {
             _dir: dir,

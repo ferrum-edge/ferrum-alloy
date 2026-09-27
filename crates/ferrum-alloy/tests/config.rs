@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use ferrum_alloy::config::{
     AlloyConfig, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus, ENV_VARS,
-    EdgeMode, Overrides, Secret, load_from,
+    EdgeMode, JwtSettings, Overrides, Secret, TlsSettings, load_from,
 };
 
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -43,6 +43,26 @@ fn defaults_are_safe_and_valid() {
     assert_eq!(config.edge.mode, EdgeMode::Standalone);
     assert!(sources.file.is_none());
     config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn constructors_match_sections_configured_with_only_their_required_fields() {
+    let vars = [
+        ("FERRUM_ALLOY_TLS_CERT_PATH", "server.pem"),
+        ("FERRUM_ALLOY_TLS_KEY_PATH", "server.key"),
+        ("FERRUM_ALLOY_JWT_ISSUER", "https://issuer.test"),
+        ("FERRUM_ALLOY_JWT_AUDIENCES", "orders-api,billing-api"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    assert_eq!(
+        config.server.tls,
+        Some(TlsSettings::new("server.pem", "server.key"))
+    );
+    let audiences = vec!["orders-api".to_owned(), "billing-api".to_owned()];
+    assert_eq!(
+        config.auth.jwt,
+        Some(JwtSettings::new("https://issuer.test", audiences))
+    );
 }
 
 #[test]

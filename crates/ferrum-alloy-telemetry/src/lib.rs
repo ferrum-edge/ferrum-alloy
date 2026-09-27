@@ -8,6 +8,9 @@
 //! Nothing here installs a global subscriber or OpenTelemetry provider as a
 //! side effect. Initialization helpers ([`init`]) are explicit calls that fail
 //! instead of silently replacing an existing subscriber.
+//!
+//! The configuration structs are `#[non_exhaustive]`, so adding a setting is
+//! not a breaking change. Start from `Default` and assign the fields to change.
 
 pub mod body;
 pub mod cache;

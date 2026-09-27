@@ -36,11 +36,10 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 fn settings(url: &str) -> DatabaseSettings {
-    DatabaseSettings {
-        url: Some(Secret::new(url)),
-        acquire_timeout_ms: 500,
-        ..DatabaseSettings::default()
-    }
+    let mut settings = DatabaseSettings::default();
+    settings.url = Some(Secret::new(url));
+    settings.acquire_timeout_ms = 500;
+    settings
 }
 
 fn database_url() -> String {

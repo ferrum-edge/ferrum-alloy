@@ -88,11 +88,10 @@ fn request_from(
 }
 
 fn trusted_layer(config: TelemetryConfig) -> TelemetryLayer {
-    let peers = TrustedPeers::new(&TrustedPeersConfig {
-        identities: vec!["spiffe://ferrum.test/ns/edge/sa/gateway".into()],
-        networks: vec!["10.0.0.0/8".parse().unwrap()],
-    })
-    .unwrap();
+    let mut trust = TrustedPeersConfig::default();
+    trust.identities = vec!["spiffe://ferrum.test/ns/edge/sa/gateway".into()];
+    trust.networks = vec!["10.0.0.0/8".parse().unwrap()];
+    let peers = TrustedPeers::new(&trust).unwrap();
     TelemetryLayer::new(config)
         .unwrap()
         .with_classifier(Arc::new(peers))
@@ -521,21 +520,14 @@ fn reserved_request_id_headers_are_rejected() {
 #[test]
 fn trusted_peer_configuration_is_validated() {
     for identity in ["gateway", "spiffe://", "dns:", "http://x"] {
-        assert!(
-            TrustedPeers::new(&TrustedPeersConfig {
-                identities: vec![identity.into()],
-                networks: vec![],
-            })
-            .is_err(),
-            "{identity}"
-        );
+        let mut trust = TrustedPeersConfig::default();
+        trust.identities = vec![identity.into()];
+        assert!(TrustedPeers::new(&trust).is_err(), "{identity}");
     }
+    let mut trust = TrustedPeersConfig::default();
+    trust.networks = vec!["0.0.0.0/0".parse().unwrap()];
     assert!(
-        TrustedPeers::new(&TrustedPeersConfig {
-            identities: vec![],
-            networks: vec!["0.0.0.0/0".parse().unwrap()],
-        })
-        .is_err(),
+        TrustedPeers::new(&trust).is_err(),
         "trusting every address must be rejected"
     );
 }

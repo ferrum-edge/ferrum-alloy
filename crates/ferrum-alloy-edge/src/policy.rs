@@ -42,6 +42,7 @@ pub enum DeploymentMode {
 
 /// Policy configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EdgePolicyConfig {
     /// Deployment mode.
     pub mode: DeploymentMode,
