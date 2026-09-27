@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use ferrum_alloy_telemetry::init::LoggingConfig;

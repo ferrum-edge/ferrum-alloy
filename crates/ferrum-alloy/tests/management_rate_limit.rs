@@ -224,10 +224,7 @@ async fn loopback_and_exempt_networks_are_not_limited() {
     limit.burst = 1;
     limit.probe_requests_per_second = 1;
     limit.probe_burst = 1;
-    limit.exempt_networks = vec![
-        "127.0.0.0/8".parse().unwrap(),
-        "::1/128".parse().unwrap(),
-    ];
+    limit.exempt_networks = vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()];
     // A node network, so kubelet probes are never refused.
     limit.exempt_networks.push("10.244.0.0/16".parse().unwrap());
     let parts = parts(cfg);

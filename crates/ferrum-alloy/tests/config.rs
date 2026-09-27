@@ -541,6 +541,7 @@ fn env_var_table_maps_to_real_config_paths() {
             ferrum_alloy::config::EnvKind::Bool => "false",
             ferrum_alloy::config::EnvKind::List => match var.name {
                 "FERRUM_ALLOY_TRUSTED_NETWORKS" => "10.0.0.0/8",
+                "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => "10.0.0.0/8",
                 _ => "a,b",
             },
             _ => match var.name {
@@ -550,7 +551,6 @@ fn env_var_table_maps_to_real_config_paths() {
                 "FERRUM_ALLOY_SERVER_TIMING" => "disabled",
                 "FERRUM_ALLOY_EDGE_MODE" => "standalone",
                 "FERRUM_ALLOY_TLS_CLIENT_AUTH" => "none",
-                "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => "10.0.0.0/8",
                 _ => "value",
             },
         };
