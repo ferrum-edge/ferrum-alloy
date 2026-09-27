@@ -31,24 +31,31 @@ use http::StatusCode;
 use tower::{ServiceExt, service_fn};
 use tower_layer::layer_fn;
 
-use crate::error::AlloyError;
+use crate::error::{AlloyError, RouteConflict};
 
 /// Set on a probe's response when an application route matched: the route's
-/// pattern, when axum reports one (it does not for a nested service's tail).
+/// pattern, when axum reports one (it does not for a nested service).
 #[derive(Clone)]
 struct Matched(Option<String>);
 
-/// Fails with [`AlloyError::ShadowedRoute`] when an application route in
-/// `router` matches one of `served`: Alloy's paths on the application
-/// listener, each with the setting that places it there.
+/// Fails with [`AlloyError::ShadowedRoute`], listing every conflict, when
+/// an application route in `router` matches one of `served`: Alloy's paths
+/// on the application listener, each with the setting that places it there.
 pub(crate) fn check(router: &Router, served: &[(&'static str, String)]) -> Result<(), AlloyError> {
     if served.is_empty() || !router.has_routes() {
         return Ok(());
     }
+    // A route for any method is found because, in axum 0.8, `route_layer`
+    // wraps a method router's fallback (what answers a method it has no
+    // handler for, such as the probe's `GET` on a `POST`-only route) along
+    // with its handlers. This is axum 0.8 behaviour, not a documented
+    // guarantee: re-check it on every axum upgrade. The `POST`-only tests in
+    // `tests/route_shadowing.rs` fail if it changes.
     let probe = router
         .clone()
         .layer(layer_fn(|_: Route| service_fn(no_route)))
         .route_layer(layer_fn(|_: Route| service_fn(route_found)));
+    let mut conflicts = Vec::new();
     for &(setting, ref path) in served {
         // A path that is not a valid request target is never requested, so
         // it shadows nothing.
@@ -66,13 +73,17 @@ pub(crate) fn check(router: &Router, served: &[(&'static str, String)]) -> Resul
         if pattern.as_deref().is_some_and(is_root_catch_all) {
             continue;
         }
-        return Err(AlloyError::ShadowedRoute {
-            route: pattern.unwrap_or_else(|| "<nested service>".to_owned()),
+        conflicts.push(RouteConflict {
+            route: pattern,
             path: path.clone(),
             setting,
         });
     }
-    Ok(())
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(AlloyError::ShadowedRoute { conflicts })
+    }
 }
 
 fn no_route(_request: Request) -> Ready<Result<Response, Infallible>> {

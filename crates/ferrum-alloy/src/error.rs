@@ -1,5 +1,6 @@
 //! Startup and serving errors.
 
+use std::fmt;
 use std::net::SocketAddr;
 
 use crate::config::ConfigError;
@@ -32,19 +33,16 @@ pub enum AlloyError {
     /// Serving failed.
     #[error("serve: {0}")]
     Serve(std::io::Error),
-    /// An application route matches a path Alloy serves on the application
-    /// listener, ahead of the application's router, so the route would
-    /// never be reached.
+    /// Application routes match paths Alloy serves on the application
+    /// listener, ahead of the application's router, so requests for those
+    /// paths would never reach them. Every conflict is listed.
     #[error(
-        "application route {route} matches {path}, which Alloy serves on the application listener ({setting}), so the route would never be reached; change {setting} or the route"
+        "Alloy serves paths on the application listener ahead of the application's router: {}; change the settings named or the routes",
+        conflict_list(.conflicts)
     )]
     ShadowedRoute {
-        /// The application route's pattern.
-        route: String,
-        /// The path Alloy serves.
-        path: String,
-        /// The setting that places the path on the application listener.
-        setting: &'static str,
+        /// Every conflict, in the order Alloy's paths are served.
+        conflicts: Vec<RouteConflict>,
     },
     /// An integration (database, auth) failed to start.
     #[error("{0}")]
@@ -52,4 +50,42 @@ pub enum AlloyError {
     /// An invariant was violated.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// An application route that a path Alloy serves on the application listener
+/// would shadow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteConflict {
+    /// The application route's pattern, or `None` for a `nest_service` whose
+    /// prefix contains `path` (axum reports no pattern for it).
+    pub route: Option<String>,
+    /// The path Alloy serves.
+    pub path: String,
+    /// The setting that places the path on the application listener.
+    pub setting: &'static str,
+}
+
+impl fmt::Display for RouteConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            route,
+            path,
+            setting,
+        } = self;
+        match route {
+            Some(route) => write!(
+                f,
+                "requests for {path} would never reach application route {route} ({setting})"
+            ),
+            None => write!(
+                f,
+                "requests for {path} would never reach a nest_service whose prefix contains {path} ({setting})"
+            ),
+        }
+    }
+}
+
+fn conflict_list(conflicts: &[RouteConflict]) -> String {
+    let conflicts: Vec<String> = conflicts.iter().map(ToString::to_string).collect();
+    conflicts.join("; ")
 }
