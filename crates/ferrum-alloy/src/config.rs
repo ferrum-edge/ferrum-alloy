@@ -154,6 +154,11 @@ pub struct ServerConfig {
     pub http2_max_concurrent_streams: u32,
     /// Time allowed to receive a request head (slow-header protection).
     pub header_read_timeout_ms: u64,
+    /// Time a connection may stay open with no request in flight after its
+    /// first request, before it is closed (HTTP/2 `GOAWAY`). Behind a load
+    /// balancer that pools connections, set it above the balancer's idle
+    /// timeout.
+    pub idle_timeout_ms: u64,
     /// Deadline for producing response *headers*. Never applied to response
     /// body streaming (SSE) or upgraded connections. `0` disables it.
     pub request_timeout_ms: u64,
@@ -176,6 +181,7 @@ impl Default for ServerConfig {
             max_connections: 10_000,
             http2_max_concurrent_streams: 256,
             header_read_timeout_ms: 10_000,
+            idle_timeout_ms: 60_000,
             request_timeout_ms: 30_000,
             max_in_flight_requests: 0,
             admission_wait_timeout_ms: 0,
@@ -672,6 +678,7 @@ env_vars! {
     "FERRUM_ALLOY_REQUEST_BODY_LIMIT_BYTES" => ["server", "request_body_limit_bytes"]: Uint,
     "FERRUM_ALLOY_REQUEST_TIMEOUT_MS" => ["server", "request_timeout_ms"]: Uint,
     "FERRUM_ALLOY_HEADER_READ_TIMEOUT_MS" => ["server", "header_read_timeout_ms"]: Uint,
+    "FERRUM_ALLOY_IDLE_TIMEOUT_MS" => ["server", "idle_timeout_ms"]: Uint,
     "FERRUM_ALLOY_MAX_CONNECTIONS" => ["server", "max_connections"]: Uint,
     "FERRUM_ALLOY_MAX_IN_FLIGHT_REQUESTS" => ["server", "max_in_flight_requests"]: Uint,
     "FERRUM_ALLOY_TLS_CERT_PATH" => ["server", "tls", "cert_path"]: Str,
@@ -1185,6 +1192,7 @@ impl AlloyConfig {
                 "server.header_read_timeout_ms",
                 server.header_read_timeout_ms,
             ),
+            ("server.idle_timeout_ms", server.idle_timeout_ms),
             ("shutdown.drain_timeout_ms", self.shutdown.drain_timeout_ms),
             ("health.cache_ttl_ms", self.health.cache_ttl_ms),
             ("health.check_timeout_ms", self.health.check_timeout_ms),

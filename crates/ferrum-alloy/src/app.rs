@@ -466,12 +466,11 @@ impl AlloyParts {
     /// activation).
     ///
     /// After shutdown it returns only once every connection socket on both
-    /// listeners is closed: connections still open when
-    /// `shutdown.drain_timeout_ms` runs out are force-closed first, and it
-    /// also waits for their aborted tasks to finish unwinding. HTTP/2 stream
-    /// handler tasks are not yet tracked by the drain and may still be
-    /// running (ferrum-edge/ferrum-alloy#35). Upgraded (WebSocket) sessions
-    /// are not connections here; see [`Lifecycle::shutdown_token`].
+    /// listeners is closed and no HTTP/2 stream handler is still running:
+    /// connections still open when `shutdown.drain_timeout_ms` runs out are
+    /// force-closed and stream tasks still running are cancelled, and it
+    /// also waits for those tasks to finish unwinding. Upgraded (WebSocket)
+    /// sessions are not connections here; see [`Lifecycle::shutdown_token`].
     pub async fn serve_on(
         mut self,
         app_listener: TcpListener,
@@ -485,6 +484,7 @@ impl AlloyParts {
             max_header_bytes: config.server.max_header_bytes,
             http2_max_concurrent_streams: config.server.http2_max_concurrent_streams,
             header_read_timeout: Duration::from_millis(config.server.header_read_timeout_ms),
+            idle_timeout: Duration::from_millis(config.server.idle_timeout_ms),
             drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
             #[cfg(feature = "tls")]
             tls: self.tls.clone(),
