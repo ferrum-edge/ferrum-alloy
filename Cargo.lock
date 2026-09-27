@@ -775,8 +775,11 @@ dependencies = [
  "hyper",
  "hyper-util",
  "opentelemetry_sdk",
+ "rcgen",
+ "rustls",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]
