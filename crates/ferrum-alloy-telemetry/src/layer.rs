@@ -34,6 +34,7 @@ use tracing::field::Empty;
 use crate::body::InstrumentedBody;
 use crate::cache::is_shared_cacheable;
 use crate::context::{RequestContext, TraceDecision};
+use crate::evidence::{EvidenceSink, Pending, RequestEvidence, TenantTag};
 use crate::metrics::{Metrics, method_label};
 use crate::peer::{PeerTrust, SharedClassifier, TrustNobody, peer_info};
 use crate::request_id::{DEFAULT_REQUEST_ID_HEADER, RequestId, RequestIdSource};
@@ -182,6 +183,7 @@ pub(crate) struct Shared {
     request_id_header: HeaderName,
     metrics: Arc<Metrics>,
     classifier: SharedClassifier,
+    evidence: Option<Arc<dyn EvidenceSink>>,
 }
 
 /// Request instrumentation layer.
@@ -209,6 +211,7 @@ impl TelemetryLayer {
                 request_id_header,
                 metrics: Arc::new(Metrics::default()),
                 classifier: Arc::new(TrustNobody),
+                evidence: None,
             }),
         })
     }
@@ -225,6 +228,15 @@ impl TelemetryLayer {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
         Arc::make_mut(&mut self.shared).metrics = metrics;
+        self
+    }
+
+    /// Hands the evidence of every finalized request to `sink`, and inserts
+    /// a [`TenantTag`] into every request so the application can attribute
+    /// it to a tenant (see [`crate::evidence`]).
+    #[must_use]
+    pub fn with_evidence_sink(mut self, sink: Arc<dyn EvidenceSink>) -> Self {
+        Arc::make_mut(&mut self.shared).evidence = Some(sink);
         self
     }
 
@@ -507,6 +519,19 @@ where
             .flatten()
             .map(|value| (shared.request_id_header.clone(), value));
 
+        let evidence = shared.evidence.as_ref().map(|sink| {
+            let tenant = TenantTag::default();
+            request.extensions_mut().insert(tenant.clone());
+            Box::new(Pending {
+                sink: Arc::clone(sink),
+                request_id: request_id.clone(),
+                trace_id,
+                span_id,
+                tenant,
+                trace_decision: trace.decision,
+                peer_trust: peer_trust.label(),
+            })
+        });
         request.extensions_mut().insert(RequestContext {
             request_id,
             request_id_source: id_source,
@@ -537,6 +562,7 @@ where
             status: None,
             body_bytes: 0,
             trailers: false,
+            evidence,
             done: false,
         };
         let inner = {
@@ -698,6 +724,8 @@ pub(crate) struct Finalizer {
     status: Option<StatusCode>,
     body_bytes: u64,
     trailers: bool,
+    /// Present while an evidence sink waits for this request.
+    evidence: Option<Box<Pending>>,
     done: bool,
 }
 
@@ -798,6 +826,39 @@ impl Finalizer {
         metrics.record_duration(self.method, &route, status, total);
         metrics.body_outcomes.inc(outcome.as_str());
         metrics.request_finished();
+
+        if let Some(pending) = self.evidence.take() {
+            let route = match self.route.as_ref().or_else(|| self.route_slot.get()) {
+                Some(RouteLabel::Template(template)) => Some(Arc::clone(template)),
+                _ => None,
+            };
+            let time_to_headers = self
+                .headers_at
+                .map(|at| at.saturating_duration_since(self.start));
+            let Pending {
+                sink,
+                request_id,
+                trace_id,
+                span_id,
+                tenant,
+                trace_decision,
+                peer_trust,
+            } = *pending;
+            sink.record(RequestEvidence {
+                request_id,
+                trace_id,
+                span_id,
+                tenant: tenant.shared(),
+                route,
+                status: self.status.map(|status| status.as_u16()),
+                time_to_headers,
+                body_duration: body,
+                duration: total,
+                outcome,
+                trace_decision,
+                peer_trust,
+            });
+        }
 
         if self.shared.config.access_log {
             let time_to_headers = self

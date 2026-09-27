@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euxo pipefail
           cargo check --locked -p ferrum-alloy --no-default-features
-          for feature in otel edge tls postgres openapi jwt http-client compression cors; do
+          for feature in otel edge tls postgres openapi jwt http-client compression cors diagnostics; do
             cargo check --locked -p ferrum-alloy --no-default-features --features "$feature"
           done
           cargo check --locked -p ferrum-alloy --features full
@@ -107,7 +107,7 @@ jobs:
         run: |
           set -euxo pipefail
           tree=$(cargo tree --locked -p ferrum-alloy --no-default-features -e normal --prefix none)
-          for forbidden in sqlx jsonwebtoken utoipa reqwest opentelemetry rustls ferrum-alloy-edge; do
+          for forbidden in sqlx jsonwebtoken utoipa reqwest opentelemetry rustls ferrum-alloy-edge ferrum-alloy-diagnostics; do
             if grep -q "^$forbidden " <<<"$tree"; then
               echo "::error::$forbidden is in the minimal dependency graph"
               exit 1

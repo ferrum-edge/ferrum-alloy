@@ -2,7 +2,7 @@
 
 Batteries-included [Axum](https://docs.rs/axum) application toolkit with optional Ferrum Edge integration. `AlloyApp` provides typed configuration, RFC 9457 problem responses, health and readiness, limits, graceful shutdown, and request telemetry, while handlers, extractors, routers, and Tower middleware stay ordinary Axum.
 
-Every integration is an optional Cargo feature, and none is on by default: `otel`, `tls`, `edge`, `postgres`, `openapi`, `jwt`, `http-client`, `compression`, `cors`, and `full` for all of them.
+Every integration is an optional Cargo feature, and none is on by default: `otel`, `tls`, `edge`, `postgres`, `openapi`, `jwt`, `http-client`, `compression`, `cors`, `diagnostics`, and `full` for all of them.
 
 See the [workspace README](https://github.com/ferrum-edge/ferrum-alloy/blob/main/README.md) and [configuration](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/configuration.md).
 

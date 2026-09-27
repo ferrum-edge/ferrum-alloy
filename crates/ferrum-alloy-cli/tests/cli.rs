@@ -150,6 +150,209 @@ fn diagnose_reads_otlp_exports() {
     assert_eq!(code(&again), 0, "{}", stderr(&again));
 }
 
+/// The credential variable of `diagnose --url`.
+const TOKEN_ENV: &str = "FERRUM_DIAGNOSTICS_TOKEN";
+
+/// A live report as a service serves it, with a forged `verified` claim
+/// and a request id carrying a terminal escape sequence.
+fn live_report() -> String {
+    serde_json::json!({
+        "schema": "ferrum.diagnostic_report",
+        "schema_version": "1.0",
+        "collection": {
+            "collector": { "kind": "alloy", "name": "ferrum-alloy" },
+            "method": "live_export",
+            "verification": "verified"
+        },
+        "subject": { "request_id": "req-7\u{1b}[2J", "service": "orders" },
+        "observations": [{
+            "id": "alloy:00f067aa0ba902b7:time_to_headers",
+            "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry" },
+            "kind": "measurement",
+            "name": "alloy.server.time_to_headers",
+            "availability": "measured",
+            "value": 12.5,
+            "unit": "ms",
+            "clock": "monotonic_local",
+            "scope": { "leg": "service", "service": "orders" },
+            "span": {
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b7"
+            },
+            "trust": "verified"
+        }]
+    })
+    .to_string()
+}
+
+/// Answers one HTTP/1.1 request on a loopback port with `status` and
+/// `body`. The handle yields the request head it received, and fails when
+/// no request arrives within 20 seconds.
+fn serve_once(status: &'static str, body: String) -> (u16, std::thread::JoinHandle<String>) {
+    use std::io::{ErrorKind, Read as _, Write as _};
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("no request arrived: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            head.push(byte[0]);
+        }
+        let length = body.len();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n{body}"
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        String::from_utf8_lossy(&head).into_owned()
+    });
+    (port, handle)
+}
+
+#[test]
+fn diagnose_url_fetches_a_live_report_with_the_credential_from_the_environment() {
+    let (port, server) = serve_once("200 OK", live_report());
+    let url = format!("http://127.0.0.1:{port}");
+    let args = [
+        "diagnose",
+        "--url",
+        &url,
+        "--request-id",
+        "req-7",
+        "--format",
+        "json",
+    ];
+    let output = bin()
+        .env(TOKEN_ENV, "live-secret-credential")
+        .args(args)
+        .output()
+        .unwrap();
+    let head = server.join().unwrap();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let expected = "GET /diagnostics/v1/requests/req-7 HTTP/1.1";
+    assert_eq!(head.lines().next(), Some(expected));
+    let head = head.to_ascii_lowercase();
+    assert!(head.contains("authorization: bearer live-secret-credential"));
+
+    let text = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(!text.contains("live-secret-credential"), "{text}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["claimed_verification"], "verified");
+    let collection = &value["report"]["collection"];
+    assert_eq!(collection["verification"], "unverified");
+    assert_eq!(collection["method"], "live_export");
+    for finding in value["report"]["findings"].as_array().into_iter().flatten() {
+        assert_ne!(finding["confidence"], "confirmed", "{finding}");
+    }
+}
+
+#[test]
+fn diagnose_url_reads_a_token_file_and_keeps_escapes_off_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = write(dir.path(), "token", "file-secret-credential\n");
+    let (port, server) = serve_once("200 OK", live_report());
+    let url = format!("http://127.0.0.1:{port}/");
+    let args = [
+        "diagnose",
+        "--url",
+        &url,
+        "--request-id",
+        "req-7",
+        "--token-file",
+        &token,
+    ];
+    let output = bin().env_remove(TOKEN_ENV).args(args).output().unwrap();
+    let head = server.join().unwrap().to_ascii_lowercase();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(head.contains("authorization: bearer file-secret-credential"));
+    let text = stdout(&output);
+    assert!(text.contains("provenance is unverified"), "{text}");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains("file-secret-credential"));
+}
+
+#[test]
+fn diagnose_url_reports_a_refusal_without_details() {
+    let problem = r#"{"title":"Not found","status":404}"#;
+    let (port, server) = serve_once("404 Not Found", problem.to_owned());
+    let url = format!("http://127.0.0.1:{port}");
+    let args = ["diagnose", "--url", &url, "--request-id", "req-7"];
+    let output = bin()
+        .env(TOKEN_ENV, "a-credential")
+        .args(args)
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(code(&output), 1);
+    let error = stderr(&output);
+    assert!(error.contains("no report"), "{error}");
+}
+
+#[test]
+fn diagnose_url_never_takes_a_credential_from_arguments() {
+    let url = "http://127.0.0.1:9";
+    for flag in [["--token", "argv-secret"], ["--bearer", "argv-secret"]] {
+        let mut args = vec!["diagnose", "--url", url, "--request-id", "req-7"];
+        args.extend(flag);
+        let output = bin().env_remove(TOKEN_ENV).args(&args).output().unwrap();
+        assert_eq!(code(&output), 2, "{}", stderr(&output));
+    }
+    let output = run(&[
+        "diagnose",
+        "--url",
+        url,
+        "--request-id",
+        "req-7",
+        "--token=argv-secret",
+    ]);
+    assert_eq!(code(&output), 2);
+    // Credentials in the URL are refused, and never repeated.
+    let output = run(&[
+        "diagnose",
+        "--url",
+        "http://user:argv-secret@127.0.0.1:9",
+        "--request-id",
+        "req-7",
+    ]);
+    assert_eq!(code(&output), 3);
+    let error = stderr(&output);
+    assert!(!error.contains("argv-secret"), "{error}");
+}
+
+#[test]
+fn diagnose_url_sends_credentials_over_plain_http_only_to_loopback() {
+    let args = [
+        "diagnose",
+        "--url",
+        "http://192.0.2.1:9090",
+        "--request-id",
+        "req-7",
+    ];
+    let output = bin()
+        .env(TOKEN_ENV, "a-credential")
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 3);
+    let error = stderr(&output);
+    assert!(error.contains("loopback"), "{error}");
+}
+
 fn write(dir: &Path, name: &str, text: &str) -> String {
     let path = dir.join(name);
     std::fs::write(&path, text).unwrap();

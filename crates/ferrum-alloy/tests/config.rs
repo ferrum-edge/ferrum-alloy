@@ -762,6 +762,48 @@ fn tls_reload_interval_defaults_to_a_minute_and_is_validated() {
 }
 
 #[test]
+fn diagnostics_retention_bounds_are_validated() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.diagnostics.max_records, 1_024);
+    assert_eq!(config.diagnostics.max_bytes, 1024 * 1024);
+
+    let vars = [
+        ("FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS", "65536"),
+        ("FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES", "4096"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    assert_eq!(config.diagnostics.max_records, 65_536);
+    config.validate(NO_FEATURES).unwrap();
+
+    for (name, value, expected) in [
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS",
+            "0",
+            "diagnostics.max_records must be within 1..=65536",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS",
+            "65537",
+            "diagnostics.max_records must be within 1..=65536",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES",
+            "4095",
+            "diagnostics.max_bytes must be within 4096..=67108864",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES",
+            "67108865",
+            "diagnostics.max_bytes must be within 4096..=67108864",
+        ),
+    ] {
+        let (config, _) = load_from(None, env(&[(name, value)]), &Overrides::default()).unwrap();
+        let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+        assert!(error.contains(expected), "{name}={value}: {error}");
+    }
+}
+
+#[test]
 fn every_environment_variable_is_documented() {
     let docs = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/configuration.md"),

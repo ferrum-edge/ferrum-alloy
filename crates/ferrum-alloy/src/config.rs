@@ -119,6 +119,9 @@ pub struct AlloyConfig {
     pub auth: AuthSettings,
     /// Outbound HTTP client (feature `http-client`).
     pub http_client: HttpClientSettings,
+    /// Evidence retained for authorized diagnostic retrieval (feature
+    /// `diagnostics`).
+    pub diagnostics: DiagnosticsSettings,
 }
 
 /// Service identity.
@@ -767,6 +770,38 @@ impl Default for HttpClientSettings {
     }
 }
 
+/// Upper bound of `diagnostics.max_records`.
+pub const MAX_DIAGNOSTICS_RECORDS: usize = 65_536;
+
+/// Bounds of `diagnostics.max_bytes`: 4 KiB to 64 MiB.
+pub const DIAGNOSTICS_BYTES: std::ops::RangeInclusive<usize> = 4_096..=64 * 1024 * 1024;
+
+/// Retention of request evidence for authorized diagnostic retrieval
+/// (feature `diagnostics`).
+///
+/// It applies only when the application installs a
+/// `diagnostics::DiagnosticsAuthorizer`; otherwise nothing is retained. The
+/// evidence lives in memory in this process. When either bound would be
+/// exceeded, the oldest records are evicted first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct DiagnosticsSettings {
+    /// Most requests retained.
+    pub max_records: usize,
+    /// Most estimated bytes retained.
+    pub max_bytes: usize,
+}
+
+impl Default for DiagnosticsSettings {
+    fn default() -> Self {
+        Self {
+            max_records: 1_024,
+            max_bytes: 1024 * 1024,
+        }
+    }
+}
+
 /// What kind of value an environment variable holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvKind {
@@ -861,6 +896,8 @@ env_vars! {
     "FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS" => ["auth", "jwt", "jwks_max_age_ms"]: Uint,
     "FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS" => ["auth", "jwt", "jwks_max_stale_ms"]: Uint,
     "FERRUM_ALLOY_CORS_ALLOWED_ORIGINS" => ["cors", "allowed_origins"]: List,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS" => ["diagnostics", "max_records"]: Uint,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES" => ["diagnostics", "max_bytes"]: Uint,
 }
 
 /// Configuration errors.
@@ -1575,6 +1612,20 @@ impl AlloyConfig {
                     }
                 }
             }
+        }
+
+        let diagnostics = &self.diagnostics;
+        if diagnostics.max_records == 0 || diagnostics.max_records > MAX_DIAGNOSTICS_RECORDS {
+            error(format!(
+                "diagnostics.max_records must be within 1..={MAX_DIAGNOSTICS_RECORDS}"
+            ));
+        }
+        if !DIAGNOSTICS_BYTES.contains(&diagnostics.max_bytes) {
+            error(format!(
+                "diagnostics.max_bytes must be within {}..={}",
+                DIAGNOSTICS_BYTES.start(),
+                DIAGNOSTICS_BYTES.end()
+            ));
         }
 
         let mut warn = |message: String| {

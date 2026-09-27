@@ -199,7 +199,39 @@ ferrum-alloy diagnose --otlp traces.jsonl --trace-id <id>
 ferrum-alloy diagnose --input report.json --format json
 ```
 
-Diagnosis is offline and deterministic. It explains only the supplied evidence, and file input is never treated as authenticated. See [measurement-semantics.md](measurement-semantics.md) for what each timing means.
+Diagnosis is deterministic. It explains only the supplied evidence, and input is never treated as authenticated. See [measurement-semantics.md](measurement-semantics.md) for what each timing means.
+
+### From a running service (feature `diagnostics`)
+
+A service can keep recent evidence in memory and serve one request's report to an authorized caller ([ADR 0008](adr/0008-tenant-scoped-diagnostic-retrieval.md)). The application attributes each request to a tenant and supplies the authorizer that decides which tenant a caller may read:
+
+```rust
+use ferrum_alloy::diagnostics::{DiagnosticsAccess, DiagnosticsRequest, TenantTag};
+
+async fn orders(tenant: TenantTag) -> &'static str {
+    tenant.set("acme"); // after authenticating the caller
+    "ok"
+}
+
+async fn authorize(request: DiagnosticsRequest) -> DiagnosticsAccess {
+    // Verify a tenant-scoped credential; a header that names a tenant proves nothing.
+    match request.bearer_token() {
+        Some(token) if verified_for_acme(token) => DiagnosticsAccess::tenant("acme"),
+        _ => DiagnosticsAccess::Deny,
+    }
+}
+
+// AlloyApp::new("orders").router(router).diagnostics_authorizer(authorize)
+```
+
+Then, with the credential in the environment or a file:
+
+```bash
+FERRUM_DIAGNOSTICS_TOKEN=... ferrum-alloy diagnose --url http://127.0.0.1:9090 --request-id <id>
+ferrum-alloy diagnose --url https://ops.example/orders --request-id <id> --token-file token.txt
+```
+
+Every refusal is the same `404`: a denied caller, another tenant's request, and an unknown or evicted id look alike. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
 
 ## Feature matrix
 
@@ -215,4 +247,5 @@ Diagnosis is offline and deterministic. It explains only the supplied evidence, 
 | `http-client` | Instrumented outbound client | reqwest 0.13 (rustls/ring), rustls-platform-verifier |
 | `compression` | gzip/br, never for SSE, `Set-Cookie`, or `no-store` responses | tower-http |
 | `cors` | Explicit allowlist CORS | tower-http |
+| `diagnostics` | Tenant-scoped retrieval of one request's evidence on the management listener, behind an application-supplied authorizer | ferrum-alloy-diagnostics |
 | `full` | All of the above | — |

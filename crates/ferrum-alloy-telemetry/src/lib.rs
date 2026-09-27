@@ -15,6 +15,7 @@
 pub mod body;
 pub mod cache;
 pub mod context;
+pub mod evidence;
 pub mod layer;
 pub mod metrics;
 pub mod operation;
@@ -37,6 +38,7 @@ pub mod json;
 pub mod otel;
 
 pub use context::{RequestContext, TraceDecision};
+pub use evidence::{EvidenceSink, RequestEvidence, TenantTag};
 pub use layer::{
     AcceptPolicy, BodyOutcome, RecordConfig, RequestIdConfig, ServerTimingPolicy, TelemetryConfig,
     TelemetryConfigError, TelemetryLayer, TelemetryService, TraceContextConfig,

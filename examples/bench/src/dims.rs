@@ -56,6 +56,9 @@ pub(crate) enum Scenario {
     AlloyLogs,
     /// As `AlloyLogs`, formatted by tracing-subscriber's JSON `fmt` layer.
     AlloyLogsFmt,
+    /// As `Alloy`, with authorized diagnostic retrieval installed and every
+    /// request tagged with a tenant, so its evidence is retained.
+    AlloyDiagnostics,
     /// OpenTelemetry bridge, every request sampled, exporter discards batches.
     OtelSampled,
     /// OpenTelemetry bridge with sampling ratio 0.
@@ -73,6 +76,7 @@ impl Dimension for Scenario {
         Self::Alloy,
         Self::AlloyLogs,
         Self::AlloyLogsFmt,
+        Self::AlloyDiagnostics,
         Self::OtelSampled,
         Self::OtelUnsampled,
         Self::OtelUnreachable,
@@ -85,6 +89,7 @@ impl Dimension for Scenario {
             Self::Alloy => "alloy",
             Self::AlloyLogs => "alloy-logs",
             Self::AlloyLogsFmt => "alloy-logs-fmt",
+            Self::AlloyDiagnostics => "alloy-diagnostics",
             Self::OtelSampled => "otel-sampled",
             Self::OtelUnsampled => "otel-unsampled",
             Self::OtelUnreachable => "otel-unreachable",

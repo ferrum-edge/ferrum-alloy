@@ -6,7 +6,7 @@ The `ferrum-alloy` command:
 - `check`: configuration validation.
 - `openapi export`: with drift detection.
 - `edge export`: Ferrum Edge file-mode YAML or a GitForgeOps tree.
-- `diagnose`: offline, deterministic explanations of evidence.
+- `diagnose`: deterministic explanations of evidence from files, or of one request's live report fetched with `--url` from a running service. The credential comes from `FERRUM_DIAGNOSTICS_TOKEN` or `--token-file`, never from an argument.
 
 See [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md).
 

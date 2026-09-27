@@ -8,6 +8,10 @@
 //! Requests are rate-limited before any handler or token check runs: per
 //! client, and except for the probes, which have a budget of their own, per
 //! listener (see [`crate::rate_limit`]).
+//!
+//! With the `diagnostics` feature and an installed authorizer, it also serves
+//! `GET /diagnostics/v1/requests/{request_id}`, which the authorizer rather
+//! than the management token guards (see `crate::diagnostics`).
 
 use std::sync::Arc;
 
@@ -45,6 +49,8 @@ pub(crate) struct ManagementState {
     pub(crate) app_stats: Arc<ServerStats>,
     pub(crate) openapi: Option<Arc<Vec<u8>>>,
     pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
+    #[cfg(feature = "diagnostics")]
+    pub(crate) diagnostics: Option<crate::diagnostics::Retrieval>,
 }
 
 /// Constant-time comparison of equal-length byte strings. Length differences
@@ -123,6 +129,10 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
                     if let Some(limiter) = &state.rate_limiter {
                         text.push_str(&limiter.render_prometheus());
                     }
+                    #[cfg(feature = "diagnostics")]
+                    if let Some(retrieval) = &state.diagnostics {
+                        text.push_str(&retrieval.store.render_prometheus());
+                    }
                     no_store(
                         (
                             StatusCode::OK,
@@ -151,6 +161,16 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
                 },
             ),
         );
+    }
+    #[cfg(feature = "diagnostics")]
+    if let Some(retrieval) = state.diagnostics.clone() {
+        use axum::extract::rejection::PathRejection;
+        use axum::extract::{Path, Request};
+        let handler = move |request_id: Result<Path<String>, PathRejection>, request: Request| {
+            let retrieval = retrieval.clone();
+            async move { retrieval.retrieve(request_id, request).await }
+        };
+        router = router.route(crate::diagnostics::ROUTE, get(handler));
     }
     let limiter = state.rate_limiter.clone();
     let router = router

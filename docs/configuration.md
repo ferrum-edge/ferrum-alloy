@@ -98,6 +98,8 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS` | `auth.jwt.jwks_max_age_ms` | integer |
 | `FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS` | `auth.jwt.jwks_max_stale_ms` | integer |
 | `FERRUM_ALLOY_CORS_ALLOWED_ORIGINS` | `cors.allowed_origins` | comma list |
+| `FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS` | `diagnostics.max_records` | integer |
+| `FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES` | `diagnostics.max_bytes` | integer |
 
 A test fails when a variable in `config::ENV_VARS` is missing from this table.
 
@@ -348,6 +350,19 @@ Refreshes never hold up requests that can be answered from the cache. While the 
 | `request_timeout_ms` | `10000` | Whole-request timeout |
 | `max_redirects` | `0` | Same-origin redirects only. Cross-origin redirects are never followed. |
 | `propagate_trace_context_to` | `[]` | Hosts (exact, or `.suffix`) that receive `traceparent`. Credentials, cookies, and baggage are never forwarded automatically. |
+
+### `[diagnostics]` (feature `diagnostics`)
+
+Bounds of the in-memory evidence that authorized diagnostic retrieval serves ([ADR 0008](adr/0008-tenant-scoped-diagnostic-retrieval.md), [security](security.md#diagnostic-retrieval)). They apply only when the application installs a `DiagnosticsAuthorizer`; without one, no evidence is retained and `GET /diagnostics/v1/requests/{request_id}` does not exist. Only requests the application tagged with a tenant (`TenantTag`) are retained. When a new record would exceed either bound, the oldest records are evicted first.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_records` | `1024` | Most requests retained, `1` to `65536`. |
+| `max_bytes` | `1048576` | Most estimated bytes retained, `4096` to `67108864`. A record is estimated at 256 bytes plus its tenant, twice its request id, and its route template, so one record is at most about 1.4 KiB. |
+
+At most 16 records share one tenant and request id, such as the attempts of a retried request; further ones are not retained. `/metrics` reports `ferrum_alloy_diagnostics_records` and `ferrum_alloy_diagnostics_bytes` (current retention), `ferrum_alloy_diagnostics_stored_total`, `ferrum_alloy_diagnostics_evicted_total{reason="count"|"bytes"}`, `ferrum_alloy_diagnostics_skipped_total{reason="untagged"|"request_id_limit"|"too_large"}`, and `ferrum_alloy_diagnostics_retrievals_total{outcome="served"|"denied"|"not_found"}`.
+
+The diagnostic retrieval command, `ferrum-alloy diagnose --url`, reads its credential from `FERRUM_DIAGNOSTICS_TOKEN` or `--token-file`. That variable belongs to the command, not to service configuration: it deliberately lacks the `FERRUM_ALLOY_` prefix, which the service reserves and rejects when unknown.
 
 ## Checking configuration
 

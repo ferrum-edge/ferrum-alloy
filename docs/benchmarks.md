@@ -14,6 +14,7 @@ A run measures one *cell*: one scenario, one workload, and one transport.
 | `alloy` | `AlloyApp` defaults (Alloy's server loop, limits, admission, request id, route labels, metrics, telemetry layer); subscriber with no layers |
 | `alloy-logs` | As `alloy`, with Alloy's JSON log layer at `info` writing to a sink. Every result on this page predates that layer and was measured with tracing-subscriber's JSON `fmt` layer instead (see *Record batching* and *Alloy JSON layer*). |
 | `alloy-logs-fmt` | As `alloy-logs`, formatted by tracing-subscriber's JSON `fmt` layer with the same line layout. Added with the Alloy JSON layer and not yet measured. |
+| `alloy-diagnostics` | Authorized diagnostic mode: as `alloy`, with a `DiagnosticsAuthorizer` installed and every request tagged with a tenant, so each request's evidence is retained in the bounded ring (default bounds, so steady-state runs evict on every request). The management router is built but not served, and retrieval itself is not measured. Added with diagnostic retrieval (#13) and not yet measured. |
 | `otel-sampled` | OpenTelemetry bridge, sampling ratio 1.0, exporter that discards batches in process |
 | `otel-unsampled` | OpenTelemetry bridge, sampling ratio 0.0 |
 | `otel-unreachable` | Sampling ratio 1.0, OTLP/HTTP to a closed port (200 ms timeout, no retries) |
@@ -37,7 +38,6 @@ TLS uses a throwaway CA, server certificate, and client certificate generated fo
 
 Not in the matrix yet:
 
-- **Authorized diagnostic mode.** It does not exist until live diagnostic retrieval lands (#13).
 - **Behind Ferrum Edge.** `examples/edge-observability` runs Alloy behind Edge for correctness; the harness does not measure it.
 - **A real Collector by default.** The stub measures OTLP encoding and export over HTTP, not a Collector's processing. Pass `--collector-endpoint` to export to a real one.
 
@@ -212,7 +212,7 @@ That data is kept in `examples/bench/results/2026-09-26-macos-m4-discarded-high-
 ## Not measured
 
 - The matrix above, on any host: large payloads, streaming, cancellation, h2c, TLS, mTLS, a healthy collector, CPU time, memory, and allocations have **no valid measurement** yet. The harness covers them; the runs wait for a dedicated host.
-- Authorized diagnostic mode (#13).
+- Authorized diagnostic mode (`alloy-diagnostics`, #13): the scenario exists; no run has measured it.
 - Behavior behind Ferrum Edge.
 - Linux, or any dedicated benchmarking host.
 - Long-duration stability and tail latency beyond p99.9.

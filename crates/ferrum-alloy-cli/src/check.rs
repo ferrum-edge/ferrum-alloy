@@ -43,6 +43,7 @@ const ALL_FEATURES: &[&str] = &[
     "http-client",
     "compression",
     "cors",
+    "diagnostics",
 ];
 
 fn capabilities(config: &AlloyConfig) -> Vec<(&'static str, bool, &'static str)> {
