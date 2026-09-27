@@ -1,0 +1,55 @@
+//! Handler tests without a network listener.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+
+fn app() -> axum::Router {
+    {{crate_name}}::router()
+}
+
+async fn call(request: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let response = app().oneshot(request).await.expect("infallible");
+    let status = response.status();
+    let body = response.into_body().collect().await.expect("body");
+    let json = serde_json::from_slice(&body.to_bytes()).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+fn post_json(path: &str, json: &'static str) -> Request<Body> {
+    Request::post(path)
+        .header("content-type", "application/json")
+        .body(Body::from(json))
+        .expect("request")
+}
+
+#[tokio::test]
+async fn creates_items() {
+    let (status, json) = call(post_json("/items", r#"{"name":"tea","quantity":2}"#)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["name"], "tea");
+}
+
+#[tokio::test]
+async fn invalid_items_are_problem_details() {
+    let (status, json) = call(post_json("/items", r#"{"name":"","quantity":0}"#)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["errors"].as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn malformed_json_is_a_problem() {
+    let (status, json) = call(post_json("/items", "{not json")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let problem_type = json["type"].as_str().unwrap_or_default();
+    assert!(problem_type.ends_with("malformed-json"));
+}
+
+#[tokio::test]
+async fn unknown_items_use_the_application_problem_type() {
+    let request = Request::get("/items/42").body(Body::empty());
+    let (status, json) = call(request.expect("request")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["title"], "Item not found");
+}

@@ -1,0 +1,3 @@
+# Snapshots, fixtures, and templates are compared byte for byte, and
+# generated files use LF on every platform. Keep LF in every checkout.
+* text=auto eol=lf

@@ -1,0 +1,10 @@
+//! OpenAPI parity: every documented path is routed, and the committed
+//! openapi.json matches the code (`ferrum-alloy openapi export --check`).
+
+#[test]
+fn documented_paths_are_the_registered_routes() {
+    let document = {{crate_name}}::openapi();
+    let mut paths: Vec<&str> = document.paths.paths.keys().map(String::as_str).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, vec!["/hello", "/items", "/items/{id}"]);
+}

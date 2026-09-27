@@ -1,0 +1,6 @@
+# Pinned so local and CI builds use the same rustc/clippy. The MSRV
+# (rust-version = 1.94 in Cargo.toml) is checked separately in CI.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

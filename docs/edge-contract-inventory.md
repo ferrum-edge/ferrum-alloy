@@ -1,0 +1,143 @@
+# Ferrum Edge contract inventory
+
+This document lists every Ferrum Edge header, attribute, endpoint, error token, and timing field Ferrum Alloy relies on, emits, or deliberately does not rely on. Each entry gives its source, producer, consumer, trust rules, lifecycle boundary, protocol coverage, tests, and status. Every item was checked against Edge source. Nothing here is a contract just because the Alloy implementation prompt used it as an example.
+
+**Status values**
+
+| Status | Meaning |
+|---|---|
+| **EXISTING** | Present in the Edge release below and verified in its source. For Alloy-owned items, implemented in this repository. |
+| **PROPOSED** | Defined by Alloy, or by another Ferrum product's design document, but not implemented by its would-be producer or consumer. |
+| **UNAVAILABLE** | Not produced by Edge v0.9.7. Alloy must not assume it and reports it as missing evidence. |
+
+## Revisions inspected
+
+| Repository | Revision | Role |
+|---|---|---|
+| ferrum-edge/ferrum-edge | `v0.9.7` = `8fed1346ce2e267eb69c03683cb89ea44d785e0b` (2026-09-25) | **Contract baseline.** The published release and the image CI pins (`ferrumedge/ferrum-edge@sha256:4c9530e0…874a`). |
+| ferrum-edge/ferrum-edge | `05997cee91bb4e1fa3dd1e64506b1512c7b16b8a` (main, 2026-09-24) | Line references below. `src/plugins/otel_tracing.rs`, `src/plugins/correlation_id.rs`, `src/proxy/headers.rs`, and `src/config/types.rs` are byte-identical to v0.9.7. Line numbers in `src/proxy/mod.rs` and `src/plugins/mod.rs` may differ slightly at v0.9.7. |
+| ferrum-edge/ferrum-edge | `00f492433e49d81f311dd73f9f2fc22fbd0dab8b` (main, 2026-09-26) | Newer main at hand-off. Not re-audited. |
+| ferrum-edge/ferrum-anvil | `075890f9418718113d5d83da4074c6b00b92bde9` (origin/main) | `DiagnosticFinding` schema, Edge v0.9.7 outcome catalog, G01 proposal. |
+| ferrum-edge/ferrum-foundry | `e2f60b1eb0e881b3302ee7416df2d085f757dec4` | Pinned-Edge approach (`docs/compatibility.json`). No diagnostic UI. |
+| ferrum-edge/ferrum-nexus | `b803a95cf4afd012d3cbb93324f5beac937b20c0` | OpenAPI 3.x publication through Edge `/api-specs`. |
+| ferrum-edge/ferrum-edge-git-forge-ops | `fa56bd790e848544fdc9fea1a1ac3024d514a3b6` | `kind`/`spec` resource format. |
+| ferrum-edge/ferrumedge | `0b796393b63e12a9fd643430446620dc23f140a8` | Website. Does not mention Alloy. |
+
+The implementation prompt cited an earlier planning snapshot, `78c71e61cad0f9ee41d1d2ea58c3137a739d563d`. It was not used as a contract source.
+
+## 1. Request metadata Edge sends to the service
+
+| Item | Status | Source (Edge) | Producer → consumer | Trust rules | Lifecycle | Protocols | Tests |
+|---|---|---|---|---|---|---|---|
+| `traceparent` | EXISTING | `src/plugins/otel_tracing.rs:978-998` (`before_proxy`), parse `:675-711` | `otel_tracing` plugin → Alloy telemetry layer | Edge removes every case variant and inserts its own value. The parent id is the **Edge SERVER span**; flags are only `00`/`01`. Alloy accepts it only from a trusted peer (default `trusted_peers`). Receiving it never authenticates anything. | Request head, once per request. **Every retry attempt carries the same value** (`src/proxy/mod.rs` `proxy_to_backend_retry` reuses headers). | HTTP/1.1 and HTTP/2 to Alloy. The e2e run used HTTP/2 via ALPN. | Edge: `tests/unit/plugins/otel_tracing_tests.rs` (`…propagates_existing_traceparent`, `…before_proxy_replaces_all_caller_trace_context_casings`, `…untrusted_parent_creates_fresh_root`). Alloy: `crates/ferrum-alloy-telemetry/tests/context_and_trust.rs`, `crates/ferrum-alloy/tests/gateway_mtls.rs`, `edge-e2e` |
+| `tracestate` | EXISTING | `otel_tracing.rs:924`, `:941-944` | Edge → Alloy | Forwarded verbatim only when Edge trusted the caller's context (`trace_context_trust: trusted`); otherwise dropped. Edge adds no member. Alloy validates the W3C grammar (≤32 members, ≤512 bytes) and propagates only accepted values. | Request head | HTTP/1.1, HTTP/2 | Edge: `…preserves_tracestate`, `…invalid_parent_drops_tracestate`. Alloy: `tracestate_validation_follows_the_w3c_grammar` |
+| `baggage` | EXISTING (pass-through) | Not touched by `otel_tracing`. Mesh egress strip only: `src/proxy/mod.rs:32881-32894` | Client → Edge → service | Untrusted. Alloy never parses it and never forwards it; `http_client` strips it. | Request head | all | Alloy: `trace_context_goes_only_to_listed_hosts` |
+| `x-request-id` | EXISTING (when the `correlation_id` plugin is attached) | `src/plugins/correlation_id.rs:103`, `:209-268`, `:289-330` | `correlation_id` → Alloy | Edge keeps a client value of at most 256 bytes of `[A-Za-z0-9._-]`, otherwise generates a UUIDv4. Alloy applies the same rule and reuses Edge's id. It is a correlation aid, not a credential. Without the plugin Edge sends no request id, and Alloy generates one. | Request head; Edge echoes it on responses and rejects | all | Edge: `tests/unit/plugins/correlation_id_tests.rs`. Alloy: `valid_request_ids_are_kept_and_echoed`, `invalid_or_oversized_request_ids_are_replaced`, `edge-e2e` ("Alloy used the gateway's request id") |
+| `x-consumer-username` | EXISTING | Doc `docs/plugins.md:288-297`. Built `src/plugins/mod.rs:6516-6560`, injected `src/proxy/mod.rs:16606-16645`, client copies stripped `src/plugins/mod.rs:6142-6146` | Edge auth plugins → Alloy Edge adapter (`GatewayContext`) | Accepted only when the peer is a **verified mTLS identity** in `trust.identities` and `edge.accept_consumer_identity = true`. Otherwise removed before handlers run. Network-boundary trust never authorizes it. Authentication by Edge; authorization stays in the application. | Request head | all | Alloy: `crates/ferrum-alloy-edge/tests/policy.rs`, `gateway_mtls.rs` |
+| `x-consumer-custom-id` | EXISTING | same as above | same | same | same | same | same |
+| `x-consumer-*` (other names) | EXISTING gap | Only the two exact names are reserved on the plain HTTP path (`src/plugins/mod.rs:6142-6146`) | client → service | A client can send, for example, `X-Consumer-Role` through Edge. Alloy trusts no other `x-consumer-*` name. | — | HTTP | — |
+| `X-Forwarded-For` | EXISTING | `src/proxy/mod.rs:4884-4927` (`build_xff_value`) | Edge → Alloy | Regenerated. An untrusted chain is dropped unless the peer is in `FERRUM_TRUSTED_PROXIES`, so the rightmost hop is written by Edge. Alloy exposes it only as `GatewayContext.client_address` from a verified identity, and never uses it for trust decisions. | Request head | all | Edge: `tests/functional/functional_forwarded_via_headers_test.rs`. Alloy: `verified_gateway_identity_is_handed_off`, `forwarded_headers_never_establish_trust` |
+| `X-Forwarded-Proto`, `X-Forwarded-Host` | EXISTING | `src/proxy/mod.rs:42075-42086`, `src/proxy/headers.rs:127-170` | Edge → service | Overwritten by Edge. Alloy does not consume them. | Request head | all | Edge functional tests |
+| `Forwarded` | EXISTING (opt-in) | `FERRUM_ADD_FORWARDED_HEADER`, default `false` (`src/config/env_config.rs:4869`) | Edge → service | When disabled, **a client's value passes through**. Alloy ignores it. | Request head | all | Edge functional tests |
+| `Via` | EXISTING | `src/proxy/mod.rs:9782-9791`, default on (`env_config.rs:4867`) | Edge → service | Appended; spoofable. Not an Edge marker for Alloy. | Request and response | all | — |
+| `X-Real-IP`, `X-Forwarded-Port` | EXISTING | `src/proxy/headers.rs:180-183` | client → service | Not generated. `X-Forwarded-Port` is not stripped. Alloy ignores both. | Request head | all | — |
+| `x-geo-country`, `x-path-param-*` | EXISTING | `src/plugins/mod.rs:6142-6146` | Edge → service | Stripped from clients, injected by Edge. Alloy does not consume them yet. | Request head | all | — |
+| Route id header (`x-ferrum-route-id` or similar) | **UNAVAILABLE** | none (`grep x-ferrum` finds only internal and admin names) | — | Alloy uses its own route template. | — | — | — |
+| Attempt number or attempt id to the backend | **UNAVAILABLE** | none | — | Alloy reports it as missing evidence. Retries appear as sibling Alloy SERVER spans under one Edge SERVER span. | — | — | Alloy rule `alloy.gateway.multiple_service_attempts` |
+| Diagnostics-request header | **UNAVAILABLE** | none | — | — | — | — | — |
+| Signed gateway context | **UNAVAILABLE** | none | — | Alloy relies on mTLS identity instead. It does not add ad hoc signatures. | — | — | — |
+
+## 2. Gateway identity toward the service
+
+| Item | Status | Source | Notes | Tests |
+|---|---|---|---|---|
+| Backend client certificate: `backend_tls_client_cert_path` / `backend_tls_client_key_path` (proxy, upstream, or global `FERRUM_BACKEND_TLS_CLIENT_CERT_PATH`) | EXISTING | `src/config/types.rs:2720-2724` (proxy), `:1928-1931` (upstream); `docs/backend_mtls.md:24-35` | With `upstream_id` set, the upstream's TLS settings win. Pointing the paths at SPIFFE SVID files presents an SVID. Edge does not present an SVID automatically. | e2e: Edge presents `spiffe://ferrum.demo/ns/edge/sa/gateway` and Alloy verifies it (`peer.trust=verified_identity`) |
+| Server verification: `backend_tls_verify_server_cert` (default true), `backend_tls_server_ca_cert_path` | EXISTING | `types.rs:2728-2732`, `:1934-1937` | A custom CA replaces public roots. | e2e (Alloy's demo CA) |
+| Active health probes present the backend client certificate | EXISTING | `src/health_check.rs:2729-2750`, `:3661-3683` | So `client_auth = required` works with Edge health checks. | Generated upstream in the e2e stack |
+
+## 3. Edge responses and error signals
+
+| Item | Status | Source | Semantics | Trust | Alloy use |
+|---|---|---|---|---|---|
+| `X-Gateway-Error` | EXISTING | `src/retry.rs:212-238` (tokens), `:281` (mapping) | Closed 7-token vocabulary, on gateway-authored 5xx only: `connection_failure`, `backend_timeout`, `backend_error`, `circuit_breaker_open`, `overload`, `config_stale`, `concurrency_limit`. | **Spoofable by backends on some paths** (Anvil `catalog/ferrum/ferrum-edge-0.9.7/outcomes.json`). | Diagnosis rule `alloy.r007` caps confidence at `likely` and lists what each token does not prove. For example, `connection_failure` does not prove a DNS failure. |
+| `X-Gateway-Upstream-Status: degraded` | EXISTING | `src/proxy/mod.rs:40214` | The all-unhealthy fallback target was used. | Spoofable | Not interpreted yet |
+| Gateway error bodies `{"error":"…"}` | EXISTING | `src/proxy/mod.rs:25817`, `:48013-48040` | Plain JSON, not Problem Details. | — | Not parsed. Body text is weak evidence (Anvil convention). |
+| `traceparent` echoed to the client | EXISTING | `otel_tracing.rs:1000-1014` (`after_proxy`) | The same value Edge sent upstream. | — | `edge-e2e` checks it equals the Alloy span's parent. |
+| `Server-Timing` | EXISTING (untouched) | No references in `src/`, `tests/`, `docs/` | Edge neither emits nor strips it. It is not in the backend-response strip set (`src/proxy/headers.rs:745-757`). | — | Alloy's opt-in `Server-Timing` would reach clients unchanged. **Not tested through Edge.** |
+
+## 4. Edge telemetry (OTLP) Alloy interprets
+
+Edge exports **OTLP/HTTP JSON only** (`otel_tracing.rs:2165-2173`), hand-written without an OTel SDK, and only **SERVER** spans (`:140-173`). There are no CLIENT spans for upstream attempts and no per-retry spans. The span ends at transaction summary time, which for streamed responses is body completion (`src/proxy/deferred_log.rs`).
+
+| Attribute | Status | Source | Meaning | Alloy handling |
+|---|---|---|---|---|
+| `gateway.latency.total_ms` | EXISTING | `otel_tracing.rs:2419` | Handler entry until summary; refreshed at body completion for streamed responses. | `edge.request.total` |
+| `gateway.latency.backend_ttfb_ms` | EXISTING | `:2420` | Backend dispatch start until response headers, **across every retry attempt and backoff**. For buffered responses it **equals the full backend exchange** (`src/proxy/mod.rs:39286-39292`). Always exported; `-1` means unknown. | `edge.backend.time_to_headers`. A negative value becomes `unavailable`, never zero. |
+| `gateway.latency.backend_total_ms` | EXISTING | `:2448-2452` | Buffered responses only. Omitted when unknown. | `edge.backend.total` |
+| `gateway.latency.processing_ms`, `gateway.overhead_ms`, `gateway.plugin_execution_ms` | EXISTING | `:2424-2458` | Derived (`src/plugins/mod.rs:8234-8251`). | `edge.plugin_execution` only |
+| `gateway.response.streamed` | EXISTING | `:2538-2559` | Whether the response streamed. | Selects which Alloy measurement is comparable (rule `alloy.r003`). |
+| `gateway.error.class` | EXISTING | `:2538-2559`, classes `src/retry.rs:23-173` | Typed gateway failure class (19 values). | `edge.gateway_error` event |
+| `gateway.proxy.id` | EXISTING | `:2466` | Proxy id. | Attribute only |
+| `http.route` | EXISTING, **different meaning** | `:3482-3516` | Holds the **proxy name**, not a path template. | Never compared with Alloy's `http.route`. |
+| `http.response.status_code` | EXISTING | `:2433` | Final status. | `edge.response` event |
+| Resource `telemetry.sdk.name = "ferrum-edge"`, scope `ferrum-edge` | EXISTING | `:2639-2659` | Producer identification. | Used by the OTLP importer, which marks provenance `unverified`. |
+| Sampling: `root_sampling`, `root_sampling_ratio`; parent-based only for trusted callers | EXISTING | `:3088-3149`, `:3433-3442` | An untrusted caller's sampled flag has no effect. | Matches Alloy's policy. |
+| Semantic-convention version / `schema_url` | **UNAVAILABLE** | none | Names match the stable HTTP conventions. | — |
+| Per-attempt duration, connection setup (DNS/TCP/TLS), connection reuse flag | **UNAVAILABLE** | `final_backend_dispatch_elapsed` exists internally but is not exported (`src/proxy/mod.rs:39231`) | — | Reported as `missing_evidence` in diagnosis. Never inferred. |
+
+## 5. Edge transaction logs
+
+These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.rs:7893-8123`). Alloy reads them only when an operator supplies them in a diagnostic report; there is no automated collection.
+
+| Field | Status | Meaning |
+|---|---|---|
+| `latency_total_ms`, `latency_backend_ttfb_ms`, `latency_backend_total_ms` | EXISTING | As in §4; `-1` means unknown. |
+| `metadata.rejection_phase` | EXISTING | The phase that rejected before upstream: `authenticate`, `authorize`, `before_proxy`, `on_request_received`, `circuit_breaker_open`, … Maps to Alloy's `edge.request.rejected` (`phase`). Plugin identity is not recorded. |
+| `error_class`, `body_error_class` | EXISTING | Typed classes (`src/retry.rs:151-173`) |
+| Warning log `"Retrying backend request"` with `attempt` | EXISTING | `src/proxy/mod.rs:38614-38619`. Log only; not in spans or summaries. |
+
+## 6. Endpoints
+
+| Endpoint | Status | Notes |
+|---|---|---|
+| Edge active health check `GET {http_path}` (default `/health`, healthy `[200, 302]`) | EXISTING | `src/config/types.rs:1463-1526`, `src/health_check.rs:85-92`, `:3242-3277`. Alloy's export sets `http_path` to the manifest's readiness path and `healthy_status_codes: [200]`. |
+| Edge admin `POST/PUT/GET/DELETE /api-specs` | EXISTING | `src/admin/mod.rs:3673-3716`, `docs/api_specs.md`. Not available in file mode. **Alloy never calls it.** `ferrum-alloy openapi export` produces the artifact that operators or Nexus publish. |
+| G01 authenticated diagnostic lookup: `X-Ferrum-Diagnostic-Ref`, `GET /diagnostics/v1/refs/{ref}`, `diagnostics:read` | **PROPOSED** (Anvil `docs/g01-gateway-diagnostic-contract.md`; ferrum-edge#5767) | Not implemented in Edge (no source hits). Alloy would treat it as `gateway_detail` evidence once it exists. |
+| Alloy `/livez`, `/readyz` (application and management listeners) | EXISTING (Alloy) | Status only, `no-store` |
+| Alloy management `/health`, `/metrics`, `/openapi.json` | EXISTING (Alloy) | Bearer token when configured; loopback bind by default |
+
+## 7. Configuration schema Alloy generates
+
+`ferrum-alloy edge export` writes only fields that exist in Edge v0.9.7's `deny_unknown_fields` resources (`src/config/types.rs`: `Proxy` 2645, `Upstream` 1842, `PluginConfig` 3100, `GatewayConfig` 3251) and GitForgeOps's `kind`/`spec` wrapper (`src/config/strict.rs:321-332`).
+
+| Generated item | Status | Validation |
+|---|---|---|
+| Proxy: `listen_path`, `backend_scheme` (never `backend_protocol`), `strip_listen_path`, `backend_path`, `backend_*_timeout_ms`, `upstream_id`, `plugins`, `labels`, `backend_tls_*` | EXISTING | CI and local: `ferrum-edge validate -m file` (v0.9.7) passes for `contracts/fixtures/manifests/plain-http.edge.yaml` and for the e2e TLS config. The e2e stack serves traffic with it. |
+| Upstream with `health_checks.active` and backend TLS on the upstream | EXISTING | same |
+| `correlation_id` plugin config (`header_name`, `echo_downstream`) | EXISTING | same |
+| `otel_tracing` plugin config (`endpoint`, `service_name`, `trace_context_trust: untrusted`, `include_url_path: false`, optional `root_sampling`/`root_sampling_ratio`) | EXISTING | same; keys checked against `ALLOWED_CONFIG_KEYS` (`otel_tracing.rs:63-81`) |
+| Service manifest `ferrum.service_manifest` v1 | **PROPOSED** | Alloy-defined. No Nexus, Foundry, or GitForgeOps consumer. |
+
+## 8. Alloy-owned telemetry (produced by this repository)
+
+| Item | Status | Meaning |
+|---|---|---|
+| Alloy SERVER span, scope `ferrum-alloy-telemetry` | EXISTING | Parent = the accepted remote parent (the Edge SERVER span behind Edge), otherwise a new root. |
+| `alloy.trace.parent` | EXISTING | `accepted_remote`, `root`, `rerooted_untrusted`, `rerooted_invalid`, or `ignored_by_policy` |
+| `alloy.peer.trust` | EXISTING | `verified_identity`, `network_boundary`, or `untrusted` |
+| `alloy.request_id` | EXISTING | Validated request id |
+| `alloy.server.time_to_headers_ms`, `alloy.server.body_duration_ms`, `alloy.server.duration_ms` | EXISTING | See [measurement-semantics.md](measurement-semantics.md) |
+| `alloy.response.body.outcome`, `alloy.response.body.bytes`, `alloy.response.upgraded` | EXISTING | Body finalization |
+| `alloy.admission.wait_ms` | EXISTING | Admission wait when enabled |
+| Operation spans with `alloy.operation.duration_ms`, `alloy.operation.kind`, `alloy.db.pool_wait_ms` | EXISTING | Explicitly instrumented operations |
+| Diagnostic report `ferrum.diagnostic_report` v1 | EXISTING in Alloy; **PROPOSED** as a shared contract | Findings are an Anvil `DiagnosticFinding` superset. Two `EvidenceSource` values (`gateway_telemetry`, `service_telemetry`) are proposed additions to Anvil's schema. Anvil import is **not tested**. |
+
+## 9. Cross-repository dependencies
+
+Alloy does not implement these, and does not claim them:
+
+1. **Edge**: per-attempt CLIENT spans or attempt identity, connection-setup and reuse evidence, and the G01 authenticated diagnostic reference. These are needed for `confirmed` gateway-vs-service timing attribution. Currently PROPOSED or UNAVAILABLE.
+2. **Edge**: stripping every client-supplied `x-consumer-*` header, not only the two exact names.
+3. **Anvil**: accepting `gateway_telemetry` / `service_telemetry` evidence sources and importing `ferrum.diagnostic_report`.
+4. **Nexus / Foundry / GitForgeOps**: consuming `ferrum.service_manifest`. None do.
+5. **Website**: no Alloy page exists. Any future page should say "in development" or "preview", not "tested" or "released".

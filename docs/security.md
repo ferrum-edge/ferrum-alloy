@@ -1,0 +1,156 @@
+# Security model
+
+This document states what Alloy trusts, why, and what it deliberately does not protect against. Deployment choices that weaken these properties are called out explicitly.
+
+## Separate concerns
+
+Alloy keeps five decisions separate. None of them implies another.
+
+| Concern | Decided by | Alloy mechanism |
+|---|---|---|
+| **Transport trust**: is the direct peer the gateway (or another trusted hop)? | The TLS stack's verified client certificate, or a configured network boundary | `[trust]` → `TrustedPeers`. Never forwarded headers. |
+| **End-user authentication**: who is the caller? | A verified JWT, or Ferrum Edge's consumer identity from a verified gateway | `jwt` feature; `edge.accept_consumer_identity` |
+| **Application authorization**: may this caller do this? | Application code | `jwt::Authorize`, handlers |
+| **Tenant / namespace authorization** | Application code | Not provided by Alloy |
+| **Diagnostic disclosure**: who may see detailed health, metrics, or diagnostic evidence? | Management token and loopback binding; offline tooling | Management listener; `ferrum-alloy diagnose` |
+
+An authenticated gateway connection does not authorize end-user operations or grant access to other tenants' data. A trace id or request id is an identifier, never a credential.
+
+## Transport trust
+
+`trust.identities` lists exact identities accepted from **verified** client certificates:
+
+- `spiffe://…` ids, taken from the leaf's single SPIFFE URI SAN;
+- `dns:<name>` DNS SANs.
+
+rustls verifies the chain against `server.tls.client_ca_path` during the handshake. `TlsPeer::from_verified_leaf` is called only for certificates rustls accepted. An unverified or unparsable certificate yields no identity. A leaf with more than one SPIFFE URI is treated as having none.
+
+`trust.networks` treats source addresses as a trusted termination boundary. Use it only when the path is isolated, for example a sidecar on loopback with the service bound to `127.0.0.1`, or a network policy that prevents direct access. `0.0.0.0/0` and `::/0` are rejected.
+
+Network trust is weaker than identity:
+
+- It never authorizes gateway-asserted identity headers. Configuration validation refuses `accept_consumer_identity` without `trust.identities`.
+- `gateway_required` requires a verified identity.
+
+Trust controls only:
+
+- whether an incoming `traceparent`/`tracestate` becomes the parent (`telemetry.trace_context.accept_incoming`, default `trusted_peers`);
+- whether an incoming request id is kept, when `request_id.accept_incoming = "trusted_peers"` (the default `any` keeps validated ids from anyone, as Ferrum Edge does);
+- whether `Server-Timing` is emitted, when `server_timing = "trusted_peers"`;
+- whether Edge consumer identity is accepted (`edge` feature).
+
+## Ferrum Edge deployment modes (feature `edge`)
+
+| Mode | Direct requests | Verified gateway |
+|---|---|---|
+| `standalone` (default) | Served. Unverified `x-consumer-*` identity headers are removed. | Treated like any peer unless listed in `[trust]`. |
+| `gateway_preferred` | Served, without `GatewayContext`. | `GatewayContext` with consumer identity when enabled. |
+| `gateway_required` | `403 gateway-required`, except the configured liveness and readiness paths, so kubelet and Edge probes work. | Served. |
+
+The recommended first deployment is Edge presenting an X.509-SVID through `backend_tls_client_cert_path`, with Alloy using `client_auth = "optional"` or `"required"`, `trust.identities = ["spiffe://…/gateway"]`, and `edge.mode = "gateway_required"`. The `edge-observability` example and CI job run exactly this.
+
+If a sidecar terminates TLS instead, Alloy sees a plaintext loopback connection and must rely on `trust.networks`. The deployment must then guarantee that only the sidecar can reach the service port. Alloy cannot verify that.
+
+Edge v0.9.7 reserves only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path. Other `x-consumer-*` names sent by clients pass through Edge. Alloy trusts only those two names, and only from a verified identity.
+
+## Trace context and sampling
+
+- The W3C parser matches Edge's. Invalid or duplicated `traceparent` headers are re-rooted, never "repaired".
+- For an untrusted peer, Alloy starts a new trace and removes `traceparent`/`tracestate` from the request before handlers see it, so naive forwarding cannot leak caller-chosen ids. Optionally it records the untrusted context as a span link (`link_untrusted_parent`, off by default because links point at caller-chosen trace ids).
+- Sampling is parent-based only for accepted parents. An untrusted caller's sampled flag cannot force export (`untrusted_callers_cannot_force_sampling`).
+- `tracestate` is propagated only when accepted and valid, and Alloy never adds its own members. `baggage` is never parsed or propagated.
+- To correlate a re-rooted request, an operator uses the response `x-request-id`, and the span link if enabled.
+
+## Response headers and caches
+
+`x-request-id` echo and `Server-Timing` are request-specific. Alloy adds them only when a shared cache cannot store the response (RFC 9111: `no-store`/`private`, or no explicit freshness and no validators, and so on). On a shared-cacheable response it withholds them and counts the suppression. Normal caching behavior is otherwise untouched.
+
+`Server-Timing` is off by default. When enabled it carries one bounded value, the service time to response headers, which may still reveal timing side channels such as authentication paths. Enable it for trusted peers only unless that is acceptable.
+
+## Management surface
+
+- The listener binds to `127.0.0.1:9090` by default.
+- A non-loopback bind requires a bearer token of at least 32 characters, compared in constant time.
+- `/livez` and `/readyz` return only a status. `/health` (check names and errors), `/metrics`, and `/openapi.json` require the token when one is configured.
+- Responses are `no-store`.
+- Readiness checks are cached (`health.cache_ttl_ms`) with single-flight refresh and per-check timeouts, so floods cannot probe dependencies.
+- Management endpoints are not rate-limited. Keep them on loopback or behind network policy.
+
+## Errors
+
+- Framework errors are RFC 9457 problems with stable `tag:` type URIs. `detail` is fixed text or parser output from the client's own input (control characters removed, at most 256 bytes).
+- Panics become `500 internal`; the panic message goes to server logs only.
+- Database and JWKS errors are never returned to clients.
+- Application response bodies are never rewritten. Only axum's empty 404 (router fallback) and 405 (`Allow` present) become problems.
+
+## Configuration and secrets
+
+`management.token` and `database.url` are `Secret`s and are never printed by `Debug`, `Display`, serialization, `ferrum-alloy check --show-effective`, or error messages. For example, an invalid database URL error does not echo the URL. `_FILE` variants read secrets from files. Unknown `FERRUM_ALLOY_*` variables and unknown keys are errors.
+
+## TLS
+
+rustls with the `ring` provider, passed explicitly. Alloy never installs a process-wide crypto provider. OpenSSL, native-tls, and aws-lc are banned in `deny.toml`. Client-certificate verification uses rustls' WebPKI verifier. **Certificate revocation (CRL/OCSP) is not checked**, so rotate short-lived certificates (SVIDs) instead.
+
+## JWT / JWKS (feature `jwt`)
+
+- Only asymmetric algorithms from an explicit allowlist. `none` and HMAC are rejected at configuration and at verification.
+- `iss`, `aud`, and `exp` are required; `nbf` is checked when present; leeway is configurable.
+- Keys come only from the configured JWKS URL: `https`, or `http` to loopback. Token-supplied `jku`, `x5u`, and embedded `jwk` are never used.
+- A token without `kid` is accepted only if exactly one key exists.
+- JWKS fetches never follow redirects, are bounded in time and size, and are single-flight. Refreshes, including those triggered by unknown `kid`s, happen at most once per `jwks_min_refresh_interval_ms`.
+- A JWKS outage returns `503 auth-unavailable`.
+- Forwarded identity headers never bypass token verification.
+- **Advisory exception:** RUSTSEC-2023-0071 (`rsa`, via jsonwebtoken's `rust_crypto` backend) is a timing side channel in RSA private-key operations. Alloy only verifies signatures with public keys. The exception is time-boxed in `deny.toml` (expires 2026-12-26).
+
+## Outbound HTTP (feature `http-client`)
+
+- `traceparent` is sent only to listed hosts. Caller-set `traceparent`/`tracestate` to other hosts, and `baggage` to any host, are removed.
+- Redirects are off by default. When enabled, only same-origin redirects are followed and cross-origin redirects are returned to the caller, so propagated context and credentials never follow to another origin.
+- There are no automatic retries.
+
+## Offline diagnostics
+
+Reports and OTLP files are untrusted input. They are bounded (size, nesting depth, string length, counts, time range) and validated. Mutation tests confirm parsing never panics.
+
+A `verified` claim in a file is downgraded to `unverified` and reported, so file input can never produce `confirmed` findings.
+
+Rules are deterministic. They run no commands, make no network calls, and use no AI service. Remediation text is prose, never an executable command.
+
+## Generated projects
+
+`ferrum-alloy new`:
+
+- validates names (no shell evaluation);
+- refuses non-empty or symlinked targets;
+- creates files with `create_new`;
+- downloads nothing.
+
+The generated CI pins `actions/checkout` by commit.
+
+## Threat model
+
+| Threat | Mitigation | Evidence |
+|---|---|---|
+| A direct caller forges `X-Consumer-Username` | Stripped unless the peer is a verified gateway identity | `standalone_mode_still_removes_forged_identity`, `a_different_identity_from_the_same_ca_is_not_the_gateway` |
+| A caller forges `X-Forwarded-For` to gain trust | Trust never reads headers | `forwarded_headers_never_establish_trust` |
+| A caller picks trace ids or forces sampling | Re-root untrusted context; parent-based sampling only for accepted parents | `untrusted_trace_context_is_rerooted_and_not_forwarded`, `untrusted_callers_cannot_force_sampling` |
+| Gateway bypass | `gateway_required` with a verified SPIFFE identity; rogue CAs fail the handshake | `gateway_required_rejects_direct_callers_but_not_health_probes`, `certificates_from_another_ca_fail_the_handshake`, `edge-e2e` |
+| A cache replays another request's ids or timing | Request-specific headers only on non-shared-cacheable responses | `request_specific_headers_are_withheld_from_shared_cacheable_responses` |
+| High-cardinality labels exhaust memory | Route templates only; series cap and overflow bucket | `metric_series_are_capped`, `matched_unmatched_and_method_not_allowed_routes_use_bounded_labels` |
+| Slow-header or connection floods | `header_read_timeout_ms`, `max_headers`, `max_connections` | `slow_request_heads_are_cut_off`, `oversized_request_heads_are_rejected`, `connections_beyond_the_limit_are_closed` |
+| Oversized bodies | `Content-Length` precheck and streaming cap | `chunked_bodies_without_content_length_are_still_limited` |
+| A collector outage slows or fails requests | Bounded queue; drop and count | `collector_failures_never_fail_requests_and_are_counted`, `a_full_queue_drops_spans_instead_of_blocking_requests` |
+| Health floods probe the database | Cached, single-flight readiness | `readiness_checks_are_cached_and_single_flight` |
+| Management exposed without auth | Validation refuses a non-loopback bind without a token | `unsafe_combinations_fail_validation` |
+| JWT algorithm confusion, `alg=none`, key-refresh floods | Allowlist; JWKS-only keys; rate-limited refresh | `algorithm_confusion_and_unsigned_tokens_are_rejected`, `unknown_kids_refresh_at_most_once_per_interval` |
+| Hostile diagnostic files | Bounds, schema checks, provenance downgrade, mutation testing | `crates/ferrum-alloy-diagnostics/tests/bounds_and_hostile_input.rs` |
+| Secrets in logs or output | `Secret` redaction; sanitized errors | `secrets_are_never_printed`, `check_never_prints_secrets`, `invalid_urls_fail_without_revealing_the_secret` |
+
+## Known gaps
+
+- No live, tenant-scoped diagnostic retrieval endpoint. Detailed evidence is available only through telemetry export and offline reports.
+- Upgraded (WebSocket) sessions are not counted against `max_connections` and are not drained. Applications should watch `Lifecycle::shutdown_token`.
+- No certificate revocation checking.
+- No rate limiting on the management listener.
+- Network-boundary trust depends on deployment isolation that Alloy cannot verify.
+- The Edge v0.9.7 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.

@@ -1,0 +1,70 @@
+[package]
+name = "ferrum-alloy-telemetry"
+description = "Independently usable Tower/Axum request instrumentation with truthful response-lifecycle accounting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["axum", "subscriber"]
+# Read axum's `MatchedPath` route template and `ConnectInfo` peer address.
+axum = ["dep:axum"]
+# Explicit, application-invoked global subscriber initialization helpers.
+subscriber = ["dep:tracing-subscriber"]
+# OpenTelemetry bridge and bounded OTLP/HTTP export.
+# Extract SPIFFE / DNS SAN identity from verified peer certificates.
+x509 = ["dep:x509-parser"]
+otel = [
+    "subscriber",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:rustls-platform-verifier",
+]
+
+[dependencies]
+bytes = { workspace = true }
+getrandom = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+ipnet = { workspace = true, features = ["serde"] }
+pin-project-lite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tower-layer = { workspace = true }
+tower-service = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+
+axum = { workspace = true, optional = true, features = ["matched-path", "tokio"] }
+x509-parser = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true, features = ["std", "fmt", "json", "env-filter", "registry", "ansi", "smallvec"] }
+opentelemetry = { workspace = true, optional = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, optional = true, features = ["trace"] }
+opentelemetry-otlp = { workspace = true, optional = true, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { workspace = true, optional = true, features = ["tracing-log"] }
+# The OTLP exporter's HTTP client is built here with an explicit rustls/ring
+# configuration, so it works however reqwest's TLS features unify.
+reqwest = { workspace = true, optional = true, features = ["blocking", "rustls-no-provider"] }
+rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["matched-path", "tokio", "http1", "json"] }
+bytes = { workspace = true }
+http-body-util = { workspace = true, features = ["channel"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }
+tower = { workspace = true, features = ["util"] }
+serde_json = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
+tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt"] }
+rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
+
+[lints]
+workspace = true

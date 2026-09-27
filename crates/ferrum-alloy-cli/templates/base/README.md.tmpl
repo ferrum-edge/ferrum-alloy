@@ -1,0 +1,35 @@
+# {{name}}
+
+An Axum service built with [Ferrum Alloy](https://github.com/ferrum-edge/ferrum-alloy).
+Handlers in `src/lib.rs` are ordinary Axum. Alloy adds configuration, Problem Details errors, health endpoints, limits, graceful shutdown, and request telemetry.
+
+## Run
+
+```bash
+cargo run
+curl -s localhost:8080/hello
+curl -s localhost:8080/readyz
+curl -s -X POST localhost:8080/items -H 'content-type: application/json' -d '{"name":"tea","quantity":2}'
+```
+
+Management endpoints (`/livez`, `/readyz`, `/health`, `/metrics`) listen on `127.0.0.1:9090`.
+
+## Test
+
+```bash
+cargo test
+```
+
+## Check configuration
+
+```bash
+ferrum-alloy check --config alloy.toml
+```
+{{readme_openapi}}
+## Generate gateway configuration
+
+```bash
+ferrum-alloy edge export --manifest ferrum-service.toml --output edge.yaml
+```
+
+The output is reviewable Ferrum Edge file-mode configuration. Nothing is applied to a gateway.

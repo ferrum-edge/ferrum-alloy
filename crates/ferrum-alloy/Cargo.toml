@@ -1,0 +1,81 @@
+[package]
+name = "ferrum-alloy"
+description = "Batteries-included Axum application toolkit with optional Ferrum Edge integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+otel = ["ferrum-alloy-telemetry/otel"]
+edge = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/axum"]
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "ferrum-alloy-telemetry/x509"]
+postgres = ["dep:sqlx"]
+openapi = ["dep:utoipa", "dep:utoipa-axum"]
+jwt = ["dep:jsonwebtoken", "http-client"]
+http-client = ["dep:reqwest", "dep:url", "dep:rustls", "dep:rustls-platform-verifier"]
+compression = ["tower-http/compression-gzip", "tower-http/compression-br"]
+cors = ["tower-http/cors"]
+full = ["otel", "edge", "tls", "postgres", "openapi", "jwt", "http-client", "compression", "cors"]
+
+[dependencies]
+ferrum-alloy-telemetry = { workspace = true, features = ["axum", "subscriber"] }
+axum = { workspace = true, features = ["tokio", "http1", "http2", "json", "query", "matched-path", "original-uri", "form"] }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio", "server", "server-auto", "server-graceful", "service", "http1", "http2"] }
+pin-project-lite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "macros", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+toml = { workspace = true, features = ["parse", "serde", "display"] }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true, features = ["catch-panic"] }
+tower-layer = { workspace = true }
+tower-service = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+ipnet = { workspace = true, features = ["serde"] }
+
+ferrum-alloy-edge = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { workspace = true, optional = true, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = { workspace = true, optional = true, features = ["std"] }
+sqlx = { workspace = true, optional = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki", "migrate", "macros"] }
+utoipa = { workspace = true, optional = true, features = ["macros"] }
+utoipa-axum = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true, features = ["rust_crypto"] }
+reqwest = { workspace = true, optional = true, features = ["rustls-no-provider", "json"] }
+url = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "migrate"] }
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+tower = { workspace = true, features = ["util"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["std", "registry"] }
+bytes = { workspace = true }
+http-body-util = { workspace = true, features = ["channel"] }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
+rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

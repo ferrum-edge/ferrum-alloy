@@ -1,0 +1,367 @@
+//! Configuration precedence, strictness, redaction, and validation.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use ferrum_alloy::config::{
+    AlloyConfig, ConfigError, ENV_VARS, EdgeMode, Overrides, Secret, load_from,
+};
+
+fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+    pairs
+        .iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .collect()
+}
+
+fn write(dir: &tempfile::TempDir, name: &str, text: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+const NO_FEATURES: &[&str] = &[];
+
+#[test]
+fn defaults_are_safe_and_valid() {
+    let (config, sources) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert!(
+        config.server.bind.ip().is_loopback(),
+        "listeners default to loopback"
+    );
+    assert!(config.management.bind.ip().is_loopback());
+    assert!(!config.cors.enabled);
+    assert!(!config.compression.enabled);
+    assert!(!config.otlp.enabled);
+    assert!(
+        !config.openapi.public,
+        "documentation is not public by default"
+    );
+    assert_eq!(config.edge.mode, EdgeMode::Standalone);
+    assert!(sources.file.is_none());
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn precedence_is_override_then_env_then_file_then_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        &dir,
+        "alloy.toml",
+        r#"
+        [server]
+        bind = "127.0.0.1:7000"
+        request_timeout_ms = 1111
+        max_connections = 42
+
+        [service]
+        environment = "staging"
+        "#,
+    );
+    let mut overrides = Overrides::default();
+    overrides.set(
+        &["server", "bind"],
+        toml::Value::String("127.0.0.1:9999".into()),
+    );
+    let (config, sources) = load_from(
+        Some(&file),
+        env(&[
+            ("FERRUM_ALLOY_BIND", "127.0.0.1:8888"),
+            ("FERRUM_ALLOY_REQUEST_TIMEOUT_MS", "2222"),
+            ("UNRELATED_VAR", "ignored"),
+        ]),
+        &overrides,
+    )
+    .unwrap();
+    assert_eq!(
+        config.server.bind.to_string(),
+        "127.0.0.1:9999",
+        "override beats env"
+    );
+    assert_eq!(config.server.request_timeout_ms, 2222, "env beats file");
+    assert_eq!(config.server.max_connections, 42, "file beats default");
+    assert_eq!(config.service.environment, "staging");
+    assert_eq!(config.server.header_read_timeout_ms, 10_000, "default");
+    assert_eq!(sources.file.as_deref(), Some(file.as_path()));
+    assert_eq!(
+        sources.env,
+        vec!["FERRUM_ALLOY_BIND", "FERRUM_ALLOY_REQUEST_TIMEOUT_MS"]
+    );
+    assert_eq!(sources.overrides, vec!["server.bind"]);
+}
+
+#[test]
+fn config_file_can_be_named_by_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "x.toml", "[server]\nmax_connections = 7\n");
+    let (config, _) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_CONFIG", file.to_str().unwrap())]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.server.max_connections, 7);
+}
+
+#[test]
+fn unknown_keys_and_variables_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let typo = write(&dir, "typo.toml", "[server]\nbnd = \"127.0.0.1:1\"\n");
+    let error = load_from(Some(&typo), env(&[]), &Overrides::default()).unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Schema(m) if m.contains("bnd")),
+        "{error}"
+    );
+
+    let section = write(&dir, "section.toml", "[serverr]\n");
+    assert!(load_from(Some(&section), env(&[]), &Overrides::default()).is_err());
+
+    let error = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_BINDD", "x")]),
+        &Overrides::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Env { name, .. } if name == "FERRUM_ALLOY_BINDD"),
+        "{error}"
+    );
+}
+
+#[test]
+fn invalid_values_are_rejected_not_defaulted() {
+    for (name, value) in [
+        ("FERRUM_ALLOY_REQUEST_TIMEOUT_MS", "-5"),
+        ("FERRUM_ALLOY_REQUEST_TIMEOUT_MS", "soon"),
+        ("FERRUM_ALLOY_MANAGEMENT_ENABLED", "yes please"),
+        ("FERRUM_ALLOY_OTLP_SAMPLING_RATIO", "NaN"),
+    ] {
+        assert!(
+            load_from(None, env(&[(name, value)]), &Overrides::default()).is_err(),
+            "{name}={value}"
+        );
+    }
+    let error = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_BIND", "localhost:80")]),
+        &Overrides::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, ConfigError::Schema(_)));
+    let dir = tempfile::tempdir().unwrap();
+    let broken = write(&dir, "broken.toml", "[server\n");
+    assert!(matches!(
+        load_from(Some(&broken), env(&[]), &Overrides::default()).unwrap_err(),
+        ConfigError::Syntax { .. }
+    ));
+    let missing = dir.path().join("missing.toml");
+    assert!(matches!(
+        load_from(Some(&missing), env(&[]), &Overrides::default()).unwrap_err(),
+        ConfigError::Read { .. }
+    ));
+}
+
+#[test]
+fn lists_and_secret_files_are_supported() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write(&dir, "token", "0123456789abcdef0123456789abcdef\n");
+    let (config, _) = load_from(
+        None,
+        env(&[
+            ("FERRUM_ALLOY_TRUSTED_NETWORKS", "10.0.0.0/8, 127.0.0.1/32,"),
+            (
+                "FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE",
+                secret.to_str().unwrap(),
+            ),
+        ]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.trust.networks.len(), 2);
+    assert_eq!(
+        config.management.token.as_ref().map(Secret::expose),
+        Some("0123456789abcdef0123456789abcdef"),
+        "trailing newline trimmed"
+    );
+    let error = load_from(
+        None,
+        env(&[
+            ("FERRUM_ALLOY_MANAGEMENT_TOKEN", "a"),
+            (
+                "FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE",
+                secret.to_str().unwrap(),
+            ),
+        ]),
+        &Overrides::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("set only one"), "{error}");
+    // `_FILE` exists only for secrets.
+    assert!(
+        load_from(
+            None,
+            env(&[("FERRUM_ALLOY_BIND_FILE", "/x")]),
+            &Overrides::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn secrets_are_never_printed() {
+    let mut config = AlloyConfig::default();
+    config.management.token = Some(Secret::new("super-secret-token-value-1234567890"));
+    config.database.url = Some(Secret::new("postgres://user:hunter2@db/orders"));
+    let rendered = config.redacted_toml();
+    assert!(!rendered.contains("super-secret"), "{rendered}");
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(rendered.contains("<redacted>"));
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("hunter2") && !debug.contains("super-secret"));
+}
+
+#[test]
+fn unsafe_combinations_fail_validation() {
+    let check = |mutate: &dyn Fn(&mut AlloyConfig), expect: &str| {
+        let mut config = AlloyConfig::default();
+        mutate(&mut config);
+        let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+        assert!(error.contains(expect), "expected {expect:?} in {error}");
+    };
+    check(
+        &|c| c.management.bind = "0.0.0.0:9090".parse().unwrap(),
+        "management.bind",
+    );
+    check(
+        &|c| c.management.token = Some(Secret::new("short")),
+        "at least 32",
+    );
+    check(&|c| c.management.bind = c.server.bind, "must differ");
+    check(&|c| c.otlp.enabled = true, "`otel` feature");
+    check(
+        &|c| c.edge.mode = EdgeMode::GatewayPreferred,
+        "`edge` feature",
+    );
+    check(
+        &|c| c.database.url = Some(Secret::new("postgres://x")),
+        "`postgres` feature",
+    );
+    check(
+        &|c| c.server.request_body_limit_bytes = 0,
+        "request_body_limit_bytes",
+    );
+    check(
+        &|c| c.health.readiness_path = "readyz".into(),
+        "health.readiness_path",
+    );
+    check(
+        &|c| {
+            c.cors.enabled = true;
+            c.cors.allowed_origins = vec!["*".into()];
+            c.cors.allow_credentials = true;
+        },
+        "allow_credentials",
+    );
+    check(
+        &|c| c.trust.networks = vec!["0.0.0.0/0".parse().unwrap()],
+        "every address",
+    );
+}
+
+#[test]
+fn gateway_modes_require_verified_identities() {
+    let features = &["edge"];
+    let mut config = AlloyConfig::default();
+    config.edge.mode = EdgeMode::GatewayRequired;
+    config.trust.networks = vec!["10.0.0.0/8".parse().unwrap()];
+    let error = config.validate(features).unwrap_err().to_string();
+    assert!(error.contains("trust.identities"), "{error}");
+    config.trust.identities = vec!["spiffe://ferrum.test/ns/edge/sa/gateway".into()];
+    config.validate(features).unwrap();
+
+    let mut config = AlloyConfig::default();
+    config.edge.accept_consumer_identity = true;
+    config.trust.networks = vec!["10.0.0.0/8".parse().unwrap()];
+    assert!(
+        config
+            .validate(features)
+            .unwrap_err()
+            .to_string()
+            .contains("network trust")
+    );
+}
+
+#[test]
+fn warnings_flag_risky_but_valid_choices() {
+    let mut config = AlloyConfig::default();
+    config.server.bind = "0.0.0.0:8080".parse().unwrap();
+    config.telemetry.trace_context.accept_incoming = ferrum_alloy::telemetry::AcceptPolicy::Any;
+    let warnings = config.validate(NO_FEATURES).unwrap();
+    let text: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(text.iter().any(|w| w.contains("non-loopback")), "{text:?}");
+    assert!(
+        text.iter().any(|w| w.contains("force sampling")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn every_environment_variable_is_documented() {
+    let docs = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/configuration.md"),
+    )
+    .unwrap();
+    for var in ENV_VARS {
+        assert!(
+            docs.contains(var.name),
+            "{} is missing from docs/configuration.md",
+            var.name
+        );
+    }
+    assert!(docs.contains("FERRUM_ALLOY_CONFIG"));
+}
+
+#[test]
+fn env_var_table_maps_to_real_config_paths() {
+    // Setting each variable to a type-appropriate value must deserialize.
+    for var in ENV_VARS {
+        let value = match var.kind {
+            ferrum_alloy::config::EnvKind::Uint => "5",
+            ferrum_alloy::config::EnvKind::Float => "0.5",
+            ferrum_alloy::config::EnvKind::Bool => "false",
+            ferrum_alloy::config::EnvKind::List => match var.name {
+                "FERRUM_ALLOY_TRUSTED_NETWORKS" => "10.0.0.0/8",
+                _ => "a,b",
+            },
+            _ => match var.name {
+                "FERRUM_ALLOY_BIND" | "FERRUM_ALLOY_MANAGEMENT_BIND" => "127.0.0.1:1234",
+                "FERRUM_ALLOY_LOG_FORMAT" => "json",
+                "FERRUM_ALLOY_TRACE_CONTEXT_ACCEPT" => "never",
+                "FERRUM_ALLOY_SERVER_TIMING" => "disabled",
+                "FERRUM_ALLOY_EDGE_MODE" => "standalone",
+                "FERRUM_ALLOY_TLS_CLIENT_AUTH" => "none",
+                _ => "value",
+            },
+        };
+        let mut vars = vec![(var.name, value)];
+        // TLS and JWT sections need their required siblings.
+        if var.path.starts_with(&["server", "tls"]) {
+            vars.extend([
+                ("FERRUM_ALLOY_TLS_CERT_PATH", "c"),
+                ("FERRUM_ALLOY_TLS_KEY_PATH", "k"),
+            ]);
+        }
+        if var.path.starts_with(&["auth", "jwt"]) {
+            vars.extend([
+                ("FERRUM_ALLOY_JWT_ISSUER", "i"),
+                ("FERRUM_ALLOY_JWT_AUDIENCES", "a"),
+            ]);
+        }
+        vars.sort();
+        vars.dedup_by_key(|(name, _)| *name);
+        let result = load_from(None, env(&vars), &Overrides::default());
+        assert!(result.is_ok(), "{} = {value}: {:?}", var.name, result.err());
+    }
+}

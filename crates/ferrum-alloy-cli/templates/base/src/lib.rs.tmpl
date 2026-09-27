@@ -1,0 +1,91 @@
+//! {{name}}: ordinary Axum handlers served by Ferrum Alloy.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use ferrum_alloy::extract::{Json, Path, ValidJson, Validate, ValidationErrors};
+use ferrum_alloy::{Problem, ProblemKind};
+use serde::{Deserialize, Serialize};
+/// Application state, supplied with `Router::with_state`.
+#[derive(Clone, Default)]
+pub struct AppState {
+    next_id: Arc<AtomicU64>,
+}
+
+/// A request to create an item.
+#[derive(Debug, Deserialize)]
+pub struct NewItem {
+    /// Item name.
+    pub name: String,
+    /// Quantity (at least 1).
+    pub quantity: u32,
+}
+
+impl Validate for NewItem {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::default();
+        if self.name.trim().is_empty() {
+            errors.add("/name", "must not be empty");
+        }
+        if self.quantity == 0 {
+            errors.add("/quantity", "must be at least 1");
+        }
+        errors.into_result()
+    }
+}
+
+/// A created item.
+#[derive(Debug, Serialize)]
+pub struct Item {
+    /// Identifier.
+    pub id: u64,
+    /// Item name.
+    pub name: String,
+    /// Quantity.
+    pub quantity: u32,
+}
+
+async fn create_item(
+    State(state): State<AppState>,
+    ValidJson(item): ValidJson<NewItem>,
+) -> (StatusCode, Json<Item>) {
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    (
+        StatusCode::CREATED,
+        Json(Item {
+            id,
+            name: item.name,
+            quantity: item.quantity,
+        }),
+    )
+}
+
+async fn get_item(Path(id): Path<u64>) -> Result<Json<Item>, Problem> {
+    if id == 0 {
+        return Err(Problem::new(ProblemKind::ValidationFailed).with_detail("id must be positive"));
+    }
+    Err(Problem::custom(
+        "tag:example.com,2026:{{name}}/problem/item-not-found",
+        "Item not found",
+        StatusCode::NOT_FOUND,
+    )
+    .with_detail(format!("no item with id {id}")))
+}
+
+async fn hello() -> &'static str {
+    concat!("Hello from ", env!("CARGO_PKG_NAME"))
+}
+
+/// The application router. Alloy adds health endpoints, limits, errors,
+/// and telemetry around it; the handlers stay plain Axum.
+pub fn router() -> Router {
+    Router::new()
+        .route("/hello", get(hello))
+        .route("/items", post(create_item))
+        .route("/items/{id}", get(get_item))
+        .with_state(AppState::default())
+}

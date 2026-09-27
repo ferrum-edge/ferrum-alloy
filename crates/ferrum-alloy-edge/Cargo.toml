@@ -1,0 +1,38 @@
+[package]
+name = "ferrum-alloy-edge"
+description = "Optional Ferrum Edge trust and diagnostic contract adapter for Ferrum Alloy services"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["axum"]
+# Body and extractor integration for axum routers.
+axum = ["dep:axum"]
+
+[dependencies]
+ferrum-alloy-telemetry = { workspace = true }
+ferrum-alloy-diagnostics = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tower-layer = { workspace = true }
+tower-service = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+ipnet = { workspace = true, features = ["serde"] }
+axum = { workspace = true, optional = true }
+toml = { workspace = true, features = ["parse", "serde", "display"] }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+
+[lints]
+workspace = true

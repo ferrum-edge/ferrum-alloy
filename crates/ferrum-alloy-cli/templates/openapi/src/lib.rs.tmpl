@@ -1,0 +1,130 @@
+//! {{name}}: ordinary Axum handlers served by Ferrum Alloy, documented with
+//! utoipa. Routes are registered once through `OpenApiRouter`, so the served
+//! routes and the OpenAPI document cannot drift apart.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use axum::Router;
+use axum::extract::State;
+use axum::http::StatusCode;
+use ferrum_alloy::extract::{Json, Path, ValidJson, Validate, ValidationErrors};
+use ferrum_alloy::{Problem, ProblemKind};
+use serde::{Deserialize, Serialize};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+/// OpenAPI metadata (title and version default to the Cargo package).
+/// Paths are added by `api()`.
+#[derive(OpenApi)]
+pub struct ApiDoc;
+
+/// Application state, supplied with `Router::with_state`.
+#[derive(Clone, Default)]
+pub struct AppState {
+    next_id: Arc<AtomicU64>,
+}
+
+/// A request to create an item.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct NewItem {
+    /// Item name.
+    pub name: String,
+    /// Quantity (at least 1).
+    pub quantity: u32,
+}
+
+impl Validate for NewItem {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::default();
+        if self.name.trim().is_empty() {
+            errors.add("/name", "must not be empty");
+        }
+        if self.quantity == 0 {
+            errors.add("/quantity", "must be at least 1");
+        }
+        errors.into_result()
+    }
+}
+
+/// A created item.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Item {
+    /// Identifier.
+    pub id: u64,
+    /// Item name.
+    pub name: String,
+    /// Quantity.
+    pub quantity: u32,
+}
+
+/// Greeting.
+#[utoipa::path(get, path = "/hello", responses((status = 200, description = "Greeting", body = String)))]
+async fn hello() -> &'static str {
+    "Hello from {{name}}"
+}
+
+/// Create an item.
+#[utoipa::path(
+    post,
+    path = "/items",
+    request_body = NewItem,
+    responses(
+        (status = 201, description = "Created", body = Item),
+        (status = 422, description = "Invalid item (application/problem+json)")
+    )
+)]
+async fn create_item(
+    State(state): State<AppState>,
+    ValidJson(item): ValidJson<NewItem>,
+) -> (StatusCode, Json<Item>) {
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    (
+        StatusCode::CREATED,
+        Json(Item {
+            id,
+            name: item.name,
+            quantity: item.quantity,
+        }),
+    )
+}
+
+/// Fetch an item.
+#[utoipa::path(
+    get,
+    path = "/items/{id}",
+    params(("id" = u64, Path, description = "Item identifier")),
+    responses((status = 404, description = "Not found (application/problem+json)"))
+)]
+async fn get_item(Path(id): Path<u64>) -> Result<Json<Item>, Problem> {
+    if id == 0 {
+        return Err(Problem::new(ProblemKind::ValidationFailed).with_detail("id must be positive"));
+    }
+    Err(Problem::custom(
+        "tag:example.com,2026:{{name}}/problem/item-not-found",
+        "Item not found",
+        StatusCode::NOT_FOUND,
+    )
+    .with_detail(format!("no item with id {id}")))
+}
+
+/// The router and its OpenAPI document, from one registration.
+pub fn api() -> (Router, utoipa::openapi::OpenApi) {
+    let (router, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(hello))
+        .routes(routes!(create_item))
+        .routes(routes!(get_item))
+        .split_for_parts();
+    (router.with_state(AppState::default()), document)
+}
+
+/// The application router.
+pub fn router() -> Router {
+    api().0
+}
+
+/// The OpenAPI document.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    api().1
+}

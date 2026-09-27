@@ -1,0 +1,39 @@
+{
+  "$comment": "Tested Alloy-Edge pairing. docs/compatibility.md is the human-readable record. Values here must match .github/workflows/ci.yml and examples/edge-observability/Dockerfile (checked by crates/ferrum-alloy-edge/tests/pairing.rs).",
+  "record_version": 1,
+  "status": "development",
+  "alloy": {
+    "version": "0.1.0",
+    "published": false
+  },
+  "edge": {
+    "release": "v0.9.7",
+    "source_commit": "8fed1346ce2e267eb69c03683cb89ea44d785e0b",
+    "image": "ferrumedge/ferrum-edge@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a",
+    "mode": "file"
+  },
+  "collector": {
+    "image": "otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1",
+    "receiver": "otlp/http"
+  },
+  "transports": {
+    "edge_to_collector": "otlp/http+json",
+    "alloy_to_collector": "otlp/http+protobuf",
+    "client_to_edge": "http/1.1",
+    "edge_to_alloy": "https (h2 via ALPN) with mTLS client certificate"
+  },
+  "trust": {
+    "edge_mode": "gateway_required",
+    "identity": "spiffe://ferrum.demo/ns/edge/sa/gateway",
+    "client_auth": "optional"
+  },
+  "rust": {
+    "toolchain": "1.98.1",
+    "msrv": "1.94"
+  },
+  "semantic_conventions": {
+    "http": "stable attribute names",
+    "database": "db.system.name, db.operation.name, db.query.summary (not all stable)",
+    "schema_url": null
+  }
+}

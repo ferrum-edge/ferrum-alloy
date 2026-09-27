@@ -1,0 +1,23 @@
+# OpenTelemetry Collector (contrib 0.161.0) for the end-to-end demo.
+# Both Ferrum Edge (OTLP/HTTP JSON) and Alloy (OTLP/HTTP protobuf) export
+# here; spans are written as OTLP/JSON lines for offline verification.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  batch:
+    timeout: 500ms
+exporters:
+  file:
+    path: /out/traces.jsonl
+    flush_interval: 500ms
+  debug:
+    verbosity: basic
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file, debug]

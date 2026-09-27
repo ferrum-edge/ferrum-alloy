@@ -1,0 +1,40 @@
+# Service manifest (PROPOSED contract) used to generate the demo's Ferrum
+# Edge configuration with `ferrum-alloy edge export`.
+schema = "ferrum.service_manifest"
+schema_version = "1.0"
+
+[service]
+name = "edge-demo-api"
+version = "0.1.0"
+
+[api]
+public_path = "/orders"
+service_base_path = "/"
+strip_public_path = true
+
+[upstream]
+host = "alloy"
+port = 8443
+scheme = "https"
+protocols = ["http1", "http2"]
+gateway_client_cert_path = "/certs/edge-client.pem"
+gateway_client_key_path = "/certs/edge-client.key"
+server_ca_path = "/certs/ca.pem"
+
+[health]
+path = "/readyz"
+interval_seconds = 2
+timeout_ms = 1000
+
+[timeouts]
+connect_ms = 2000
+read_ms = 30000
+write_ms = 30000
+
+[gateway]
+namespace = "ferrum"
+correlation_id = true
+otel_endpoint = "http://otel-collector:4318/v1/traces"
+
+[auth]
+mode = "none"
