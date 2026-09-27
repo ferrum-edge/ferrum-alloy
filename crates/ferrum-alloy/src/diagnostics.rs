@@ -262,6 +262,9 @@ impl Ring {
 
     /// Removes the oldest record. Returns `false` when there is none.
     fn evict_oldest(&mut self) -> bool {
+        // An empty slot is never first, but skipping any keeps `first_seq`
+        // in step with the queue if that ever stops holding.
+        self.trim();
         let Some(Some(oldest)) = self.records.pop_front() else {
             return false;
         };
@@ -985,6 +988,27 @@ mod tests {
         assert_eq!(indexed, ring.live);
         let present = ring.records.iter().filter(|slot| slot.is_some()).count();
         assert_eq!(present, ring.live);
+    }
+
+    #[test]
+    fn eviction_skips_empty_slots_at_the_front() {
+        let store = EvidenceStore::new(&settings(20, 1024 * 1024));
+        store.record(evidence(Some("acme"), "first"));
+        store.record(evidence(Some("acme"), "second"));
+        let mut ring = store.ring();
+        // An empty slot at the front, which `trim` normally prevents.
+        ring.records.push_front(None);
+        ring.first_seq = ring.first_seq.wrapping_sub(1);
+
+        assert!(ring.evict_oldest());
+        assert_eq!(ring.live, 1);
+        assert_eq!(ring.records.len(), 1);
+        let second = (Arc::from("acme"), id("second"));
+        assert_eq!(ring.find(&second).len(), 1);
+        assert!(ring.find(&(Arc::from("acme"), id("first"))).is_empty());
+        assert!(ring.evict_oldest());
+        assert!(!ring.evict_oldest());
+        assert!(ring.index.is_empty());
     }
 
     #[test]

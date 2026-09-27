@@ -508,6 +508,22 @@ fn startup_requires_a_loopback_management_listener() {
         );
     }
 
+    // Any loopback address is accepted, IPv6 included.
+    for bind in ["127.0.0.1:9090", "127.0.0.2:9090", "[::1]:9090"] {
+        let mut cfg = settings();
+        cfg.management.bind = bind.parse().unwrap();
+        let parts = app()
+            .diagnostics_authorizer(authorize)
+            .config(cfg)
+            .telemetry(TelemetryInit::ApplicationOwned)
+            .into_parts();
+        assert!(
+            parts.is_ok(),
+            "{bind}: {:?}",
+            parts.err().map(|e| e.to_string())
+        );
+    }
+
     // Without retrieval, a non-loopback listener with a token is allowed.
     let mut cfg = settings();
     cfg.management.bind = "0.0.0.0:9090".parse().unwrap();
