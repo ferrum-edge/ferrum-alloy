@@ -24,7 +24,10 @@ fn endless() -> Body {
         if !first {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        Some((Ok::<_, std::io::Error>(Bytes::from_static(b"tick\n")), false))
+        Some((
+            Ok::<_, std::io::Error>(Bytes::from_static(b"tick\n")),
+            false,
+        ))
     });
     Body::from_stream(chunks)
 }

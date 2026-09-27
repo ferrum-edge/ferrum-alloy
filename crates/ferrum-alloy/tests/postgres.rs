@@ -213,7 +213,8 @@ impl Visit for Fields<'_> {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name(), Value::from(format!("{value:?}")));
+        self.0
+            .insert(field.name(), Value::from(format!("{value:?}")));
     }
 }
 
@@ -404,8 +405,7 @@ async fn pool_wait_is_measured_separately_from_the_query() {
         let mut connection = postgres::acquire(&pool).await?;
         sqlx::query("SELECT 1").execute(&mut *connection).await
     };
-    let operation = postgres::query("pool.wait", "SELECT", "SELECT 1")
-        .run_result(wait_then_query);
+    let operation = postgres::query("pool.wait", "SELECT", "SELECT 1").run_result(wait_then_query);
     let ((), result) = tokio::join!(release, operation);
     result.unwrap();
 
