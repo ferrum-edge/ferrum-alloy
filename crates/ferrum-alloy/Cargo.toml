@@ -59,6 +59,7 @@ rustls-platform-verifier = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
+ferrum-alloy-diagnostics = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "migrate"] }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
