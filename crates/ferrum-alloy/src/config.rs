@@ -803,13 +803,14 @@ fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError
 
 /// `true` for text that is safe to echo as a key name: a short bare TOML
 /// key. Anything else (quoted keys with URLs, long tokens) is redacted,
-/// including a bare key over 32 bytes that mixes letters and digits, which
-/// looks more like a token than a key name.
+/// including keys with at least 16 bytes mixing letters and digits, or any
+/// key at least 33 bytes long, which look more like tokens than key names.
 fn is_plain_key(key: &str) -> bool {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
-    let token_like = key.len() > 32
-        && key.bytes().any(|b| b.is_ascii_alphabetic())
-        && key.bytes().any(|b| b.is_ascii_digit());
+    let token_like = key.len() >= 33
+        || (key.len() >= 16
+            && key.bytes().any(|b| b.is_ascii_alphabetic())
+            && key.bytes().any(|b| b.is_ascii_digit()));
     !key.is_empty() && key.len() <= 64 && !token_like && key.bytes().all(plain)
 }
 

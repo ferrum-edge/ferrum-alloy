@@ -231,13 +231,16 @@ fn schema_errors_name_keys_but_never_values() {
         assert!(rendered.contains(kind), "{rendered}");
         assert!(rendered.contains(&format!("`{key}`")), "{rendered}");
     }
-    // A long bare key mixing letters and digits looks like a token.
-    let token = "synth4token0123456789abcdefghijklmnop";
-    let path = write(&dir, "token.toml", &format!("[database]\n{token} = 1\n"));
-    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
-    let rendered = error.to_string();
-    assert!(!rendered.contains(token), "{rendered}");
-    assert!(rendered.contains("(key redacted)"), "{rendered}");
+    for (name, token) in [
+        ("hex", "0123456789abcdef0123456789abcdef"),
+        ("alnum", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"),
+    ] {
+        let path = write(&dir, "token.toml", &format!("[database]\n{token} = 1\n"));
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains(token), "{name}: {rendered}");
+        assert!(rendered.contains("(key redacted)"), "{name}: {rendered}");
+    }
     // The expected type or variants still come through.
     let path = write(&dir, "variant.toml", "[logging]\nformat = \"xml\"\n");
     let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
