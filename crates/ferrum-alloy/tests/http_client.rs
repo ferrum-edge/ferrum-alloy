@@ -270,7 +270,10 @@ async fn refused_connections_are_reported_as_refusals() {
     }
     assert!(error.is_connect(), "{error:?}");
     assert!(!error.is_timeout(), "{error:?}");
-    assert!(refused, "no ConnectionRefused in the error chain: {error:?}");
+    assert!(
+        refused,
+        "no ConnectionRefused in the error chain: {error:?}"
+    );
     // The refusal arrives before the connect deadline on every platform.
     assert!(started.elapsed() < Duration::from_secs(5));
 }
