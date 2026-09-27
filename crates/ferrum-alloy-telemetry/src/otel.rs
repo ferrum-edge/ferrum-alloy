@@ -38,6 +38,7 @@ use crate::metrics::Metrics;
 /// OTLP trace export configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct OtlpConfig {
     /// Export spans. Off by default: a service works without a collector.
     pub enabled: bool,

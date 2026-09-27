@@ -138,7 +138,7 @@ impl ServerStats {
             (
                 "ferrum_alloy_tls_reload_stalls_total",
                 "counter",
-                "TLS reloads stalled by files that kept changing between reads.",
+                "Streaks of TLS reloads stalled by files that kept changing between reads.",
                 &self.tls_reload_stalls,
             ),
             (

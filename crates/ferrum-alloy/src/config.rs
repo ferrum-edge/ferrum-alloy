@@ -18,7 +18,9 @@
 //! The configuration structs are `#[non_exhaustive]`, so adding a setting is
 //! not a breaking change. Outside this crate, start from `Default` (or
 //! [`TlsSettings::new`] and [`JwtSettings::new`], whose sections have
-//! required fields) and assign the fields to change.
+//! required fields) and assign the fields to change. The enums are
+//! `#[non_exhaustive]` too, so a `match` on them outside this crate needs a
+//! wildcard arm.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -207,6 +209,7 @@ impl Default for ServerConfig {
 /// Client certificate policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ClientAuth {
     /// No client certificates.
     #[default]
@@ -278,6 +281,7 @@ impl TlsSettings {
 /// Which certificates of a client chain are checked against the CRLs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrlDepth {
     /// The leaf and every intermediate. Trust anchors are never checked.
     #[default]
@@ -290,6 +294,7 @@ pub enum CrlDepth {
 /// determines.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrlUnknownStatus {
     /// Refuse the handshake.
     #[default]
@@ -301,6 +306,7 @@ pub enum CrlUnknownStatus {
 /// Policy for a CRL whose `nextUpdate` time has passed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CrlExpiration {
     /// Fail startup, and refuse handshakes once a loaded CRL expires.
     #[default]
@@ -510,6 +516,7 @@ impl Default for OtlpSettings {
 /// How the service relates to Ferrum Edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EdgeMode {
     /// No gateway assumptions; direct requests work normally.
     #[default]

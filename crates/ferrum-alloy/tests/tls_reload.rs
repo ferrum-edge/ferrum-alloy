@@ -318,6 +318,10 @@ async fn invalid_replacements_keep_the_previous_material_serving_and_are_counted
             !metrics.contains("ferrum_alloy_tls_reload_failures_total{listener=\"app\"} 0\n"),
             "{case}: {metrics}"
         );
+        assert!(
+            metrics.contains("ferrum_alloy_tls_reload_stalls_total{listener=\"app\"} 0\n"),
+            "{case}: {metrics}"
+        );
         for gauge in [
             "ferrum_alloy_tls_server_cert_not_after_timestamp_seconds{",
             "ferrum_alloy_tls_client_crl_next_update_timestamp_seconds{",
