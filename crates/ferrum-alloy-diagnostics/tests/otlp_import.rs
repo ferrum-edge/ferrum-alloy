@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use ferrum_alloy_diagnostics::model::{
-    Availability, CollectionMethod, Confidence, Finding, Interval, Producer, ProducerKind, Severity,
-    Trust, Verification,
+    Availability, CollectionMethod, Confidence, Finding, Interval, Producer, ProducerKind,
+    Severity, Trust, Verification,
 };
 use ferrum_alloy_diagnostics::otlp::{ImportError, ImportLimits, import, trace_ids};
 use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
