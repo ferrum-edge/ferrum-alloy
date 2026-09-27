@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use ferrum_alloy_telemetry::peer::{PeerInfo, TlsPeer, TrustedPeers, TrustedPeersConfig};
 use ferrum_alloy_telemetry::trace_context::{
-    TraceContextError, parse_traceparent, validate_tracestate,
+    SpanId, TraceContextError, TraceId, parse_traceparent, validate_tracestate,
 };
 use ferrum_alloy_telemetry::{
     AcceptPolicy, PeerTrust, RequestContext, ServerTimingPolicy, TelemetryConfig, TelemetryLayer,
@@ -616,4 +616,28 @@ fn traceparent_parser_never_panics_on_hostile_input() {
             let _ = validate_tracestate(&text);
         }
     }
+}
+
+#[test]
+fn a_constructed_context_is_an_untrusted_root() {
+    let context = RequestContext::new(TraceId([0x11; 16]), SpanId([0x22; 8]), true);
+    assert_eq!(context.request_id.as_str().len(), 36, "generated UUID");
+    assert_eq!(
+        context.request_id_source,
+        ferrum_alloy_telemetry::request_id::RequestIdSource::Generated
+    );
+    assert_eq!(context.trace_decision, TraceDecision::Root);
+    assert_eq!(context.peer_trust, PeerTrust::Untrusted);
+    assert!(!context.exported);
+    assert!(context.remote_parent.is_none());
+    assert!(context.tracestate.is_none());
+    let parent = context.child_traceparent(SpanId([0x33; 8]));
+    assert_eq!(
+        parent.to_header_value(),
+        "00-11111111111111111111111111111111-3333333333333333-01"
+    );
+
+    let unsampled = RequestContext::new(TraceId::random(), SpanId::random(), false);
+    let parent = unsampled.child_traceparent(SpanId::random());
+    assert!(parent.to_header_value().ends_with("-00"));
 }

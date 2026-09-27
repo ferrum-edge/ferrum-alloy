@@ -68,6 +68,7 @@ opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 # `json`: the JSON log layer's tests compare it with tracing-subscriber's formatter.
 tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt", "json"] }
 rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

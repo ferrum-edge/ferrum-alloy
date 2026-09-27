@@ -12,6 +12,8 @@ members = [
     "examples/edge-observability",
     "examples/bench",
 ]
+# cargo-fuzz targets build on nightly in their own workspace (docs/testing.md).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -83,6 +85,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 # Test-only
 tempfile = "3.27.0"
 rcgen = { version = "0.14.10", default-features = false }
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

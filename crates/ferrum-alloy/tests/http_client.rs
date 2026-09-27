@@ -12,9 +12,7 @@ use axum::response::Redirect;
 use axum::routing::get;
 use ferrum_alloy::config::HttpClientSettings;
 use ferrum_alloy::http_client::AlloyClient;
-use ferrum_alloy::telemetry::PeerTrust;
-use ferrum_alloy::telemetry::context::{RequestContext, TraceDecision};
-use ferrum_alloy::telemetry::request_id::{RequestId, RequestIdSource};
+use ferrum_alloy::telemetry::context::RequestContext;
 use ferrum_alloy::telemetry::trace_context::{SpanId, TraceId};
 
 async fn server(other: Option<SocketAddr>) -> SocketAddr {
@@ -51,19 +49,7 @@ async fn server(other: Option<SocketAddr>) -> SocketAddr {
 }
 
 fn context() -> RequestContext {
-    RequestContext {
-        request_id: RequestId::generate(),
-        request_id_source: RequestIdSource::Generated,
-        trace_id: TraceId([0x11; 16]),
-        span_id: SpanId([0x22; 8]),
-        sampled: true,
-        exported: false,
-        trace_decision: TraceDecision::Root,
-        remote_parent: None,
-        tracestate: None,
-        peer_trust: PeerTrust::Untrusted,
-        span: tracing::Span::none(),
-    }
+    RequestContext::new(TraceId([0x11; 16]), SpanId([0x22; 8]), true)
 }
 
 fn client(propagate: &[&str], redirects: usize) -> AlloyClient {

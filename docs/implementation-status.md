@@ -29,6 +29,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 | CORS, compression | Off by default; compression skips streams, `no-store`, and `set-cookie` responses | `optional_layers.rs` |
 | Diagnostics | Versioned report schema (JSON Schema in `contracts/diagnostics/`), bounded offline parser, rules r001–r008, OTLP/JSON import, deterministic rendering | `ferrum-alloy-diagnostics/tests/*` including `schema_parity.rs`. Rules r005 (streaming) and r008 (incomplete body) have no test or fixture yet. |
 | CLI | `new` (with `openapi`, `otel`, `edge`, `tls`, `postgres`, `jwt`, and `http-client`), `check`, `openapi export`, `edge export`, `diagnose`, `version` with stable exit codes | `ferrum-alloy-cli/tests/cli.rs` (15 tests); the generator test (ignored by default; the CI `generator` job runs it) builds plain, `openapi`, `postgres`, `jwt`, `http-client`, and combined projects and runs `cargo test`, `clippy -D warnings`, and `fmt --check` in each. Generated database tests are ignored unless `TEST_DATABASE_URL` is set; the generated CI workflow runs them against a service container, and so does the `generator` job, with its own PostgreSQL service container. |
+| Fuzz and property tests | Property tests (`proptest`) for offline diagnosis (never `confirmed`, deterministic rules and rendering), trace-context and request-id parity with Ferrum Edge v0.9.7, exactly-once body finalization with the implied outcome, and configuration errors that never repeat values. cargo-fuzz targets for `parse_traceparent`/`validate_tracestate`, `RequestId::parse`, `parse_offline`, `otlp::import`, and `config::load_from`, seeded from `contracts/fixtures`. See [testing.md](testing.md). | `*/tests/properties.rs`, `ferrum-alloy/tests/config_properties.rs` (CI `test` job); `fuzz/` (CI `fuzz-smoke` job, 60 s per target). Not run locally. Longer fuzzing runs are manual. |
 | Existing-Axum adoption | `ferrum-alloy-telemetry` alone as a Tower layer | `examples/existing-axum` test |
 
 ## Partial
@@ -46,7 +47,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 - A live diagnostics endpoint. `diagnose` is offline and file-based only.
 - Certificate revocation (CRL/OCSP) checks for client certificates.
 - TLS certificate hot reload.
-- Fuzzing of the trace-context, request-id, and diagnostic parsers. Bounds are covered by unit tests only.
+- Scheduled long-running fuzzing. CI runs a 60-second smoke run per target; longer runs are manual (see [testing.md](testing.md)).
 - Service-side HTTP/3, gRPC tooling, and WebSocket message tracing.
 - Tenant or namespace authorization (application responsibility by design).
 - Publishing to crates.io, and any release process.

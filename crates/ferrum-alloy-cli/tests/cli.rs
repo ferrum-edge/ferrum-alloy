@@ -674,6 +674,21 @@ fn generated_projects_build_and_pass_their_tests() {
                 .unwrap();
             assert_eq!(code(&check), 0, "{}", stderr(&check));
         }
+        // The JWT tests pin the algorithm they sign with, so switching
+        // alloy.toml to an issuer's algorithm does not break them.
+        if with.contains(&"jwt") {
+            let config = read(&target, "alloy.toml");
+            let config = config.replace("\"ES256\"", "\"RS256\"");
+            assert!(config.contains(r#"algorithms = ["RS256"]"#), "{config}");
+            std::fs::write(target.join("alloy.toml"), config).unwrap();
+            let status = Command::new(&cargo)
+                .args(["test", "--quiet", "--test", "auth"])
+                .current_dir(&target)
+                .env("CARGO_TARGET_DIR", dir.path().join("target"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}: tests broke on RS256");
+        }
     }
 }
 

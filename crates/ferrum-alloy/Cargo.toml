@@ -77,6 +77,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { workspace = true, features = ["std"] }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

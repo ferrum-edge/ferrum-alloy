@@ -817,13 +817,14 @@ fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError
 
 /// `true` for text that is safe to echo as a key name: a short bare TOML
 /// key. Anything else (quoted keys with URLs, long tokens) is redacted,
-/// including a bare key over 32 bytes that mixes letters and digits, which
-/// looks more like a token than a key name.
+/// including keys with at least 16 bytes mixing letters and digits, or any
+/// key at least 33 bytes long, which look more like tokens than key names.
 fn is_plain_key(key: &str) -> bool {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
-    let token_like = key.len() > 32
-        && key.bytes().any(|b| b.is_ascii_alphabetic())
-        && key.bytes().any(|b| b.is_ascii_digit());
+    let token_like = key.len() >= 33
+        || (key.len() >= 16
+            && key.bytes().any(|b| b.is_ascii_alphabetic())
+            && key.bytes().any(|b| b.is_ascii_digit()));
     !key.is_empty() && key.len() <= 64 && !token_like && key.bytes().all(plain)
 }
 
@@ -840,51 +841,90 @@ fn redact_segment(segment: &str) -> &str {
 /// (`invalid type: string "postgres://u:pw@db", expected ...`), and
 /// `toml::de::Error`'s `Display` appends the key path.
 fn schema_error(error: &toml::de::Error) -> ConfigError {
-    let first = error.message().lines().next().unwrap_or_default();
-    let mut message = redact_schema_message(first);
-    // With no source input, `Display` ends with "in `a.b.c`" when the
-    // failing key is known.
+    let message = error.message();
+    // With no source input, `Display` prints the message and then, when the
+    // failing key is known, "in `a.b.c`". The message is stripped whole
+    // rather than split into lines, because a supplied value or key may
+    // itself hold a newline.
     let rendered = error.to_string();
-    let path = rendered
-        .lines()
-        .last()
-        .and_then(|line| line.strip_prefix("in `"))
-        .and_then(|rest| rest.strip_suffix('`'));
-    if let Some(path) = path {
-        let segments: Vec<&str> = path.split('.').map(redact_segment).collect();
-        message.push_str(&format!(" (at `{}`)", segments.join(".")));
+    let path: Vec<&str> = rendered
+        .strip_prefix(message)
+        .and_then(|rest| rest.strip_prefix("\nin `"))
+        .and_then(|rest| rest.strip_suffix("`\n"))
+        .map(|path| path.split('.').collect())
+        .unwrap_or_default();
+    let mut redacted = redact_schema_message(message, &path);
+    if !path.is_empty() {
+        let segments: Vec<&str> = path.iter().copied().map(redact_segment).collect();
+        redacted.push_str(&format!(" (at `{}`)", segments.join(".")));
     }
-    ConfigError::Schema(message)
+    ConfigError::Schema(redacted)
 }
 
-/// The `", expected ..."` part of a serde message, or nothing. The value
-/// comes first and the schema's expectation last, so the last separator is
-/// the real one even when the value contains the same text.
+/// The `", expected ..."` part of an `invalid type` or `invalid value`
+/// message, or nothing. serde quotes the value with escapes and puts the
+/// schema's expectation last, so the last separator is the real one even
+/// when the value contains the same text.
 fn expectation(message: &str) -> &str {
-    match message.rfind(", expected ") {
-        Some(at) => message.get(at..).unwrap_or_default(),
-        None => "",
-    }
+    message
+        .rfind(", expected ")
+        .and_then(|at| message.get(at..))
+        .filter(|tail| !tail.chars().any(char::is_control))
+        .unwrap_or_default()
 }
 
-fn redact_schema_message(message: &str) -> String {
-    for kind in ["invalid type", "invalid value", "unknown variant"] {
+/// Stands in for a supplied variant or key when asking the schema what it
+/// expects. It holds no backtick and no `, expected `.
+const PROBE: &str = "?";
+
+/// The schema's own text after an unknown variant at `path` (`field` false),
+/// or after an unknown key in the table at `path` (`field` true), such as
+/// `, expected one of ...` or `, there are no fields`. It comes from
+/// deserializing a table that holds only [`PROBE`], so it never contains
+/// supplied text.
+fn schema_expectation(path: &[&str], field: bool) -> Option<String> {
+    let mut table = toml::Table::new();
+    let prefix = if field {
+        let mut at = path.to_vec();
+        at.push(PROBE);
+        insert(&mut table, &at, toml::Value::Integer(0));
+        format!("unknown field `{PROBE}`")
+    } else {
+        insert(&mut table, path, toml::Value::String(PROBE.to_owned()));
+        format!("unknown variant `{PROBE}`")
+    };
+    let probed: Result<AlloyConfig, _> = toml::Value::Table(table).try_into();
+    let error = probed.err()?;
+    let tail = error.message().strip_prefix(&prefix)?;
+    if tail.chars().any(char::is_control) {
+        return None;
+    }
+    Some(tail.to_owned())
+}
+
+fn redact_schema_message(message: &str, path: &[&str]) -> String {
+    for kind in ["invalid type", "invalid value"] {
         if message.starts_with(kind) {
             return format!("{kind} (value redacted){}", expectation(message));
         }
     }
+    // serde repeats an unknown variant or key verbatim, and it may hold a
+    // newline or `, expected `. Nothing after the prefix is kept; the valid
+    // variants or keys are asked of the schema instead.
+    if message.starts_with("unknown variant") {
+        let tail = schema_expectation(path, false).unwrap_or_default();
+        return format!("unknown variant (value redacted){tail}");
+    }
     if let Some(rest) = message.strip_prefix("unknown field `") {
-        let end = rest
-            .rfind("`, expected ")
-            .or_else(|| rest.rfind("`, there are no fields"));
-        let (field, tail) = match end.and_then(|end| rest.split_at_checked(end)) {
-            Some((field, tail)) => (field, tail.strip_prefix('`').unwrap_or(tail)),
-            None => ("", ""),
-        };
-        return if is_plain_key(field) {
-            format!("unknown field `{field}`{tail}")
-        } else {
-            format!("unknown field (key redacted){tail}")
+        let tail = schema_expectation(path, true);
+        // With the schema's text known exactly, the key is what precedes it.
+        let key = tail
+            .as_deref()
+            .and_then(|tail| rest.strip_suffix(tail)?.strip_suffix('`'));
+        let tail = tail.as_deref().unwrap_or_default();
+        return match key {
+            Some(key) if is_plain_key(key) => format!("unknown field `{key}`{tail}"),
+            _ => format!("unknown field (key redacted){tail}"),
         };
     }
     // Field names in these come from the schema, not from the input.

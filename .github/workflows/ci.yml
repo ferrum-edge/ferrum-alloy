@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # Property tests draw the same cases on every run, so a failure reproduces.
+  # Explore other cases locally with a different or unset seed (docs/testing.md).
+  PROPTEST_RNG_SEED: "20260927"
 
 jobs:
   fmt:
@@ -121,7 +124,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo +1.94.0 check --workspace --all-features --locked
+      - run: cargo +1.94.0 check --workspace --all-targets --all-features --locked
 
   generator:
     name: Generated projects
@@ -193,6 +196,65 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+      - name: Fuzz crate dependencies
+        # The fuzz crate is its own workspace with its own lockfile. Alloy's
+        # optional batteries are off there, so an advisory ignored for them
+        # may not be detected.
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check -A advisory-not-detected
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-15
+      FUZZ_SECONDS: "60"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Check the committed fuzz lockfile
+        # cargo-fuzz has no --locked flag. Resolve first and fail, showing the
+        # difference, if fuzz/Cargo.lock would change.
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- fuzz/Cargo.lock
+          cargo "+$FUZZ_TOOLCHAIN" fetch --manifest-path fuzz/Cargo.toml --locked
+      - name: Build fuzz targets
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build
+      - name: Run each target for ${{ env.FUZZ_SECONDS }} seconds
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          run() {
+            target="$1"
+            shift
+            mkdir -p "$root/fuzz/corpus/$target"
+            dict=()
+            if [ -f "$root/fuzz/dicts/$target.dict" ]; then
+              dict=("-dict=$root/fuzz/dicts/$target.dict")
+            fi
+            cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target" "$root/fuzz/corpus/$target" "$@" -- \
+              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 "${dict[@]}"
+          }
+          run traceparent "$root/fuzz/seeds/traceparent"
+          run request_id "$root/fuzz/seeds/request_id"
+          run diagnostic_report "$root/contracts/fixtures/reports"
+          run otlp_import "$root/contracts/fixtures/otlp"
+          run config_file "$root/contracts/fixtures/manifests" "$root/fuzz/seeds/config_file"
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
 
   edge-e2e:
     name: Ferrum Edge end-to-end
