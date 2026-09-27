@@ -259,17 +259,78 @@ fn schema_errors_name_keys_but_never_values() {
         assert!(rendered.contains(kind), "{rendered}");
         assert!(rendered.contains(&format!("`{key}`")), "{rendered}");
     }
-    // A long bare key mixing letters and digits looks like a token.
-    let token = "synth4token0123456789abcdefghijklmnop";
-    let path = write(&dir, "token.toml", &format!("[database]\n{token} = 1\n"));
-    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
-    let rendered = error.to_string();
-    assert!(!rendered.contains(token), "{rendered}");
-    assert!(rendered.contains("(key redacted)"), "{rendered}");
+    for (name, token) in [
+        ("hex", "0123456789abcdef0123456789abcdef"),
+        ("alnum", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"),
+    ] {
+        let path = write(&dir, "token.toml", &format!("[database]\n{token} = 1\n"));
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains(token), "{name}: {rendered}");
+        assert!(rendered.contains("(key redacted)"), "{name}: {rendered}");
+    }
     // The expected type or variants still come through.
     let path = write(&dir, "variant.toml", "[logging]\nformat = \"xml\"\n");
     let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
     assert!(error.to_string().contains("expected one of"), "{error}");
+}
+
+#[test]
+fn schema_errors_ignore_text_inside_unknown_variants_and_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let variant = "x, expected hunter2\ny";
+    let files = [
+        (
+            "[logging]\nformat = \"x, expected hunter2\\ny\"\n",
+            "unknown variant (value redacted), expected one of `json`",
+            "(at `logging.format`)",
+        ),
+        (
+            "[database]\n\"x`, expected hunter2\\n\" = 1\n",
+            "unknown field (key redacted), expected one of `url`",
+            "(at `database`)",
+        ),
+        (
+            "\"x`, expected hunter2\\n\" = 1\n",
+            "unknown field (key redacted), expected one of `service`",
+            "",
+        ),
+        (
+            "[database]\n\"x`, there are no fields\\nin `hunter2\" = 1\n",
+            "unknown field (key redacted), expected one of `url`",
+            "(at `database`)",
+        ),
+    ];
+    let mut errors = Vec::new();
+    for (text, message, at) in files {
+        let path = write(&dir, "echo.toml", text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        errors.push((error, message, at));
+    }
+    let vars = env(&[("FERRUM_ALLOY_LOG_FORMAT", variant)]);
+    let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+    errors.push((
+        error,
+        "unknown variant (value redacted), expected one of `json`",
+        "(at `logging.format`)",
+    ));
+    for (error, message, at) in errors {
+        let rendered = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(matches!(error, ConfigError::Schema(_)), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(rendered.contains(message), "{rendered}");
+        assert!(rendered.contains(at), "{rendered}");
+    }
+    // A short bare key is still named, with the schema's own key list.
+    let path = write(&dir, "typo.toml", "[database]\nurll = 1\n");
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("unknown field `urll`, expected one of `url`"),
+        "{rendered}"
+    );
 }
 
 #[test]

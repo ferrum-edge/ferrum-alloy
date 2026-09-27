@@ -77,6 +77,7 @@ See [docs/getting-started.md](docs/getting-started.md).
 - [Compatibility](docs/compatibility.md): the exact tested matrix
 - [Architecture decisions](docs/adr/README.md)
 - [Implementation status](docs/implementation-status.md)
+- [Testing](docs/testing.md): property tests and fuzz targets for untrusted input
 - [Benchmarks](docs/benchmarks.md): local, same-host overhead measurements and their limits
 
 ## Development
