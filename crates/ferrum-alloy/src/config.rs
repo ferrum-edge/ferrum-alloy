@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use ferrum_alloy_telemetry::init::LoggingConfig;
 use ferrum_alloy_telemetry::{TelemetryConfig, TrustedPeersConfig};
+use ipnet::IpNet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum configuration file size.
@@ -252,6 +253,8 @@ pub struct ManagementConfig {
     pub bind: SocketAddr,
     /// Bearer token for detailed health, metrics, and OpenAPI.
     pub token: Option<Secret>,
+    /// Request rate limits.
+    pub rate_limit: ManagementRateLimit,
 }
 
 impl Default for ManagementConfig {
@@ -260,6 +263,68 @@ impl Default for ManagementConfig {
             enabled: true,
             bind: SocketAddr::from(([127, 0, 0, 1], 9090)),
             token: None,
+            rate_limit: ManagementRateLimit::default(),
+        }
+    }
+}
+
+/// Upper bound of `management.rate_limit.max_clients`.
+pub const MAX_RATE_LIMIT_CLIENTS: usize = 65_536;
+
+/// Bounds of `management.rate_limit.ipv6_prefix_len`.
+pub const RATE_LIMIT_IPV6_PREFIX_LENS: std::ops::RangeInclusive<u8> = 48..=128;
+
+/// Request rate limits of the management listener.
+///
+/// Probes (`/livez` and `/readyz`) and every other path have separate
+/// budgets and client tables, so traffic to one never throttles the other.
+/// Endpoint requests are charged to a token bucket of their client and one
+/// of the whole listener; probes only to one of their client. A client is
+/// the transport peer address (an IPv6 address by its `ipv6_prefix_len`
+/// prefix), never a request header. Peers in `exempt_networks` are not
+/// limited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ManagementRateLimit {
+    /// Enforce the limits.
+    pub enabled: bool,
+    /// Sustained requests per second from one client, other than probes.
+    pub requests_per_second: u32,
+    /// Requests one client may send at once, other than probes.
+    pub burst: u32,
+    /// Sustained requests per second from all clients together, other than
+    /// probes.
+    pub global_requests_per_second: u32,
+    /// Requests all clients together may send at once, other than probes.
+    pub global_burst: u32,
+    /// Sustained probe requests per second from one client.
+    pub probe_requests_per_second: u32,
+    /// Probe requests one client may send at once.
+    pub probe_burst: u32,
+    /// Clients tracked individually, per budget. When a table is full of
+    /// clients still spending their budget, endpoint requests from further
+    /// clients share one per-client budget and probes from further clients
+    /// are served untracked.
+    pub max_clients: usize,
+    /// Leading bits of an IPv6 peer address that identify one client.
+    pub ipv6_prefix_len: u8,
+    /// Peer networks that bypass the limits entirely. Empty by default.
+    pub exempt_networks: Vec<IpNet>,
+}
+
+impl Default for ManagementRateLimit {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            requests_per_second: 10,
+            burst: 20,
+            global_requests_per_second: 100,
+            global_burst: 200,
+            probe_requests_per_second: 20,
+            probe_burst: 40,
+            max_clients: 1_024,
+            ipv6_prefix_len: 64,
+            exempt_networks: Vec::new(),
         }
     }
 }
@@ -618,6 +683,16 @@ env_vars! {
     "FERRUM_ALLOY_MANAGEMENT_ENABLED" => ["management", "enabled"]: Bool,
     "FERRUM_ALLOY_MANAGEMENT_BIND" => ["management", "bind"]: Str,
     "FERRUM_ALLOY_MANAGEMENT_TOKEN" => ["management", "token"]: Secret,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED" => ["management", "rate_limit", "enabled"]: Bool,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_REQUESTS_PER_SECOND" => ["management", "rate_limit", "requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST" => ["management", "rate_limit", "burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_REQUESTS_PER_SECOND" => ["management", "rate_limit", "global_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST" => ["management", "rate_limit", "global_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_REQUESTS_PER_SECOND" => ["management", "rate_limit", "probe_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST" => ["management", "rate_limit", "probe_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS" => ["management", "rate_limit", "max_clients"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN" => ["management", "rate_limit", "ipv6_prefix_len"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => ["management", "rate_limit", "exempt_networks"]: List,
     "FERRUM_ALLOY_LOG_FORMAT" => ["logging", "format"]: Str,
     "FERRUM_ALLOY_LOG_FILTER" => ["logging", "filter"]: Str,
     "FERRUM_ALLOY_OTLP_ENABLED" => ["otlp", "enabled"]: Bool,
@@ -1163,6 +1238,63 @@ impl AlloyConfig {
             }
             if management.bind == server.bind {
                 error("management.bind must differ from server.bind".into());
+            }
+            let rate = &management.rate_limit;
+            if rate.enabled {
+                for (name, value) in [
+                    (
+                        "management.rate_limit.requests_per_second",
+                        rate.requests_per_second,
+                    ),
+                    ("management.rate_limit.burst", rate.burst),
+                    (
+                        "management.rate_limit.global_requests_per_second",
+                        rate.global_requests_per_second,
+                    ),
+                    ("management.rate_limit.global_burst", rate.global_burst),
+                    (
+                        "management.rate_limit.probe_requests_per_second",
+                        rate.probe_requests_per_second,
+                    ),
+                    ("management.rate_limit.probe_burst", rate.probe_burst),
+                ] {
+                    if value == 0 {
+                        error(format!("{name} must be greater than zero"));
+                    }
+                }
+                if rate.max_clients == 0 || rate.max_clients > MAX_RATE_LIMIT_CLIENTS {
+                    error(format!(
+                        "management.rate_limit.max_clients must be within 1..={MAX_RATE_LIMIT_CLIENTS}"
+                    ));
+                }
+                // Clients admitted at once must fit, or a burst of newcomers
+                // would push returning clients into the shared budget.
+                let admitted_at_once = usize::try_from(rate.global_burst).unwrap_or(usize::MAX);
+                if rate.max_clients < admitted_at_once {
+                    error("management.rate_limit.max_clients must be at least management.rate_limit.global_burst".into());
+                }
+                if !RATE_LIMIT_IPV6_PREFIX_LENS.contains(&rate.ipv6_prefix_len) {
+                    error(format!(
+                        "management.rate_limit.ipv6_prefix_len must be within {}..={}",
+                        RATE_LIMIT_IPV6_PREFIX_LENS.start(),
+                        RATE_LIMIT_IPV6_PREFIX_LENS.end()
+                    ));
+                }
+                if rate.exempt_networks.iter().any(|n| n.prefix_len() == 0) {
+                    error("management.rate_limit.exempt_networks must not contain a network of every address; set management.rate_limit.enabled = false instead".into());
+                }
+                if rate.exempt_networks.iter().any(|network| {
+                    matches!(
+                        network,
+                        IpNet::V6(v6)
+                            if v6.prefix_len() >= 96 && v6.addr().to_ipv4_mapped().is_some()
+                    )
+                }) {
+                    error(
+                        "management.rate_limit.exempt_networks must use IPv4 CIDRs instead of IPv4-mapped IPv6 CIDRs"
+                            .into(),
+                    );
+                }
             }
         }
 

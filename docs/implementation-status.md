@@ -9,9 +9,9 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 | Area | What exists | Evidence |
 |---|---|---|
 | Configuration | Typed, strict TOML and `FERRUM_ALLOY_*` environment variables, builder overrides, documented precedence, `Secret` redaction, syntax and schema errors that never quote configuration values, feature-aware validation | `crates/ferrum-alloy/tests/config.rs`, `ferrum-alloy check` CLI tests |
-| Problem Details | RFC 9457 bodies for framework errors (400, 404, 405, 413, 415, 422, 503 overload/timeout/draining, 403 gateway-required, 401/403/503 auth), Problem-returning `Json`, `Path`, `Query`, `ValidJson` extractors. Application bodies are not rewritten. | `app_core.rs` |
+| Problem Details | RFC 9457 bodies for framework errors (400, 404, 405, 413, 415, 422, 429 rate-limited, 503 overload/timeout/draining, 403 gateway-required, 401/403/503 auth), Problem-returning `Json`, `Path`, `Query`, `ValidJson` extractors. Application bodies are not rewritten. | `app_core.rs` |
 | Health | Liveness, cached single-flight readiness with per-check timeouts, draining state, detailed health behind the management token | `app_core.rs` |
-| Limits | Body, header, connection, and admission limits; first-request deadline on every connection and protocol, on both listeners; time-to-headers deadline that never cuts streams | `app_core.rs`, `server_hardening.rs` |
+| Limits | Body, header, connection, and admission limits; first-request deadline on every connection and protocol, on both listeners; time-to-headers deadline that never cuts streams; management listener rate limits per client and per listener, with a per-client probe budget, exempt networks, and bounded client tables | `app_core.rs`, `server_hardening.rs`, `management_rate_limit.rs` |
 | Lifecycle | SIGTERM/Ctrl-C draining with a budget and forced close; pending TLS handshakes are abandoned; serving returns only after every connection socket is closed; readiness flips to draining first | `app_core.rs`, `server_hardening.rs`; against the built binary, `examples/minimal/tests/sigterm.rs` (real SIGTERM, Unix only) and `examples/minimal/tests/ctrl_c.rs` (real Ctrl-C: SIGINT on Unix, a console `CTRL_C_EVENT` on Windows) |
 | Request telemetry | Request ids, W3C trace context accepted only from trusted peers, route-template labels, accounting that ends when the response body ends, exactly once (completed, aborted, errored, dropped) | `ferrum-alloy-telemetry/tests/lifecycle.rs`, `context_and_trust.rs`, `axum_adoption.rs`; `ferrum-alloy/tests/connection_reset.rs` resets a raw client socket mid-request-body and mid-response-body against a running app and asserts the `cancelled` outcome, exactly one finalization, and no request left in flight; the `features` CI job lints every target and runs the tests with no features and with each telemetry feature alone |
 | Transport trust | `PeerInfo`, verified-leaf `TlsPeer` (SPIFFE URI SAN, DNS SAN), CIDR network trust with `0.0.0.0/0` refused, no header-derived trust | `x509_identity.rs`, `gateway_mtls.rs` |
@@ -46,7 +46,6 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 - A live diagnostics endpoint. `diagnose` is offline and file-based only.
 - Certificate revocation (CRL/OCSP) checks for client certificates.
 - TLS certificate hot reload.
-- Rate limiting on the management listener (keep it on loopback or behind network policy).
 - Scheduled long-running fuzzing. CI runs a 60-second smoke run per target; longer runs are manual (see [testing.md](testing.md)).
 - Service-side HTTP/3, gRPC tooling, and WebSocket message tracing.
 - Tenant or namespace authorization (application responsibility by design).
