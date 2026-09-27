@@ -284,10 +284,10 @@ impl Reloader {
                 self.tls.log_crl_next_update(now, false);
                 self.crl_logged_at = Instant::now();
             }
-            _ if self.crl_logged_at.elapsed() >= CRL_WARNING_INTERVAL => {
-                if self.tls.log_crl_next_update(now, true) {
-                    self.crl_logged_at = Instant::now();
-                }
+            _ if self.crl_logged_at.elapsed() >= CRL_WARNING_INTERVAL
+                && self.tls.log_crl_next_update(now, true) =>
+            {
+                self.crl_logged_at = Instant::now();
             }
             _ => {}
         }
