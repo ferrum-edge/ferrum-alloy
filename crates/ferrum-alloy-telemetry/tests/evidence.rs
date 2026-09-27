@@ -94,7 +94,10 @@ async fn every_finalized_request_is_handed_over_once_with_its_tenant() {
     assert!(tagged.body_duration.is_some());
 
     assert_eq!(records[1].tenant, None, "untagged requests carry no tenant");
-    assert_eq!(records[2].route, None, "unmatched requests have no template");
+    assert_eq!(
+        records[2].route, None,
+        "unmatched requests have no template"
+    );
     assert_eq!(records[2].status, Some(404));
 
     // The evidence holds labels and timings only: no query, raw path, or

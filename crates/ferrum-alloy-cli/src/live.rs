@@ -41,9 +41,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliError> {
     let raw = match token_file {
         Some(path) => {
-            let invalid = |e: std::io::Error| {
-                CliError::Invalid(format!("{}: {e}", path.display()))
-            };
+            let invalid = |e: std::io::Error| CliError::Invalid(format!("{}: {e}", path.display()));
             let size = std::fs::metadata(path).map_err(invalid)?.len();
             if size > MAX_TOKEN_FILE_BYTES {
                 return Err(CliError::Invalid(format!(
@@ -94,7 +92,9 @@ pub(crate) fn report_url(base: &str, request_id: &str, has_token: bool) -> Resul
         )));
     }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(CliError::Invalid("--url must not have a query or fragment".into()));
+        return Err(CliError::Invalid(
+            "--url must not have a query or fragment".into(),
+        ));
     }
     if has_token && url.scheme() == "http" && !is_loopback(&url) {
         return Err(CliError::Invalid(
@@ -182,7 +182,9 @@ pub(crate) fn fetch(
         .read_to_end(&mut body)
         .map_err(|e| CliError::Io(format!("reading the report failed: {e}")))?;
     if body.len() > max_bytes {
-        return Err(CliError::Invalid(format!("the report is larger than {max_bytes} bytes")));
+        return Err(CliError::Invalid(format!(
+            "the report is larger than {max_bytes} bytes"
+        )));
     }
     Ok(body)
 }

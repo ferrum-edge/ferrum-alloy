@@ -713,10 +713,10 @@ mod tests {
     use super::*;
 
     fn settings(max_records: usize, max_bytes: usize) -> DiagnosticsSettings {
-        let mut settings = DiagnosticsSettings::default();
-        settings.max_records = max_records;
-        settings.max_bytes = max_bytes;
-        settings
+        DiagnosticsSettings {
+            max_records,
+            max_bytes,
+        }
     }
 
     fn id(text: &str) -> RequestId {

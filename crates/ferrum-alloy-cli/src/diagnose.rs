@@ -124,7 +124,9 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
             return Err(CliError::Invalid("--url requires --request-id".into()));
         };
         if !(1..=120_000).contains(&args.timeout_ms) {
-            return Err(CliError::Invalid("--timeout-ms must be within 1..=120000".into()));
+            return Err(CliError::Invalid(
+                "--timeout-ms must be within 1..=120000".into(),
+            ));
         }
         let token = crate::live::token(args.token_file.as_deref())?;
         let url = crate::live::report_url(base, request_id, token.is_some())?;
