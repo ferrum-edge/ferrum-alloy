@@ -50,6 +50,7 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_REQUEST_BODY_LIMIT_BYTES` | `server.request_body_limit_bytes` | integer |
 | `FERRUM_ALLOY_REQUEST_TIMEOUT_MS` | `server.request_timeout_ms` | integer |
 | `FERRUM_ALLOY_HEADER_READ_TIMEOUT_MS` | `server.header_read_timeout_ms` | integer |
+| `FERRUM_ALLOY_IDLE_TIMEOUT_MS` | `server.idle_timeout_ms` | integer |
 | `FERRUM_ALLOY_MAX_CONNECTIONS` | `server.max_connections` | integer |
 | `FERRUM_ALLOY_MAX_IN_FLIGHT_REQUESTS` | `server.max_in_flight_requests` | integer |
 | `FERRUM_ALLOY_TLS_CERT_PATH` | `server.tls.cert_path` | path |
@@ -135,6 +136,7 @@ Each section below shows a key, its default, and its meaning.
 | `max_connections` | `10000` | Further connections are closed immediately. Upgraded (WebSocket) sessions are not counted. |
 | `http2_max_concurrent_streams` | `256` | Per-connection HTTP/2 stream limit. |
 | `header_read_timeout_ms` | `10000` | Time to receive a request head (slow-header protection). It also bounds the time from a ready connection (accepted, and past the TLS handshake if any) to its first complete request head, whatever the protocol: a connection that sends nothing, stops inside the HTTP/2 preface, or opens HTTP/2 without sending a request is closed and frees its `max_connections` slot. An established HTTP/2 connection is sent `GOAWAY` first and dropped after a grace period of at most one second. These closes are counted in `ferrum_alloy_first_request_timeouts_total` (application listener). On HTTP/1.1 keep-alive connections it also bounds the wait for the next request. The management listener uses the same value. |
+| `idle_timeout_ms` | `60000` | After a connection's first request: how long it may stay open with no request in flight. A request counts as in flight from its request head until its response body has been sent or dropped, so slow handlers and long response streams (SSE) are never idle. HTTP/2 keep-alive pings do not count as activity, so a peer that sends one request and then only answers pings cannot keep its `max_connections` slot. An HTTP/2 connection is sent `GOAWAY` and dropped after the same grace period as above; a request that raced the `GOAWAY` gets up to `shutdown.drain_timeout_ms` to finish. These closes are counted in `ferrum_alloy_idle_timeouts_total` (application listener). HTTP/1.1 keep-alive connections are normally closed first by `header_read_timeout_ms`. A response stalled on flow control (the peer withholds HTTP/2 `WINDOW_UPDATE` or keeps a zero TCP receive window) still counts as in flight, so this timeout does not close its connection ([#46](https://github.com/ferrum-edge/ferrum-alloy/issues/46)). Behind a load balancer or proxy that pools connections, set it above that proxy's idle timeout, so the proxy closes idle connections first and never sends a request on one Alloy is closing. The management listener uses the same value. Must be greater than zero. |
 | `request_timeout_ms` | `30000` | Deadline to produce response **headers**; `503 request-timeout` when exceeded. Never applied to response bodies (SSE) or upgraded sessions. `0` disables it. |
 | `max_in_flight_requests` | `0` (unlimited) | Concurrent handler admission limit; excess gets `503 overloaded`. The permit is released when headers are produced. |
 | `admission_wait_timeout_ms` | `0` | How long to wait for a permit. `0` rejects immediately. The wait is recorded as `alloy.admission.wait_ms`. |
@@ -154,7 +156,7 @@ Each section below shows a key, its default, and its meaning.
 | Key | Default | Meaning |
 |---|---|---|
 | `readiness_grace_ms` | `0` | After SIGTERM, keep accepting while readiness reports `draining`, so load balancers stop routing first. A second signal skips the grace. |
-| `drain_timeout_ms` | `30000` | After accepting stops: time for in-flight requests and response streams. Remaining connections are then force-closed and counted in `ferrum_alloy_force_closed_connections_total`. Serving returns only after every connection socket is closed and aborted connection tasks have finished unwinding. HTTP/2 stream handler tasks are not yet tracked by the drain ([#35](https://github.com/ferrum-edge/ferrum-alloy/issues/35)). |
+| `drain_timeout_ms` | `30000` | After accepting stops: time for in-flight requests and response streams. Remaining connections are then force-closed and counted in `ferrum_alloy_force_closed_connections_total`. HTTP/2 stream tasks (a request's handler and its response body) still running are cancelled, which drops the handler, and counted in `ferrum_alloy_force_closed_streams_total`. Serving returns only after every connection socket is closed and every aborted connection task and cancelled stream task has finished unwinding, so no HTTP/2 handler is still running. |
 | `telemetry_flush_timeout_ms` | `5000` | Bound on the final span flush. |
 
 ### `[management]`
