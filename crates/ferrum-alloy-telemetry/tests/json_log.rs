@@ -222,6 +222,14 @@ fn escapes_control_characters_quotes_and_backslashes() {
 }
 
 #[test]
+fn escapes_line_separators_next_to_multibyte_characters() {
+    let line = line_with("é\u{2028}€\u{85}");
+    assert!(line.contains(r#""v":"é\u2028€\u0085""#), "{line}");
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["span"]["v"], "é\u{2028}€\u{85}");
+}
+
+#[test]
 fn escapes_debug_output_and_field_names() {
     let (subscriber, alloy) = alloy_only();
     tracing::subscriber::with_default(subscriber, || {

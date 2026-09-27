@@ -454,38 +454,49 @@ fn write_string(buf: &mut Vec<u8>, value: &str) {
 
 /// Appends `value` escaped as serde_json does, with line separators escaped:
 /// `\"` and `\\`, the short forms `\b`, `\t`, `\n`, `\f`, and `\r`, and
-/// `\u00xx` (lowercase hex) for the other characters below U+0020. U+0085,
-/// U+2028, and U+2029 are also escaped to protect line-oriented consumers.
-/// Everything else, including DEL and `/`, is copied unchanged. A `str` is
-/// always valid UTF-8, and every byte this matches is ASCII, so the output is
-/// valid UTF-8 too.
+/// `\u00xx` (lowercase hex) for the other bytes below 0x20. The UTF-8 byte
+/// sequences for U+0085, U+2028, and U+2029 are also escaped to protect
+/// line-oriented consumers. Everything else, including DEL and `/`, is copied
+/// unchanged. A `str` is always valid UTF-8, and every byte this matches is
+/// ASCII, so the output is valid UTF-8 too.
 fn write_escaped(buf: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     let mut start = 0;
+    let mut index = 0;
     let mut unicode = *b"\\u0000";
-    for (index, character) in value.char_indices() {
-        let escape: &[u8] = match character {
-            '"' => b"\\\"",
-            '\\' => b"\\\\",
-            '\u{8}' => b"\\b",
-            '\t' => b"\\t",
-            '\n' => b"\\n",
-            '\u{c}' => b"\\f",
-            '\r' => b"\\r",
-            '\u{85}' => b"\\u0085",
-            '\u{2028}' => b"\\u2028",
-            '\u{2029}' => b"\\u2029",
-            '\u{0}'..='\u{1f}' => {
-                let byte = character as u8;
+    while index < bytes.len() {
+        let (escape, width): (&[u8], usize) = match bytes[index] {
+            b'"' => (b"\\\"", 1),
+            b'\\' => (b"\\\\", 1),
+            0x08 => (b"\\b", 1),
+            b'\t' => (b"\\t", 1),
+            b'\n' => (b"\\n", 1),
+            0x0c => (b"\\f", 1),
+            b'\r' => (b"\\r", 1),
+            0xc2 if bytes.get(index + 1) == Some(&0x85) => (b"\\u0085", 2),
+            0xe2 if bytes.get(index + 1) == Some(&0x80) => match bytes.get(index + 2) {
+                Some(&0xa8) => (b"\\u2028", 3),
+                Some(&0xa9) => (b"\\u2029", 3),
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            },
+            0x00..=0x1f => {
+                let byte = bytes[index];
                 unicode[4] = b'0' + (byte >> 4);
                 unicode[5] = hex_digit(byte & 0x0f);
-                &unicode
+                (&unicode, 1)
             }
-            _ => continue,
+            _ => {
+                index += 1;
+                continue;
+            }
         };
         buf.extend_from_slice(bytes.get(start..index).unwrap_or_default());
         buf.extend_from_slice(escape);
-        start = index + character.len_utf8();
+        index += width;
+        start = index;
     }
     buf.extend_from_slice(bytes.get(start..).unwrap_or_default());
 }
