@@ -1,6 +1,6 @@
 # Ferrum Edge contract inventory
 
-This document lists every Ferrum Edge header, attribute, endpoint, error token, and timing field Ferrum Alloy relies on, emits, or deliberately does not rely on. Each entry gives its source, producer, consumer, trust rules, lifecycle boundary, protocol coverage, tests, and status. Every item was checked against Edge source. Nothing here is a contract just because the Alloy implementation prompt used it as an example.
+This document lists every Ferrum Edge header, attribute, endpoint, error token, and timing field Ferrum Alloy relies on, emits, or deliberately does not rely on. Each entry gives its source, producer, consumer, trust rules, lifecycle boundary, protocol coverage, tests, and status. Every item was checked against Edge source; nothing is listed as a contract on the strength of an example or design note alone.
 
 **Status values**
 
@@ -16,14 +16,12 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 |---|---|---|
 | ferrum-edge/ferrum-edge | `v0.9.7` = `8fed1346ce2e267eb69c03683cb89ea44d785e0b` (2026-09-25) | **Contract baseline.** The published release and the image CI pins (`ferrumedge/ferrum-edge@sha256:4c9530e0…874a`). |
 | ferrum-edge/ferrum-edge | `05997cee91bb4e1fa3dd1e64506b1512c7b16b8a` (main, 2026-09-24) | Line references below. `src/plugins/otel_tracing.rs`, `src/plugins/correlation_id.rs`, `src/proxy/headers.rs`, and `src/config/types.rs` are byte-identical to v0.9.7. Line numbers in `src/proxy/mod.rs` and `src/plugins/mod.rs` may differ slightly at v0.9.7. |
-| ferrum-edge/ferrum-edge | `00f492433e49d81f311dd73f9f2fc22fbd0dab8b` (main, 2026-09-26) | Newer main at hand-off. Not re-audited. |
+| ferrum-edge/ferrum-edge | `00f492433e49d81f311dd73f9f2fc22fbd0dab8b` (main, 2026-09-26) | Newer main. Not re-audited. |
 | ferrum-edge/ferrum-anvil | `075890f9418718113d5d83da4074c6b00b92bde9` (origin/main) | `DiagnosticFinding` schema, Edge v0.9.7 outcome catalog, G01 proposal. |
 | ferrum-edge/ferrum-foundry | `e2f60b1eb0e881b3302ee7416df2d085f757dec4` | Pinned-Edge approach (`docs/compatibility.json`). No diagnostic UI. |
 | ferrum-edge/ferrum-nexus | `b803a95cf4afd012d3cbb93324f5beac937b20c0` | OpenAPI 3.x publication through Edge `/api-specs`. |
 | ferrum-edge/ferrum-edge-git-forge-ops | `fa56bd790e848544fdc9fea1a1ac3024d514a3b6` | `kind`/`spec` resource format. |
 | ferrum-edge/ferrumedge | `0b796393b63e12a9fd643430446620dc23f140a8` | Website. Does not mention Alloy. |
-
-The implementation prompt cited an earlier planning snapshot, `78c71e61cad0f9ee41d1d2ea58c3137a739d563d`. It was not used as a contract source.
 
 ## 1. Request metadata Edge sends to the service
 
@@ -100,7 +98,7 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| Edge active health check `GET {http_path}` (default `/health`, healthy `[200, 302]`) | EXISTING | `src/config/types.rs:1463-1526`, `src/health_check.rs:85-92`, `:3242-3277`. Alloy's export sets `http_path` to the manifest's readiness path and `healthy_status_codes: [200]`. |
+| Edge active health check `GET {http_path}` (default `/health`, healthy `[200, 302]`) | EXISTING | `src/config/types.rs:1463-1526`, `src/health_check.rs:85-92`, `:3242-3277`. Alloy's export sets `http_path` to the manifest's `health.path` (typically `/readyz`) and `healthy_status_codes: [200]`. |
 | Edge admin `POST/PUT/GET/DELETE /api-specs` | EXISTING | `src/admin/mod.rs:3673-3716`, `docs/api_specs.md`. Not available in file mode. **Alloy never calls it.** `ferrum-alloy openapi export` produces the artifact that operators or Nexus publish. |
 | G01 authenticated diagnostic lookup: `X-Ferrum-Diagnostic-Ref`, `GET /diagnostics/v1/refs/{ref}`, `diagnostics:read` | **PROPOSED** (Anvil `docs/g01-gateway-diagnostic-contract.md`; ferrum-edge#5767) | Not implemented in Edge (no source hits). Alloy would treat it as `gateway_detail` evidence once it exists. |
 | Alloy `/livez`, `/readyz` (application and management listeners) | EXISTING (Alloy) | Status only, `no-store` |

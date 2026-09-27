@@ -28,7 +28,7 @@ ferrum-alloy-cli           umbrella (no features) + edge + diagnostics
 ```
 
 - Telemetry never depends on the umbrella. The Edge adapter never depends on the umbrella.
-- `ferrum-alloy-diagnostics` is the one crate beyond the four the prompt proposed. It exists because offline diagnosis needs no async runtime, and because the schema should stay light enough for other products to reuse.
+- `ferrum-alloy-diagnostics` is the one crate beyond the four originally planned. It exists because offline diagnosis needs no async runtime, and because the schema should stay light enough for other products to reuse.
 - Every integration is an additive feature: `otel`, `edge`, `tls`, `postgres`, `openapi`, `jwt`, `http-client`, `compression`, `cors`. The default is none. CI checks each feature alone, `--no-default-features`, and `full`, and fails if the minimal build pulls in sqlx, jsonwebtoken, utoipa, reqwest, opentelemetry, rustls, or the Edge adapter.
 - Configuration types are always compiled, so enabling a section without its feature is reported rather than ignored.
 - All crates are `publish = false` and licensed PolyForm Noncommercial 1.0.0 with dual commercial licensing, matching Ferrum Edge.

@@ -1,6 +1,6 @@
 # Implementation status
 
-This page records what exists and what evidence backs it. "Tested" means an automated test in this repository exercises the behavior. Local results are from macOS arm64 on 2026-09-26. Hosted CI results belong to the PR checks for the final commit and are not restated here.
+This page records what exists and what evidence backs it. "Tested" means an automated test in this repository exercises the behavior. Local results are from macOS arm64 on 2026-09-26. Hosted CI results are in the CI checks and are not restated here.
 
 Everything is pre-release. No crate is published (`publish = false` everywhere).
 
@@ -19,14 +19,14 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 | OTLP export (`otel`) | Explicit pipeline, bounded span processor with counted drops, no global provider installed by constructors, conflict detection with an existing global subscriber | `otel_export.rs`, `telemetry_conflict.rs` |
 | TLS (`tls`) | rustls with the `ring` provider passed explicitly, optional or required client auth against a configured CA | `gateway_mtls.rs` |
 | Ferrum Edge (`edge`) | `standalone`, `gateway_preferred`, `gateway_required` modes; `GatewayContext`; consumer identity accepted only from a verified identity; manifest; file-mode and GitForgeOps YAML export | `ferrum-alloy-edge/tests/{export,policy,pairing}.rs`, e2e |
-| Real gateway e2e | Ferrum Edge v0.9.7 (pinned digest) → Alloy over HTTPS + mTLS, Collector, 19 checks | `examples/edge-observability/src/bin/edge_e2e.rs`: **passed locally** (all 19). CI job `edge-e2e`: see PR checks. |
+| Real gateway e2e | Ferrum Edge v0.9.7 (pinned digest) → Alloy over HTTPS + mTLS, Collector, 19 checks | `examples/edge-observability/src/bin/edge_e2e.rs`: **passed locally** (all 19). CI job `edge-e2e`: see the CI checks. |
 | Generated Edge configuration | Validated by the real `ferrum-edge validate` for both TLS and plain fixtures | CI job `edge-config`; passed locally |
 | PostgreSQL (`postgres`) | SQLx pool, readiness check, instrumented pool wait, migrations, scheme and runtime checks | `postgres.rs`: the real-database test passed locally against Postgres 17; ignored without `FERRUM_ALLOY_TEST_DATABASE_URL` |
 | OpenAPI (`openapi`) | utoipa document serving (management by default, public opt-in), CLI export with drift detection | `optional_layers.rs`, CLI tests |
 | JWT (`jwt`) | JWKS verification, fail-closed policy, single-flight rate-limited refresh, `503` on JWKS outage, `Authorize` | `jwt.rs` (8 tests) |
 | HTTP client (`http-client`) | Instrumented CLIENT spans, allow-listed trace propagation, same-origin redirects only, no automatic retries | `http_client.rs` (5 tests) |
 | CORS, compression | Off by default; compression skips streams, `no-store`, and `set-cookie` responses | `optional_layers.rs` |
-| Diagnostics | Versioned report schema (JSON Schema in `contracts/diagnostics/`), bounded offline parser, rules r001–r008, OTLP/JSON import, deterministic rendering | `ferrum-alloy-diagnostics/tests/*` including `schema_parity.rs` |
+| Diagnostics | Versioned report schema (JSON Schema in `contracts/diagnostics/`), bounded offline parser, rules r001–r008, OTLP/JSON import, deterministic rendering | `ferrum-alloy-diagnostics/tests/*` including `schema_parity.rs`. Rules r005 (streaming) and r008 (incomplete body) have no test or fixture yet. |
 | CLI | `new`, `check`, `openapi export`, `edge export`, `diagnose`, `version` with stable exit codes | `ferrum-alloy-cli/tests/cli.rs` (13 tests); generator test (ignored by default) passed locally, including `cargo test`, `clippy -D warnings`, and `fmt --check` in generated projects |
 | Existing-Axum adoption | `ferrum-alloy-telemetry` alone as a Tower layer | `examples/existing-axum` test |
 

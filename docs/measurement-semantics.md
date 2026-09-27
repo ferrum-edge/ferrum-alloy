@@ -105,7 +105,7 @@ Default reporting thresholds are ≥ 50 ms and ≥ 20 % of the gateway measureme
 
 ## Dominance of an instrumented operation
 
-Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers, with a floor of 5 ms. It never adds operations together. Nesting is validated by the parent-span chain plus same-instance wall-clock intervals (1 ms slack). Without interval proof, the finding stays `likely` and records the missing evidence. An operation longer than an enclosing interval it claims to be inside is `conflicting_evidence`.
+Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers. Services whose time to headers is under 5 ms are skipped. It never adds operations together. Nesting is validated by the parent-span chain plus same-instance wall-clock intervals (1 ms slack). Without interval proof, the finding stays `likely` and records the missing evidence. An operation longer than an enclosing interval it claims to be inside is `conflicting_evidence`.
 
 ## Clock skew
 
