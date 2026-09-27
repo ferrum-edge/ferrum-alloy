@@ -154,10 +154,10 @@ pub struct ServerConfig {
     pub http2_max_concurrent_streams: u32,
     /// Time allowed to receive a request head (slow-header protection).
     pub header_read_timeout_ms: u64,
-    /// Time a connection may stay open with no request in flight after its
-    /// first request, before it is closed (HTTP/2 `GOAWAY`). Behind a load
-    /// balancer that pools connections, set it above the balancer's idle
-    /// timeout.
+    /// Time a connection may stay open with no request in flight and no
+    /// response data written after its first request, before it is closed
+    /// (HTTP/2 `GOAWAY`). Behind a load balancer that pools connections, set
+    /// it above the balancer's idle timeout.
     pub idle_timeout_ms: u64,
     /// Time a connection may go without writing any response data while
     /// response data waits to be written (the peer withholds HTTP/2

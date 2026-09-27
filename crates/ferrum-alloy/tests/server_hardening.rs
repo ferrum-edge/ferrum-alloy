@@ -25,8 +25,8 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_millis(300);
@@ -49,6 +49,11 @@ const H2_PING: u8 = 0x6;
 const H2_GOAWAY: u8 = 0x7;
 /// The size of each chunk of the endless `/flood` response.
 const FLOOD_CHUNK: usize = 16 * 1024;
+/// The size of the `/big` response, sent in one chunk.
+const BIG_BODY: usize = 2 * 1024 * 1024;
+/// How much a slow reader takes at a time, and how long it waits in between.
+const BITE: usize = 16 * 1024;
+const PAUSE: Duration = Duration::from_millis(20);
 
 fn router() -> Router {
     Router::new()
@@ -86,6 +91,12 @@ fn router() -> Router {
                 Body::new(body)
             }),
         )
+        .route("/big", get(big))
+}
+
+/// A response of [`BIG_BODY`] bytes in one chunk.
+async fn big() -> Bytes {
+    Bytes::from(vec![b'x'; BIG_BODY])
 }
 
 fn hardened() -> AlloyConfig {
@@ -173,7 +184,10 @@ async fn frame_types_until_closed(stream: &mut TcpStream) -> Option<Vec<u8>> {
 
 /// Like [`frame_types_until_closed`], but sends a PING every 50 ms and never
 /// a WINDOW_UPDATE, and returns each frame's type and payload length.
-async fn frames_until_closed_pinging(stream: &mut TcpStream) -> Option<Vec<(u8, usize)>> {
+async fn frames_until_closed_pinging<S>(stream: &mut S) -> Option<Vec<(u8, usize)>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut received = Vec::new();
     let read_all = async {
         let mut buf = [0u8; 4096];
@@ -187,6 +201,7 @@ async fn frames_until_closed_pinging(stream: &mut TcpStream) -> Option<Vec<(u8, 
                 _ = ping.tick() => {
                     // The server may have closed the connection already.
                     let _ = stream.write_all(H2_PING_FRAME).await;
+                    let _ = stream.flush().await;
                 }
             }
         }
@@ -222,6 +237,62 @@ async fn connect_with_small_window(addr: SocketAddr) -> TcpStream {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.set_recv_buffer_size(16 * 1024).unwrap();
     socket.connect(addr).await.unwrap()
+}
+
+/// Binds a loopback listener whose connections have a small send buffer, so
+/// that a large response waits in the server rather than in the kernel, and
+/// the server keeps writing it for as long as the client reads it.
+fn listener_with_small_send_buffer() -> TcpListener {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_send_buffer_size(16 * 1024).unwrap();
+    socket.bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+    socket.listen(1024).unwrap()
+}
+
+/// Reads the HTTP/1.1 response to `GET /big` from `stream`, [`BITE`] bytes
+/// at most at a time and [`PAUSE`] apart, and returns how much of its body
+/// arrived before it was complete or the connection ended.
+async fn read_big_http1_slowly(stream: &mut TcpStream) -> usize {
+    let mut head = Vec::new();
+    let mut body = None;
+    let mut buf = vec![0u8; BITE];
+    loop {
+        let n = tokio::time::timeout(WITHIN, stream.read(&mut buf))
+            .await
+            .expect("the HTTP/1.1 response keeps coming")
+            .unwrap_or(0);
+        body = match body {
+            Some(body) => Some(body + n),
+            None => {
+                head.extend_from_slice(&buf[..n]);
+                let end = head.windows(4).position(|window| window == b"\r\n\r\n");
+                end.map(|end| head.len() - end - 4)
+            }
+        };
+        if n == 0 || body >= Some(BIG_BODY) {
+            return body.unwrap_or_default();
+        }
+        tokio::time::sleep(PAUSE).await;
+    }
+}
+
+/// Reads the HTTP/2 response body of `GET /big`, one DATA frame (at most
+/// [`BITE`] bytes) at a time and [`PAUSE`] apart, and returns how much of it
+/// arrived before it ended or failed.
+async fn read_big_http2_slowly(body: &mut Incoming) -> usize {
+    let mut received = 0;
+    loop {
+        let frame = tokio::time::timeout(WITHIN, body.frame())
+            .await
+            .expect("the HTTP/2 response keeps coming");
+        let Some(Ok(frame)) = frame else {
+            return received;
+        };
+        if let Ok(data) = frame.into_data() {
+            received += data.len();
+        }
+        tokio::time::sleep(PAUSE).await;
+    }
 }
 
 /// Reads `body` for `period` and then up to one more data frame, failing if
@@ -530,6 +601,106 @@ async fn a_websocket_session_outlives_the_idle_timeout() {
     assert_eq!(&reply[..n], b"\x81\x07echo:hi");
     assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
     drop(stream);
+    server.shutdown().await.unwrap();
+}
+
+/// Hyper lets go of a response body as soon as it has taken the last chunk,
+/// long before a slow reader has all of a large response. Idle time counts
+/// from the last response data written, so a reader that keeps taking data
+/// gets the whole response however long it takes, on either protocol.
+#[tokio::test]
+async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
+    let server = support::start_on(
+        AlloyApp::new("hardening").router(router()),
+        idle_limited(),
+        listener_with_small_send_buffer(),
+    )
+    .await;
+    let mut http1 = connect_with_small_window(server.addr).await;
+    http1
+        .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
+        .await
+        .unwrap();
+
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(H2_INITIAL_WINDOW)
+        .initial_connection_window_size(H2_INITIAL_WINDOW)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let big = format!("http://{}/big", server.addr);
+    let response = sender.send_request(request(&big)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    let mut http2_body = response.into_body();
+
+    let started = Instant::now();
+    let (http1_received, http2_received) = tokio::join!(
+        read_big_http1_slowly(&mut http1),
+        read_big_http2_slowly(&mut http2_body),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(
+        http1_received, BIG_BODY,
+        "the whole HTTP/1.1 response arrived"
+    );
+    assert_eq!(
+        http2_received, BIG_BODY,
+        "the whole HTTP/2 response arrived"
+    );
+    assert!(
+        elapsed > IDLE_TIMEOUT * 3,
+        "the downloads outlasted the idle timeout several times ({elapsed:?})"
+    );
+    assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    drop((http1, http2_body));
+    server.shutdown().await.unwrap();
+}
+
+/// A peer that asks for a response larger than the initial HTTP/2 window and
+/// never sends WINDOW_UPDATE takes none of the rest of it once the response
+/// body has ended, so no response data is written and the idle timeout still
+/// closes the connection, however many PINGs the peer sends.
+#[tokio::test]
+async fn a_finished_http2_response_without_window_updates_is_closed_by_the_idle_timeout() {
+    let mut config = idle_limited();
+    config.server.max_connections = 1;
+    let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
+    let stats = Arc::clone(&server.stats);
+    let mut stalled = TcpStream::connect(server.addr).await.unwrap();
+    stalled.write_all(H2_PREFACE).await.unwrap();
+    stalled.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    stalled.write_all(&h2_get("/big")).await.unwrap();
+    let started = Instant::now();
+    let frames = frames_until_closed_pinging(&mut stalled)
+        .await
+        .expect("the HTTP/2 connection is closed");
+    let elapsed = started.elapsed();
+    let kinds: Vec<u8> = frames.iter().map(|&(kind, _)| kind).collect();
+    let response = kinds.iter().position(|&kind| kind == H2_HEADERS);
+    let goaway = kinds.iter().position(|&kind| kind == H2_GOAWAY);
+    assert!(
+        response.is_some() && goaway > response,
+        "the response starts, then GOAWAY is sent (frame types: {kinds:?})"
+    );
+    let data: usize = frames
+        .iter()
+        .filter(|&&(kind, _)| kind == H2_DATA)
+        .map(|&(_, length)| length)
+        .sum();
+    assert!(
+        (1..=H2_INITIAL_WINDOW as usize).contains(&data),
+        "the response filled the initial window and no more ({data} bytes)"
+    );
+    assert!(
+        elapsed >= IDLE_TIMEOUT / 2,
+        "closed by the idle timeout, not at once ({elapsed:?})"
+    );
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
     server.shutdown().await.unwrap();
 }
 
@@ -892,6 +1063,105 @@ mod tls {
             assert!(Instant::now() < deadline, "the TLS listener serves again");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        server.shutdown().await.unwrap();
+    }
+
+    fn write_stall_limited_tls() -> Tls {
+        let mut tls = tls_listener(2_000);
+        tls.config.server.write_stall_timeout_ms = WRITE_STALL_TIMEOUT.as_millis() as u64;
+        tls
+    }
+
+    /// Completes a TLS handshake with the test listener over `tcp`.
+    async fn tls_connect(tcp: TcpStream, ca: &Ca) -> tokio_rustls::client::TlsStream<TcpStream> {
+        let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+        tokio_rustls::TlsConnector::from(pki::client_config(ca, None))
+            .connect(name, tcp)
+            .await
+            .unwrap()
+    }
+
+    /// The write stall timeout works above TLS: an HTTP/1.1 client that
+    /// stops reading its response over TLS, so that rustls cannot pass on
+    /// the server's writes, is disconnected, and its slot is freed.
+    #[tokio::test]
+    async fn a_tls_client_that_stops_reading_is_disconnected_and_releases_its_slot() {
+        let mut tls = write_stall_limited_tls();
+        tls.config.server.max_connections = 1;
+        let server = support::start(AlloyApp::new("hardening").router(router()), tls.config).await;
+        let tcp = connect_with_small_window(server.addr).await;
+        let mut stream = tls_connect(tcp, &tls.ca).await;
+        stream
+            .write_all(b"GET /flood HTTP/1.1\r\nhost: t\r\n\r\n")
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        let started = Instant::now();
+        let mut head = [0u8; 64];
+        let n = stream.read(&mut head).await.unwrap();
+        assert!(
+            head[..n].starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&head[..n])
+        );
+        // Stop reading until the server gives up on the response.
+        counted(&server.stats.write_stall_timeouts).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= WRITE_STALL_TIMEOUT / 2,
+            "closed by the write stall timeout, not at once ({elapsed:?})"
+        );
+        assert!(
+            closed_by_server(&mut stream).await,
+            "the connection is closed"
+        );
+        let stats = &server.stats;
+        assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
+        let client = pki::client_config(&tls.ca, None);
+        let deadline = Instant::now() + WITHIN;
+        loop {
+            if let Some(status) = tls_get(server.addr, &client).await {
+                assert_eq!(status, StatusCode::OK);
+                break;
+            }
+            assert!(Instant::now() < deadline, "the TLS listener serves again");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        server.shutdown().await.unwrap();
+    }
+
+    /// The write stall timeout counts the HTTP/2 response data a TLS
+    /// connection carries, not the TLS records beneath it: a peer that never
+    /// sends WINDOW_UPDATE is sent `GOAWAY`, although every PING it sends is
+    /// answered in a TLS record of its own.
+    #[tokio::test]
+    async fn an_http2_response_over_tls_without_window_updates_is_sent_goaway() {
+        let tls = write_stall_limited_tls();
+        let server = support::start(AlloyApp::new("hardening").router(router()), tls.config).await;
+        let tcp = TcpStream::connect(server.addr).await.unwrap();
+        let mut stalled = tls_connect(tcp, &tls.ca).await;
+        stalled.write_all(H2_PREFACE).await.unwrap();
+        stalled.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+        stalled.write_all(&h2_get("/flood")).await.unwrap();
+        stalled.flush().await.unwrap();
+        let frames = frames_until_closed_pinging(&mut stalled)
+            .await
+            .expect("the stalled HTTP/2 connection is closed");
+        let kinds: Vec<u8> = frames.iter().map(|&(kind, _)| kind).collect();
+        let response = kinds.iter().position(|&kind| kind == H2_HEADERS);
+        let goaway = kinds.iter().position(|&kind| kind == H2_GOAWAY);
+        assert!(
+            response.is_some() && goaway > response,
+            "the response starts, then GOAWAY is sent (frame types: {kinds:?})"
+        );
+        assert!(
+            kinds.contains(&H2_PING),
+            "the server kept answering PINGs (frame types: {kinds:?})"
+        );
+        let stats = &server.stats;
+        assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
         server.shutdown().await.unwrap();
     }
 

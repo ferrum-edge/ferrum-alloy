@@ -7,15 +7,16 @@
 //! handshake) to its first request head, whatever the protocol, so a peer
 //! that sends nothing or only part of the HTTP/2 preface cannot keep a
 //! connection slot. After that, the idle timeout bounds the time a
-//! connection may spend with no request in flight, so a peer that sends one
-//! cheap request and then only answers HTTP/2 keep-alive pings cannot keep
-//! its slot either. A response the peer will not take counts as in flight,
-//! so the write stall timeout bounds the time a connection may go without
-//! writing any response data while a response waits to be written: a peer
-//! that withholds HTTP/2 `WINDOW_UPDATE` or keeps a zero TCP receive window
-//! cannot keep its slot. An established HTTP/2 connection is sent `GOAWAY`
-//! at any of these deadlines, so a client can retry elsewhere, and is closed
-//! shortly after.
+//! connection may spend with no request in flight and no response data
+//! written, so a peer that sends one cheap request and then only answers
+//! HTTP/2 keep-alive pings cannot keep its slot either, while a slow reader
+//! still taking the end of a response is not cut. A response the peer will
+//! not take counts as in flight, so the write stall timeout bounds the time
+//! a connection may go without writing any response data while a response
+//! waits to be written: a peer that withholds HTTP/2 `WINDOW_UPDATE` or
+//! keeps a zero TCP receive window cannot keep its slot. An established
+//! HTTP/2 connection is sent `GOAWAY` at any of these deadlines, so a client
+//! can retry elsewhere, and is closed shortly after.
 //!
 //! On shutdown it stops accepting, abandons unfinished TLS handshakes, asks
 //! every connection to finish (HTTP/1.1 `Connection: close` after the current
@@ -869,8 +870,11 @@ async fn serve_io<I>(
     // starts only after detection, and HTTP/2 has no request-head timer. This
     // deadline covers all of it. After the first request it becomes the idle
     // deadline: re-armed whenever the last request in flight ends, it closes
-    // the connection once no request has been in flight for the idle
-    // timeout. HTTP/2 keep-alive pings do not count as activity.
+    // the connection once no request has been in flight and no response data
+    // has been written for the idle timeout. Hyper lets go of a response body
+    // as soon as it has taken the last chunk, which can still be on its way
+    // to a slow reader, so the idle time counts from the last response byte
+    // written. HTTP/2 keep-alive pings do not count as activity.
     let deadline = tokio::time::sleep(options.header_read_timeout);
     tokio::pin!(deadline);
     // The write stall check samples response progress every half period. It
@@ -888,8 +892,10 @@ async fn serve_io<I>(
     let mut stalled: Option<(u64, u32)> = None;
     let grace = options.header_read_timeout.min(Duration::from_secs(1));
     // The request count when the deadline was armed with no request in
-    // flight, or `None` when it was armed with requests in flight.
+    // flight, or `None` when it was armed with requests in flight, and the
+    // response data written by then.
     let mut idle_since = Some(0);
+    let mut idle_written = 0;
     let mut phase = Phase::Open;
     let mut draining = false;
     let result = loop {
@@ -898,6 +904,7 @@ async fn serve_io<I>(
             () = activity.idle.notified(), if phase == Phase::Open => {
                 if activity.in_flight() == 0 {
                     idle_since = Some(activity.started());
+                    idle_written = activity.written();
                     deadline
                         .as_mut()
                         .reset(Instant::now() + options.idle_timeout);
@@ -907,11 +914,13 @@ async fn serve_io<I>(
                 Phase::Open => {
                     let started = activity.started();
                     let busy = activity.in_flight() > 0;
-                    if busy || idle_since != Some(started) {
+                    let written = activity.written();
+                    if busy || idle_since != Some(started) || written != idle_written {
                         // Not idle for the whole period: look again later.
                         // The idle notification re-arms the deadline as soon
                         // as the last request in flight ends.
                         idle_since = (!busy).then_some(started);
+                        idle_written = written;
                         deadline
                             .as_mut()
                             .reset(Instant::now() + options.idle_timeout);

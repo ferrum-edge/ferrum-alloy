@@ -65,8 +65,14 @@ impl TestServer {
 }
 
 /// Starts `app` with `config` on ephemeral loopback ports.
-pub async fn start(app: AlloyApp, mut config: AlloyConfig) -> TestServer {
+pub async fn start(app: AlloyApp, config: AlloyConfig) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    start_on(app, config, listener).await
+}
+
+/// Starts `app` with `config`, serving the application on `listener` and
+/// management on an ephemeral loopback port.
+pub async fn start_on(app: AlloyApp, mut config: AlloyConfig, listener: TcpListener) -> TestServer {
     let management = TcpListener::bind("127.0.0.1:0").await.unwrap();
     config.server.bind = listener.local_addr().unwrap();
     config.management.bind = management.local_addr().unwrap();
