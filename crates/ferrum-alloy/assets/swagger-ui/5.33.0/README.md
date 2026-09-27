@@ -24,7 +24,7 @@ Only these files are taken from the package:
 
 - `swagger-ui-bundle.js`: Swagger UI with its dependencies, loaded by the page.
 - `swagger-ui.css`: its stylesheet.
-- `swagger-ui-bundle.js.LICENSE.txt`: the licenses of the dependencies inside the bundle (MIT, BSD-3-Clause, and DOMPurify under Apache-2.0 or MPL-2.0).
+- `swagger-ui-bundle.js.LICENSE.txt`: the licenses of the dependencies inside the bundle (MIT, BSD-3-Clause, and DOMPurify under Apache-2.0 or MPL-2.0). The bundle's first line points to it, so it is also served beside the bundle.
 - `LICENSE` and `NOTICE`: Swagger UI's license and notice.
 
 The package's `index.html` and `swagger-initializer.js` are not used. Alloy

@@ -27,12 +27,14 @@ use http::header::{
 const HTML: &str = "text/html; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 const JAVASCRIPT: &str = "text/javascript; charset=utf-8";
+const TEXT: &str = "text/plain; charset=utf-8";
 
 /// The page, with `{{assets}}` and `{{document}}` placeholders.
 const PAGE: &str = include_str!("openapi_ui/index.html");
 
-/// Files served beneath the page: name, content type, and contents.
-const ASSETS: [(&str, &str, &[u8]); 3] = [
+/// Files served beneath the page: name, content type, and contents. The
+/// bundle's first line points to its license file, so that is served too.
+const ASSETS: [(&str, &str, &[u8]); 4] = [
     (
         "swagger-ui.css",
         CSS,
@@ -42,6 +44,11 @@ const ASSETS: [(&str, &str, &[u8]); 3] = [
         "swagger-ui-bundle.js",
         JAVASCRIPT,
         include_bytes!("../assets/swagger-ui/5.33.0/swagger-ui-bundle.js"),
+    ),
+    (
+        "swagger-ui-bundle.js.LICENSE.txt",
+        TEXT,
+        include_bytes!("../assets/swagger-ui/5.33.0/swagger-ui-bundle.js.LICENSE.txt"),
     ),
     (
         "swagger-initializer.js",

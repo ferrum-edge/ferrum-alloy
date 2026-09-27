@@ -18,10 +18,11 @@ use ferrum_alloy::config::AlloyConfig;
 use support::{Reply, TOKEN, config, fetch, fetch_with, start};
 
 /// The page and every asset beneath it, at the default `openapi.ui_path`.
-const UI_PATHS: [&str; 4] = [
+const UI_PATHS: [&str; 5] = [
     "/docs",
     "/docs/swagger-ui.css",
     "/docs/swagger-ui-bundle.js",
+    "/docs/swagger-ui-bundle.js.LICENSE.txt",
     "/docs/swagger-initializer.js",
 ];
 
@@ -126,6 +127,7 @@ async fn ui_responses_are_locked_down() {
         "text/html; charset=utf-8",
         "text/css; charset=utf-8",
         "text/javascript; charset=utf-8",
+        "text/plain; charset=utf-8",
         "text/javascript; charset=utf-8",
     ];
     for (path, content_type) in UI_PATHS.into_iter().zip(content_types) {
@@ -266,7 +268,11 @@ async fn openapi_ui_assets_match_the_manifest() {
 
     // The served bytes are the embedded ones.
     let server = start(app(), ui_config()).await;
-    for name in ["swagger-ui.css", "swagger-ui-bundle.js"] {
+    for name in [
+        "swagger-ui.css",
+        "swagger-ui-bundle.js",
+        "swagger-ui-bundle.js.LICENSE.txt",
+    ] {
         let reply = with_token(&server.management_url(&format!("/docs/{name}"))).await;
         assert_eq!(reply.status, 200, "{name}");
         assert_eq!(&sha256_hex(&reply.body), &manifest[name], "{name} served");
