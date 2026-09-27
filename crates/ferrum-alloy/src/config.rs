@@ -239,6 +239,11 @@ pub struct TlsSettings {
     /// Whether a CRL past its `nextUpdate` time is rejected.
     #[serde(default)]
     pub client_crl_expiration: CrlExpiration,
+    /// How often the certificate chain, private key, client CA bundle, and
+    /// CRLs are read again and, when they changed and validate, swapped in
+    /// for new handshakes. `0` disables reloading.
+    #[serde(default = "default_reload_interval_ms")]
+    pub reload_interval_ms: u64,
 }
 
 /// Which certificates of a client chain are checked against the CRLs.
@@ -278,6 +283,14 @@ pub enum CrlExpiration {
 fn default_handshake_timeout_ms() -> u64 {
     10_000
 }
+
+fn default_reload_interval_ms() -> u64 {
+    60_000
+}
+
+/// Accepted nonzero `server.tls.reload_interval_ms` values: 100 ms to one
+/// day.
+const TLS_RELOAD_INTERVAL_MS: std::ops::RangeInclusive<u64> = 100..=24 * 60 * 60 * 1000;
 
 /// Graceful shutdown budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -743,6 +756,7 @@ env_vars! {
     "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH" => ["server", "tls", "client_crl_depth"]: Str,
     "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS" => ["server", "tls", "client_crl_unknown_status"]: Str,
     "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION" => ["server", "tls", "client_crl_expiration"]: Str,
+    "FERRUM_ALLOY_TLS_RELOAD_INTERVAL_MS" => ["server", "tls", "reload_interval_ms"]: Uint,
     "FERRUM_ALLOY_SHUTDOWN_READINESS_GRACE_MS" => ["shutdown", "readiness_grace_ms"]: Uint,
     "FERRUM_ALLOY_SHUTDOWN_DRAIN_TIMEOUT_MS" => ["shutdown", "drain_timeout_ms"]: Uint,
     "FERRUM_ALLOY_MANAGEMENT_ENABLED" => ["management", "enabled"]: Bool,
@@ -1294,6 +1308,14 @@ impl AlloyConfig {
             }
             if tls.client_auth == ClientAuth::None && !tls.client_crl_paths.is_empty() {
                 error("server.tls.client_crl_paths is set but client_auth is none".into());
+            }
+            let interval = tls.reload_interval_ms;
+            if interval != 0 && !TLS_RELOAD_INTERVAL_MS.contains(&interval) {
+                error(format!(
+                    "server.tls.reload_interval_ms must be 0 (disabled) or between {} and {}",
+                    TLS_RELOAD_INTERVAL_MS.start(),
+                    TLS_RELOAD_INTERVAL_MS.end()
+                ));
             }
             if tls.client_crl_paths.is_empty() {
                 for (name, changed) in [

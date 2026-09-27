@@ -510,6 +510,15 @@ impl AlloyParts {
             self.lifecycle.clone(),
             Arc::clone(&self.app_stats),
         ));
+        // New handshakes keep getting reloaded material until accepting stops.
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.clone() {
+            tokio::spawn(crate::tls::reload_until(
+                tls,
+                Arc::clone(&self.app_stats),
+                self.lifecycle.stop_accepting().clone(),
+            ));
+        }
         let management_task = match (management_listener, self.management_router.clone()) {
             (Some(listener), Some(router)) => Some(tokio::spawn(server::serve(
                 listener,
