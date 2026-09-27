@@ -652,7 +652,10 @@ fn openapi_ui_needs_its_feature_and_a_path_of_its_own() {
         ("docs", "openapi.ui_path must be a path like /docs"),
         ("/", "openapi.ui_path must be a path like /docs"),
         ("/docs/", "openapi.ui_path must be a path like /docs"),
-        ("//evil.example", "openapi.ui_path must be a path like /docs"),
+        (
+            "//evil.example",
+            "openapi.ui_path must be a path like /docs",
+        ),
         ("/a/../docs", "openapi.ui_path must be a path like /docs"),
         ("/do cs", "openapi.ui_path must be a path like /docs"),
         (r#"/docs"x"#, "openapi.ui_path must be a path like /docs"),
