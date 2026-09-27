@@ -67,6 +67,7 @@ fn every_fixture_avoids_invalid_explanations() {
     for name in [
         "edge-rejected-before-upstream.json",
         "db-operation-dominates.json",
+        "db-operation-after-headers.json",
         "unattributed-interval.json",
         "service-span-missing.json",
         "service-exceeds-gateway.json",
@@ -243,6 +244,25 @@ fn dominance_compares_the_largest_single_operation_and_never_sums() {
 }
 
 #[test]
+fn operations_outside_the_header_phase_are_not_blamed_on_time_to_headers() {
+    // The database call runs while the body streams and the cache fill
+    // crosses the headers boundary; the only operation inside the header
+    // phase is too small to dominate.
+    let findings = findings("db-operation-after-headers.json");
+    let found = codes(&findings);
+    assert!(
+        !found.contains(&"alloy.service.operation_dominates"),
+        "{found:?}"
+    );
+    assert!(
+        !found.contains(&"alloy.evidence.operation_exceeds_enclosing"),
+        "{found:?}"
+    );
+    let streaming = by_code(&findings, "alloy.response.streaming_dominates");
+    assert_eq!(streaming.confidence, Confidence::Likely);
+}
+
+#[test]
 fn unattributed_interval_is_not_called_network_latency() {
     let findings = findings("unattributed-interval.json");
     let finding = by_code(&findings, "alloy.gateway.unattributed_interval");
@@ -362,6 +382,7 @@ fn newer_minor_version_preserves_unknown_fields_without_interpreting_them() {
 fn analysis_and_rendering_are_deterministic() {
     for name in [
         "db-operation-dominates.json",
+        "db-operation-after-headers.json",
         "unattributed-interval.json",
         "gateway-error-token.json",
     ] {
