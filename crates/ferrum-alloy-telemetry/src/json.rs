@@ -23,6 +23,8 @@
 //!   re-parses it, which can change the last digit of a 16- or 17-digit value.
 //! - A span field whose `Debug` implementation returns an error is skipped.
 //!   tracing-subscriber panics.
+//! - U+0085, U+2028, and U+2029 are escaped to keep log lines intact for
+//!   consumers that split on Unicode line separators.
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
@@ -187,11 +189,13 @@ where
         let Some(span) = ctx.span(id) else {
             return;
         };
+        // `Debug` implementations are application code and can re-enter
+        // tracing, so render before locking the span extensions.
+        let mut rendered = SpanFields::default();
+        attrs.record(&mut SpanVisitor(&mut rendered));
         let mut extensions = span.extensions_mut();
         if extensions.get_mut::<SpanFields>().is_none() {
-            let mut fields = SpanFields::default();
-            attrs.record(&mut SpanVisitor(&mut fields));
-            extensions.insert(fields);
+            extensions.insert(rendered);
         }
     }
 
@@ -199,13 +203,15 @@ where
         let Some(span) = ctx.span(id) else {
             return;
         };
+        // `Debug` implementations are application code and can re-enter
+        // tracing, so render before locking the span extensions.
+        let mut rendered = SpanFields::default();
+        values.record(&mut SpanVisitor(&mut rendered));
         let mut extensions = span.extensions_mut();
         match extensions.get_mut::<SpanFields>() {
-            Some(fields) => values.record(&mut SpanVisitor(fields)),
+            Some(fields) => fields.merge(rendered),
             None => {
-                let mut fields = SpanFields::default();
-                values.record(&mut SpanVisitor(&mut fields));
-                extensions.insert(fields);
+                extensions.insert(rendered);
             }
         }
     }
@@ -282,6 +288,20 @@ impl SpanFields {
         }
         self.values = values;
         self.stale = 0;
+    }
+
+    /// Merges fields rendered without holding the span extensions lock.
+    fn merge(&mut self, other: SpanFields) {
+        for entry in &other.entries {
+            let value = other
+                .values
+                .get(entry.start..entry.end)
+                .unwrap_or_default();
+            self.set(entry.name, |buf| {
+                buf.extend_from_slice(value);
+                Ok(())
+            });
+        }
     }
 
     /// Appends `"name":value,` for every field.
@@ -432,26 +452,31 @@ fn write_string(buf: &mut Vec<u8>, value: &str) {
     buf.push(b'"');
 }
 
-/// Appends `value` escaped exactly as serde_json escapes string contents:
+/// Appends `value` escaped as serde_json does, with line separators escaped:
 /// `\"` and `\\`, the short forms `\b`, `\t`, `\n`, `\f`, and `\r`, and
-/// `\u00xx` (lowercase hex) for the other characters below U+0020. Everything
-/// else, including DEL, `/`, and non-ASCII text, is copied unchanged. A `str`
-/// is always valid UTF-8, and every byte this matches is ASCII, so the output
-/// is valid UTF-8 too.
+/// `\u00xx` (lowercase hex) for the other characters below U+0020. U+0085,
+/// U+2028, and U+2029 are also escaped to protect line-oriented consumers.
+/// Everything else, including DEL and `/`, is copied unchanged. A `str` is
+/// always valid UTF-8, and every byte this matches is ASCII, so the output is
+/// valid UTF-8 too.
 fn write_escaped(buf: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     let mut start = 0;
     let mut unicode = *b"\\u0000";
-    for (index, &byte) in bytes.iter().enumerate() {
-        let escape: &[u8] = match byte {
-            b'"' => b"\\\"",
-            b'\\' => b"\\\\",
-            0x08 => b"\\b",
-            b'\t' => b"\\t",
-            b'\n' => b"\\n",
-            0x0c => b"\\f",
-            b'\r' => b"\\r",
-            0x00..=0x1f => {
+    for (index, character) in value.char_indices() {
+        let escape: &[u8] = match character {
+            '"' => b"\\\"",
+            '\\' => b"\\\\",
+            '\u{8}' => b"\\b",
+            '\t' => b"\\t",
+            '\n' => b"\\n",
+            '\u{c}' => b"\\f",
+            '\r' => b"\\r",
+            '\u{85}' => b"\\u0085",
+            '\u{2028}' => b"\\u2028",
+            '\u{2029}' => b"\\u2029",
+            '\u{0}'..='\u{1f}' => {
+                let byte = character as u8;
                 unicode[4] = b'0' + (byte >> 4);
                 unicode[5] = hex_digit(byte & 0x0f);
                 &unicode
@@ -460,7 +485,7 @@ fn write_escaped(buf: &mut Vec<u8>, value: &str) {
         };
         buf.extend_from_slice(bytes.get(start..index).unwrap_or_default());
         buf.extend_from_slice(escape);
-        start = index + 1;
+        start = index + character.len_utf8();
     }
     buf.extend_from_slice(bytes.get(start..).unwrap_or_default());
 }

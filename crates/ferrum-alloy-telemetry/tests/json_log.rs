@@ -173,7 +173,7 @@ fn lines_match_the_tracing_subscriber_json_formatter() {
 
     let alloy = alloy.text();
     assert_eq!(alloy.lines().count(), 8, "{alloy}");
-    assert_eq!(alloy, upstream.text());
+    assert_eq!(alloy, escape_line_separators(&upstream.text()));
     for line in alloy.lines() {
         serde_json::from_str::<Value>(line).unwrap();
     }
@@ -190,17 +190,30 @@ fn every_character_is_escaped_like_serde_json() {
         tracing::info!(target: "t", v = %all);
     });
     let alloy = alloy.text();
-    let expected = format!("\"v\":{}", serde_json::to_string(&all).unwrap());
+    let expected = format!(
+        "\"v\":{}",
+        escape_line_separators(&serde_json::to_string(&all).unwrap())
+    );
     // Two event fields, and the span field once per event.
     assert_eq!(alloy.matches(&expected).count(), 4);
-    assert_eq!(alloy, upstream.text());
+    assert_eq!(alloy, escape_line_separators(&upstream.text()));
+}
+
+fn escape_line_separators(value: &str) -> String {
+    value
+        .replace('\u{85}', "\\u0085")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 #[test]
 fn escapes_control_characters_quotes_and_backslashes() {
-    let line = line_with("\u{0}\u{1}\u{8}\t\n\u{b}\u{c}\r\u{1b}\u{1f} \"\\/\u{7f}é🚀\u{2028}");
-    let expected = r#""v":"\u0000\u0001\b\t\n\u000b\f\r\u001b\u001f \"\\/"#.to_owned()
-        + "\u{7f}é🚀\u{2028}\"";
+    let line = line_with(
+        "\u{0}\u{1}\u{8}\t\n\u{b}\u{c}\r\u{1b}\u{1f} \"\\/\u{7f}é🚀\u{85}\u{2028}\u{2029}",
+    );
+    let expected =
+        r#""v":"\u0000\u0001\b\t\n\u000b\f\r\u001b\u001f \"\\/"#.to_owned()
+            + "\u{7f}é🚀\\u0085\\u2028\\u2029\"";
     assert_eq!(line.matches(&expected).count(), 2, "{line}");
     // The only raw newline ends the line.
     assert!(line.ends_with("}}\n"), "{line}");
@@ -224,6 +237,29 @@ fn escapes_debug_output_and_field_names() {
     );
 }
 
+struct ReentrantDebug;
+
+impl fmt::Debug for ReentrantDebug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        tracing::info!(target: "t", "nested from Debug");
+        f.write_str("recorded")
+    }
+}
+
+#[test]
+fn recording_debug_fields_allows_reentrant_events() {
+    let (subscriber, alloy) = alloy_only();
+    tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::info_span!(target: "t", "s", field = EmptyField);
+        let _entered = span.enter();
+        span.record("field", &ReentrantDebug);
+        tracing::info!(target: "t", "outer");
+    });
+    let output = alloy.text();
+    assert!(output.contains("nested from Debug"), "{output}");
+    assert!(output.contains(r#""field":"recorded""#), "{output}");
+}
+
 #[test]
 fn bytes_that_are_not_utf8_stay_valid_json() {
     let (subscriber, alloy, upstream) = side_by_side();
@@ -233,8 +269,14 @@ fn bytes_that_are_not_utf8_stay_valid_json() {
         tracing::info!(target: "t", raw = &b"\xff\x00\"\\"[..], empty = &b""[..]);
     });
     let alloy = alloy.text();
-    assert!(alloy.contains(r#""raw":"[ff 00 22 5c]","empty":"[]""#), "{alloy}");
-    assert!(alloy.contains(r#""span":{"raw":[255,0,34,92],"name":"s"}"#), "{alloy}");
+    assert!(
+        alloy.contains(r#""raw":"[ff 00 22 5c]","empty":"[]""#),
+        "{alloy}"
+    );
+    assert!(
+        alloy.contains(r#""span":{"raw":[255,0,34,92],"name":"s"}"#),
+        "{alloy}"
+    );
     assert_eq!(alloy, upstream.text());
 }
 
@@ -431,8 +473,10 @@ fn access_line(text: &str) -> String {
         .to_owned()
 }
 
+type Entries = Vec<(String, Value)>;
+
 /// The event's entries and its span's entries, each in written order.
-fn split_span(line: &str) -> (Vec<(String, Value)>, Vec<(String, Value)>) {
+fn split_span(line: &str) -> (Entries, Entries) {
     let at = line.find(r#","span":{"#).expect("span");
     let event = format!("{}}}", &line[..at]);
     let span = &line[at + r#","span":"#.len()..line.trim_end().len() - 1];
