@@ -536,7 +536,47 @@ fn does_not_prove_for_token(token: &str) -> &'static [&'static str] {
     }
 }
 
+/// Where an operation ran relative to the header phase of its server request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// Same-instance intervals place the operation inside the header phase.
+    Inside,
+    /// Same-instance intervals place the operation after response headers were
+    /// produced, for example while the response body was streamed.
+    AfterHeaders,
+    /// Same-instance intervals show the operation crossing a header-phase
+    /// boundary, so only part of its duration belongs to the header phase.
+    Straddles,
+    /// No same-instance intervals place the operation.
+    Unknown,
+}
+
+/// Places `operation` relative to the header-phase interval of `server`
+/// (`alloy.server.time_to_headers`). Intervals from different or unnamed
+/// producer instances are never compared.
+fn placement(operation: &Observation, server: &Observation, slack_nanos: u64) -> Placement {
+    let (Some(inner), Some(outer)) = (operation.interval, server.interval) else {
+        return Placement::Unknown;
+    };
+    if !same_instance(operation, server) || inner.start_unix_nano > inner.end_unix_nano {
+        return Placement::Unknown;
+    }
+    if inner.within(&outer, slack_nanos) {
+        Placement::Inside
+    } else if inner.start_unix_nano.saturating_add(slack_nanos) >= outer.end_unix_nano {
+        Placement::AfterHeaders
+    } else {
+        Placement::Straddles
+    }
+}
+
 /// R002: one explicitly instrumented operation dominated time-to-headers.
+///
+/// Only operations placed inside the header phase, or whose placement is
+/// unknown, are compared. An operation the evidence places after headers, or
+/// across the headers boundary, cannot explain the time to headers with its
+/// whole duration, so it is never compared. Unknown placement yields at most
+/// `unknown` confidence.
 fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r002";
     for view in index.service.values() {
@@ -549,28 +589,30 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
         if server_ms < thresholds.dominance_min_ms {
             continue;
         }
-        let server_span = view.span_id();
-        // Candidate operations: descendants of this server span.
+        let Some(server_span) = view.span_id() else {
+            continue;
+        };
+        // Candidate operations: descendants of this server span. An operation
+        // placed inside the header phase outranks one whose placement is
+        // unknown; otherwise the longest wins.
         let mut best: Option<(&Observation, f64, bool)> = None;
         for operation in &index.operations {
-            let (Some(op_ms), Some(op_span), Some(server_span)) = (
-                operation.duration_ms(),
-                operation.span.as_ref(),
-                server_span,
-            ) else {
+            let Some(op_ms) = operation.duration_ms() else {
+                continue;
+            };
+            let Some(op_span) = operation.span.as_ref() else {
                 continue;
             };
             if !index.descends_from(&op_span.span_id, server_span) {
                 continue;
             }
-            let nested = match (operation.interval, server.interval) {
-                (Some(inner), Some(outer)) => {
-                    same_instance(operation, server)
-                        && inner.within(&outer, thresholds.nesting_slack_nanos)
-                }
-                _ => false,
+            let nested = match placement(operation, server, thresholds.nesting_slack_nanos) {
+                Placement::Inside => true,
+                Placement::Unknown => false,
+                Placement::AfterHeaders | Placement::Straddles => continue,
             };
-            if best.is_none_or(|(_, best_ms, _)| op_ms > best_ms) {
+            let rank = (nested, op_ms);
+            if best.is_none_or(|(_, best_ms, best_nested)| rank > (best_nested, best_ms)) {
                 best = Some((operation, op_ms, nested));
             }
         }
@@ -613,26 +655,41 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
         let is_db = operation.attr("operation.kind") == Some("db");
         let confidence = match (nested, index.verified(operation) && index.verified(server)) {
             (true, true) => Confidence::Confirmed,
-            _ => Confidence::Likely,
+            (true, false) => Confidence::Likely,
+            (false, _) => Confidence::Unknown,
+        };
+        let explanation = if nested {
+            format!(
+                "The application-observed operation {op_name:?} took {} of the {} the service spent before producing response headers ({:.0}%). Only the single largest operation is compared; overlapping operations are never added together.",
+                ms(op_ms),
+                ms(server_ms),
+                fraction * 100.0
+            )
+        } else {
+            format!(
+                "The application-observed operation {op_name:?} took {}, {:.0}% of the {} the service spent before producing response headers, but no same-instance intervals place it inside that phase. It may have run while the response body was produced, so it is not attributed to the time to headers. Only the single largest operation is compared; overlapping operations are never added together.",
+                ms(op_ms),
+                fraction * 100.0,
+                ms(server_ms)
+            )
         };
         let mut builder = FindingBuilder::new(
             "alloy.service.operation_dominates",
             RULE,
-            1,
+            2,
             "An instrumented operation dominated the service's time to response headers",
         )
         .scope(SourceScope::UpstreamApplication)
-        .severity(Severity::Warning)
+        .severity(if nested {
+            Severity::Warning
+        } else {
+            Severity::Info
+        })
         .owner(Owner::ApiOwner)
         .confidence(confidence)
         .cite(server, "alloy.server.time_to_headers", ms(server_ms))
         .cite(operation, "alloy.operation.duration", format!("{} ({op_name})", ms(op_ms)))
-        .explanation(format!(
-            "The application-observed operation {op_name:?} took {} of the {} the service spent before producing response headers ({:.0}%). Only the single largest operation is compared; overlapping operations are never added together.",
-            ms(op_ms),
-            ms(server_ms),
-            fraction * 100.0
-        ))
+        .explanation(explanation)
         .alternatives(&[
             "the dependency was slow",
             "the operation waited on a contended resource (pool, lock, or rate limit) that is inside the measured interval",
@@ -653,7 +710,13 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
             ]);
         }
         if !nested {
-            builder = builder.missing(&["same-instance intervals proving the operation is nested"]);
+            builder = builder
+                .does_not_prove(&[
+                    "that the operation ran before response headers were produced (no same-instance intervals place it in the header phase; it may have run during the response body)",
+                ])
+                .missing(&[
+                    "same-instance intervals placing the operation inside the header phase",
+                ]);
         }
         out.push(builder.build());
     }
