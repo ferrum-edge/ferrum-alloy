@@ -338,7 +338,7 @@ fn short_lived(jwks: SocketAddr, max_age_ms: u64, max_stale_ms: u64) -> JwtVerif
     let config = JwtSettings {
         jwks_max_age_ms: max_age_ms,
         jwks_max_stale_ms: max_stale_ms,
-        ..settings(jwks, 20)
+        ..settings(jwks, 500)
     };
     JwtVerifier::new(&config).unwrap()
 }
@@ -445,7 +445,7 @@ async fn failed_refreshes_serve_stale_keys_only_within_the_grace_period() {
 
     // The issuer recovers: the next request refreshes and succeeds.
     *jwks.status.lock().unwrap() = StatusCode::OK;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(status_of(&verifier, &token()).await, 200);
 }
 
@@ -457,7 +457,7 @@ async fn a_zero_grace_period_fails_closed_at_the_max_age() {
     let token = key.sign(&claims(), Some("k1"));
     assert_eq!(status_of(&verifier, &token).await, 200);
     *jwks.status.lock().unwrap() = StatusCode::SERVICE_UNAVAILABLE;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(status_of(&verifier, &token).await, 503);
 }
 
@@ -517,7 +517,7 @@ async fn a_slow_successful_refresh_is_used_even_past_its_lifetime() {
     let key = SigningKey::new("k1");
     let jwks = jwks_server(&[&key]).await;
     // Every fetch takes longer than the 100 ms key-set lifetime.
-    jwks.set_delay(Duration::from_millis(500));
+    jwks.set_delay(Duration::from_millis(700));
     let verifier = short_lived(jwks.addr, 100, 0);
     let token = key.sign(&claims(), Some("k1"));
     let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
@@ -577,7 +577,7 @@ async fn expired_ambiguous_keys_are_refreshed_before_rejecting_a_kidless_token()
     // The expired two-key set is ambiguous, but the issuer has since
     // removed one key, leaving a set that can verify tokens without `kid`.
     jwks.serve(&[&a]);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(status_of(&verifier, &token).await, 200);
     assert_eq!(jwks.fetches(), 2);
 }

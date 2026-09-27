@@ -500,9 +500,10 @@ impl JwtVerifier {
         let Ok(mut state) = self.inner.state.write() else {
             return;
         };
-        let abandoned = state.latest.as_ref().is_some_and(|latest| {
-            latest.borrow().is_none() && latest.has_changed().is_err()
-        });
+        let abandoned = state
+            .latest
+            .as_ref()
+            .is_some_and(|latest| latest.borrow().is_none() && latest.has_changed().is_err());
         if abandoned {
             state.last_attempt = None;
             state.latest = None;
