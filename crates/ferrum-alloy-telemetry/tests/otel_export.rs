@@ -264,8 +264,8 @@ async fn server_span_ends_after_the_body_not_at_headers() {
         .unwrap()
         .as_millis();
     assert!(
-        headers_after < Duration::from_millis(100),
-        "headers were immediate"
+        span_ms >= headers_after.as_millis() + 100,
+        "span ended at headers ({headers_after:?}) instead of after the body ({span_ms} ms)"
     );
     assert!(
         span_ms >= 140,
