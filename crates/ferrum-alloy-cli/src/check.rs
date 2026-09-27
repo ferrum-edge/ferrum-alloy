@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
-use ferrum_alloy::config::{AlloyConfig, ClientAuth, EdgeMode, Overrides, load_from};
+use ferrum_alloy::config::{AlloyConfig, ClientAuth, ConfigError, EdgeMode, Overrides, load_from};
 
 use crate::Format;
 use crate::error::{CliError, INVALID};
@@ -92,12 +92,21 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
     let (config, sources) = match load_from(args.config.as_deref(), env, &Overrides::default()) {
         Ok(loaded) => loaded,
         Err(error) => {
+            // `ConfigError` names files, keys, and locations, but never
+            // configuration values or source excerpts, which may be secrets.
             return match args.format {
                 Format::Json => {
-                    crate::print(&format!(
-                        "{:#}\n",
-                        serde_json::json!({ "valid": false, "errors": [error.to_string()] })
-                    ))?;
+                    let mut value =
+                        serde_json::json!({ "valid": false, "errors": [error.to_string()] });
+                    if let ConfigError::Syntax { line, column, .. } = &error
+                        && let Some(map) = value.as_object_mut()
+                    {
+                        map.insert(
+                            "location".into(),
+                            serde_json::json!({ "line": line, "column": column }),
+                        );
+                    }
+                    crate::print(&format!("{value:#}\n"))?;
                     Ok(ExitCode::from(INVALID))
                 }
                 Format::Human => Err(CliError::Invalid(error.to_string())),

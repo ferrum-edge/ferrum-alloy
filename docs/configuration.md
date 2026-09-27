@@ -35,6 +35,7 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 - `ferrum-alloy check --show-effective` and `AlloyConfig::redacted_toml()` never reveal them.
 - Each can be supplied as `FERRUM_ALLOY_<NAME>_FILE=/path`. Trailing `\n` and `\r` characters are trimmed.
 - Setting both `<NAME>` and `<NAME>_FILE` is an error.
+- Syntax and schema (type) errors never quote values. A TOML syntax error reports the file, line, column, and parser message, without the source excerpt. A schema error reports the key path and the expected type or variants, never the supplied value. Both apply to startup errors and to `ferrum-alloy check` in human and JSON output. For a syntax error, the JSON output also has `location.line` and `location.column`. Semantic validation errors, reported after parsing, may quote non-secret values, such as an unaccepted algorithm name or a bind address; they never quote secrets.
 
 ## Environment variables
 
@@ -77,6 +78,8 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_JWT_ISSUER` | `auth.jwt.issuer` | string |
 | `FERRUM_ALLOY_JWT_AUDIENCES` | `auth.jwt.audiences` | comma list |
 | `FERRUM_ALLOY_JWT_JWKS_URL` | `auth.jwt.jwks_url` | URL |
+| `FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS` | `auth.jwt.jwks_max_age_ms` | integer |
+| `FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS` | `auth.jwt.jwks_max_stale_ms` | integer |
 | `FERRUM_ALLOY_CORS_ALLOWED_ORIGINS` | `cors.allowed_origins` | comma list |
 
 A test fails when a variable in `config::ENV_VARS` is missing from this table.
@@ -262,10 +265,16 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 | `audiences` | required | Accepted `aud` values |
 | `algorithms` | `["RS256"]` | Any of `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `EdDSA`. `none` and HMAC are rejected. |
 | `jwks_url` | required | `https`, or `http` to loopback only |
-| `jwks_min_refresh_interval_ms` | `60000` | Refresh rate limit (also applied for unknown `kid`s) |
+| `jwks_min_refresh_interval_ms` | `60000` | Rate limit for JWKS fetches, whatever triggers them (expiry or unknown `kid`). Also the shortest key-set lifetime. |
+| `jwks_max_age_ms` | `300000` | Longest time a fetched key set is trusted before it is revalidated, even for known `kid`s. Must be greater than zero, at least `jwks_min_refresh_interval_ms`, and at most 24 hours (`86400000`). |
+| `jwks_max_stale_ms` | `300000` | How long an expired key set keeps verifying known `kid`s while it is revalidated in the background or while refreshes fail. After that, requests get `503 auth-unavailable`. `0` fails closed as soon as the key set expires. At most 24 hours (`86400000`). |
 | `jwks_max_bytes` | `262144` | JWKS response size bound |
 | `jwks_timeout_ms` | `5000` | JWKS request timeout |
 | `leeway_seconds` | `30` | Clock skew for `exp`/`nbf` |
+
+Key-set lifetime: a JWKS response's `Cache-Control: max-age` (minus its `Age` header) sets the lifetime, bounded below by `jwks_min_refresh_interval_ms` and above by `jwks_max_age_ms`. `no-cache` and `no-store` count as `max-age=0`. Without `max-age`, the lifetime is `jwks_max_age_ms`. The lifetime is measured from when the fetch started. A key removed from the JWKS stops verifying within `jwks_max_age_ms` of the last successful fetch while the JWKS is reachable (plus one fetch, bounded by `jwks_timeout_ms`, when `jwks_max_stale_ms` is nonzero), and within `jwks_max_age_ms + jwks_max_stale_ms` in the worst case.
+
+Refreshes never hold up requests that can be answered from the cache. While the key set is stale, a request with a known `kid` verifies against it at once and starts a background refresh. Requests wait for a refresh only when the key set has expired, has never been fetched, or lacks the token's `kid`. A refresh runs in its own task, so a request that is cancelled while waiting does not cancel it. Keys from a successful refresh are used even if the fetch took longer than their lifetime.
 
 ### `[http_client]` (feature `http-client`)
 

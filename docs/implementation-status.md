@@ -8,7 +8,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 
 | Area | What exists | Evidence |
 |---|---|---|
-| Configuration | Typed, strict TOML and `FERRUM_ALLOY_*` environment variables, builder overrides, documented precedence, `Secret` redaction, feature-aware validation | `crates/ferrum-alloy/tests/config.rs`, `ferrum-alloy check` CLI tests |
+| Configuration | Typed, strict TOML and `FERRUM_ALLOY_*` environment variables, builder overrides, documented precedence, `Secret` redaction, syntax and schema errors that never quote configuration values, feature-aware validation | `crates/ferrum-alloy/tests/config.rs`, `ferrum-alloy check` CLI tests |
 | Problem Details | RFC 9457 bodies for framework errors (400, 404, 405, 413, 415, 422, 503 overload/timeout/draining, 403 gateway-required, 401/403/503 auth), Problem-returning `Json`, `Path`, `Query`, `ValidJson` extractors. Application bodies are not rewritten. | `app_core.rs` |
 | Health | Liveness, cached single-flight readiness with per-check timeouts, draining state, detailed health behind the management token | `app_core.rs` |
 | Limits | Body, header, connection, and admission limits; first-request deadline on every connection and protocol, on both listeners; time-to-headers deadline that never cuts streams | `app_core.rs`, `server_hardening.rs` |
@@ -23,11 +23,11 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 | Generated Edge configuration | Validated by the real `ferrum-edge validate` for both TLS and plain fixtures | CI job `edge-config`; passed locally |
 | PostgreSQL (`postgres`) | SQLx pool, readiness check, instrumented pool wait, migrations, scheme and runtime checks | `postgres.rs`: the migrations test passed locally against Postgres 17. Fault-injection tests run only in the CI `postgres` job (not run locally): an exhausted one-connection pool records `alloy.db.pool_wait_ms` apart from the operation duration and fails with `PoolTimedOut` within `acquire_timeout_ms`; a `pg_sleep` call behind a real request dominates time to headers, and the imported trace yields `alloy.service.operation_dominates` (r002, placed in the header phase, `likely`) whose `does_not_prove` names database server execution time; `pg_terminate_backend` mid-query fails the call as an error and the pool replaces the connection without losing its permit. The database tests are ignored without `FERRUM_ALLOY_TEST_DATABASE_URL` |
 | OpenAPI (`openapi`) | utoipa document serving (management by default, public opt-in), CLI export with drift detection | `optional_layers.rs`, CLI tests |
-| JWT (`jwt`) | JWKS verification, fail-closed policy, single-flight rate-limited refresh, `503` on JWKS outage, `Authorize` | `jwt.rs` (8 tests) |
+| JWT (`jwt`) | JWKS verification, fail-closed policy, single-flight rate-limited refresh, bounded key-set lifetime (`Cache-Control` aware) with revalidation of known `kid`s, bounded stale-if-error window, `503` on JWKS outage, `Authorize` | `jwt.rs` (17 tests) |
 | HTTP client (`http-client`) | Instrumented CLIENT spans, allow-listed trace propagation, same-origin redirects only, no automatic retries | `http_client.rs` (6 tests; request timeouts and refused connections use separate clients, and a refusal must surface as `ConnectionRefused` on every platform) |
 | CORS, compression | Off by default; compression skips streams, `no-store`, and `set-cookie` responses | `optional_layers.rs` |
 | Diagnostics | Versioned report schema (JSON Schema in `contracts/diagnostics/`), bounded offline parser, rules r001–r008, OTLP/JSON import, deterministic rendering | `ferrum-alloy-diagnostics/tests/*` including `schema_parity.rs`. Rules r005 (streaming) and r008 (incomplete body) have no test or fixture yet. |
-| CLI | `new`, `check`, `openapi export`, `edge export`, `diagnose`, `version` with stable exit codes | `ferrum-alloy-cli/tests/cli.rs` (13 tests); generator test (ignored by default) passed locally, including `cargo test`, `clippy -D warnings`, and `fmt --check` in generated projects |
+| CLI | `new`, `check`, `openapi export`, `edge export`, `diagnose`, `version` with stable exit codes | `ferrum-alloy-cli/tests/cli.rs` (14 tests); generator test (ignored by default) passed locally, including `cargo test`, `clippy -D warnings`, and `fmt --check` in generated projects |
 | Existing-Axum adoption | `ferrum-alloy-telemetry` alone as a Tower layer | `examples/existing-axum` test |
 
 ## Partial

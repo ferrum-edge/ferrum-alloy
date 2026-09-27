@@ -221,6 +221,49 @@ fn check_never_prints_secrets() {
 }
 
 #[test]
+fn check_never_prints_secrets_from_malformed_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text, secret) in [
+        (
+            "token.toml",
+            "[management]\ntoken = \"SYNTHETIC-AUDIT-TOKEN-0123456789ABCDEF\" extra\n",
+            "SYNTHETIC-AUDIT-TOKEN",
+        ),
+        (
+            "database.toml",
+            "[database]\nurl = \"postgres://u:SYNTHETIC-PASSWORD@db/x\" extra\n",
+            "SYNTHETIC-PASSWORD",
+        ),
+        (
+            "typed.toml",
+            "[database]\nmax_connections = \"postgres://u:SYNTHETIC-TYPED@db/x\"\n",
+            "SYNTHETIC-TYPED",
+        ),
+    ] {
+        let path = write(dir.path(), name, text);
+        for fmt in ["human", "json"] {
+            let output = run(&["check", "--config", &path, "--format", fmt]);
+            assert_eq!(code(&output), 3, "{name} {fmt}");
+            let printed = format!("{}{}", stdout(&output), stderr(&output));
+            assert!(!printed.contains(secret), "{name} {fmt}: {printed}");
+        }
+    }
+
+    // Syntax errors keep the file and a useful location in both formats.
+    let path = write(dir.path(), "bad.toml", "[server]\nbind = \"x\" extra\n");
+    let message = stderr(&run(&["check", "--config", &path]));
+    assert!(message.contains("bad.toml"), "{message}");
+    assert!(message.contains("at line 2, column "), "{message}");
+    let json = run(&["check", "--config", &path, "--format", "json"]);
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["valid"], false);
+    assert!(value["errors"][0].as_str().unwrap().contains("bad.toml"));
+    assert_eq!(value["location"]["line"], 2);
+    let column = value["location"]["column"].as_u64().unwrap();
+    assert!(column > 1, "{column}");
+}
+
+#[test]
 fn edge_export_writes_reviewable_artifacts_without_overwriting() {
     let manifest = fixture("manifests/orders-api.toml");
     let output = run(&["edge", "export", "--manifest", &manifest]);

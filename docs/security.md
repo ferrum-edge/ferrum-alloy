@@ -89,6 +89,13 @@ Edge v0.9.7 reserves only `x-consumer-username` and `x-consumer-custom-id` on th
 
 `management.token` and `database.url` are `Secret`s and are never printed by `Debug`, `Display`, serialization, `ferrum-alloy check --show-effective`, or error messages. For example, an invalid database URL error does not echo the URL. `_FILE` variants read secrets from files. Unknown `FERRUM_ALLOY_*` variables and unknown keys are errors.
 
+Parsing fails before values reach `Secret`, so syntax and schema (type) errors never quote configuration content:
+
+- A TOML syntax error keeps the file, line, column, and the parser's own message. The source line excerpt that `toml` prints is dropped, because the malformed line may hold a token or database password.
+- A schema error keeps the key path and the expected type or variants. The supplied value (`invalid type: string "..."`, `unknown variant ...`) is replaced with `(value redacted)`. Unknown keys are named only when they are short bare keys; any other key, such as a quoted URL or a bare key over 32 characters that mixes letters and digits, is shown as `(key redacted)`. Messages that match no known shape become a generic "does not match the expected type or format" with the key path.
+- `ferrum-alloy check` prints these messages unchanged in human and JSON output, and startup returns the same `ConfigError`.
+- Semantic validation errors, reported after parsing, may quote non-secret values, such as an unaccepted algorithm name or a bind address. They never quote `Secret` values.
+
 ## TLS
 
 rustls with the `ring` provider, passed explicitly. Alloy never installs a process-wide crypto provider. OpenSSL, native-tls, and aws-lc are banned in `deny.toml`. Client-certificate verification uses rustls' WebPKI verifier. **Certificate revocation (CRL/OCSP) is not checked**, so rotate short-lived certificates (SVIDs) instead.
@@ -99,8 +106,10 @@ rustls with the `ring` provider, passed explicitly. Alloy never installs a proce
 - `iss`, `aud`, and `exp` are required; `nbf` is checked when present; leeway is configurable.
 - Keys come only from the configured JWKS URL: `https`, or `http` to loopback. Token-supplied `jku`, `x5u`, and embedded `jwk` are never used.
 - A token without `kid` is accepted only if the key set holds exactly one signing key.
-- JWKS fetches never follow redirects, are bounded in time and size, and are single-flight. Refreshes, including those triggered by unknown `kid`s, happen at most once per `jwks_min_refresh_interval_ms`.
-- A JWKS outage returns `503 auth-unavailable`.
+- JWKS fetches never follow redirects, are bounded in time and size, and are single-flight. Refreshes, including those triggered by unknown `kid`s or by expiry, happen at most once per `jwks_min_refresh_interval_ms`. Callers that wait behind a refresh use its result instead of fetching again. A refresh runs in its own task, so a caller that stops waiting never cancels it.
+- A fetched key set has a bounded lifetime: `Cache-Control: max-age` from the JWKS response, bounded by `jwks_min_refresh_interval_ms` and `jwks_max_age_ms` (default 5 minutes, at most 24 hours). After that, the set is revalidated even when the token's `kid` is cached. Within `jwks_max_stale_ms`, requests with a known `kid` verify against the stale set while it is revalidated in the background; after that, requests wait for the refresh. Keys missing from the refreshed set stop verifying, and a key replaced under the same `kid` is replaced in the cache.
+- If a refresh fails, the expired set keeps verifying for at most `jwks_max_stale_ms` (default 5 minutes, at most 24 hours), with a retry at most once per `jwks_min_refresh_interval_ms`. After that, verification fails closed with `503 auth-unavailable` until a refresh succeeds. This trades a bounded window, during which a key retired while the JWKS was unreachable may still verify, for availability during short JWKS outages. Set `jwks_max_stale_ms = 0` to fail closed as soon as the set expires.
+- A JWKS outage with no usable keys returns `503 auth-unavailable`.
 - Forwarded identity headers never bypass token verification.
 - **Advisory exception:** RUSTSEC-2023-0071 (`rsa`, via jsonwebtoken's `rust_crypto` backend) is a timing side channel in RSA private-key operations. Alloy only verifies signatures with public keys. The exception is time-boxed in `deny.toml` (expires 2026-12-26).
 
@@ -145,9 +154,10 @@ The generated CI pins `actions/checkout` by commit.
 | A collector outage slows or fails requests | Bounded queue; drop and count | `collector_failures_never_fail_requests_and_are_counted`, `a_full_queue_drops_spans_instead_of_blocking_requests` |
 | Health floods probe the database | Cached, single-flight readiness | `readiness_checks_are_cached_and_single_flight` |
 | Management exposed without auth | Validation refuses a non-loopback bind without a token | `unsafe_combinations_fail_validation` |
-| JWT algorithm confusion, `alg=none`, key-refresh floods | Allowlist; JWKS-only keys; rate-limited refresh | `algorithm_confusion_and_unsigned_tokens_are_rejected`, `unknown_kids_refresh_at_most_once_per_interval` |
+| JWT algorithm confusion, `alg=none`, key-refresh floods | Allowlist; JWKS-only keys; rate-limited refresh | `algorithm_confusion_and_unsigned_tokens_are_rejected`, `unknown_kids_refresh_at_most_once_per_interval`, `concurrent_requests_on_an_expired_set_refresh_once` |
+| A retired or compromised signing key keeps verifying | Bounded key-set lifetime with revalidation of known `kid`s; bounded stale window, then fail closed | `removed_keys_stop_verifying_after_the_max_age`, `a_replaced_key_with_the_same_kid_is_picked_up_after_the_max_age`, `failed_refreshes_serve_stale_keys_only_within_the_grace_period` |
 | Hostile diagnostic files | Bounds, schema checks, provenance downgrade, mutation testing | `crates/ferrum-alloy-diagnostics/tests/bounds_and_hostile_input.rs` |
-| Secrets in logs or output | `Secret` redaction; sanitized errors | `secrets_are_never_printed`, `check_never_prints_secrets`, `invalid_urls_fail_without_revealing_the_secret` |
+| Secrets in logs or output | `Secret` redaction; sanitized errors; configuration errors without source excerpts or values | `secrets_are_never_printed`, `check_never_prints_secrets`, `invalid_urls_fail_without_revealing_the_secret`, `syntax_errors_report_the_location_without_the_source_line`, `schema_errors_name_keys_but_never_values`, `check_never_prints_secrets_from_malformed_files` |
 
 ## Known gaps
 
