@@ -211,9 +211,8 @@ fn escapes_control_characters_quotes_and_backslashes() {
     let line = line_with(
         "\u{0}\u{1}\u{8}\t\n\u{b}\u{c}\r\u{1b}\u{1f} \"\\/\u{7f}é🚀\u{85}\u{2028}\u{2029}",
     );
-    let expected =
-        r#""v":"\u0000\u0001\b\t\n\u000b\f\r\u001b\u001f \"\\/"#.to_owned()
-            + "\u{7f}é🚀\\u0085\\u2028\\u2029\"";
+    let expected = r#""v":"\u0000\u0001\b\t\n\u000b\f\r\u001b\u001f \"\\/"#.to_owned()
+        + "\u{7f}é🚀\\u0085\\u2028\\u2029\"";
     assert_eq!(line.matches(&expected).count(), 2, "{line}");
     // The only raw newline ends the line.
     assert!(line.ends_with("}}\n"), "{line}");
@@ -260,7 +259,7 @@ fn recording_debug_fields_allows_reentrant_events() {
     tracing::subscriber::with_default(subscriber, || {
         let span = tracing::info_span!(target: "t", "s", field = EmptyField);
         let _entered = span.enter();
-        span.record("field", &ReentrantDebug);
+        span.record("field", tracing::field::debug(ReentrantDebug));
         tracing::info!(target: "t", "outer");
     });
     let output = alloy.text();

@@ -293,10 +293,7 @@ impl SpanFields {
     /// Merges fields rendered without holding the span extensions lock.
     fn merge(&mut self, other: SpanFields) {
         for entry in &other.entries {
-            let value = other
-                .values
-                .get(entry.start..entry.end)
-                .unwrap_or_default();
+            let value = other.values.get(entry.start..entry.end).unwrap_or_default();
             self.set(entry.name, |buf| {
                 buf.extend_from_slice(value);
                 Ok(())
