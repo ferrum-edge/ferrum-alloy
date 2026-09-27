@@ -19,7 +19,6 @@ use rustls::server::danger::ClientCertVerifier;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer, UnixTime};
 use tokio_rustls::TlsAcceptor;
-use x509_parser::oid_registry::OID_X509_EXT_ISSUER_DISTRIBUTION_POINT;
 use x509_parser::time::ASN1Time;
 
 use crate::config::{ClientAuth, CrlDepth, CrlExpiration, CrlUnknownStatus, TlsSettings};
@@ -139,7 +138,7 @@ pub(crate) fn client_verifier(
         }
         crls.extend(file);
     }
-    check_one_crl_per_scope(&summaries)?;
+    check_one_crl_per_issuer(&summaries)?;
     let now = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
     if settings.client_crl_expiration == CrlExpiration::Enforce {
         check_not_expired(&summaries, now)?;
@@ -190,7 +189,6 @@ fn revocation_lists(path: &Path) -> Result<Vec<CertificateRevocationListDer<'sta
 struct CrlSummary<'a> {
     path: &'a Path,
     issuer: Vec<u8>,
-    distribution_point: Option<Vec<u8>>,
     next_update: Option<ASN1Time>,
 }
 
@@ -198,51 +196,35 @@ impl<'a> CrlSummary<'a> {
     fn parse(path: &'a Path, crl: &CertificateRevocationListDer<'_>) -> Result<Self, TlsError> {
         let (_, parsed) = x509_parser::parse_x509_crl(crl.as_ref())
             .map_err(|_| pem_error(CRL, path, "the CRL cannot be parsed"))?;
-        let distribution_point = parsed
-            .extensions()
-            .iter()
-            .find(|extension| extension.oid == OID_X509_EXT_ISSUER_DISTRIBUTION_POINT)
-            .map(|extension| extension.value.to_vec());
         Ok(Self {
             path,
             issuer: parsed.issuer().as_raw().to_vec(),
-            distribution_point,
             next_update: parsed.next_update(),
         })
     }
-
-    /// Whether both CRLs could be the CRL consulted for one certificate.
-    fn overlaps(&self, other: &Self) -> bool {
-        if self.issuer != other.issuer {
-            return false;
-        }
-        match (&self.distribution_point, &other.distribution_point) {
-            (Some(ours), Some(theirs)) => ours == theirs,
-            // A CRL without an issuing distribution point covers every
-            // certificate from its issuer.
-            _ => true,
-        }
-    }
 }
 
-/// Rejects two CRLs that cover the same certificates. The verifier consults
-/// only the first CRL that covers a certificate, so a revocation listed only
-/// in a later one (a newer CRL added during rotation, say) would be missed.
-fn check_one_crl_per_scope(summaries: &[CrlSummary<'_>]) -> Result<(), TlsError> {
+/// Rejects two CRLs from the same issuer. The verifier consults only the
+/// first CRL whose issuer matches a certificate, so a revocation listed only
+/// in a later one (a newer CRL added during rotation, or another partition)
+/// would be missed. Partitioned CRLs are refused too: a partition also
+/// covers certificates without a CRL distribution point, and partitions
+/// can overlap in ways their issuing distribution points do not show.
+fn check_one_crl_per_issuer(summaries: &[CrlSummary<'_>]) -> Result<(), TlsError> {
     for (index, later) in summaries.iter().enumerate() {
         for earlier in &summaries[..index] {
-            if earlier.overlaps(later) {
-                return Err(overlap_error(earlier.path, later.path));
+            if earlier.issuer == later.issuer {
+                return Err(same_issuer_error(earlier.path, later.path));
             }
         }
     }
     Ok(())
 }
 
-fn overlap_error(earlier: &Path, later: &Path) -> TlsError {
-    let message = "two CRLs from the same issuer cover the same certificates, and only the \
-                   first would be consulted; configure one CRL per issuer, or per issuing \
-                   distribution point";
+fn same_issuer_error(earlier: &Path, later: &Path) -> TlsError {
+    let message = "two CRLs have the same issuer, and only the first would be consulted; \
+                   provide exactly one full CRL per issuing CA (combine partitioned CRLs \
+                   into one)";
     if earlier == later {
         return pem_error(CRL, later, message);
     }
@@ -258,7 +240,11 @@ fn overlap_error(earlier: &Path, later: &Path) -> TlsError {
 fn check_not_expired(summaries: &[CrlSummary<'_>], now: i64) -> Result<(), TlsError> {
     for summary in summaries {
         let Some(next_update) = summary.next_update else {
-            return Err(pem_error(CRL, summary.path, "the CRL has no nextUpdate time"));
+            return Err(pem_error(
+                CRL,
+                summary.path,
+                "the CRL has no nextUpdate time",
+            ));
         };
         if next_update.timestamp() <= now {
             return Err(pem_error(

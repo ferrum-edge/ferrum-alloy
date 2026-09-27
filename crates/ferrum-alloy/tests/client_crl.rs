@@ -333,20 +333,31 @@ fn one_bad_file_among_several_is_named() {
 }
 
 #[test]
-fn crls_that_cover_the_same_certificates_fail_startup() {
+fn two_crls_from_one_issuer_fail_startup() {
     let pki = Pki::new();
     let full_pem = pki.ca.crl(&[]).pem().unwrap();
     let newer_pem = pki.ca.crl(&[]).pem().unwrap();
     let full = pki.file("full.crl.pem", &full_pem);
     let newer = pki.file("newer.crl.pem", &newer_pem);
-    let partition = pki.file(
-        "partition.crl.pem",
+    let partition_a = pki.file(
+        "a.crl.pem",
         pki.ca.partition_crl("http://crl.test/a").pem().unwrap(),
     );
+    let partition_b = pki.file(
+        "b.crl.pem",
+        pki.ca.partition_crl("http://crl.test/b").pem().unwrap(),
+    );
 
-    // Only the first CRL that covers a certificate is consulted, so a
-    // revocation listed only in the other one would be missed.
-    for (earlier, later) in [(&full, &newer), (&full, &partition), (&partition, &full)] {
+    // Only the first CRL whose issuer matches is consulted, so a revocation
+    // listed only in the other one would be missed. Partitions are refused
+    // too: each also covers certificates without a CRL distribution point.
+    let pairs = [
+        (&full, &newer),
+        (&full, &partition_a),
+        (&partition_a, &full),
+        (&partition_a, &partition_b),
+    ];
+    for (earlier, later) in pairs {
         let error = startup_error(pki.config(vec![earlier.clone(), later.clone()])).to_string();
         assert!(error.contains("same issuer"), "{error}");
         assert!(error.contains(&earlier.display().to_string()), "{error}");
@@ -360,16 +371,12 @@ fn crls_that_cover_the_same_certificates_fail_startup() {
 }
 
 #[tokio::test]
-async fn crls_for_different_partitions_of_one_issuer_are_accepted() {
+async fn crls_from_different_issuers_are_accepted() {
     let pki = Pki::new();
-    let first = pki.file(
-        "a.crl.pem",
-        pki.ca.partition_crl("http://crl.test/a").pem().unwrap(),
-    );
-    let second = pki.file(
-        "b.crl.pem",
-        pki.ca.partition_crl("http://crl.test/b").pem().unwrap(),
-    );
-    let server = support::start(app(), pki.config(vec![first, second])).await;
+    let intermediate = pki.ca.intermediate("crl-test-intermediate");
+    let root_crl = pki.file("root.crl.pem", pki.ca.crl(&[]).pem().unwrap());
+    let intermediate_pem = intermediate.crl(&[]).pem().unwrap();
+    let intermediate_crl = pki.file("intermediate.crl.pem", intermediate_pem);
+    let server = support::start(app(), pki.config(vec![root_crl, intermediate_crl])).await;
     server.shutdown().await.unwrap();
 }
