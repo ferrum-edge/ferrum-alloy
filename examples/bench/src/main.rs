@@ -22,6 +22,7 @@ use axum::Router;
 use axum::routing::get;
 use bytes::Bytes;
 use ferrum_alloy::config::AlloyConfig;
+use ferrum_alloy::telemetry::json::JsonLayer;
 use ferrum_alloy::telemetry::metrics::Metrics;
 use ferrum_alloy::telemetry::otel::{OtelPipeline, OtlpConfig, ServiceResource};
 use ferrum_alloy::{AlloyApp, TelemetryInit};
@@ -41,8 +42,11 @@ enum Scenario {
     Plain,
     /// `AlloyApp` defaults, telemetry layer active, no subscriber output.
     Alloy,
-    /// As `Alloy`, plus JSON access logs written to a sink.
+    /// As `Alloy`, plus JSON access logs written to a sink by Alloy's layer.
     AlloyLogs,
+    /// As `AlloyLogs`, formatted by tracing-subscriber's JSON `fmt` layer,
+    /// which Alloy used before its own layer.
+    AlloyLogsFmt,
     /// OpenTelemetry bridge, every request sampled, exporter discards batches.
     OtelSampled,
     /// OpenTelemetry bridge with sampling ratio 0.
@@ -57,6 +61,7 @@ impl Scenario {
             "plain" => Self::Plain,
             "alloy" => Self::Alloy,
             "alloy-logs" => Self::AlloyLogs,
+            "alloy-logs-fmt" => Self::AlloyLogsFmt,
             "otel-sampled" => Self::OtelSampled,
             "otel-unsampled" => Self::OtelUnsampled,
             "otel-unreachable" => Self::OtelUnreachable,
@@ -210,8 +215,17 @@ fn start_server(
                     );
                 }
                 (None, Scenario::AlloyLogs) => {
-                    // Same formatting as `ferrum_alloy::telemetry::init::fmt_layer`
-                    // for `LogFormat::Json`, writing to a sink.
+                    // `ferrum_alloy::telemetry::init::fmt_layer` for
+                    // `LogFormat::Json`, writing to a sink.
+                    let layer = JsonLayer::new()
+                        .with_writer(std::io::sink)
+                        .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
+                    let _ = tracing::subscriber::set_global_default(
+                        tracing_subscriber::registry().with(layer),
+                    );
+                }
+                (None, Scenario::AlloyLogsFmt) => {
+                    // The same line layout from tracing-subscriber's formatter.
                     let layer = tracing_subscriber::fmt::layer()
                         .with_target(true)
                         .json()

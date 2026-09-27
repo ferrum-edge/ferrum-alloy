@@ -173,6 +173,19 @@ Each section below shows a key, its default, and its meaning.
 | `filter` | `RUST_LOG`, else `info` | `EnvFilter` directives |
 | `ansi` | `false` | Colors for text formats |
 
+With `json`, each event is one line:
+
+```text
+{"timestamp":"2026-09-27T12:00:00.000000Z","level":"INFO",<event fields>,"target":"ferrum_alloy::access","span":{<span fields>,"name":"http.server.request"}}
+```
+
+- Event fields, including `message`, are flattened into the object in the order the event declares them.
+- `span` is the event's parent span, or else the current span, and is omitted when there is neither. Its fields are sorted by name, followed by `name`, the span name. Fields that were never recorded are absent.
+- The timestamp is RFC 3339 in UTC with microseconds.
+- Strings use JSON escapes: `\"`, `\\`, `\b`, `\t`, `\n`, `\f`, `\r`, and `\u00xx` for other control characters; other text, including non-ASCII, is written as UTF-8. Byte-slice fields are written as `"[ff 00]"` on events and `[255,0]` on spans. Non-finite floats are `null`.
+
+This is the layout tracing-subscriber's JSON formatter produces with flattened events, the current span, and no span list, which Alloy used before it had its own JSON layer. The layer writes the same bytes, with two exceptions: a float span field is written from the recorded value, where tracing-subscriber's re-parse could change its last digit; and a span field whose `Debug` implementation fails is left out instead of panicking. `crates/ferrum-alloy-telemetry/tests/snapshots/json-access-log.expected.txt` pins the access-event line.
+
 ### `[telemetry]`
 
 | Key | Default | Meaning |
