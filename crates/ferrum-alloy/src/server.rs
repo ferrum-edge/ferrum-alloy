@@ -9,9 +9,13 @@
 //! connection slot. After that, the idle timeout bounds the time a
 //! connection may spend with no request in flight, so a peer that sends one
 //! cheap request and then only answers HTTP/2 keep-alive pings cannot keep
-//! its slot either. An established HTTP/2 connection is sent `GOAWAY` at
-//! either deadline, so a client can retry elsewhere, and is closed shortly
-//! after.
+//! its slot either. A response the peer will not take counts as in flight,
+//! so the write stall timeout bounds the time a connection may go without
+//! writing any response data while a response waits to be written: a peer
+//! that withholds HTTP/2 `WINDOW_UPDATE` or keeps a zero TCP receive window
+//! cannot keep its slot. An established HTTP/2 connection is sent `GOAWAY`
+//! at any of these deadlines, so a client can retry elsewhere, and is closed
+//! shortly after.
 //!
 //! On shutdown it stops accepting, abandons unfinished TLS handshakes, asks
 //! every connection to finish (HTTP/1.1 `Connection: close` after the current
@@ -77,6 +81,9 @@ pub struct ServerStats {
     /// HTTP/2 stream tasks (a request's handler and response body) still
     /// running at the end of the drain budget, then cancelled.
     pub force_closed_streams: AtomicU64,
+    /// Connections closed because a response waiting to be written got no
+    /// data written for the write stall timeout.
+    pub write_stall_timeouts: AtomicU64,
 }
 
 impl ServerStats {
@@ -126,6 +133,12 @@ impl ServerStats {
                 "HTTP/2 stream tasks cancelled after the drain budget.",
                 &self.force_closed_streams,
             ),
+            (
+                "ferrum_alloy_write_stall_timeouts_total",
+                "counter",
+                "Connections closed with a response unwritten for the write stall timeout.",
+                &self.write_stall_timeouts,
+            ),
         ] {
             out.push_str(&format!(
                 "# HELP {name} {help}\n# TYPE {name} {kind}\n{name}{{listener=\"{listener}\"}} {}\n",
@@ -171,6 +184,7 @@ pub(crate) struct ServeOptions {
     pub(crate) http2_max_concurrent_streams: u32,
     pub(crate) header_read_timeout: Duration,
     pub(crate) idle_timeout: Duration,
+    pub(crate) write_stall_timeout: Duration,
     pub(crate) drain_timeout: Duration,
     #[cfg(feature = "tls")]
     pub(crate) tls: Option<crate::tls::TlsServer>,
@@ -432,7 +446,7 @@ async fn handle(
 }
 
 /// Request activity on one connection, shared by the connection task with
-/// the request futures and response bodies it produces.
+/// its transport and the request futures and response bodies it produces.
 #[derive(Default)]
 struct Activity {
     /// Requests received so far.
@@ -441,6 +455,13 @@ struct Activity {
     in_flight: AtomicUsize,
     /// Notified when `in_flight` drops to zero.
     idle: Notify,
+    /// Responses whose body produced data that the connection has not come
+    /// back for, because it cannot send that data yet.
+    unsent: AtomicUsize,
+    /// Response data bytes written to the transport so far.
+    written: AtomicU64,
+    /// Whether the last write to the transport could not complete.
+    write_blocked: AtomicBool,
 }
 
 impl Activity {
@@ -453,24 +474,58 @@ impl Activity {
     fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed)
     }
+
+    fn written(&self) -> u64 {
+        self.written.load(Ordering::Relaxed)
+    }
+
+    /// Whether response data is waiting for the transport: the transport
+    /// cannot take a write, or a response body has produced data that the
+    /// connection cannot send yet (HTTP/2 flow control).
+    fn response_pending(&self) -> bool {
+        self.write_blocked.load(Ordering::Relaxed) || self.unsent.load(Ordering::Relaxed) > 0
+    }
 }
 
 /// One request in flight, from the service call until its response body ends
 /// or is dropped, or until the request future is dropped unfinished.
-struct InFlight(Arc<Activity>);
+struct InFlight {
+    activity: Arc<Activity>,
+    /// Whether this response is counted in `unsent`.
+    unsent: bool,
+}
 
 impl InFlight {
     fn start(activity: &Arc<Activity>) -> Self {
         activity.in_flight.fetch_add(1, Ordering::Relaxed);
         activity.started.fetch_add(1, Ordering::Relaxed);
-        Self(Arc::clone(activity))
+        Self {
+            activity: Arc::clone(activity),
+            unsent: false,
+        }
+    }
+
+    /// Records whether the response body last produced data (`true`) or is
+    /// waiting for the application or has ended (`false`). The shared count
+    /// changes only when this does, so a body that always has data ready
+    /// touches it once.
+    fn set_unsent(&mut self, unsent: bool) {
+        if self.unsent != unsent {
+            self.unsent = unsent;
+            if unsent {
+                self.activity.unsent.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.activity.unsent.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        if self.0.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.0.idle.notify_one();
+        self.set_unsent(false);
+        if self.activity.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.activity.idle.notify_one();
         }
     }
 }
@@ -526,7 +581,8 @@ where
 
 pin_project! {
     /// A response body that keeps its request in flight until it ends or is
-    /// dropped.
+    /// dropped. Between producing data and being polled again, it counts as
+    /// unsent: Hyper polls a body again only once it can take more data.
     struct TrackedBody<B> {
         #[pin]
         inner: B,
@@ -546,12 +602,17 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
         let this = self.project();
-        let frame = ready!(this.inner.poll_frame(cx));
-        if frame.is_none() {
+        let frame = this.inner.poll_frame(cx);
+        match &frame {
             // The response has ended, even if Hyper holds on to the body.
-            *this.in_flight = None;
+            Poll::Ready(None) => *this.in_flight = None,
+            frame => {
+                if let Some(in_flight) = this.in_flight {
+                    in_flight.set_unsent(matches!(frame, Poll::Ready(Some(Ok(_)))));
+                }
+            }
         }
-        Poll::Ready(frame)
+        frame
     }
 
     fn is_end_stream(&self) -> bool {
@@ -563,7 +624,203 @@ where
     }
 }
 
-/// Where a connection is in closing itself for inactivity.
+/// The length of an HTTP/2 frame header.
+const FRAME_HEADER_LEN: usize = 9;
+/// The HTTP/2 DATA frame type.
+const DATA_FRAME: u8 = 0x0;
+
+/// What a connection writes, as far as response progress is concerned.
+enum Output {
+    /// Nothing written yet.
+    Unknown,
+    /// HTTP/1: every byte written belongs to a response.
+    Http1,
+    /// HTTP/2: only DATA frame payloads are response data. Other frames, such
+    /// as PING and SETTINGS acknowledgements, are written whenever the peer
+    /// asks for them, so they are not progress.
+    Http2(Frames),
+}
+
+impl Output {
+    /// The response data bytes in `buf`, the next bytes written.
+    fn response_bytes(&mut self, buf: &[u8]) -> u64 {
+        if let Output::Unknown = self {
+            // An HTTP/1 connection starts with a status line, `HTTP/1.x`. An
+            // HTTP/2 server starts with a SETTINGS frame, too short for the
+            // first byte of its length to be `H`.
+            *self = match buf.first() {
+                None => return 0,
+                Some(b'H') => Output::Http1,
+                Some(_) => Output::Http2(Frames::default()),
+            };
+        }
+        match self {
+            Output::Unknown => 0,
+            Output::Http1 => buf.len() as u64,
+            Output::Http2(frames) => frames.data_bytes(buf),
+        }
+    }
+}
+
+/// Follows HTTP/2 frame boundaries through the bytes a connection writes.
+#[derive(Default)]
+struct Frames {
+    /// The part of the next frame header written so far.
+    header: [u8; FRAME_HEADER_LEN],
+    header_len: usize,
+    /// Payload bytes of the current frame not yet written.
+    payload_left: usize,
+    /// Whether the current frame is a DATA frame.
+    data: bool,
+}
+
+impl Frames {
+    /// The DATA payload bytes in `buf`, the next bytes written.
+    fn data_bytes(&mut self, mut buf: &[u8]) -> u64 {
+        let mut data = 0;
+        while !buf.is_empty() {
+            if self.payload_left > 0 {
+                let (payload, rest) = buf.split_at(self.payload_left.min(buf.len()));
+                self.payload_left -= payload.len();
+                if self.data {
+                    data += payload.len() as u64;
+                }
+                buf = rest;
+                continue;
+            }
+            let wanted = FRAME_HEADER_LEN - self.header_len;
+            let (part, rest) = buf.split_at(wanted.min(buf.len()));
+            let end = self.header_len + part.len();
+            self.header[self.header_len..end].copy_from_slice(part);
+            self.header_len = end;
+            buf = rest;
+            if self.header_len == FRAME_HEADER_LEN {
+                let [a, b, c, kind, ..] = self.header;
+                self.payload_left = u32::from_be_bytes([0, a, b, c]) as usize;
+                self.data = kind == DATA_FRAME;
+                self.header_len = 0;
+            }
+        }
+        data
+    }
+}
+
+/// The transport of one connection, which records response progress for the
+/// write stall timeout: whether the last write could not complete, and how
+/// many response data bytes have been written. It is only used from the
+/// connection task, which also reads what it records.
+struct Transport<I> {
+    io: I,
+    activity: Arc<Activity>,
+    output: Output,
+    response_written: u64,
+    blocked: bool,
+}
+
+impl<I> Transport<I> {
+    fn new(io: I, activity: Arc<Activity>) -> Self {
+        Self {
+            io,
+            activity,
+            output: Output::Unknown,
+            response_written: 0,
+            blocked: false,
+        }
+    }
+
+    /// Records whether a write, flush, or shutdown could not complete. Only
+    /// a change reaches the shared state.
+    fn set_blocked(&mut self, blocked: bool) {
+        if self.blocked != blocked {
+            self.blocked = blocked;
+            self.activity
+                .write_blocked
+                .store(blocked, Ordering::Relaxed);
+        }
+    }
+
+    /// Records the outcome of writing `bufs`, of which the first `len` bytes
+    /// were written if it completed.
+    fn record_write<'a>(
+        &mut self,
+        result: &Poll<io::Result<usize>>,
+        bufs: impl IntoIterator<Item = &'a [u8]>,
+    ) {
+        self.set_blocked(result.is_pending());
+        let Poll::Ready(Ok(mut len)) = *result else {
+            return;
+        };
+        let mut data = 0;
+        for buf in bufs {
+            if len == 0 {
+                break;
+            }
+            let (sent, _) = buf.split_at(len.min(buf.len()));
+            len -= sent.len();
+            data += self.output.response_bytes(sent);
+        }
+        if data > 0 {
+            self.response_written += data;
+            self.activity
+                .written
+                .store(self.response_written, Ordering::Relaxed);
+        }
+    }
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for Transport<I> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.io).poll_write(cx, buf);
+        this.record_write(&result, [buf]);
+        result
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
+        this.record_write(&result, bufs.iter().map(|buf| &**buf));
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.io).poll_flush(cx);
+        this.set_blocked(result.is_pending());
+        result
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.io).poll_shutdown(cx);
+        this.set_blocked(result.is_pending());
+        result
+    }
+}
+
+/// Where a connection is in closing itself for inactivity or a write stall.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// Serving. The deadline is the first-request or idle deadline.
@@ -574,6 +831,9 @@ enum Phase {
     /// A request raced the close. The deadline is the hard cap for it to
     /// finish.
     Finishing,
+    /// Asked to close because a response could not be written. The deadline
+    /// ends a short grace period; the stalled response will not finish.
+    Stalled,
 }
 
 async fn serve_io<I>(
@@ -601,7 +861,8 @@ async fn serve_io<I>(
         inner: TowerToHyperService::new(service),
         activity: Arc::clone(&activity),
     };
-    let connection = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+    let io = TokioIo::new(Transport::new(io, Arc::clone(&activity)));
+    let connection = builder.serve_connection_with_upgrades(io, service);
     tokio::pin!(connection);
     // Protocol detection waits for enough bytes to rule out the HTTP/2
     // preface before either protocol starts, Hyper's HTTP/1 header timer
@@ -612,6 +873,20 @@ async fn serve_io<I>(
     // timeout. HTTP/2 keep-alive pings do not count as activity.
     let deadline = tokio::time::sleep(options.header_read_timeout);
     tokio::pin!(deadline);
+    // The write stall check samples response progress every half period. It
+    // closes the connection once response data has been waiting for the
+    // transport at three checks in a row with none written in between: at
+    // least the write stall timeout, and at most one and a half times it,
+    // after the last response data was written. Keep-alive pings and other
+    // control frames are not response data.
+    let stall_check = options.write_stall_timeout / 2;
+    let stall_timer = tokio::time::sleep(stall_check);
+    tokio::pin!(stall_timer);
+    // The response data written when the check last saw none waiting or some
+    // written, and how many checks since have seen it waiting with none
+    // written. `None` while no response data is waiting.
+    let mut stalled: Option<(u64, u32)> = None;
+    let grace = options.header_read_timeout.min(Duration::from_secs(1));
     // The request count when the deadline was armed with no request in
     // flight, or `None` when it was armed with requests in flight.
     let mut idle_since = Some(0);
@@ -662,7 +937,6 @@ async fn serve_io<I>(
                             draining = true;
                             connection.as_mut().graceful_shutdown();
                         }
-                        let grace = options.header_read_timeout.min(Duration::from_secs(1));
                         deadline.as_mut().reset(Instant::now() + grace);
                     }
                 }
@@ -686,7 +960,35 @@ async fn serve_io<I>(
                     tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "connection still open after the request drain budget; dropping");
                     return;
                 }
+                Phase::Stalled => {
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "connection still open after the write stall grace period; dropping");
+                    return;
+                }
             },
+            () = stall_timer.as_mut(), if phase == Phase::Open => {
+                let written = activity.written();
+                stalled = match stalled {
+                    _ if !activity.response_pending() => None,
+                    Some((mark, checks)) if mark == written => Some((mark, checks + 1)),
+                    _ => Some((written, 0)),
+                };
+                if matches!(stalled, Some((_, checks)) if checks >= 2) {
+                    stats.write_stall_timeouts.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no response data written within the write stall timeout; closing");
+                    // An HTTP/2 peer is sent `GOAWAY` first, if the transport
+                    // still takes it. The stalled response cannot finish, so
+                    // the connection is dropped after the grace period
+                    // whatever else is in flight on it.
+                    phase = Phase::Stalled;
+                    if !draining {
+                        draining = true;
+                        connection.as_mut().graceful_shutdown();
+                    }
+                    deadline.as_mut().reset(Instant::now() + grace);
+                } else {
+                    stall_timer.as_mut().reset(Instant::now() + stall_check);
+                }
+            }
             () = lifecycle.drain_connections().cancelled(), if !draining => {
                 draining = true;
                 connection.as_mut().graceful_shutdown();
