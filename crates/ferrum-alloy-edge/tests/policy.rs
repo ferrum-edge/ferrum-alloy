@@ -27,8 +27,7 @@ fn policy(mode: DeploymentMode, accept: bool) -> EdgePolicy {
     let mut config = EdgePolicyConfig::default();
     config.mode = mode;
     config.accept_consumer_identity = accept;
-    EdgePolicy::new(config, Arc::new(peers))
-        .with_exempt_paths(vec!["/readyz".into()])
+    EdgePolicy::new(config, Arc::new(peers)).with_exempt_paths(vec!["/readyz".into()])
 }
 
 fn request(path: &str, peer: PeerInfo, headers: &[(&str, &str)]) -> Request<Body> {
