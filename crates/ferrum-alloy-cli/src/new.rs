@@ -218,7 +218,7 @@ const HTTP_CLIENT_STARTER: Starter = Starter {
     integration: Integration::HttpClient,
     module: "upstream",
     files: HTTP_CLIENT,
-    dependencies: "",
+    dependencies: include_str!("../templates/http-client/fragments/dependencies.toml.tmpl"),
     dev_dependencies: "",
     main_doc: "",
     main_use: "use ferrum_alloy::http_client::AlloyClient;\n",

@@ -72,15 +72,23 @@ fn now() -> u64 {
         .as_secs()
 }
 
-fn token(pair: &KeyPair, jwt: &JwtSettings, scope: &str) -> String {
-    let claims = json!({
+/// Claims that `jwt` accepts, granting `scope`.
+fn valid_claims(jwt: &JwtSettings, scope: &str) -> Value {
+    json!({
         "iss": jwt.issuer, "aud": jwt.audiences[0], "sub": "user-1",
         "exp": now() + 300, "scope": scope,
-    });
+    })
+}
+
+fn sign(pair: &KeyPair, claims: &Value) -> String {
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(KID.into());
     let key = EncodingKey::from_ec_der(&pair.serialize_der());
-    encode(&header, &claims, &key).expect("sign")
+    encode(&header, claims, &key).expect("sign")
+}
+
+fn token(pair: &KeyPair, jwt: &JwtSettings, scope: &str) -> String {
+    sign(pair, &valid_claims(jwt, scope))
 }
 
 /// The router under test, verifying tokens against `pair`'s JWKS.
@@ -107,6 +115,7 @@ async fn get_me(router: Router, token: Option<&str>) -> (StatusCode, Value) {
 #[test]
 fn alloy_toml_bounds_the_key_set_lifetime() {
     let jwt = configured();
+    assert_eq!(jwt.algorithms, ["ES256"]);
     assert!((1..=MAX_JWKS_LIFETIME_MS).contains(&jwt.jwks_max_age_ms));
     assert!(jwt.jwks_max_stale_ms <= MAX_JWKS_LIFETIME_MS);
     assert!(jwt.jwks_min_refresh_interval_ms <= jwt.jwks_max_age_ms);
@@ -146,5 +155,35 @@ async fn a_token_signed_by_another_key_is_unauthorized() {
     let other = KeyPair::generate().expect("key pair");
     let token = token(&other, &jwt, auth::READ_SCOPE);
     let (status, _) = get_me(router, Some(&token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_from_another_issuer_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let mut claims = valid_claims(&jwt, auth::READ_SCOPE);
+    claims["iss"] = json!("https://other-issuer.example.com/");
+    let (status, _) = get_me(router, Some(&sign(&pair, &claims))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_for_another_audience_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let mut claims = valid_claims(&jwt, auth::READ_SCOPE);
+    claims["aud"] = json!("another-service");
+    let (status, _) = get_me(router, Some(&sign(&pair, &claims))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_expired_token_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let mut claims = valid_claims(&jwt, auth::READ_SCOPE);
+    claims["exp"] = json!(now() - 3600);
+    let (status, _) = get_me(router, Some(&sign(&pair, &claims))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

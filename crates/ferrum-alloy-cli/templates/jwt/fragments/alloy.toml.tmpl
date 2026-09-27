@@ -6,7 +6,8 @@
 issuer = "https://auth.example.com/"
 audiences = ["{{name}}"]
 # Asymmetric algorithms only; list just the ones your issuer signs with.
-algorithms = ["RS256", "ES256"]
+# ES256 matches the key the tests generate; many issuers use RS256.
+algorithms = ["ES256"]
 # Keys come only from here: https, or http to loopback.
 jwks_url = "https://auth.example.com/.well-known/jwks.json"
 # A fetched key set is trusted for at most jwks_max_age_ms (a shorter

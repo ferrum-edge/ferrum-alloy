@@ -562,6 +562,7 @@ fn new_generates_database_auth_and_client_starters() {
     for expected in [
         "use notes_api::{auth, db, upstream};",
         "postgres::migrate(&pool, &db::MIGRATOR)",
+        "Some(\"migrate\") => true,",
         "app = app.router(routes).openapi(&document);",
     ] {
         assert!(main.contains(expected), "{expected}: {main}");
@@ -632,8 +633,8 @@ fn generated_projects_build_and_pass_their_tests() {
             status.success(),
             "{name}: generated code is not rustfmt-clean"
         );
-        // With a database (as in the `postgres` CI job), also run the
-        // generated tests that need one.
+        // With a database (the CI `generator` job has its own service
+        // container), also run the generated tests that need one.
         let database = std::env::var_os("FERRUM_ALLOY_TEST_DATABASE_URL");
         if let Some(url) = database.filter(|_| with.contains(&"postgres")) {
             let status = Command::new(&cargo)

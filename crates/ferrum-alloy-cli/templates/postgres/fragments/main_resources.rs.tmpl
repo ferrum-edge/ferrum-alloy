@@ -1,6 +1,17 @@
+    // `migrate` is the only command; anything else is a mistake, not a
+    // request to serve.
+    let command = std::env::args().nth(1);
+    let migrate = match command.as_deref() {
+        None => false,
+        Some("migrate") => true,
+        Some(other) => {
+            let message = format!("unknown argument {other:?}; expected `migrate` or none");
+            return Err(message.into());
+        }
+    };
     let database = config.database.clone();
     let pool = postgres::connect(&database, env!("CARGO_PKG_NAME"))?;
-    if std::env::args().nth(1).as_deref() == Some("migrate") {
+    if migrate {
         // The production migration step: run it once per release, before the
         // new version serves traffic.
         postgres::migrate(&pool, &db::MIGRATOR).await?;

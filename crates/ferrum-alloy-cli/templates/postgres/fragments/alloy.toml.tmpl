@@ -5,6 +5,8 @@
 url = "postgres://postgres:postgres@127.0.0.1:5432/postgres"
 max_connections = 10
 acquire_timeout_ms = 5000
+# Uncomment to have PostgreSQL cancel any statement that runs longer.
+# statement_timeout_ms = 5000
 # Migrations are a separate step (`cargo run -- migrate`). Setting this to
 # true applies them at every start, from every replica: development only.
 migrate_on_startup = false

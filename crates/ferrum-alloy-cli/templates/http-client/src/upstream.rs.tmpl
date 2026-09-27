@@ -4,6 +4,8 @@
 //! hosts listed in `http_client.propagate_trace_context_to` (none by
 //! default), and credentials, cookies, and `baggage` are never added.
 
+use std::env::VarError;
+
 use axum::Extension;
 use axum::Router;
 use axum::extract::State;
@@ -14,6 +16,7 @@ use ferrum_alloy::extract::Json;
 use ferrum_alloy::http_client::AlloyClient;
 use ferrum_alloy::telemetry::RequestContext;
 use serde::Serialize;
+use url::Url;
 
 /// What `GET /upstream` calls when `UPSTREAM_URL` is unset: this service's
 /// own `/hello`.
@@ -26,23 +29,42 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub struct Upstream {
     client: AlloyClient,
-    url: String,
+    url: Url,
 }
 
 impl Upstream {
     /// Calls `url` with `client`.
-    pub fn new(client: AlloyClient, url: impl Into<String>) -> Self {
-        Self {
-            client,
-            url: url.into(),
-        }
+    pub fn new(client: AlloyClient, url: Url) -> Self {
+        Self { client, url }
     }
 
-    /// Calls `UPSTREAM_URL`, or [`DEFAULT_URL`] when it is unset.
-    pub fn from_env(client: AlloyClient) -> Self {
-        let url = std::env::var("UPSTREAM_URL").unwrap_or_else(|_| DEFAULT_URL.into());
-        Self::new(client, url)
+    /// Calls `UPSTREAM_URL`, or [`DEFAULT_URL`] when it is unset. A value
+    /// that is set but invalid is an error, so a mistake fails at startup
+    /// instead of silently calling the default.
+    pub fn from_env(client: AlloyClient) -> Result<Self, String> {
+        let url = match std::env::var("UPSTREAM_URL") {
+            Ok(value) => parse_url(&value)?,
+            Err(VarError::NotPresent) => parse_url(DEFAULT_URL)?,
+            Err(VarError::NotUnicode(_)) => return Err("UPSTREAM_URL is not UTF-8".into()),
+        };
+        Ok(Self::new(client, url))
     }
+}
+
+/// Parses an upstream URL: absolute `http` or `https`, with no credentials
+/// in it. Errors never repeat the value, which may hold a secret.
+pub fn parse_url(value: &str) -> Result<Url, String> {
+    let url = match Url::parse(value) {
+        Ok(url) => url,
+        Err(error) => return Err(format!("UPSTREAM_URL is not a valid URL: {error}")),
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("UPSTREAM_URL must use http or https".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("UPSTREAM_URL must not contain credentials".into());
+    }
+    Ok(url)
 }
 
 /// What the upstream answered.

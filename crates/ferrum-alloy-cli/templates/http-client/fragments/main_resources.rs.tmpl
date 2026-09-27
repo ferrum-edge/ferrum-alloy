@@ -1,1 +1,2 @@
     let client = AlloyClient::new(&config.http_client)?;
+    let outbound = upstream::Upstream::from_env(client)?;
