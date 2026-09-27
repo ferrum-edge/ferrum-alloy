@@ -531,12 +531,82 @@ fn new_generates_a_complete_project() {
     assert_eq!(code(&export), 0, "{}", stderr(&export));
 }
 
+fn read(dir: &Path, file: &str) -> String {
+    std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"))
+}
+
+#[test]
+fn new_generates_database_auth_and_client_starters() {
+    let dir = tempfile::tempdir().unwrap();
+    let with = ["openapi", "postgres", "jwt", "http-client"];
+    let target = generate(dir.path(), "notes-api", &with);
+    for file in [
+        "src/db.rs",
+        "src/auth.rs",
+        "src/upstream.rs",
+        "tests/db.rs",
+        "tests/auth.rs",
+        "tests/upstream.rs",
+        "migrations/0001_create_notes.sql",
+    ] {
+        assert!(!read(&target, file).contains("{{"), "{file}");
+    }
+    let cargo = read(&target, "Cargo.toml");
+    let features = r#"features = ["openapi", "postgres", "jwt", "http-client"]"#;
+    assert!(cargo.contains(features), "{cargo}");
+    assert!(cargo.contains(r#"default-run = "notes-api""#), "{cargo}");
+    let lib = read(&target, "src/lib.rs");
+    let modules = "pub mod auth;\npub mod db;\npub mod upstream;\n";
+    assert!(lib.contains(modules), "{lib}");
+    let main = read(&target, "src/main.rs");
+    for expected in [
+        "use notes_api::{auth, db, upstream};",
+        "postgres::migrate(&pool, &db::MIGRATOR)",
+        "Some(\"migrate\") => true,",
+        "app = app.router(routes).openapi(&document);",
+    ] {
+        assert!(main.contains(expected), "{expected}: {main}");
+    }
+    let ci = read(&target, ".github/workflows/ci.yml");
+    assert!(ci.contains("TEST_DATABASE_URL"), "{ci}");
+    assert!(ci.contains("cargo test -- --include-ignored"), "{ci}");
+    let readme = read(&target, "README.md");
+    assert!(readme.contains("cargo run -- migrate"), "{readme}");
+    // The generated configuration passes the tool's own validation.
+    let config = target.join("alloy.toml").to_string_lossy().into_owned();
+    let check = run(&["check", "--config", &config, "--no-env"]);
+    assert_eq!(code(&check), 0, "{}", stdout(&check));
+
+    // Each starter also stands alone.
+    for (with, module) in [
+        ("postgres", "db"),
+        ("jwt", "auth"),
+        ("http-client", "upstream"),
+    ] {
+        let target = generate(dir.path(), &format!("only-{module}"), &[with]);
+        let main = read(&target, "src/main.rs");
+        let import = format!("use only_{module}::{module};");
+        assert!(main.contains(&import), "{main}");
+        assert!(target.join(format!("src/{module}.rs")).is_file());
+    }
+}
+
 /// Compiles and tests generated projects. Slow; CI runs it with `--ignored`.
 #[test]
 #[ignore = "builds generated projects with cargo; run with --ignored"]
 fn generated_projects_build_and_pass_their_tests() {
     let dir = tempfile::tempdir().unwrap();
-    for (name, with) in [("plain-api", vec![]), ("documented-api", vec!["openapi"])] {
+    for (name, with) in [
+        ("plain-api", vec![]),
+        ("documented-api", vec!["openapi"]),
+        ("postgres-api", vec!["postgres"]),
+        ("jwt-api", vec!["jwt"]),
+        ("client-api", vec!["http-client"]),
+        (
+            "starters-api",
+            vec!["openapi", "postgres", "jwt", "http-client"],
+        ),
+    ] {
         let target = generate(dir.path(), name, &with);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = Command::new(&cargo)
@@ -563,6 +633,19 @@ fn generated_projects_build_and_pass_their_tests() {
             status.success(),
             "{name}: generated code is not rustfmt-clean"
         );
+        // With a database (the CI `generator` job has its own service
+        // container), also run the generated tests that need one.
+        let database = std::env::var_os("FERRUM_ALLOY_TEST_DATABASE_URL");
+        if let Some(url) = database.filter(|_| with.contains(&"postgres")) {
+            let status = Command::new(&cargo)
+                .args(["test", "--quiet", "--", "--include-ignored"])
+                .current_dir(&target)
+                .env("CARGO_TARGET_DIR", dir.path().join("target"))
+                .env("TEST_DATABASE_URL", url)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}: database tests failed");
+        }
         if with.contains(&"openapi") {
             let output = bin()
                 .current_dir(&target)
@@ -575,7 +658,7 @@ fn generated_projects_build_and_pass_their_tests() {
                 &std::fs::read_to_string(target.join("openapi.json")).unwrap(),
             )
             .unwrap();
-            assert_eq!(document["servers"][0]["url"], "/documented-api");
+            assert_eq!(document["servers"][0]["url"], format!("/{name}"));
             assert!(document["paths"]["/items/{id}"].is_object());
             let check = bin()
                 .current_dir(&target)
@@ -607,6 +690,12 @@ fn generated_code_is_rustfmt_clean_for_short_and_long_names() {
         (
             "a-rather-long-service-name-that-changes-line-widths-oa",
             vec!["openapi"],
+        ),
+        ("ab-starters", vec!["postgres", "jwt", "http-client"]),
+        ("ab-oa-db", vec!["openapi", "postgres"]),
+        (
+            "a-rather-long-service-name-that-changes-line-widths-st",
+            vec!["openapi", "postgres", "jwt", "http-client"],
         ),
     ] {
         let target = generate(dir.path(), name, &with);

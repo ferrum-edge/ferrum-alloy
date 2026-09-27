@@ -1,0 +1,3 @@
+    if database.readiness_check {
+        app = app.readiness_check("postgres", postgres::readiness(pool));
+    }

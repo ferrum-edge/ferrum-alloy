@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 publish = false
-
+{{default_run}}
 [dependencies]
 {{alloy_dependency}}
 axum = "0.8"
@@ -15,3 +15,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 http-body-util = "0.1"
 serde_json = "1"
 tower = { version = "0.5", features = ["util"] }
+{{extra_dev_dependencies}}

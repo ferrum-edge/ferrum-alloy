@@ -7,9 +7,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    steps:
+{{ci_services}}    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo test{{ci_test_args}}

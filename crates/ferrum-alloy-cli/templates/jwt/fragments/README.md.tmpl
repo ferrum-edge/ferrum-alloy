@@ -1,0 +1,8 @@
+
+## Authentication
+
+`GET /me` requires a bearer token verified with `[auth.jwt]` in `alloy.toml`: the issuer, audiences, algorithms, and JWKS URL of your identity provider. `src/auth.rs` shows the `Authorize` hook: authentication proves who the caller is, and `RequireScope` decides what they may do (here, the `{{name}}:read` scope). Missing or invalid tokens get `401`, and tokens without the scope get `403`.
+
+Signing keys come only from `auth.jwt.jwks_url`. A fetched key set is trusted for at most `jwks_max_age_ms` (a shorter `Cache-Control: max-age` wins) and then revalidated, so a key removed from the JWKS stops verifying. While revalidation fails, known keys keep verifying for at most `jwks_max_stale_ms`; then requests fail closed with `503`.
+
+The tests sign tokens with a locally generated key and serve its JWKS on loopback.
