@@ -105,11 +105,11 @@ Default reporting thresholds are ≥ 50 ms and ≥ 20 % of the gateway measureme
 
 ## Dominance of an instrumented operation
 
-Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers, with a floor of 5 ms. It never adds operations together.
+Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers. Services whose time to headers is under 5 ms are skipped. It never adds operations together.
 
 The comparison is limited to the **header phase**. Diagnostic imports give `alloy.server.time_to_headers` an interval that starts at the Alloy SERVER span's start (middleware entry) and ends at that start plus `alloy.server.time_to_headers_ms`. This adds a local duration to one timestamp of the same span; no two timestamps are subtracted. The interval never ends at the span's end, because the span stays open through the response body. If the duration is missing, or ends more than 1 ms after the span ends, the header-phase interval is unknown and none is made up.
 
-Each descendant operation is placed against that interval, using same-instance wall-clock intervals only (`service.instance.id`, 1 ms slack):
+Descendants of the service span (parent-span chain) are placed against that interval using same-instance wall-clock intervals only (`service.instance.id`, 1 ms slack):
 
 | Placement | Treatment |
 |---|---|
