@@ -59,7 +59,7 @@ What that job verifies is listed in [ADR 0007](adr/0007-real-gateway-integration
 
 - HTTP span and metric attribute names follow the **stable** OpenTelemetry HTTP conventions: `http.request.method`, `http.route`, `http.response.status_code`, `url.scheme`, `network.protocol.version`, `error.type`, `server.address`, `server.port`, and the optional `url.path`, `client.address`, `user_agent.original`.
 - Database operations use `db.system.name`, `db.operation.name`, and `db.query.summary` from the database conventions, which are not all stable.
-- `http.server.request.duration` is exported with Alloy's documented boundaries (middleware entry → body finalization).
+- The Prometheus histogram `http_server_request_duration_seconds` (OpenTelemetry `http.server.request.duration`) uses Alloy's documented boundaries: middleware entry to body finalization.
 - Alloy-specific data uses the `alloy.*` prefix.
 - **No `schema_url` is emitted.** Ferrum Edge v0.9.7 emits none either, and its `http.route` holds the proxy name, not a template.
 
@@ -79,15 +79,16 @@ What that job verifies is listed in [ADR 0007](adr/0007-real-gateway-integration
 | Platform | Status |
 |---|---|
 | macOS arm64 | Local development. Full workspace tests, clippy, the generator end-to-end, and PostgreSQL tests passed on 2026-09-26. |
-| Linux x86_64 (GitHub `ubuntu-latest`) | CI. See the PR checks for results on the final commit. |
+| Linux x86_64 (GitHub `ubuntu-latest`) | CI test matrix and every Docker-based job. Results are in the CI checks. |
 | Linux arm64 | e2e images built and run under colima (Ubuntu 24.04 VM) |
-| macOS (GitHub `macos-latest`), Windows (`windows-latest`) | CI test matrix. See the PR checks. |
+| macOS (GitHub `macos-latest`), Windows (`windows-latest`) | CI test matrix. Results are in the CI checks. |
 
 ## Pairing rules
 
 - Moving to a new Edge release requires:
-  1. updating the image digest in `.github/workflows/ci.yml` and `examples/edge-observability/Dockerfile`;
-  2. re-auditing the entries marked EXISTING in the contract inventory;
-  3. updating `ferrum_alloy_edge::contract::{EDGE_RELEASE, EDGE_SOURCE_COMMIT}`;
+  1. updating the image digest in `.github/workflows/ci.yml`, `examples/edge-observability/Dockerfile`, this page, and `compatibility.json`;
+  2. updating `ferrum_alloy_edge::contract::{EDGE_RELEASE, EDGE_SOURCE_COMMIT}`;
+  3. re-auditing the entries marked EXISTING in the contract inventory;
   4. passing the `Ferrum Edge end-to-end` and `Generated Edge configuration validates` jobs.
+- `crates/ferrum-alloy-edge/tests/pairing.rs` fails when steps 1 and 2 disagree.
 - Unreleased Edge main is never pinned.

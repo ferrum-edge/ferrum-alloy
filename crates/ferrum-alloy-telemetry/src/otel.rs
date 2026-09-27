@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::{Context, KeyValue};
+use opentelemetry::{Array, Context, KeyValue, Value};
 use opentelemetry_otlp::{Protocol, RetryPolicy, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
@@ -349,17 +349,41 @@ impl fmt::Debug for BoundedSpanProcessor {
 
 /// Rough encoded size of a span, used for the byte budget.
 fn estimate_bytes(span: &SpanData) -> usize {
-    let attributes: usize = span
-        .attributes
-        .iter()
-        .map(|kv| kv.key.as_str().len() + kv.value.as_str().len() + 8)
-        .sum();
+    let attributes = estimate_attributes_bytes(&span.attributes);
     let events: usize = span
         .events
         .iter()
-        .map(|e| e.name.len() + e.attributes.len() * 32 + 16)
+        .map(|event| event.name.len() + estimate_attributes_bytes(&event.attributes) + 16)
         .sum();
-    96 + span.name.len() + attributes + events + span.links.len() * 64
+    let links: usize = span
+        .links
+        .iter()
+        .map(|link| estimate_attributes_bytes(&link.attributes) + 64)
+        .sum();
+    96 + span.name.len() + attributes + events + links
+}
+
+fn estimate_attributes_bytes(attributes: &[KeyValue]) -> usize {
+    attributes
+        .iter()
+        .map(|kv| kv.key.as_str().len() + estimate_value_bytes(&kv.value) + 8)
+        .sum()
+}
+
+fn estimate_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Bool(_) => std::mem::size_of::<bool>(),
+        Value::I64(_) | Value::F64(_) => std::mem::size_of::<u64>(),
+        Value::String(value) => value.as_str().len(),
+        Value::Array(array) => match array {
+            Array::Bool(values) => values.len() * std::mem::size_of::<bool>(),
+            Array::I64(values) => values.len() * std::mem::size_of::<i64>(),
+            Array::F64(values) => values.len() * std::mem::size_of::<f64>(),
+            Array::String(values) => values.iter().map(|value| value.as_str().len() + 8).sum(),
+            _ => 0,
+        },
+        _ => 0,
+    }
 }
 
 impl BoundedSpanProcessor {

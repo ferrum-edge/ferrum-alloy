@@ -28,7 +28,9 @@ The generated project contains:
 - a README;
 - a GitHub Actions workflow.
 
-With `--with openapi` it also includes an `openapi` binary and a parity test. CI generates projects, builds them, runs their tests, and runs `clippy -D warnings` and `rustfmt --check` on them.
+`--with` takes a comma-separated list of `openapi`, `otel`, `edge`, and `tls`, which become Cargo features of the dependency. `openapi` also adds an `openapi` binary and a parity test. CI generates projects, builds them, runs their tests, and runs `clippy -D warnings` and `rustfmt --check` on them.
+
+The generated `Cargo.toml` follows the `main` branch by default. Pass `--alloy-rev <40-character commit>` to pin a commit, or `--alloy-path <checkout>/crates/ferrum-alloy` to use a local checkout.
 
 `ferrum-alloy new` refuses non-empty or symlinked targets, validates the name, never overwrites files, and downloads nothing. Cargo fetches dependencies when you build.
 

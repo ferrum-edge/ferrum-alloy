@@ -41,11 +41,13 @@ Trust controls only:
 
 ## Ferrum Edge deployment modes (feature `edge`)
 
-| Mode | Direct requests | Verified gateway |
+| Mode | Request without a verified gateway identity | Request from a verified gateway identity |
 |---|---|---|
-| `standalone` (default) | Served. Unverified `x-consumer-*` identity headers are removed. | Treated like any peer unless listed in `[trust]`. |
-| `gateway_preferred` | Served, without `GatewayContext`. | `GatewayContext` with consumer identity when enabled. |
+| `standalone` (default) | Served, without `GatewayContext`. | Served. |
+| `gateway_preferred` | Served, without `GatewayContext`. | Served. |
 | `gateway_required` | `403 gateway-required`, except the configured liveness and readiness paths, so kubelet and Edge probes work. | Served. |
+
+In every mode, `x-consumer-username` and `x-consumer-custom-id` are removed unless the peer is a verified identity in `trust.identities` **and** `edge.accept_consumer_identity = true`. In that case handlers get a `GatewayContext` with the consumer identity. `standalone` and `gateway_preferred` currently behave the same; only `gateway_required` rejects requests.
 
 The recommended first deployment is Edge presenting an X.509-SVID through `backend_tls_client_cert_path`, with Alloy using `client_auth = "optional"` or `"required"`, `trust.identities = ["spiffe://…/gateway"]`, and `edge.mode = "gateway_required"`. The `edge-observability` example and CI job run exactly this.
 
@@ -78,7 +80,7 @@ Edge v0.9.7 reserves only `x-consumer-username` and `x-consumer-custom-id` on th
 
 ## Errors
 
-- Framework errors are RFC 9457 problems with stable `tag:` type URIs. `detail` is fixed text or parser output from the client's own input (control characters removed, at most 256 bytes).
+- Framework errors are RFC 9457 problems with stable `tag:` type URIs. `detail` is fixed text or parser output from the client's own input (control characters replaced with spaces, truncated to 256 bytes).
 - Panics become `500 internal`; the panic message goes to server logs only.
 - Database and JWKS errors are never returned to clients.
 - Application response bodies are never rewritten. Only axum's empty 404 (router fallback) and 405 (`Allow` present) become problems.
@@ -102,7 +104,7 @@ rustls with the `ring` provider, passed explicitly. Alloy never installs a proce
 - Only asymmetric algorithms from an explicit allowlist. `none` and HMAC are rejected at configuration and at verification.
 - `iss`, `aud`, and `exp` are required; `nbf` is checked when present; leeway is configurable.
 - Keys come only from the configured JWKS URL: `https`, or `http` to loopback. Token-supplied `jku`, `x5u`, and embedded `jwk` are never used.
-- A token without `kid` is accepted only if exactly one key exists.
+- A token without `kid` is accepted only if the key set holds exactly one signing key.
 - JWKS fetches never follow redirects, are bounded in time and size, and are single-flight. Refreshes, including those triggered by unknown `kid`s or by expiry, happen at most once per `jwks_min_refresh_interval_ms`. Callers that wait behind a refresh use its result instead of fetching again.
 - A fetched key set has a bounded lifetime: `Cache-Control: max-age` from the JWKS response, bounded by `jwks_min_refresh_interval_ms` and `jwks_max_age_ms` (default 5 minutes). After that, the next request revalidates the set even when its `kid` is cached. Keys missing from the refreshed set stop verifying, and a key replaced under the same `kid` is replaced in the cache.
 - If a refresh fails, the expired set keeps verifying for at most `jwks_max_stale_ms` (default 5 minutes), with a retry at most once per `jwks_min_refresh_interval_ms`. After that, verification fails closed with `503 auth-unavailable` until a refresh succeeds. This trades a bounded window, during which a key retired while the JWKS was unreachable may still verify, for availability during short JWKS outages. Set `jwks_max_stale_ms = 0` to fail closed as soon as the set expires.
@@ -139,13 +141,13 @@ The generated CI pins `actions/checkout` by commit.
 
 | Threat | Mitigation | Evidence |
 |---|---|---|
-| A direct caller forges `X-Consumer-Username` | Stripped unless the peer is a verified gateway identity | `standalone_mode_still_removes_forged_identity`, `a_different_identity_from_the_same_ca_is_not_the_gateway` |
+| A direct caller forges `X-Consumer-Username` | Stripped unless the peer is a verified gateway identity and `accept_consumer_identity` is on | `standalone_mode_still_removes_forged_identity`, `a_different_identity_from_the_same_ca_is_not_the_gateway` |
 | A caller forges `X-Forwarded-For` to gain trust | Trust never reads headers | `forwarded_headers_never_establish_trust` |
 | A caller picks trace ids or forces sampling | Re-root untrusted context; parent-based sampling only for accepted parents | `untrusted_trace_context_is_rerooted_and_not_forwarded`, `untrusted_callers_cannot_force_sampling` |
 | Gateway bypass | `gateway_required` with a verified SPIFFE identity; rogue CAs fail the handshake | `gateway_required_rejects_direct_callers_but_not_health_probes`, `certificates_from_another_ca_fail_the_handshake`, `edge-e2e` |
 | A cache replays another request's ids or timing | Request-specific headers only on non-shared-cacheable responses | `request_specific_headers_are_withheld_from_shared_cacheable_responses` |
 | High-cardinality labels exhaust memory | Route templates only; series cap and overflow bucket | `metric_series_are_capped`, `matched_unmatched_and_method_not_allowed_routes_use_bounded_labels` |
-| Slow-header or connection floods | `header_read_timeout_ms`, `max_headers`, `max_connections` | `slow_request_heads_are_cut_off`, `oversized_request_heads_are_rejected`, `connections_beyond_the_limit_are_closed` |
+| Slow-header or connection floods | `header_read_timeout_ms`, `max_header_count`, `max_header_bytes`, `max_connections` | `slow_request_heads_are_cut_off`, `oversized_request_heads_are_rejected`, `connections_beyond_the_limit_are_closed` |
 | Oversized bodies | `Content-Length` precheck and streaming cap | `chunked_bodies_without_content_length_are_still_limited` |
 | A collector outage slows or fails requests | Bounded queue; drop and count | `collector_failures_never_fail_requests_and_are_counted`, `a_full_queue_drops_spans_instead_of_blocking_requests` |
 | Health floods probe the database | Cached, single-flight readiness | `readiness_checks_are_cached_and_single_flight` |
