@@ -36,18 +36,14 @@ impl Pki {
         let dir = tempfile::tempdir().unwrap();
         let ca = Ca::new("crl-test-ca");
         let server = ca.server();
-        let tls = TlsSettings {
-            cert_path: pki::write(dir.path(), "server.pem", &server.cert_pem),
-            key_path: pki::write(dir.path(), "server.key", &server.key_pem),
-            client_ca_path: Some(pki::write(dir.path(), "ca.pem", &ca.cert_pem)),
-            client_auth: ClientAuth::Required,
-            handshake_timeout_ms: 2_000,
-            client_crl_paths: Vec::new(),
-            client_crl_depth: CrlDepth::default(),
-            client_crl_unknown_status: CrlUnknownStatus::default(),
-            client_crl_expiration: CrlExpiration::default(),
-            reload_interval_ms: 0,
-        };
+        let mut tls = TlsSettings::new(
+            pki::write(dir.path(), "server.pem", &server.cert_pem),
+            pki::write(dir.path(), "server.key", &server.key_pem),
+        );
+        tls.client_ca_path = Some(pki::write(dir.path(), "ca.pem", &ca.cert_pem));
+        tls.client_auth = ClientAuth::Required;
+        tls.handshake_timeout_ms = 2_000;
+        tls.reload_interval_ms = 0;
         Self { dir, ca, tls }
     }
 

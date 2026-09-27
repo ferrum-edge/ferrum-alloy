@@ -77,6 +77,10 @@ pub struct ServerStats {
     /// TLS reloads whose files could not be read or failed validation, the
     /// same way as at the reload before; the previous material kept serving.
     pub tls_reload_failures: AtomicU64,
+    /// Streaks of TLS reloads whose files changed between the two reads
+    /// three reloads in a row, with no swap or unchanged result in between,
+    /// counted once per streak; the previous material kept serving.
+    pub tls_reload_stalls: AtomicU64,
     /// When the serving TLS certificate and client CRLs stop being valid.
     #[cfg(feature = "tls")]
     pub(crate) tls_expiry: std::sync::Mutex<crate::tls::Expiry>,
@@ -130,6 +134,12 @@ impl ServerStats {
                 "counter",
                 "Repeated TLS reload failures; the previous material kept serving.",
                 &self.tls_reload_failures,
+            ),
+            (
+                "ferrum_alloy_tls_reload_stalls_total",
+                "counter",
+                "TLS reloads stalled by files that kept changing between reads.",
+                &self.tls_reload_stalls,
             ),
             (
                 "ferrum_alloy_force_closed_connections_total",
