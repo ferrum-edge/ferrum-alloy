@@ -1,0 +1,58 @@
+//! Bearer authentication with a JWKS verifier configured from `[auth.jwt]`
+//! in `alloy.toml`, and an [`Authorize`] policy for what a verified caller
+//! may do.
+//!
+//! Signing keys come only from `auth.jwt.jwks_url`. A fetched key set is
+//! trusted for at most `auth.jwt.jwks_max_age_ms` (a shorter
+//! `Cache-Control: max-age` on the JWKS response wins) and is then
+//! revalidated, so a key removed from the JWKS stops verifying. While
+//! revalidation fails, known keys keep verifying for at most
+//! `auth.jwt.jwks_max_stale_ms`; after that, requests fail closed with
+//! `503 auth-unavailable`.
+
+use axum::Router;
+use axum::http::request::Parts;
+use axum::routing::get;
+use ferrum_alloy::extract::Json;
+use ferrum_alloy::jwt::{Authorize, JwtVerifier, Principal};
+use serde::Serialize;
+
+/// The scope `GET /me` requires.
+pub const READ_SCOPE: &str = "{{name}}:read";
+
+/// Allows requests whose token grants one scope; denies others with `403`.
+#[derive(Debug, Clone, Copy)]
+pub struct RequireScope(pub &'static str);
+
+impl Authorize for RequireScope {
+    fn authorize(&self, principal: &Principal, _request: &Parts) -> Result<(), String> {
+        if principal.has_scope(self.0) {
+            Ok(())
+        } else {
+            Err(format!("the token does not grant the {} scope", self.0))
+        }
+    }
+}
+
+/// The verified caller.
+#[derive(Debug, Serialize)]
+pub struct Me {
+    /// `sub`, when the token has one.
+    pub subject: Option<String>,
+    /// Granted scopes.
+    pub scopes: Vec<String>,
+}
+
+async fn me(principal: Principal) -> Json<Me> {
+    Json(Me {
+        subject: principal.subject,
+        scopes: principal.scopes,
+    })
+}
+
+/// `GET /me`, which requires a valid bearer token granting [`READ_SCOPE`].
+pub fn router(verifier: &JwtVerifier) -> Router {
+    Router::new()
+        .route("/me", get(me))
+        .route_layer(verifier.layer().with_authorizer(RequireScope(READ_SCOPE)))
+}

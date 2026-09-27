@@ -1,0 +1,7 @@
+-- Applied by `cargo run -- migrate` (or `database.migrate_on_startup`), never
+-- implicitly. Add new files with a higher version; never edit an applied one.
+CREATE TABLE IF NOT EXISTS notes (
+    id BIGSERIAL PRIMARY KEY,
+    body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 500),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

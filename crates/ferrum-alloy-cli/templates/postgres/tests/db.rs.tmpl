@@ -1,0 +1,86 @@
+//! PostgreSQL starter tests. Tests that need a database are ignored by
+//! default: set `TEST_DATABASE_URL` and run `cargo test -- --include-ignored`.
+//! The generated CI workflow does both, with a PostgreSQL service container.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use ferrum_alloy::config::{DatabaseSettings, Secret};
+use ferrum_alloy::health::HealthCheck;
+use ferrum_alloy::postgres;
+use http_body_util::BodyExt;
+use sqlx::PgPool;
+use tower::ServiceExt;
+
+use {{crate_name}}::db;
+
+/// Nothing listens on port 1 of the loopback interface.
+const UNREACHABLE: &str = "postgres://app@127.0.0.1:1/app";
+
+fn pool(url: &str) -> PgPool {
+    let settings = DatabaseSettings {
+        url: Some(Secret::new(url)),
+        acquire_timeout_ms: 1_000,
+        ..DatabaseSettings::default()
+    };
+    postgres::connect(&settings, env!("CARGO_PKG_NAME")).expect("pool")
+}
+
+async fn call(pool: &PgPool, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let response = db::router(pool.clone())
+        .oneshot(request)
+        .await
+        .expect("infallible");
+    let status = response.status();
+    let body = response.into_body().collect().await.expect("body");
+    let json = serde_json::from_slice(&body.to_bytes()).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+fn post_note(json: &'static str) -> Request<Body> {
+    Request::post("/notes")
+        .header("content-type", "application/json")
+        .body(Body::from(json))
+        .expect("request")
+}
+
+#[test]
+fn migrations_are_embedded() {
+    assert!(db::MIGRATOR.iter().next().is_some());
+}
+
+#[tokio::test]
+async fn invalid_notes_are_rejected_without_a_database() {
+    let (status, json) = call(&pool(UNREACHABLE), post_note(r#"{"body":""}"#)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["errors"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn an_unreachable_database_is_not_ready() {
+    let pool = pool(UNREACHABLE);
+    assert!(postgres::readiness(pool).check().await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "needs PostgreSQL: set TEST_DATABASE_URL and run with --include-ignored"]
+async fn notes_round_trip_through_postgres() {
+    let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is set");
+    let pool = pool(&url);
+    postgres::migrate(&pool, &db::MIGRATOR)
+        .await
+        .expect("migrations apply");
+    assert!(postgres::readiness(pool.clone()).check().await.is_ok());
+
+    let (status, created) = call(&pool, post_note(r#"{"body":"hello"}"#)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_i64().expect("id");
+
+    let request = Request::get(format!("/notes/{id}")).body(Body::empty());
+    let (status, fetched) = call(&pool, request.expect("request")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["body"], "hello");
+
+    let request = Request::get("/notes/0").body(Body::empty());
+    let (status, _) = call(&pool, request.expect("request")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

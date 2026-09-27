@@ -127,6 +127,22 @@ jobs:
     name: Generated projects
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: alloy
+          POSTGRES_PASSWORD: alloy
+          POSTGRES_DB: alloy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U alloy"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FERRUM_ALLOY_TEST_DATABASE_URL: postgres://alloy:alloy@127.0.0.1:5432/alloy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
