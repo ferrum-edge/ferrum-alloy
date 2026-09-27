@@ -351,7 +351,7 @@ async fn status_of(verifier: &JwtVerifier, token: &str) -> StatusCode {
 async fn removed_keys_stop_verifying_after_the_max_age() {
     let old = SigningKey::new("old");
     let jwks = jwks_server(&[&old]).await;
-    let verifier = short_lived(jwks.addr, 600, 0);
+    let verifier = short_lived(jwks.addr, 2_000, 0);
     let token = || old.sign(&claims(), Some("old"));
     assert_eq!(status_of(&verifier, &token()).await, 200);
 
@@ -363,7 +363,7 @@ async fn removed_keys_stop_verifying_after_the_max_age() {
 
     // After the max age, the known kid alone forces revalidation, and the
     // removed key is no longer trusted.
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
     assert_eq!(status_of(&verifier, &token()).await, 401);
     assert_eq!(jwks.fetches(), 2, "expired keys are revalidated");
     for _ in 0..3 {
@@ -378,7 +378,7 @@ async fn removed_keys_stop_verifying_after_the_max_age() {
 async fn a_replaced_key_with_the_same_kid_is_picked_up_after_the_max_age() {
     let first = SigningKey::new("k1");
     let jwks = jwks_server(&[&first]).await;
-    let verifier = short_lived(jwks.addr, 600, 0);
+    let verifier = short_lived(jwks.addr, 2_000, 0);
     let first_token = first.sign(&claims(), Some("k1"));
     assert_eq!(status_of(&verifier, &first_token).await, 200);
 
@@ -386,7 +386,7 @@ async fn a_replaced_key_with_the_same_kid_is_picked_up_after_the_max_age() {
     jwks.serve(&[&second]);
     let second_token = second.sign(&claims(), Some("k1"));
     assert_eq!(status_of(&verifier, &second_token).await, 401, "cached");
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
     assert_eq!(status_of(&verifier, &second_token).await, 200);
     assert_eq!(status_of(&verifier, &first_token).await, 401);
     assert_eq!(jwks.fetches(), 2);
@@ -398,8 +398,8 @@ async fn cache_control_max_age_shortens_but_never_extends_the_lifetime() {
     for (cache_control, max_age_ms, refresh_ms, sleep_ms) in [
         // max-age=1 under a 60 s maximum: revalidated after 1 s.
         ("public, max-age=1", 60_000, 20, 1_300),
-        // max-age=3600 over a 600 ms maximum: the maximum wins.
-        ("max-age=3600", 600, 20, 900),
+        // max-age=3600 over a 2 s maximum: the maximum wins.
+        ("max-age=3600", 2_000, 20, 2_500),
         // no-store: bounded below by the 250 ms refresh interval.
         ("no-store", 60_000, 250, 600),
     ] {
@@ -560,6 +560,40 @@ async fn kid_less_tokens_need_an_unambiguous_key_set() {
     let (status, _, _) = call(&router, Some(&a.sign(&claims(), Some("a")))).await;
     assert_eq!(status, 200, "warm the cache");
     assert_eq!(call(&router, Some(&a.sign(&claims(), None))).await.0, 401);
+}
+
+#[tokio::test]
+async fn expired_ambiguous_keys_are_refreshed_before_rejecting_a_kidless_token() {
+    let a = SigningKey::new("a");
+    let b = SigningKey::new("b");
+    let jwks = jwks_server(&[&a, &b]).await;
+    let verifier = short_lived(jwks.addr, 200, 0);
+    let token = a.sign(&claims(), None);
+    assert_eq!(
+        status_of(&verifier, &a.sign(&claims(), Some("a"))).await,
+        200
+    );
+
+    // The expired two-key set is ambiguous, but the issuer has since
+    // removed one key, leaving a set that can verify tokens without `kid`.
+    jwks.serve(&[&a]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(status_of(&verifier, &token).await, 200);
+    assert_eq!(jwks.fetches(), 2);
+}
+
+#[tokio::test]
+async fn jwks_with_only_unusable_keys_returns_503() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[]).await;
+    let mut unusable = key.jwk();
+    unusable["use"] = json!("enc");
+    *jwks.body.lock().unwrap() = json!({ "keys": [unusable] }).to_string();
+    let router = protected(&JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap());
+
+    let (status, body, _) = call(&router, Some(&key.sign(&claims(), Some("k1")))).await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("auth-unavailable"), "{body}");
 }
 
 #[tokio::test]

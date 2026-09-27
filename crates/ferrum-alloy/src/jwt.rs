@@ -431,9 +431,11 @@ impl JwtVerifier {
     /// outcome instead of fetching again.
     ///
     /// The fetch runs in its own task, so a caller that stops waiting (a
-    /// disconnected client, a deadline) never cancels it, and its outcome is
-    /// always recorded.
+    /// disconnected client, a deadline) never cancels it. If the task ends
+    /// without publishing an outcome, a later request clears its rate-limit
+    /// timestamp and can start a replacement refresh.
     fn refresh(&self, seen: u64) -> Refresh {
+        self.clear_abandoned();
         // Fast path under the read lock: join the latest refresh, or honour
         // the rate limit.
         match self.inner.state.read() {
@@ -480,7 +482,8 @@ impl JwtVerifier {
             // A task that ended without an outcome (a panic, or a runtime
             // shutting down) closed its channel: it is not running.
             let running = latest.borrow().is_none() && latest.has_changed().is_ok();
-            if running || state.attempts != seen {
+            let completed_after_snapshot = latest.borrow().is_some() && state.attempts != seen;
+            if running || completed_after_snapshot {
                 return Some(Refresh::Started(latest.clone()));
             }
         }
@@ -489,6 +492,21 @@ impl JwtVerifier {
             return Some(Refresh::Skipped);
         }
         None
+    }
+
+    /// Removes the rate limit left by a refresh task that ended without
+    /// publishing an outcome. Normal completions keep their timestamp.
+    fn clear_abandoned(&self) {
+        let Ok(mut state) = self.inner.state.write() else {
+            return;
+        };
+        let abandoned = state.latest.as_ref().is_some_and(|latest| {
+            latest.borrow().is_none() && latest.has_changed().is_err()
+        });
+        if abandoned {
+            state.last_attempt = None;
+            state.latest = None;
+        }
     }
 
     /// Records a finished refresh and publishes its outcome to the callers
@@ -533,8 +551,12 @@ impl JwtVerifier {
                     .await
                     .ok()
                     .and_then(|outcome| outcome.clone());
+                if outcome.is_none() {
+                    self.clear_abandoned();
+                }
                 match outcome {
-                    Some(Ok(keys)) => return Ok(keys),
+                    Some(Ok(keys)) if !keys.is_empty() => return Ok(keys),
+                    Some(Ok(_)) => return Err(AuthError::KeysUnavailable),
                     Some(Err(error)) => error,
                     None => AuthError::KeysUnavailable,
                 }
@@ -577,18 +599,27 @@ impl JwtVerifier {
         }
         let kid = header.kid.as_deref();
         let cached = self.cached();
-        let known = Self::select(&cached.keys, kid)?.is_some();
-        let keys = match (cached.freshness, known) {
-            (Freshness::Fresh, true) => cached.keys,
+        let keys = match cached.freshness {
+            // Expiry takes precedence over selection errors: the refreshed
+            // set may no longer be ambiguous or may contain usable keys.
+            Freshness::Expired => self.refreshed(cached.attempts).await?,
+            Freshness::Fresh => {
+                if Self::select(&cached.keys, kid)?.is_some() {
+                    cached.keys
+                } else {
+                    self.refreshed(cached.attempts).await?
+                }
+            }
             // Past its lifetime but within the stale bound: verify now and
             // revalidate in the background, so no request waits on the JWKS.
-            (Freshness::Stale, true) => {
-                self.refresh(cached.attempts);
-                cached.keys
+            Freshness::Stale => {
+                if Self::select(&cached.keys, kid)?.is_some() {
+                    self.refresh(cached.attempts);
+                    cached.keys
+                } else {
+                    self.refreshed(cached.attempts).await?
+                }
             }
-            // Expired keys, an unknown kid, or no keys yet: wait for a
-            // refresh once.
-            _ => self.refreshed(cached.attempts).await?,
         };
         let key = Self::select(&keys, kid)?.ok_or(AuthError::Invalid("unknown signing key"))?;
         let mut validation = Validation::new(header.alg);
