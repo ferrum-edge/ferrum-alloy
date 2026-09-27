@@ -1,25 +1,37 @@
 //! Token-bucket rate limits for the management listener.
 //!
-//! Every request is charged to two buckets of its budget: one for the whole
-//! listener and one for its client. Probes (`/livez` and `/readyz`) and all
-//! other paths have separate budgets, so a flood of one never throttles the
-//! other. A request is admitted only when both buckets hold a token, and a
+//! Probes (`/livez` and `/readyz`) and all other paths ("endpoints") have
+//! separate budgets, each with its own client table behind its own lock, so
+//! a flood of one neither throttles nor contends with the other.
+//!
+//! An endpoint request is charged to a bucket of its client and to one of
+//! the whole listener, and is admitted only when both hold a token. A
 //! rejected request consumes nothing, so a client over its own limit cannot
-//! drain the listener budget of everyone else.
+//! drain the listener budget of everyone else. A probe is charged to its
+//! client's bucket only: a listener-wide probe budget would let a few
+//! sources starve kubelet of `/livez`.
 //!
 //! A client is the transport peer address ([`PeerInfo`], or axum's
-//! `ConnectInfo`), never a request header. IPv6 clients are keyed by their
-//! /64 prefix, which a single host usually controls entirely. The client
-//! table holds at most `max_clients` entries. A client whose buckets have
-//! refilled completely is indistinguishable from a new one, so it is dropped
-//! when room is needed and at least once a minute. While the table is full
-//! of active clients, further clients, and requests without a transport
-//! address, share one client budget.
+//! `ConnectInfo`), never a request header. IPv4-mapped IPv6 addresses count
+//! as IPv4; other IPv6 addresses are keyed by their `ipv6_prefix_len`
+//! prefix, which a single host usually controls entirely. Peers in
+//! `exempt_networks` (loopback by default) are not limited at all.
+//!
+//! Each client table holds at most `max_clients` entries. A client gets an
+//! entry only when a request of it is admitted, so rejected requests never
+//! take room. An entry whose bucket has refilled completely is equivalent to
+//! none and is forgotten: every request examines the longest-unexamined
+//! entry, and a newcomer that finds the table full examines a few more. The
+//! work per request is bounded; a table is never swept as a whole. While a
+//! table is full of clients still spending their budget, endpoint requests
+//! from further clients share one client budget, and probes from further
+//! clients are served untracked, because refusing them restarts pods.
+//! Requests without a transport address use the shared budget.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -27,6 +39,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ferrum_alloy_telemetry::PeerInfo;
 use http::header::{CACHE_CONTROL, HeaderValue, RETRY_AFTER};
+use ipnet::IpNet;
 
 use crate::config::ManagementRateLimit;
 use crate::problem::{Problem, ProblemKind};
@@ -34,14 +47,11 @@ use crate::problem::{Problem, ProblemKind};
 /// Buckets count billionths of a request, so refills are exact integers.
 const TOKEN: u64 = 1_000_000_000;
 
-/// Shortest interval between sweeps for idle clients while the table is full.
-const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+/// Entries every request examines for a refilled bucket.
+const EXAMINED_PER_REQUEST: usize = 1;
 
-/// Longest interval between sweeps for idle clients.
-const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Keeps the network part of an IPv6 address.
-const IPV6_PREFIX_64: u128 = !0 << 64;
+/// Further entries a newcomer examines when the table is full.
+const EXAMINED_WHEN_FULL: usize = 8;
 
 /// Sustained rate and capacity of one bucket.
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +124,8 @@ pub(crate) enum Budget {
 }
 
 impl Budget {
+    const ALL: [Self; 2] = [Self::Probes, Self::Endpoints];
+
     fn of(path: &str) -> Self {
         if crate::management::PROBE_PATHS.contains(&path) {
             Self::Probes
@@ -128,6 +140,21 @@ impl Budget {
             Self::Endpoints => "endpoints",
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Probes => 0,
+            Self::Endpoints => 1,
+        }
+    }
+
+    /// The buckets that can reject a request of this budget.
+    fn scopes(self) -> &'static [Scope] {
+        match self {
+            Self::Probes => &[Scope::Client, Scope::Shared],
+            Self::Endpoints => &Scope::ALL,
+        }
+    }
 }
 
 /// Which bucket rejected a request.
@@ -135,9 +162,10 @@ impl Budget {
 pub(crate) enum Scope {
     /// The client's own bucket.
     Client,
-    /// The bucket shared by clients the table has no room for.
+    /// The bucket shared by requests without a transport address and, for
+    /// endpoints, by clients the table has no room for.
     Shared,
-    /// The listener bucket.
+    /// The listener bucket (endpoints only).
     Global,
 }
 
@@ -175,85 +203,181 @@ pub(crate) enum Decision {
     },
 }
 
+/// What a full table does with a newcomer.
 #[derive(Debug, Clone, Copy)]
-struct Rates {
+enum Overflow {
+    /// Charge it to the shared bucket.
+    Shared,
+    /// Serve it without an entry.
+    Untracked,
+}
+
+/// The limits of one budget.
+#[derive(Debug, Clone, Copy)]
+struct Policy {
     client: Rate,
-    global: Rate,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Client {
-    probes: Bucket,
-    endpoints: Bucket,
-}
-
-impl Client {
-    fn full(limits: &Limits, now: Instant) -> Self {
-        Self {
-            probes: Bucket::full(limits.probes.client, now),
-            endpoints: Bucket::full(limits.endpoints.client, now),
-        }
-    }
-
-    /// Refills both buckets and reports whether they are full, which makes
-    /// the entry equivalent to a new one.
-    fn refill_is_idle(&mut self, limits: &Limits, now: Instant) -> bool {
-        self.probes.refill(limits.probes.client, now);
-        self.endpoints.refill(limits.endpoints.client, now);
-        let probes = self.probes.is_full(limits.probes.client);
-        probes && self.endpoints.is_full(limits.endpoints.client)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Limits {
-    probes: Rates,
-    endpoints: Rates,
+    global: Option<Rate>,
     max_clients: usize,
+    overflow: Overflow,
 }
 
+/// Where a request is charged.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    /// The entry of a tracked client.
+    Tracked(IpAddr),
+    /// A fresh bucket, which becomes the client's entry if it is admitted.
+    New(IpAddr),
+    /// A fresh bucket that is not kept.
+    Untracked,
+    /// The shared bucket.
+    Shared,
+}
+
+/// The client table of one budget.
 #[derive(Debug)]
 struct Table {
-    clients: HashMap<IpAddr, Client>,
-    shared: Client,
-    global_probes: Bucket,
-    global_endpoints: Bucket,
-    last_sweep: Instant,
+    clients: HashMap<IpAddr, Bucket>,
+    /// Every key of `clients` exactly once, longest-unexamined first.
+    queue: VecDeque<IpAddr>,
+    shared: Bucket,
+    /// The listener bucket, for endpoints.
+    global: Option<Bucket>,
+    /// Newcomers served without an entry because the table was full.
+    untracked: u64,
 }
 
 impl Table {
-    fn sweep(&mut self, limits: &Limits, now: Instant) {
-        self.clients
-            .retain(|_, client| !client.refill_is_idle(limits, now));
-        self.last_sweep = now;
+    fn new(policy: &Policy, now: Instant) -> Self {
+        Self {
+            clients: HashMap::new(),
+            queue: VecDeque::new(),
+            shared: Bucket::full(policy.client, now),
+            global: policy.global.map(|rate| Bucket::full(rate, now)),
+            untracked: 0,
+        }
     }
 
-    /// The key under which `client` has an entry, creating one when there is
-    /// room. `None` means the shared budget applies.
-    fn admit(&mut self, client: Option<IpAddr>, limits: &Limits, now: Instant) -> Option<IpAddr> {
-        let since_sweep = now.saturating_duration_since(self.last_sweep);
-        let full = self.clients.len() >= limits.max_clients;
-        if since_sweep >= IDLE_SWEEP_INTERVAL || (full && since_sweep >= FULL_SWEEP_INTERVAL) {
-            self.sweep(limits, now);
+    /// Examines up to `count` entries, longest-unexamined first. An entry
+    /// whose bucket has refilled completely is forgotten; any other moves to
+    /// the back of the queue.
+    fn forget_refilled(&mut self, rate: Rate, now: Instant, count: usize) {
+        for _ in 0..count {
+            let Some(key) = self.queue.pop_front() else {
+                return;
+            };
+            let Some(bucket) = self.clients.get_mut(&key) else {
+                continue;
+            };
+            bucket.refill(rate, now);
+            if bucket.is_full(rate) {
+                self.clients.remove(&key);
+            } else {
+                self.queue.push_back(key);
+            }
         }
-        let key = client?;
+    }
+
+    fn slot(&mut self, policy: &Policy, client: Option<IpAddr>, now: Instant) -> Slot {
+        let Some(key) = client else {
+            return Slot::Shared;
+        };
         if self.clients.contains_key(&key) {
-            return Some(key);
+            return Slot::Tracked(key);
         }
-        if self.clients.len() >= limits.max_clients {
-            return None;
+        if self.clients.len() >= policy.max_clients {
+            self.forget_refilled(policy.client, now, EXAMINED_WHEN_FULL);
         }
-        self.clients.insert(key, Client::full(limits, now));
-        Some(key)
+        if self.clients.len() < policy.max_clients {
+            return Slot::New(key);
+        }
+        match policy.overflow {
+            Overflow::Shared => Slot::Shared,
+            Overflow::Untracked => Slot::Untracked,
+        }
+    }
+
+    /// Charges one request from the client keyed `client`.
+    fn check(&mut self, policy: &Policy, client: Option<IpAddr>, now: Instant) -> Decision {
+        self.forget_refilled(policy.client, now, EXAMINED_PER_REQUEST);
+        let slot = self.slot(policy, client, now);
+        let Self {
+            clients,
+            queue,
+            shared,
+            global,
+            untracked,
+        } = self;
+        let mut fresh = Bucket::full(policy.client, now);
+        let (own, own_scope) = match slot {
+            Slot::Tracked(key) => (clients.get_mut(&key).unwrap_or(&mut fresh), Scope::Client),
+            Slot::New(_) | Slot::Untracked => (&mut fresh, Scope::Client),
+            Slot::Shared => (shared, Scope::Shared),
+        };
+        own.refill(policy.client, now);
+        if let (Some(bucket), Some(rate)) = (global.as_mut(), policy.global) {
+            bucket.refill(rate, now);
+        }
+        let global_ready = global.as_ref().is_none_or(Bucket::has_token);
+        if own.has_token() && global_ready {
+            own.take();
+            if let Some(bucket) = global.as_mut() {
+                bucket.take();
+            }
+            match slot {
+                Slot::New(key) => {
+                    clients.insert(key, fresh);
+                    queue.push_back(key);
+                }
+                Slot::Untracked => *untracked = untracked.saturating_add(1),
+                Slot::Tracked(_) | Slot::Shared => {}
+            }
+            return Decision::Allow;
+        }
+        let scope = if own.has_token() {
+            Scope::Global
+        } else {
+            own_scope
+        };
+        let global_wait = match (global.as_ref(), policy.global) {
+            (Some(bucket), Some(rate)) => bucket.wait(rate),
+            _ => Duration::ZERO,
+        };
+        let retry_after = own.wait(policy.client).max(global_wait);
+        Decision::Reject { scope, retry_after }
+    }
+}
+
+/// The limits and the client table of one budget.
+#[derive(Debug)]
+struct Limiter {
+    policy: Policy,
+    table: Mutex<Table>,
+}
+
+impl Limiter {
+    fn new(policy: Policy, now: Instant) -> Self {
+        Self {
+            table: Mutex::new(Table::new(&policy, now)),
+            policy,
+        }
+    }
+
+    fn table(&self) -> MutexGuard<'_, Table> {
+        self.table.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 /// The management listener's rate limiter.
 #[derive(Debug)]
 pub(crate) struct RateLimiter {
-    limits: Limits,
-    table: Mutex<Table>,
-    /// Rejections by budget (probes, endpoints) and [`Scope`].
+    probes: Limiter,
+    endpoints: Limiter,
+    /// Peers that bypass the limits.
+    exempt: Vec<IpNet>,
+    /// Keeps the network part of an IPv6 address.
+    ipv6_mask: u128,
+    /// Rejections by [`Budget`] and [`Scope`].
     rejected: [[AtomicU64; 3]; 2],
 }
 
@@ -263,103 +387,87 @@ impl RateLimiter {
     }
 
     fn starting_at(config: &ManagementRateLimit, now: Instant) -> Self {
-        let limits = Limits {
-            probes: Rates {
-                client: Rate::new(config.probe_requests_per_second, config.probe_burst),
-                global: Rate::new(
-                    config.probe_global_requests_per_second,
-                    config.probe_global_burst,
-                ),
-            },
-            endpoints: Rates {
-                client: Rate::new(config.requests_per_second, config.burst),
-                global: Rate::new(config.global_requests_per_second, config.global_burst),
-            },
-            max_clients: config.max_clients.max(1),
+        let max_clients = config.max_clients.max(1);
+        let probes = Policy {
+            client: Rate::new(config.probe_requests_per_second, config.probe_burst),
+            global: None,
+            max_clients,
+            overflow: Overflow::Untracked,
         };
+        let global = Rate::new(config.global_requests_per_second, config.global_burst);
+        let endpoints = Policy {
+            client: Rate::new(config.requests_per_second, config.burst),
+            global: Some(global),
+            max_clients,
+            overflow: Overflow::Shared,
+        };
+        let prefix_len = u32::from(config.ipv6_prefix_len.min(128));
         Self {
-            table: Mutex::new(Table {
-                clients: HashMap::new(),
-                shared: Client::full(&limits, now),
-                global_probes: Bucket::full(limits.probes.global, now),
-                global_endpoints: Bucket::full(limits.endpoints.global, now),
-                last_sweep: now,
-            }),
-            limits,
+            probes: Limiter::new(probes, now),
+            endpoints: Limiter::new(endpoints, now),
+            exempt: config.exempt_networks.iter().map(IpNet::trunc).collect(),
+            ipv6_mask: u128::MAX.checked_shl(128 - prefix_len).unwrap_or(0),
             rejected: Default::default(),
         }
     }
 
-    /// Charges one request from `client` to `budget`.
-    pub(crate) fn check(&self, client: Option<IpAddr>, budget: Budget, now: Instant) -> Decision {
-        let limits = &self.limits;
-        let mut table = self.table.lock().unwrap_or_else(PoisonError::into_inner);
-        let key = table.admit(client, limits, now);
-        let Table {
-            clients,
-            shared,
-            global_probes,
-            global_endpoints,
-            ..
-        } = &mut *table;
-        let tracked = match key {
-            Some(key) => clients.get_mut(&key),
-            None => None,
-        };
-        let (entry, own_scope) = match tracked {
-            Some(entry) => (entry, Scope::Client),
-            None => (shared, Scope::Shared),
-        };
-        let (own, global, rates) = match budget {
-            Budget::Probes => (&mut entry.probes, global_probes, limits.probes),
-            Budget::Endpoints => (&mut entry.endpoints, global_endpoints, limits.endpoints),
-        };
-        own.refill(rates.client, now);
-        global.refill(rates.global, now);
-        if own.has_token() && global.has_token() {
-            own.take();
-            global.take();
+    fn limiter(&self, budget: Budget) -> &Limiter {
+        match budget {
+            Budget::Probes => &self.probes,
+            Budget::Endpoints => &self.endpoints,
+        }
+    }
+
+    /// Whether requests from the canonical peer address `ip` bypass the
+    /// limits.
+    fn is_exempt(&self, ip: IpAddr) -> bool {
+        self.exempt.iter().any(|network| network.contains(&ip))
+    }
+
+    /// The table key of a canonical peer address: IPv4 as is, IPv6 by its
+    /// prefix.
+    fn client_key(&self, ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V4(_) => ip,
+            IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & self.ipv6_mask)),
+        }
+    }
+
+    /// Charges one request from the transport peer `peer` to `budget`.
+    pub(crate) fn check(&self, peer: Option<IpAddr>, budget: Budget, now: Instant) -> Decision {
+        // IPv4-mapped IPv6 addresses are IPv4 clients.
+        let peer = peer.map(|ip| ip.to_canonical());
+        if peer.is_some_and(|ip| self.is_exempt(ip)) {
             return Decision::Allow;
         }
-        let scope = if own.has_token() {
-            Scope::Global
-        } else {
-            own_scope
-        };
-        let retry_after = own.wait(rates.client).max(global.wait(rates.global));
-        drop(table);
-        let row = match budget {
-            Budget::Probes => 0,
-            Budget::Endpoints => 1,
-        };
-        if let Some(counter) = self.rejected.get(row).and_then(|r| r.get(scope.index())) {
-            counter.fetch_add(1, Ordering::Relaxed);
+        let key = peer.map(|ip| self.client_key(ip));
+        let limiter = self.limiter(budget);
+        let decision = limiter.table().check(&limiter.policy, key, now);
+        if let Decision::Reject { scope, .. } = decision {
+            let row = self.rejected.get(budget.index());
+            if let Some(counter) = row.and_then(|row| row.get(scope.index())) {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        Decision::Reject { scope, retry_after }
+        decision
     }
 
-    /// Clients with their own entry.
-    pub(crate) fn tracked_clients(&self) -> usize {
-        self.table
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clients
-            .len()
+    /// Clients of `budget` with their own entry.
+    pub(crate) fn tracked_clients(&self, budget: Budget) -> usize {
+        self.limiter(budget).table().clients.len()
     }
 
-    /// Prometheus text for the rejection counters and the table size.
+    /// Prometheus text for the rejection counters and the table sizes.
     pub(crate) fn render_prometheus(&self) -> String {
         let name = "ferrum_alloy_management_rate_limited_total";
         let mut out = format!(
             "# HELP {name} Management requests rejected by a rate limit.\n# TYPE {name} counter\n"
         );
-        for (budget, row) in [Budget::Probes, Budget::Endpoints]
-            .into_iter()
-            .zip(&self.rejected)
-        {
-            for scope in Scope::ALL {
+        for budget in Budget::ALL {
+            let row = self.rejected.get(budget.index());
+            for scope in budget.scopes() {
                 let value = row
-                    .get(scope.index())
+                    .and_then(|row| row.get(scope.index()))
                     .map_or(0, |counter| counter.load(Ordering::Relaxed));
                 out.push_str(&format!(
                     "{name}{{budget=\"{}\",scope=\"{}\"}} {value}\n",
@@ -370,22 +478,21 @@ impl RateLimiter {
         }
         let name = "ferrum_alloy_management_rate_limit_clients";
         out.push_str(&format!(
-            "# HELP {name} Clients tracked individually by the management rate limit.\n# TYPE {name} gauge\n{name} {}\n",
-            self.tracked_clients()
+            "# HELP {name} Clients tracked individually by the management rate limit.\n# TYPE {name} gauge\n"
+        ));
+        for budget in Budget::ALL {
+            out.push_str(&format!(
+                "{name}{{budget=\"{}\"}} {}\n",
+                budget.label(),
+                self.tracked_clients(budget)
+            ));
+        }
+        let name = "ferrum_alloy_management_rate_limit_untracked_probes_total";
+        out.push_str(&format!(
+            "# HELP {name} Probes served untracked because the probe client table was full.\n# TYPE {name} counter\n{name} {}\n",
+            self.probes.table().untracked
         ));
         out
-    }
-}
-
-/// The key of a transport peer address: IPv4 (including IPv4-mapped IPv6)
-/// as is, other IPv6 addresses by their /64 prefix.
-fn client_key(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => ip,
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & IPV6_PREFIX_64)),
-        },
     }
 }
 
@@ -393,10 +500,10 @@ fn client_key(ip: IpAddr) -> IpAddr {
 fn peer(request: &Request) -> Option<IpAddr> {
     let extensions = request.extensions();
     if let Some(peer) = extensions.get::<PeerInfo>() {
-        return peer.remote_addr.map(|addr| client_key(addr.ip()));
+        return peer.remote_addr.map(|addr| addr.ip());
     }
     let ConnectInfo(addr) = extensions.get::<ConnectInfo<SocketAddr>>()?;
-    Some(client_key(addr.ip()))
+    Some(addr.ip())
 }
 
 /// Seconds for `Retry-After`: rounded up, at least one.
@@ -450,9 +557,9 @@ mod tests {
             global_burst: 100,
             probe_requests_per_second: 2,
             probe_burst: 3,
-            probe_global_requests_per_second: 100,
-            probe_global_burst: 100,
             max_clients: 4,
+            ipv6_prefix_len: 64,
+            exempt_networks: vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()],
         }
     }
 
@@ -465,10 +572,26 @@ mod tests {
         limiter.check(ip(client), Budget::Endpoints, at)
     }
 
+    /// One probe request.
+    fn probe(limiter: &RateLimiter, client: &str, at: Instant) -> Decision {
+        limiter.check(ip(client), Budget::Probes, at)
+    }
+
     fn rejected(decision: Decision) -> (Scope, Duration) {
         match decision {
             Decision::Reject { scope, retry_after } => (scope, retry_after),
             Decision::Allow => panic!("expected a rejection"),
+        }
+    }
+
+    /// Every tracked key is queued exactly once.
+    fn assert_queue_matches(limiter: &RateLimiter) {
+        for budget in Budget::ALL {
+            let table = limiter.limiter(budget).table();
+            assert_eq!(table.queue.len(), table.clients.len());
+            for key in &table.queue {
+                assert!(table.clients.contains_key(key));
+            }
         }
     }
 
@@ -498,8 +621,7 @@ mod tests {
         }
         assert_ne!(call(&limiter, "192.0.2.1", start), Decision::Allow);
         assert_eq!(call(&limiter, "192.0.2.2", start), Decision::Allow);
-        let probe = limiter.check(ip("192.0.2.1"), Budget::Probes, start);
-        assert_eq!(probe, Decision::Allow);
+        assert_eq!(probe(&limiter, "192.0.2.1", start), Decision::Allow);
     }
 
     #[test]
@@ -516,8 +638,8 @@ mod tests {
         let (scope, wait) = rejected(call(&limiter, "192.0.2.2", start));
         assert_eq!(scope, Scope::Global);
         assert_eq!(wait, Duration::from_secs(1));
-        let probe = limiter.check(ip("192.0.2.1"), Budget::Probes, start);
-        assert_eq!(probe, Decision::Allow, "probes have their own budget");
+        let decision = probe(&limiter, "192.0.2.1", start);
+        assert_eq!(decision, Decision::Allow, "probes have their own budget");
     }
 
     #[test]
@@ -527,9 +649,10 @@ mod tests {
         for n in 0..=255u8 {
             let client = Some(IpAddr::from([198, 51, 100, n]));
             limiter.check(client, Budget::Endpoints, start);
-            assert!(limiter.tracked_clients() <= 4);
+            assert!(limiter.tracked_clients(Budget::Endpoints) <= 4);
         }
-        assert_eq!(limiter.tracked_clients(), 4);
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 4);
+        assert_queue_matches(&limiter);
         // The overflow clients used up the shared budget.
         let (scope, _) = rejected(call(&limiter, "203.0.113.9", start));
         assert_eq!(scope, Scope::Shared);
@@ -541,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_clients_are_evicted_to_make_room() {
+    fn refilled_clients_are_forgotten_a_few_at_a_time() {
         let start = Instant::now();
         let limiter = RateLimiter::starting_at(&limits(), start);
         for n in 0..4u8 {
@@ -549,34 +672,163 @@ mod tests {
             limiter.check(client, Budget::Endpoints, start);
         }
         for _ in 0..3 {
-            call(&limiter, "203.0.113.1", start);
+            assert_eq!(call(&limiter, "203.0.113.1", start), Decision::Allow);
         }
         let (scope, _) = rejected(call(&limiter, "203.0.113.1", start));
-        assert_eq!(scope, Scope::Shared);
-        // The table sweeps at most once a second while full; by then the
-        // first four clients have refilled and are dropped.
-        let later = start + Duration::from_secs(1);
-        assert_eq!(call(&limiter, "203.0.113.1", later), Decision::Allow);
-        assert_eq!(limiter.tracked_clients(), 1, "idle clients were dropped");
-        // Idle clients also leave a table that is not full.
+        assert_eq!(scope, Scope::Shared, "the table is full of active clients");
+        // After 500 ms the first four clients have refilled. The newcomer
+        // finds one of them to forget and gets its own entry.
+        let later = start + Duration::from_millis(500);
+        for _ in 0..3 {
+            assert_eq!(call(&limiter, "203.0.113.1", later), Decision::Allow);
+        }
+        let (scope, _) = rejected(call(&limiter, "203.0.113.1", later));
+        assert_eq!(scope, Scope::Client);
+        // Every request examined one more entry and forgot it.
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 1);
         let much_later = start + Duration::from_secs(120);
-        limiter.check(None, Budget::Probes, much_later);
-        assert_eq!(limiter.tracked_clients(), 0);
+        limiter.check(None, Budget::Endpoints, much_later);
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 0);
+        assert_queue_matches(&limiter);
     }
 
     #[test]
-    fn ipv6_clients_are_keyed_by_their_64_prefix() {
+    fn rejected_newcomers_never_take_room_from_a_returning_client() {
+        let start = Instant::now();
+        let mut config = limits();
+        config.global_requests_per_second = 1;
+        config.global_burst = 3;
+        let limiter = RateLimiter::starting_at(&config, start);
+        // A returning client and an attacker use up the listener budget.
+        assert_eq!(call(&limiter, "192.0.2.1", start), Decision::Allow);
+        for _ in 0..2 {
+            assert_eq!(call(&limiter, "192.0.2.66", start), Decision::Allow);
+        }
+        // Newcomers find no listener token: none of them gets an entry.
+        let flood = start + Duration::from_millis(500);
+        for n in 0..=255u8 {
+            let client = Some(IpAddr::from([198, 51, 100, n]));
+            let (scope, _) = rejected(limiter.check(client, Budget::Endpoints, flood));
+            assert_eq!(scope, Scope::Global);
+        }
+        assert!(limiter.tracked_clients(Budget::Endpoints) <= 2);
+        assert_queue_matches(&limiter);
+        // The returning client has refilled and was forgotten, but there is
+        // room, so it gets its own budget again instead of the shared one.
+        let back = start + Duration::from_secs(1);
+        assert_eq!(call(&limiter, "192.0.2.1", back), Decision::Allow);
+        let returning: IpAddr = "192.0.2.1".parse().unwrap();
+        let table = limiter.endpoints.table();
+        assert!(table.clients.contains_key(&returning));
+    }
+
+    #[test]
+    fn probes_are_limited_per_client_only() {
+        let start = Instant::now();
+        let mut config = limits();
+        config.probe_requests_per_second = 1;
+        let limiter = RateLimiter::starting_at(&config, start);
+        // Many clients spending their probe budget never limit another one.
+        for n in 0..=255u8 {
+            let client = Some(IpAddr::from([198, 51, 100, n]));
+            for _ in 0..3 {
+                let decision = limiter.check(client, Budget::Probes, start);
+                assert_eq!(decision, Decision::Allow);
+            }
+        }
+        assert_eq!(limiter.tracked_clients(Budget::Probes), 4);
+        // A tracked client is limited by its own bucket.
+        let (scope, wait) = rejected(probe(&limiter, "198.51.100.0", start));
+        assert_eq!(scope, Scope::Client);
+        assert_eq!(wait, Duration::from_secs(1));
+        // Clients beyond the full table are served untracked.
+        assert_eq!(probe(&limiter, "203.0.113.1", start), Decision::Allow);
+        assert!(limiter.probes.table().untracked > 0);
+        // Probes without a transport address share one bucket.
+        for _ in 0..3 {
+            assert_eq!(limiter.check(None, Budget::Probes, start), Decision::Allow);
+        }
+        let (scope, _) = rejected(limiter.check(None, Budget::Probes, start));
+        assert_eq!(scope, Scope::Shared);
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 0);
+        assert_queue_matches(&limiter);
+    }
+
+    #[test]
+    fn exempt_networks_bypass_the_limits() {
+        let start = Instant::now();
+        let mut config = limits();
+        config.exempt_networks.push("10.1.0.0/16".parse().unwrap());
+        let limiter = RateLimiter::starting_at(&config, start);
+        // 127.0.0.6 is where the Istio sidecar connects from.
+        for client in ["127.0.0.6", "::1", "::ffff:127.0.0.1", "10.1.2.3"] {
+            for _ in 0..50 {
+                assert_eq!(call(&limiter, client, start), Decision::Allow);
+                assert_eq!(probe(&limiter, client, start), Decision::Allow);
+            }
+        }
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 0);
+        assert_eq!(limiter.tracked_clients(Budget::Probes), 0);
+        for _ in 0..3 {
+            assert_eq!(call(&limiter, "10.2.0.1", start), Decision::Allow);
+        }
+        assert_ne!(call(&limiter, "10.2.0.1", start), Decision::Allow);
+    }
+
+    #[test]
+    fn ipv6_clients_are_keyed_by_their_prefix() {
         let start = Instant::now();
         let limiter = RateLimiter::starting_at(&limits(), start);
         for client in ["2001:db8:1:2::1", "2001:db8:1:2::2", "2001:db8:1:2:f::"] {
             assert_eq!(call(&limiter, client, start), Decision::Allow);
         }
-        assert_eq!(limiter.tracked_clients(), 1);
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 1);
         let (scope, _) = rejected(call(&limiter, "2001:db8:1:2::9", start));
         assert_eq!(scope, Scope::Client);
         assert_eq!(call(&limiter, "2001:db8:1:3::1", start), Decision::Allow);
-        let mapped = client_key("::ffff:192.0.2.1".parse().unwrap());
-        assert_eq!(mapped, "192.0.2.1".parse::<IpAddr>().unwrap());
+
+        // IPv4-mapped IPv6 addresses are the IPv4 client.
+        for _ in 0..3 {
+            assert_eq!(call(&limiter, "::ffff:192.0.2.1", start), Decision::Allow);
+        }
+        let (scope, _) = rejected(call(&limiter, "192.0.2.1", start));
+        assert_eq!(scope, Scope::Client);
+
+        // A shorter prefix groups more addresses, a longer one fewer.
+        let mut config = limits();
+        config.ipv6_prefix_len = 56;
+        let limiter = RateLimiter::starting_at(&config, start);
+        for client in ["2001:db8:1:2::1", "2001:db8:1:3::1", "2001:db8:1:ff::1"] {
+            assert_eq!(call(&limiter, client, start), Decision::Allow);
+        }
+        assert_ne!(call(&limiter, "2001:db8:1:4::1", start), Decision::Allow);
+        assert_eq!(call(&limiter, "2001:db8:1:100::1", start), Decision::Allow);
+        config.ipv6_prefix_len = 128;
+        let limiter = RateLimiter::starting_at(&config, start);
+        for n in 0..4u16 {
+            let client = Some(IpAddr::from([0x2001, 0xdb8, 1, 2, 0, 0, 0, n]));
+            limiter.check(client, Budget::Endpoints, start);
+        }
+        assert_eq!(limiter.tracked_clients(Budget::Endpoints), 4);
+    }
+
+    #[test]
+    fn metrics_name_every_budget_and_scope() {
+        let start = Instant::now();
+        let limiter = RateLimiter::starting_at(&limits(), start);
+        for _ in 0..4 {
+            call(&limiter, "192.0.2.1", start);
+        }
+        let text = limiter.render_prometheus();
+        assert!(
+            text.contains("budget=\"endpoints\",scope=\"client\"} 1"),
+            "{text}"
+        );
+        assert!(!text.contains("budget=\"probes\",scope=\"global\""));
+        let clients = "ferrum_alloy_management_rate_limit_clients{budget=\"endpoints\"} 1";
+        assert!(text.contains(clients), "{text}");
+        let untracked = "ferrum_alloy_management_rate_limit_untracked_probes_total 0";
+        assert!(text.contains(untracked), "{text}");
     }
 
     #[test]

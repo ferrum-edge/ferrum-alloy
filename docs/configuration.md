@@ -68,9 +68,9 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST` | `management.rate_limit.global_burst` | integer |
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_REQUESTS_PER_SECOND` | `management.rate_limit.probe_requests_per_second` | integer |
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST` | `management.rate_limit.probe_burst` | integer |
-| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_GLOBAL_REQUESTS_PER_SECOND` | `management.rate_limit.probe_global_requests_per_second` | integer |
-| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_GLOBAL_BURST` | `management.rate_limit.probe_global_burst` | integer |
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS` | `management.rate_limit.max_clients` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN` | `management.rate_limit.ipv6_prefix_len` | integer |
+| `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS` | `management.rate_limit.exempt_networks` | comma list of CIDRs (empty for none) |
 | `FERRUM_ALLOY_LOG_FORMAT` | `logging.format` | `json` / `pretty` / `compact` |
 | `FERRUM_ALLOY_LOG_FILTER` | `logging.filter` | `EnvFilter` directives |
 | `FERRUM_ALLOY_OTLP_ENABLED` | `otlp.enabled` | bool |
@@ -167,11 +167,15 @@ Each section below shows a key, its default, and its meaning.
 
 #### `[management.rate_limit]`
 
-Every request to the management listener is rate-limited before any handler or token check runs, so failed token attempts count too. Requests are charged to one of two budgets: **probes** (`/livez` and `/readyz`) and **endpoints** (every other path, including unknown ones). Traffic to one budget never throttles the other, so kubelet and Edge health probes keep working while `/metrics` is saturated.
+Every request to the management listener is rate-limited before any handler or token check runs, so failed token attempts count too. Requests are charged to one of two budgets: **probes** (`/livez` and `/readyz`) and **endpoints** (every other path, including unknown ones). Each budget has its own client table and lock, so traffic to one budget never throttles or slows the other, and kubelet and Edge health probes keep working while `/metrics` is saturated.
 
-Each budget is a token bucket for the whole listener plus one per client. A request is admitted only when both buckets hold a token, and a rejected request consumes neither, so one client over its limit cannot drain the listener budget for the others. A rejected request gets `429` Problem Details (`tag:ferrumedge.com,2026:alloy/problem/rate-limited`) with `Retry-After` (whole seconds until a token is available) and `Cache-Control: no-store`.
+An endpoint request is charged to a token bucket of its client and one of the whole listener. It is admitted only when both hold a token, and a rejected request consumes neither, so one client over its limit cannot drain the listener budget for the others. A probe is charged to its client's bucket only: there is no listener-wide probe budget, so no set of sources can use up `/livez` for everyone else. A rejected request gets `429` Problem Details (`tag:ferrumedge.com,2026:alloy/problem/rate-limited`) with `Retry-After` (whole seconds until a token is available) and `Cache-Control: no-store`.
 
-A client is the transport peer address of the connection, never a header such as `X-Forwarded-For`. IPv6 clients are keyed by their /64 prefix; IPv4-mapped IPv6 addresses count as IPv4. At most `max_clients` clients are tracked individually. A client whose buckets have refilled completely is forgotten when room is needed, and at least once a minute. While the table is full of active clients, further clients share one per-client budget. When you serve `AlloyParts::management_router` yourself, insert `PeerInfo` or axum `ConnectInfo`; requests without either share that same budget.
+A client is the transport peer address of the connection, never a header such as `X-Forwarded-For`. IPv4-mapped IPv6 addresses count as IPv4. Other IPv6 addresses are keyed by their first `ipv6_prefix_len` bits, because one host usually controls a whole /64. Lower it (down to 48) when one tenant controls more, and raise it (up to 128) when distinct clients share a /64: in Kubernetes, pod addresses of one node often come from a single /64, and behind NAT64 many IPv4 clients arrive from one /96 prefix.
+
+Peers in `exempt_networks` bypass the limits entirely. The default is loopback (`127.0.0.0/8` and `::1`). Kubelet probes the pod from its node's address, so add the node network (for example `10.244.0.0/16`, or the node CIDR of your cluster) when the management listener is reachable from the node; otherwise a probe that is refused can restart the pod. Behind a proxy or sidecar, every client is the proxy's address: Istio connects to the application from `127.0.0.6`, so its traffic is exempt by default, and without that exemption all proxied clients would share one client budget. A network of every address (`0.0.0.0/0`, `::/0`) is refused; set `enabled = false` instead.
+
+Each client table holds at most `max_clients` clients. A client gets an entry only when one of its requests is admitted, so rejected requests never take room. A client whose bucket has refilled completely is indistinguishable from a new one and is forgotten: each request examines the entry examined longest ago, and a newcomer that finds the table full examines a few more. The work per request is bounded, and a table is never swept as a whole. While the endpoint table is full of clients that are still spending their budget, further clients share one per-client budget. While the probe table is full, probes from further clients are served untracked rather than refused. When you serve `AlloyParts::management_router` yourself, insert `PeerInfo` or axum `ConnectInfo`; without either, every request is one unknown client and all of them share one budget.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -182,11 +186,11 @@ A client is the transport peer address of the connection, never a header such as
 | `global_burst` | `200` | Endpoint requests all clients together may send at once. |
 | `probe_requests_per_second` | `20` | Sustained probe requests per second from one client. |
 | `probe_burst` | `40` | Probe requests one client may send at once. |
-| `probe_global_requests_per_second` | `200` | Sustained probe requests per second from all clients together. |
-| `probe_global_burst` | `400` | Probe requests all clients together may send at once. |
-| `max_clients` | `1024` | Clients tracked individually, `1` to `1000000`. |
+| `max_clients` | `1024` | Clients tracked individually per budget, `1` to `65536`, and at least `global_burst`. |
+| `ipv6_prefix_len` | `64` | Leading bits of an IPv6 address that identify one client, `48` to `128`. |
+| `exempt_networks` | `["127.0.0.0/8", "::1/128"]` | Peer networks that are not rate-limited. |
 
-Every rate and burst must be greater than zero when `enabled` is `true`. Rejections are counted in `ferrum_alloy_management_rate_limited_total{budget="probes"|"endpoints",scope="client"|"shared"|"global"}` on `/metrics`, where `scope` names the empty bucket: the client's own, the shared one for clients beyond `max_clients`, or the listener's. `ferrum_alloy_management_rate_limit_clients` is the number of clients currently tracked. The application listener, including its own `/livez` and `/readyz`, is not affected.
+Every rate and burst must be greater than zero when `enabled` is `true`. Rejections are counted in `ferrum_alloy_management_rate_limited_total{budget,scope}` on `/metrics`, where `scope` names the empty bucket: `client` (the client's own), `shared` (the one for requests without a transport address and, for endpoints, for clients beyond `max_clients`), or `global` (the listener's, endpoints only). `ferrum_alloy_management_rate_limit_clients{budget}` is the number of clients currently tracked, and `ferrum_alloy_management_rate_limit_untracked_probes_total` counts probes served untracked because the probe table was full. Exempt requests are not counted. The application listener, including its own `/livez` and `/readyz`, is not affected.
 
 ### `[health]`
 

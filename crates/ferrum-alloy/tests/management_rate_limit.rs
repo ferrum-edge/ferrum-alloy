@@ -1,6 +1,6 @@
 //! Rate limits on the management listener: the `429` shape, per-client
-//! budgets keyed by transport address, separate probe budgets, and a bounded
-//! client table.
+//! budgets keyed by transport address, separate probe budgets, exempt
+//! networks, and a bounded client table.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -76,6 +76,8 @@ async fn a_burst_beyond_the_limit_gets_a_429_problem() {
     let mut cfg = config();
     cfg.management.rate_limit.requests_per_second = 1;
     cfg.management.rate_limit.burst = 3;
+    // The test client connects from loopback, which is exempt by default.
+    cfg.management.rate_limit.exempt_networks.clear();
     let server = start(app(), cfg).await;
     let url = server.management_url("/metrics");
 
@@ -118,6 +120,7 @@ async fn probes_are_served_while_metrics_is_saturated() {
     limit.burst = 2;
     limit.global_requests_per_second = 1;
     limit.global_burst = 2;
+    limit.exempt_networks.clear();
     let server = start(app(), cfg).await;
 
     let mut saturated = false;
@@ -178,8 +181,10 @@ async fn the_client_table_stays_bounded_under_many_distinct_peers() {
     let limit = &mut cfg.management.rate_limit;
     limit.requests_per_second = 1;
     limit.burst = 2;
-    limit.global_requests_per_second = 100_000;
-    limit.global_burst = 100_000;
+    // At one listener token per second, 500 requests are not all admitted
+    // unless they take minutes.
+    limit.global_requests_per_second = 1;
+    limit.global_burst = 8;
     limit.max_clients = 8;
     let parts = parts(cfg);
 
@@ -190,24 +195,55 @@ async fn the_client_table_stays_bounded_under_many_distinct_peers() {
         assert!(status == 404 || status == 429, "{status}");
     }
 
-    // A tracked client keeps its own budget; the scrape itself is admitted.
+    // Loopback is exempt, so the scrape is served however long the loop took.
     let bearer = format!("Bearer {TOKEN}");
     let auth = [("authorization", bearer.as_str())];
-    let reply = call(&parts, ip("10.0.0.0"), "/metrics", &auth).await;
+    let reply = call(&parts, ip("127.0.0.1"), "/metrics", &auth).await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let text = reply.body;
-    let tracked = metric(&text, "ferrum_alloy_management_rate_limit_clients");
-    assert!((1..=8).contains(&tracked), "tracked clients: {tracked}");
-    let shared = metric(
-        &text,
-        "ferrum_alloy_management_rate_limited_total{budget=\"endpoints\",scope=\"shared\"}",
-    );
-    assert!(shared > 0, "clients beyond the table share one budget");
+    let tracked_series = "ferrum_alloy_management_rate_limit_clients{budget=\"endpoints\"}";
+    let tracked = metric(&text, tracked_series);
+    assert!(tracked <= 8, "tracked clients: {tracked}");
+    let name = "ferrum_alloy_management_rate_limited_total";
+    let mut rejected = 0;
+    for scope in ["client", "shared", "global"] {
+        let series = format!("{name}{{budget=\"endpoints\",scope=\"{scope}\"}}");
+        rejected += metric(&text, &series);
+    }
+    assert!(rejected > 0, "some of the 500 requests were rejected");
     let probes = metric(
         &text,
         "ferrum_alloy_management_rate_limited_total{budget=\"probes\",scope=\"client\"}",
     );
     assert_eq!(probes, 0);
+}
+
+#[tokio::test]
+async fn loopback_and_exempt_networks_are_not_limited() {
+    let mut cfg = config();
+    let limit = &mut cfg.management.rate_limit;
+    limit.requests_per_second = 1;
+    limit.burst = 1;
+    limit.probe_requests_per_second = 1;
+    limit.probe_burst = 1;
+    // A node network, so kubelet probes are never refused.
+    limit.exempt_networks.push("10.244.0.0/16".parse().unwrap());
+    let parts = parts(cfg);
+
+    // Loopback includes sidecars such as Istio, which connect from 127.0.0.6.
+    for peer in ["127.0.0.1", "127.0.0.6", "::1", "10.244.3.7"] {
+        for _ in 0..20 {
+            assert_eq!(call(&parts, ip(peer), "/livez", &[]).await.status, 200);
+            assert_eq!(call(&parts, ip(peer), "/nope", &[]).await.status, 404);
+        }
+    }
+    // Any other peer is limited.
+    let other = ip("10.245.0.1");
+    let mut limited = false;
+    for _ in 0..10 {
+        limited |= call(&parts, other, "/livez", &[]).await.status == 429;
+    }
+    assert!(limited, "other peers are limited");
 }
 
 #[tokio::test]

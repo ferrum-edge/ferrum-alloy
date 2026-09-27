@@ -5,9 +5,9 @@
 //! token is configured; configuration validation refuses a non-loopback
 //! management bind without a token. Every response is `no-store`.
 //!
-//! Requests are rate-limited per client and per listener before any handler
-//! or token check runs, with a separate budget for the probes (see
-//! [`crate::rate_limit`]).
+//! Requests are rate-limited before any handler or token check runs: per
+//! client, and except for the probes, which have a budget of their own, per
+//! listener (see [`crate::rate_limit`]).
 
 use std::sync::Arc;
 
