@@ -3,13 +3,13 @@
 //! Every item is an EXISTING contract of the Ferrum Edge release named in
 //! [`EDGE_RELEASE`], verified against its source. `docs/edge-contract-inventory.md`
 //! records producers, consumers, trust rules, and tests for each. Nothing
-//! here invents gateway headers: Edge v0.9.7 sends no route id, attempt
+//! here invents gateway headers: Edge v0.9.8 sends no route id, attempt
 //! number, or diagnostics header to backends.
 
 /// The Ferrum Edge release these contracts were verified against.
-pub const EDGE_RELEASE: &str = "v0.9.7";
+pub const EDGE_RELEASE: &str = "v0.9.8";
 /// Source commit of [`EDGE_RELEASE`].
-pub const EDGE_SOURCE_COMMIT: &str = "8fed1346ce2e267eb69c03683cb89ea44d785e0b";
+pub const EDGE_SOURCE_COMMIT: &str = "e27f2109216352c3fe9e67a7014611f3f66daa91";
 
 /// Authenticated consumer username injected by Edge after authentication.
 /// Edge strips client-supplied copies at admission (`src/plugins/mod.rs`,
@@ -24,7 +24,8 @@ pub const GATEWAY_ERROR: &str = "x-gateway-error";
 /// `degraded` when Edge used its all-unhealthy fallback target.
 pub const GATEWAY_UPSTREAM_STATUS: &str = "x-gateway-upstream-status";
 
-/// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`).
+/// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`). Edge v0.9.8 added
+/// `request_timeout`; older releases send only the first seven.
 pub const GATEWAY_ERROR_TOKENS: &[&str] = &[
     "connection_failure",
     "backend_timeout",
@@ -33,6 +34,7 @@ pub const GATEWAY_ERROR_TOKENS: &[&str] = &[
     "overload",
     "config_stale",
     "concurrency_limit",
+    "request_timeout",
 ];
 
 /// Edge `otel_tracing` span attributes Alloy's diagnostics interpret.

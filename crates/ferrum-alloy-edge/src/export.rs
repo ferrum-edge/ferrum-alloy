@@ -1,7 +1,7 @@
 //! Generates reviewable Ferrum Edge configuration from a service manifest.
 //!
-//! Output uses only fields that exist in Ferrum Edge v0.9.7's configuration
-//! schema (`src/config/types.rs`: `Proxy`, `Upstream`, `PluginConfig`,
+//! Output uses only fields that exist in the configuration schema of Ferrum Edge
+//! v0.9.8 and v0.9.7 (`src/config/types.rs`: `Proxy`, `Upstream`, `PluginConfig`,
 //! `GatewayConfig`, all `deny_unknown_fields`) and GitForgeOps's per-resource
 //! `kind`/`spec` wrapper. Nothing is sent to a running gateway: artifacts are
 //! written for review and applied through the operator's normal process.

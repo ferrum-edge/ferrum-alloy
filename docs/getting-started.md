@@ -183,7 +183,7 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
 
    Build with `features = ["tls", "edge"]`, and add `"otel"` for trace export. Handlers can take `Option<ferrum_alloy::edge::GatewayContext>` for Edge's authenticated consumer.
 
-3. `examples/edge-observability` runs Edge v0.9.7, Alloy, and an OpenTelemetry Collector together:
+3. `examples/edge-observability` runs Edge v0.9.8, Alloy, and an OpenTelemetry Collector together:
 
    ```bash
    docker compose -f examples/edge-observability/compose.yaml up -d --build

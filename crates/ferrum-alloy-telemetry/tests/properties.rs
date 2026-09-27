@@ -20,7 +20,7 @@ use http_body::{Body, Frame};
 use proptest::prelude::*;
 use tower::{Layer, Service, service_fn};
 
-/// Ferrum Edge v0.9.7 `OtelTracing::parse_traceparent`
+/// Ferrum Edge v0.9.8 `OtelTracing::parse_traceparent` (unchanged since v0.9.7)
 /// (`src/plugins/otel_tracing.rs`), transcribed for differential testing.
 fn edge_parse_traceparent(value: &str) -> Option<(&str, &str, &str)> {
     let value = value.trim();
@@ -55,7 +55,7 @@ fn edge_is_lowercase_hex(value: &str, expected_len: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Ferrum Edge v0.9.7 `correlation_id` acceptance
+/// Ferrum Edge v0.9.8 `correlation_id` acceptance (unchanged since v0.9.7)
 /// (`src/plugins/correlation_id.rs`).
 fn edge_accepts_correlation_id(value: &str) -> bool {
     value.len() <= 256
@@ -71,7 +71,7 @@ fn header_trim(value: &str) -> &str {
     value.trim_matches([' ', '\t'])
 }
 
-/// Accepted by Ferrum Edge's own parser tests (v0.9.7
+/// Accepted by Ferrum Edge's own parser tests (v0.9.8
 /// `src/plugins/otel_tracing.rs` and `tests/unit/plugins/otel_tracing_tests.rs`).
 const EDGE_ACCEPTS: &[&str] = &[
     "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",

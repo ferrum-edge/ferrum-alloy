@@ -1,0 +1,267 @@
+name: Edge release bump
+
+# Detects a new Ferrum Edge release and opens a draft pull request that makes
+# it the contract baseline, keeps the previous baseline as the second supported
+# release, and drops the oldest (docs/compatibility.md, "Supported Edge
+# releases"). CI's Edge jobs read their matrix from docs/compatibility.json, so
+# this never edits a workflow. The image digest is pinned only after Cosign
+# verifies that Edge's release workflow signed it. It runs only on a schedule
+# or by hand, never for pull requests, and uses no secrets: only the job's
+# GITHUB_TOKEN.
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: edge-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Propose the latest Ferrum Edge release
+    if: github.repository == 'ferrum-edge/ferrum-alloy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # push the bump branch
+      pull-requests: write # open the draft pull request
+      actions: write # start CI on the bump branch
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EDGE_REPO: ferrum-edge/ferrum-edge
+      EDGE_IMAGE_REPO: ferrumedge/ferrum-edge
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Find a newer Edge release
+        id: find
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/$EDGE_REPO/releases/latest" --jq .tag_name)
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Unexpected Edge release tag: $tag"
+            exit 1
+          fi
+          current=$(jq -er .edge.release docs/compatibility.json)
+          newest=$(printf '%s\n%s\n' "$current" "$tag" | sort -V | tail -n 1)
+          if [ "$tag" = "$current" ] || [ "$newest" != "$tag" ]; then
+            echo "Edge $tag is not newer than the baseline $current."
+            exit 0
+          fi
+          branch="edge-bump/$tag"
+          # A branch without a pull request (an earlier run that failed after
+          # pushing) gets its pull request now; any pull request, open or
+          # closed, means the release was already proposed.
+          existing=false
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            prs=$(gh pr list --head "$branch" --state all --json number --jq length)
+            if [ "$prs" != 0 ]; then
+              echo "$branch already has a pull request."
+              exit 0
+            fi
+            existing=true
+          fi
+
+          commit=$(gh api "repos/$EDGE_REPO/commits/$tag" --jq .sha)
+          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected commit for $tag: $commit"
+            exit 1
+          fi
+
+          # The multi-arch index digest of the published tag. A release whose
+          # image is not pushed yet (404) is picked up by a later run; any other
+          # registry answer fails the run.
+          scope="repository:$EDGE_IMAGE_REPO:pull"
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=$scope" | jq -er .token)
+          status=$(curl -sS --head -o /dev/null -D "$RUNNER_TEMP/manifest-headers" -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://registry-1.docker.io/v2/$EDGE_IMAGE_REPO/manifests/$tag")
+          case "$status" in
+            200) ;;
+            404)
+              echo "::notice::$EDGE_IMAGE_REPO:$tag is not published yet."
+              exit 0
+              ;;
+            *)
+              echo "::error::Docker Hub answered HTTP $status for $EDGE_IMAGE_REPO:$tag"
+              exit 1
+              ;;
+          esac
+          headers=$(tr -d '\r' < "$RUNNER_TEMP/manifest-headers")
+          media=$(awk -F': ' 'tolower($1) == "content-type" { print $2 }' <<<"$headers")
+          digest=$(awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }' <<<"$headers")
+          case "$media" in
+            application/vnd.oci.image.index.v1+json* | application/vnd.docker.distribution.manifest.list.v2+json*) ;;
+            *)
+              echo "::error::$EDGE_IMAGE_REPO:$tag is not a multi-arch index: $media"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected digest for $EDGE_IMAGE_REPO:$tag: $digest"
+            exit 1
+          fi
+
+          # The tag is mutable; the digest is trusted only when Edge's release
+          # workflow signed it (keyless Cosign) for this tag and source commit.
+          identity="https://github.com/$EDGE_REPO/.github/workflows/release.yml@refs/tags/$tag"
+          if ! cosign verify "$EDGE_IMAGE_REPO@$digest" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "$identity" \
+            --certificate-github-workflow-repository "$EDGE_REPO" \
+            --certificate-github-workflow-sha "$commit" \
+            > "$RUNNER_TEMP/cosign-verify.json"; then
+            echo "::error::$EDGE_IMAGE_REPO@$digest has no valid signature from $identity"
+            exit 1
+          fi
+          echo "Cosign verified $EDGE_IMAGE_REPO@$digest (signed by $identity at $commit)."
+
+          {
+            echo "tag=$tag"
+            echo "previous=$current"
+            echo "commit=$commit"
+            echo "image=$EDGE_IMAGE_REPO@$digest"
+            echo "branch=$branch"
+            echo "existing=$existing"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Rewrite the pin
+        if: steps.find.outputs.tag != '' && steps.find.outputs.existing != 'true'
+        env:
+          TAG: ${{ steps.find.outputs.tag }}
+          COMMIT: ${{ steps.find.outputs.commit }}
+          IMAGE: ${{ steps.find.outputs.image }}
+        shell: python
+        run: |
+          import json
+          import os
+          import pathlib
+
+
+          def edit(path, old, new, count=1):
+              file = pathlib.Path(path)
+              text = file.read_text()
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(f"{path}: expected {count} of {old!r}, found {found}")
+              file.write_text(text.replace(old, new))
+
+
+          def rows(entries):
+              return "".join(
+                  f"| {e['release']} | `{e['source_commit']}` | `{e['image']}` |\n" for e in entries
+              )
+
+
+          path = pathlib.Path("docs/compatibility.json")
+          pairing = json.loads(path.read_text())
+          old = {key: pairing["edge"][key] for key in ("release", "source_commit", "image")}
+          new = {"release": os.environ["TAG"], "source_commit": os.environ["COMMIT"], "image": os.environ["IMAGE"]}
+          old_tested = pairing["edge_support"]["tested"]
+          tested = [new, old]
+          pairing["edge"].update(new)
+          pairing["edge_support"]["tested"] = tested
+          path.write_text(json.dumps(pairing, indent=2) + "\n")
+
+          md = "docs/compatibility.md"
+          edit(md, rows(old_tested), rows(tested))
+          edit(
+              md,
+              f"**{old['release']}**, source `{old['source_commit']}`",
+              f"**{new['release']}**, source `{new['source_commit']}`",
+          )
+          edit(md, f"| Edge image | `{old['image']}`", f"| Edge image | `{new['image']}`")
+          edit(md, f"of the published `{old['release']}` tag", f"of the published `{new['release']}` tag")
+
+          dockerfile = "examples/edge-observability/Dockerfile"
+          edit(dockerfile, f"ARG EDGE_IMAGE={old['image']}\n", f"ARG EDGE_IMAGE={new['image']}\n")
+          edit(dockerfile, f"# Ferrum Edge {old['release']} (", f"# Ferrum Edge {new['release']} (")
+
+          contract = "crates/ferrum-alloy-edge/src/contract.rs"
+          edit(
+              contract,
+              f'pub const EDGE_RELEASE: &str = "{old["release"]}";',
+              f'pub const EDGE_RELEASE: &str = "{new["release"]}";',
+          )
+          edit(
+              contract,
+              f'pub const EDGE_SOURCE_COMMIT: &str = "{old["source_commit"]}";',
+              f'pub const EDGE_SOURCE_COMMIT: &str = "{new["source_commit"]}";',
+          )
+
+          for manifest in ("orders-api", "plain-http"):
+              edit(
+                  f"contracts/fixtures/manifests/{manifest}.edge.yaml",
+                  f"for Ferrum Edge {old['release']} ({old['source_commit'][:12]}).",
+                  f"for Ferrum Edge {new['release']} ({new['source_commit'][:12]}).",
+              )
+
+          edit(
+              "crates/ferrum-alloy-cli/tests/cli.rs",
+              f'assert_eq!(json["edge_contract"]["release"], "{old["release"]}");',
+              f'assert_eq!(json["edge_contract"]["release"], "{new["release"]}");',
+          )
+
+      - name: Open a draft pull request
+        if: steps.find.outputs.tag != ''
+        env:
+          TAG: ${{ steps.find.outputs.tag }}
+          PREVIOUS: ${{ steps.find.outputs.previous }}
+          COMMIT: ${{ steps.find.outputs.commit }}
+          IMAGE: ${{ steps.find.outputs.image }}
+          BRANCH: ${{ steps.find.outputs.branch }}
+          EXISTING: ${{ steps.find.outputs.existing }}
+        run: |
+          set -euo pipefail
+          if [ "$EXISTING" != true ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$BRANCH"
+            git commit -am "Pin Ferrum Edge $TAG"
+            git push origin "HEAD:refs/heads/$BRANCH"
+          else
+            # An earlier run pushed this branch; open its pull request only if
+            # it pins the image this run just verified.
+            git fetch --no-tags --depth 1 origin "refs/heads/$BRANCH"
+            pinned=$(git show FETCH_HEAD:docs/compatibility.json | jq -er .edge.image)
+            if [ "$pinned" != "$IMAGE" ]; then
+              echo "::error::$BRANCH pins $pinned, not the verified $IMAGE"
+              exit 1
+            fi
+          fi
+
+          body="$RUNNER_TEMP/edge-bump.md"
+          {
+            echo "## Summary"
+            echo
+            echo "Ferrum Edge $TAG is released. This draft makes it the contract baseline, keeps $PREVIOUS as the second supported release, and drops the oldest."
+            echo
+            echo "- Source commit: $COMMIT"
+            echo "- Image (multi-arch index): $IMAGE"
+            echo "- Signature: verified with Cosign against Edge's release workflow for $TAG at $COMMIT"
+            echo
+            echo "## Before this merges"
+            echo
+            echo "- [ ] The image digest was verified with Cosign (see the Edge release bump run log)."
+            echo "- [ ] Work through the re-audit checklist in docs/compatibility.md and record the result in the revision table of docs/edge-contract-inventory.md."
+            echo "- [ ] Mirror any new X-Gateway-Error token in contract::GATEWAY_ERROR_TOKENS, catalog::EDGE_GATEWAY_ERROR_TOKENS, and rule alloy.r007."
+            echo "- [ ] Update the prose in docs/compatibility.md and the docs that name Edge releases."
+            echo "- [ ] The Ferrum Edge end-to-end and Generated Edge configuration validates jobs pass for both releases."
+            echo
+            echo "## Test plan"
+            echo
+            echo "CI on this branch (started by the bump workflow): crates/ferrum-alloy-edge/tests/pairing.rs, the CLI edge_contract test, and the Edge jobs for each supported release."
+          } > "$body"
+          gh pr create --draft --base main --head "$BRANCH" --title "Pin Ferrum Edge $TAG" --body-file "$body"
+
+          # A pull request opened with GITHUB_TOKEN starts no pull_request runs,
+          # so start CI on the branch explicitly.
+          gh workflow run ci.yml --ref "$BRANCH"

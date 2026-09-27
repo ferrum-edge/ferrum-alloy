@@ -53,7 +53,7 @@ The recommended first deployment is Edge presenting an X.509-SVID through `backe
 
 If a sidecar terminates TLS instead, Alloy sees a plaintext loopback connection and must rely on `trust.networks`. The deployment must then guarantee that only the sidecar can reach the service port. Alloy cannot verify that.
 
-Edge v0.9.7 reserves only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path. Other `x-consumer-*` names sent by clients pass through Edge. Alloy trusts only those two names, and only from a verified identity.
+Edge v0.9.8 and v0.9.7 reserve only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path. Other `x-consumer-*` names sent by clients pass through Edge. Alloy trusts only those two names, and only from a verified identity.
 
 ## Trace context and sampling
 
@@ -201,4 +201,4 @@ The generated CI pins `actions/checkout` by commit, and the `postgres` starter's
 - Neither `idle_timeout_ms` nor `write_stall_timeout_ms` is a minimum transfer rate. A trickle reader that takes a little response data at a time, such as one byte of HTTP/2 window or one TCP segment every half period, keeps its connection open for as long as the response lasts, as with nginx `send_timeout`. `max_connections` bounds how many such connections one can hold.
 - Client certificate revocation uses only CRLs read from `client_crl_paths`, at startup and at each reload. There is no OCSP and no CRL fetching from distribution points. A revocation reaches connections established before it only when they close.
 - Network-boundary trust depends on deployment isolation that Alloy cannot verify.
-- The Edge v0.9.7 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.
+- The Edge v0.9.8 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.

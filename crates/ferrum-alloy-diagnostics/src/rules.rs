@@ -340,7 +340,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
             )
             .does_not_prove(&[
                 "that the gateway policy is misconfigured",
-                "which plugin rejected the request (Ferrum Edge v0.9.7 records only the phase)",
+                "which plugin rejected the request (Ferrum Edge v0.9.7 and v0.9.8 record only the phase)",
             ])
             .confirm_with(&[
                 "the gateway transaction log entry for this request (metadata.rejection_phase)",
@@ -471,11 +471,12 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         ]);
         builder = match known {
             Some((_, meaning)) => builder
-                // Ferrum Edge v0.9.5/v0.9.7 do not strip a backend-supplied
-                // X-Gateway-Error on every path, so a header alone caps at likely.
+                // Ferrum Edge v0.9.8 strips a backend-supplied X-Gateway-Error,
+                // but v0.9.5/v0.9.7 do not on every path, and the header names no
+                // Edge version or authenticated sender, so it caps at likely.
                 .confidence(Confidence::Likely)
                 .explanation(format!(
-                    "X-Gateway-Error: {token}. {meaning} The header can be injected by a backend on some gateway paths, so it is not authenticated gateway evidence."
+                    "X-Gateway-Error: {token}. {meaning} Ferrum Edge before v0.9.8 lets a backend inject the header on some paths, and the header names no gateway version, so it is not authenticated gateway evidence."
                 ))
                 .missing(&["authenticated gateway diagnostic record"]),
             None => builder.confidence(Confidence::Unknown).explanation(format!(
@@ -532,6 +533,10 @@ fn does_not_prove_for_token(token: &str) -> &'static [&'static str] {
         "backend_error" => &["that the service itself returned this error"],
         "circuit_breaker_open" => &["that the service is down right now"],
         "overload" => &["that the gateway host is CPU-bound"],
+        "request_timeout" => &[
+            "that the service received the request",
+            "which gateway phase used up the deadline",
+        ],
         _ => &["any specific root cause"],
     }
 }
@@ -764,7 +769,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             .confidence(Confidence::Likely)
             .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
             .explanation(format!(
-                "{} service server spans have the same gateway span as parent. Ferrum Edge v0.9.7 reuses one traceparent for every retry attempt and records no attempt identity, so these are probably separate attempts; gateway and service timings are not compared.",
+                "{} service server spans have the same gateway span as parent. Ferrum Edge v0.9.7 and v0.9.8 reuse one traceparent for every retry attempt and record no attempt identity, so these are probably separate attempts; gateway and service timings are not compared.",
                 services.len()
             ))
             .does_not_prove(&["which attempt produced the final response"])
@@ -900,7 +905,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "that the service was idle during the interval",
         ])
         .confirm_with(&[
-            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.7)",
+            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.7 or v0.9.8)",
             "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
         if !verified_attempt {

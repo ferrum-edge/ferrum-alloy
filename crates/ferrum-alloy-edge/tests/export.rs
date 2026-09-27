@@ -20,7 +20,7 @@ fn manifest() -> ServiceManifest {
     .unwrap()
 }
 
-/// Field names of Ferrum Edge v0.9.7 resources (`src/config/types.rs`,
+/// Field names of Ferrum Edge v0.9.8 resources (`src/config/types.rs`,
 /// `deny_unknown_fields`) that the generator may emit.
 const PROXY_FIELDS: &[&str] = &[
     "id",
@@ -65,7 +65,7 @@ const PLUGIN_CONFIG_FIELDS: &[&str] = &[
     "proxy_id",
     "enabled",
 ];
-/// `otel_tracing` ALLOWED_CONFIG_KEYS in Edge v0.9.7.
+/// `otel_tracing` ALLOWED_CONFIG_KEYS in Edge v0.9.8.
 const OTEL_TRACING_KEYS: &[&str] = &[
     "endpoint",
     "service_name",
@@ -101,7 +101,7 @@ fn generated_resources_use_only_existing_edge_fields() {
     for key in keys(&resources.proxy) {
         assert!(
             PROXY_FIELDS.contains(&key),
-            "proxy field {key} is not an Edge v0.9.7 field"
+            "proxy field {key} is not an Edge v0.9.8 field"
         );
     }
     let upstream = resources.upstream.as_ref().unwrap();
