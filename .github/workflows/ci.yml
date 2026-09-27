@@ -267,13 +267,21 @@ jobs:
       - name: Read the tested Edge releases
         id: read
         # Every Edge image the jobs below run comes from this list (newest
-        # first), so a release bump never edits this workflow.
+        # first), so a release bump never edits this workflow. Each entry must
+        # be a digest-pinned image with a release tag and full source commit,
+        # and gets a stable slot name for the job names: baseline, previous.
         run: |
-          tested=$(jq -ce '.edge_support.tested | select(length > 0)' docs/compatibility.json)
+          set -euo pipefail
+          tested=$(jq -ce '.edge_support.tested
+            | select(length == 2 and all(.[];
+                (.image | test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}$"))
+                and (.release | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                and (.source_commit | test("^[0-9a-f]{40}$"))))
+            | [to_entries[] | .value + {slot: (["baseline", "previous"][.key])}]' docs/compatibility.json)
           echo "tested=$tested" >> "$GITHUB_OUTPUT"
 
   edge-e2e:
-    name: Ferrum Edge end-to-end (${{ matrix.edge.release }})
+    name: Ferrum Edge end-to-end (${{ matrix.edge.slot }})
     needs: edge-support
     strategy:
       fail-fast: false
@@ -318,7 +326,7 @@ jobs:
         run: docker compose -f "$COMPOSE_FILE" down -v
 
   edge-config:
-    name: Generated Edge configuration validates (${{ matrix.edge.release }})
+    name: Generated Edge configuration validates (${{ matrix.edge.slot }})
     needs: edge-support
     strategy:
       fail-fast: false

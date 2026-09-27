@@ -28,7 +28,7 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 - `src/plugins/otel_tracing.rs`, `src/plugins/correlation_id.rs`, and `src/config/types.rs` are unchanged, so §1 `traceparent`/`tracestate`/`x-request-id`, §4, and §7 carry over.
 - `src/retry.rs` adds the eighth `X-Gateway-Error` token `request_timeout` and narrows `backend_timeout` (§3). Alloy mirrors the token in `contract::GATEWAY_ERROR_TOKENS` and the diagnostics catalog.
 - `src/proxy/headers.rs` now strips backend copies of `X-Gateway-Error` and `X-Gateway-Upstream-Status` (§3). Header trust in Alloy is unchanged.
-- The reserved `x-consumer-*` names (§1) and the `rejection_phase` values behind `catalog::EDGE_PRE_UPSTREAM_PHASES` (§5) are unchanged.
+- The reserved `x-consumer-*` names (§1) are unchanged. The `rejection_phase` values behind `catalog::EDGE_PRE_UPSTREAM_PHASES` (§5) are unchanged except the HTTP/3-only `route_request_timeout_h3_upload` (Edge v0.9.8), which is not yet mapped.
 - Every UNAVAILABLE entry is still unavailable: v0.9.8 exports no attempt identity, connection timing, or diagnostic reference.
 - The remaining EXISTING entries in `src/proxy/mod.rs`, `src/plugins/mod.rs`, `src/health_check.rs`, and `src/admin/mod.rs` were spot-checked (the functions and strings they cite are present). The e2e and `edge-config` jobs cover them on both releases. Their unmarked line numbers remain those of `05997cee`.
 

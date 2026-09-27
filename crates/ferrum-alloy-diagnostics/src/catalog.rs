@@ -132,7 +132,8 @@ pub fn is_known(name: &str) -> bool {
 }
 
 /// Ferrum Edge `rejection_phase` values that run before any upstream attempt
-/// (Edge `docs/plugin_execution_order.md`; the same set in v0.9.7 and v0.9.8).
+/// (Edge `docs/plugin_execution_order.md`; the same set in v0.9.7 and v0.9.8, except the
+/// HTTP/3-only `route_request_timeout_h3_upload` added in v0.9.8, which is not yet mapped).
 pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "allowed_methods",
     "on_request_received",

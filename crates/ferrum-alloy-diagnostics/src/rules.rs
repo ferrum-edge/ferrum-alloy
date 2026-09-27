@@ -905,7 +905,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "that the service was idle during the interval",
         ])
         .confirm_with(&[
-            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8)",
+            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.7 or v0.9.8)",
             "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
         if !verified_attempt {

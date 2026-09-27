@@ -4,8 +4,10 @@ name: Edge release bump
 # it the contract baseline, keeps the previous baseline as the second supported
 # release, and drops the oldest (docs/compatibility.md, "Supported Edge
 # releases"). CI's Edge jobs read their matrix from docs/compatibility.json, so
-# this never edits a workflow. It runs only on a schedule or by hand, never for
-# pull requests, and uses no secrets: only the job's GITHUB_TOKEN.
+# this never edits a workflow. The image digest is pinned only after Cosign
+# verifies that Edge's release workflow signed it. It runs only on a schedule
+# or by hand, never for pull requests, and uses no secrets: only the job's
+# GITHUB_TOKEN.
 
 on:
   schedule:
@@ -34,6 +36,8 @@ jobs:
       EDGE_IMAGE_REPO: ferrumedge/ferrum-edge
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Find a newer Edge release
         id: find
@@ -51,9 +55,17 @@ jobs:
             exit 0
           fi
           branch="edge-bump/$tag"
+          # A branch without a pull request (an earlier run that failed after
+          # pushing) gets its pull request now; any pull request, open or
+          # closed, means the release was already proposed.
+          existing=false
           if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
-            echo "$branch already exists."
-            exit 0
+            prs=$(gh pr list --head "$branch" --state all --json number --jq length)
+            if [ "$prs" != 0 ]; then
+              echo "$branch already has a pull request."
+              exit 0
+            fi
+            existing=true
           fi
 
           commit=$(gh api "repos/$EDGE_REPO/commits/$tag" --jq .sha)
@@ -63,18 +75,27 @@ jobs:
           fi
 
           # The multi-arch index digest of the published tag. A release whose
-          # image is not pushed yet is picked up by a later run.
+          # image is not pushed yet (404) is picked up by a later run; any other
+          # registry answer fails the run.
           scope="repository:$EDGE_IMAGE_REPO:pull"
           token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=$scope" | jq -er .token)
-          if ! headers=$(curl -fsS --head \
+          status=$(curl -sS --head -o /dev/null -D "$RUNNER_TEMP/manifest-headers" -w '%{http_code}' \
             -H "Authorization: Bearer $token" \
             -H "Accept: application/vnd.oci.image.index.v1+json" \
             -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
-            "https://registry-1.docker.io/v2/$EDGE_IMAGE_REPO/manifests/$tag"); then
-            echo "::notice::$EDGE_IMAGE_REPO:$tag is not published yet."
-            exit 0
-          fi
-          headers=$(tr -d '\r' <<<"$headers")
+            "https://registry-1.docker.io/v2/$EDGE_IMAGE_REPO/manifests/$tag")
+          case "$status" in
+            200) ;;
+            404)
+              echo "::notice::$EDGE_IMAGE_REPO:$tag is not published yet."
+              exit 0
+              ;;
+            *)
+              echo "::error::Docker Hub answered HTTP $status for $EDGE_IMAGE_REPO:$tag"
+              exit 1
+              ;;
+          esac
+          headers=$(tr -d '\r' < "$RUNNER_TEMP/manifest-headers")
           media=$(awk -F': ' 'tolower($1) == "content-type" { print $2 }' <<<"$headers")
           digest=$(awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }' <<<"$headers")
           case "$media" in
@@ -89,16 +110,31 @@ jobs:
             exit 1
           fi
 
+          # The tag is mutable; the digest is trusted only when Edge's release
+          # workflow signed it (keyless Cosign) for this tag and source commit.
+          identity="https://github.com/$EDGE_REPO/.github/workflows/release.yml@refs/tags/$tag"
+          if ! cosign verify "$EDGE_IMAGE_REPO@$digest" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "$identity" \
+            --certificate-github-workflow-repository "$EDGE_REPO" \
+            --certificate-github-workflow-sha "$commit" \
+            > "$RUNNER_TEMP/cosign-verify.json"; then
+            echo "::error::$EDGE_IMAGE_REPO@$digest has no valid signature from $identity"
+            exit 1
+          fi
+          echo "Cosign verified $EDGE_IMAGE_REPO@$digest (signed by $identity at $commit)."
+
           {
             echo "tag=$tag"
             echo "previous=$current"
             echo "commit=$commit"
             echo "image=$EDGE_IMAGE_REPO@$digest"
             echo "branch=$branch"
+            echo "existing=$existing"
           } >> "$GITHUB_OUTPUT"
 
       - name: Rewrite the pin
-        if: steps.find.outputs.tag != ''
+        if: steps.find.outputs.tag != '' && steps.find.outputs.existing != 'true'
         env:
           TAG: ${{ steps.find.outputs.tag }}
           COMMIT: ${{ steps.find.outputs.commit }}
@@ -182,13 +218,16 @@ jobs:
           COMMIT: ${{ steps.find.outputs.commit }}
           IMAGE: ${{ steps.find.outputs.image }}
           BRANCH: ${{ steps.find.outputs.branch }}
+          EXISTING: ${{ steps.find.outputs.existing }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$BRANCH"
-          git commit -am "Pin Ferrum Edge $TAG"
-          git push origin "HEAD:refs/heads/$BRANCH"
+          if [ "$EXISTING" != true ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$BRANCH"
+            git commit -am "Pin Ferrum Edge $TAG"
+            git push origin "HEAD:refs/heads/$BRANCH"
+          fi
 
           body="$RUNNER_TEMP/edge-bump.md"
           {
@@ -198,9 +237,11 @@ jobs:
             echo
             echo "- Source commit: $COMMIT"
             echo "- Image (multi-arch index): $IMAGE"
+            echo "- Signature: verified with Cosign against Edge's release workflow for $TAG at $COMMIT"
             echo
             echo "## Before this merges"
             echo
+            echo "- [ ] The image digest was verified with Cosign (see the Edge release bump run log)."
             echo "- [ ] Work through the re-audit checklist in docs/compatibility.md and record the result in the revision table of docs/edge-contract-inventory.md."
             echo "- [ ] Mirror any new X-Gateway-Error token in contract::GATEWAY_ERROR_TOKENS, catalog::EDGE_GATEWAY_ERROR_TOKENS, and rule alloy.r007."
             echo "- [ ] Update the prose in docs/compatibility.md and the docs that name Edge releases."

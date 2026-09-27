@@ -22,6 +22,33 @@ fn image_digest(image: &str) -> &str {
     image.split_once('@').unwrap().1
 }
 
+fn is_lower_hex(text: &str, len: usize) -> bool {
+    text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `vMAJOR.MINOR.PATCH`, the only Edge release tag shape CI accepts.
+fn is_release_tag(text: &str) -> bool {
+    let Some(version) = text.strip_prefix('v') else {
+        return false;
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    parts.len() == 3 && parts.into_iter().all(numeric)
+}
+
+/// Mirrors the shape check in ci.yml's `edge-support` job.
+fn assert_entry_shape(edge: &serde_json::Value) {
+    let release = edge["release"].as_str().unwrap();
+    assert!(is_release_tag(release), "release {release}");
+    let commit = edge["source_commit"].as_str().unwrap();
+    assert!(is_lower_hex(commit, 40), "source_commit {commit}");
+    let image = edge["image"].as_str().unwrap();
+    let digest = image
+        .strip_prefix("ferrumedge/ferrum-edge@sha256:")
+        .unwrap_or_else(|| panic!("image {image} is not a ferrumedge/ferrum-edge digest"));
+    assert!(is_lower_hex(digest, 64), "image {image}");
+}
+
 /// Every line of `text` that pins an Edge image names one of `digests`.
 fn assert_pins_only(file: &str, text: &str, digests: &[&str]) {
     for line in text
@@ -75,6 +102,9 @@ fn ci_tests_every_supported_edge_release() {
     let pairing = compatibility();
     let tested = pairing["edge_support"]["tested"].as_array().unwrap();
     assert_eq!(tested.len(), 2, "latest release plus the previous one");
+    for edge in tested {
+        assert_entry_shape(edge);
+    }
     for key in ["release", "source_commit", "image"] {
         assert_eq!(tested[0][key], pairing["edge"][key], "{key}");
     }
@@ -84,6 +114,13 @@ fn ci_tests_every_supported_edge_release() {
     // (`.github/workflows/edge-bump.yml`) never has to edit a workflow.
     let ci = repo(".github/workflows/ci.yml");
     assert!(ci.contains("jq -ce '.edge_support.tested"));
+    for pattern in [
+        r#"test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}$")"#,
+        r#"test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")"#,
+        r#"test("^[0-9a-f]{40}$")"#,
+    ] {
+        assert!(ci.contains(pattern), "ci.yml edge-support lacks {pattern}");
+    }
     let matrix = "edge: ${{ fromJSON(needs.edge-support.outputs.tested) }}";
     assert_eq!(ci.matches(matrix).count(), 2, "edge-e2e and edge-config");
     assert_pins_only("ci.yml", &ci, &[]);

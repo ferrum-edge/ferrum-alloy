@@ -16,7 +16,7 @@ The same pairing in machine-readable form is in [compatibility.json](compatibili
 
 ## Supported Edge releases
 
-Alloy supports **the latest Ferrum Edge release and the release before it**. CI reads `edge_support.tested` from [compatibility.json](compatibility.json) and runs the `Ferrum Edge end-to-end` and `Generated Edge configuration validates` jobs once for each release below. The first row is the contract baseline above; the demo stack uses it unless `EDGE_IMAGE` is set.
+Alloy supports **the latest Ferrum Edge release and the release before it**. CI reads `edge_support.tested` from [compatibility.json](compatibility.json) and runs the `Ferrum Edge end-to-end` and `Generated Edge configuration validates` jobs once for each release below, named `(baseline)` for the first row and `(previous)` for the second. The first row is the contract baseline above; the demo stack uses it unless `EDGE_IMAGE` is set.
 
 <!-- edge-support:begin -->
 | Release | Source commit | Image (multi-arch index) |
@@ -27,7 +27,7 @@ Alloy supports **the latest Ferrum Edge release and the release before it**. CI 
 
 - **Differences inside the window.** v0.9.8 added the `request_timeout` token to `X-Gateway-Error` and strips backend-supplied copies of `X-Gateway-Error` and `X-Gateway-Upstream-Status`. v0.9.7 does neither. Alloy's diagnosis accepts both token sets. Because a response header names no Edge version, `backend_timeout` keeps its v0.9.7 meaning (a backend or route deadline elapsed), and a header alone never exceeds `likely`.
 - **Unsupported releases.** Older releases and unreleased Edge `main` are not tested. Alloy does not refuse to run behind them, but nothing in the inventory is claimed for them. Diagnosis treats their tokens and attributes by the same rules: an unknown `X-Gateway-Error` token yields `unknown`, never a guessed meaning.
-- **New releases.** `.github/workflows/edge-bump.yml` checks for a new Edge release every day. When it finds one, it opens a draft pull request that makes the new release the baseline, keeps the previous baseline as the second supported release, and drops the oldest. The same CI jobs then prove or disprove compatibility. Its pull request still needs the re-audit below before it merges.
+- **New releases.** `.github/workflows/edge-bump.yml` checks for a new Edge release every day. When it finds one, it resolves the tag's multi-arch index digest, verifies with Cosign that Edge's release workflow signed that digest for the tag and its source commit (the run fails otherwise), and opens a draft pull request that makes the new release the baseline, keeps the previous baseline as the second supported release, and drops the oldest. The same CI jobs then prove or disprove compatibility. Its pull request still needs the re-audit below before it merges.
 
 ## Topology tested end to end
 

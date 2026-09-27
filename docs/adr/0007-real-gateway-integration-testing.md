@@ -1,6 +1,6 @@
 # ADR 0007: Prove Edge integration with a pinned real gateway
 
-**Status:** Accepted (2026-09-26)
+**Status:** Accepted (2026-09-26). The single pinned release below is superseded by the two-release matrix in `docs/compatibility.json` (`edge_support.tested`).
 
 ## Context
 
