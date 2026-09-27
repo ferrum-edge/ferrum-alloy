@@ -41,6 +41,7 @@ fn defaults_are_safe_and_valid() {
         !config.openapi.public,
         "documentation is not public by default"
     );
+    assert!(!config.openapi.ui, "the documentation UI is off by default");
     assert_eq!(config.edge.mode, EdgeMode::Standalone);
     assert!(sources.file.is_none());
     config.validate(NO_FEATURES).unwrap();
@@ -635,6 +636,67 @@ fn unsafe_combinations_fail_validation() {
     check(
         &|c| c.trust.networks = vec!["0.0.0.0/0".parse().unwrap()],
         "every address",
+    );
+}
+
+#[test]
+fn openapi_ui_needs_its_feature_and_a_path_of_its_own() {
+    let features = &["openapi", "openapi-ui"];
+    let mut config = AlloyConfig::default();
+    config.openapi.ui = true;
+    config.validate(features).unwrap();
+    let error = config.validate(&["openapi"]).unwrap_err().to_string();
+    assert!(error.contains("`openapi-ui` feature"), "{error}");
+
+    for (ui_path, expected) in [
+        ("docs", "openapi.ui_path must be a path like /docs"),
+        ("/", "openapi.ui_path must be a path like /docs"),
+        ("/docs/", "openapi.ui_path must be a path like /docs"),
+        ("//evil.example", "openapi.ui_path must be a path like /docs"),
+        ("/a/../docs", "openapi.ui_path must be a path like /docs"),
+        ("/do cs", "openapi.ui_path must be a path like /docs"),
+        (r#"/docs"x"#, "openapi.ui_path must be a path like /docs"),
+        ("/docs?x", "openapi.ui_path must be a path like /docs"),
+        ("/openapi.json", "another served path"),
+        ("/health", "another served path"),
+        ("/metrics", "another served path"),
+        ("/livez", "another served path"),
+        ("/readyz", "another served path"),
+        ("/diagnostics", "outside /diagnostics"),
+        ("/diagnostics/ui", "outside /diagnostics"),
+    ] {
+        let mut config = AlloyConfig::default();
+        config.openapi.ui = true;
+        config.openapi.ui_path = ui_path.into();
+        let error = config.validate(features).unwrap_err().to_string();
+        assert!(error.contains(expected), "{ui_path}: {error}");
+    }
+
+    let mut config = AlloyConfig::default();
+    config.openapi.ui = true;
+    config.openapi.ui_path = "/api".into();
+    config.openapi.path = "/api/openapi.json".into();
+    let error = config.validate(features).unwrap_err().to_string();
+    assert!(error.contains("another served path"), "{error}");
+    config.openapi.ui_path = "/api/docs".into();
+    config.validate(features).unwrap();
+
+    let mut config = AlloyConfig::default();
+    config.openapi.ui_path = "not checked while the UI is off".into();
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn a_public_openapi_ui_is_flagged() {
+    let mut config = AlloyConfig::default();
+    config.openapi.ui = true;
+    config.openapi.public = true;
+    let warnings = config.validate(&["openapi", "openapi-ui"]).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("documentation UI unauthenticated")),
+        "{warnings:?}"
     );
 }
 

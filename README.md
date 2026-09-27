@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - route-template metrics;
   - accounting that ends when the response *body* ends, exactly once;
   - bounded OTLP export with counted loss.
-- **Optional batteries** (Cargo features): `otel`, `tls` (rustls, verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `jwt` (JWKS), `http-client`, `compression`, `cors`, `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service).
+- **Optional batteries** (Cargo features): `otel`, `tls` (rustls, verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `openapi-ui` (a protected Swagger UI from embedded assets), `jwt` (JWKS), `http-client`, `compression`, `cors`, `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service).
 - **CLI** (`ferrum-alloy`):
   - `new`: starters that compile and pass their own tests;
   - `check`: configuration validation;

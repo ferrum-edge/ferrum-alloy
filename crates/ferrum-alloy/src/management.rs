@@ -9,6 +9,9 @@
 //! client, and except for the probes, which have a budget of their own, per
 //! listener (see [`crate::rate_limit`]).
 //!
+//! With the `openapi-ui` feature and `openapi.ui`, the documentation UI is
+//! served beside the OpenAPI document and requires the same token.
+//!
 //! With the `diagnostics` feature and an installed authorizer, it also serves
 //! `GET /diagnostics/v1/requests/{request_id}`, which the authorizer rather
 //! than the management token guards (see `crate::diagnostics`).
@@ -36,8 +39,18 @@ const LIVENESS_PATH: &str = "/livez";
 /// Readiness probe path of the management listener.
 const READINESS_PATH: &str = "/readyz";
 
+/// Detailed health path of the management listener.
+const HEALTH_PATH: &str = "/health";
+
+/// Metrics path of the management listener.
+const METRICS_PATH: &str = "/metrics";
+
 /// Probe paths, rate-limited separately from the rest of the listener.
 pub(crate) const PROBE_PATHS: [&str; 2] = [LIVENESS_PATH, READINESS_PATH];
+
+/// Paths the management listener always serves, whatever the configuration.
+pub(crate) const FIXED_PATHS: [&str; 4] =
+    [LIVENESS_PATH, READINESS_PATH, HEALTH_PATH, METRICS_PATH];
 
 #[derive(Clone)]
 pub(crate) struct ManagementState {
@@ -48,6 +61,8 @@ pub(crate) struct ManagementState {
     pub(crate) version: Option<String>,
     pub(crate) app_stats: Arc<ServerStats>,
     pub(crate) openapi: Option<Arc<Vec<u8>>>,
+    #[cfg(feature = "openapi-ui")]
+    pub(crate) openapi_ui: Option<crate::openapi_ui::DocsUi>,
     pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
     #[cfg(feature = "diagnostics")]
     pub(crate) diagnostics: Option<crate::diagnostics::Retrieval>,
@@ -101,7 +116,7 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
             }),
         )
         .route(
-            "/health",
+            HEALTH_PATH,
             get(
                 |State(state): State<ManagementState>, headers: HeaderMap| async move {
                     if !authorized(&headers, state.token.as_ref()) {
@@ -118,7 +133,7 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
             ),
         )
         .route(
-            "/metrics",
+            METRICS_PATH,
             get(
                 |State(state): State<ManagementState>, headers: HeaderMap| async move {
                     if !authorized(&headers, state.token.as_ref()) {
@@ -162,6 +177,11 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
             ),
         );
     }
+    #[cfg(feature = "openapi-ui")]
+    if let Some(ui) = &state.openapi_ui {
+        let guard = middleware::from_fn_with_state(state.token.clone(), require_token);
+        router = router.merge(ui.routes::<ManagementState>().route_layer(guard));
+    }
     #[cfg(feature = "diagnostics")]
     if let Some(retrieval) = state.diagnostics.clone() {
         use axum::extract::rejection::PathRejection;
@@ -182,6 +202,20 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
     // Outermost, so it also covers the fallback and `405` responses.
     let layer = middleware::from_fn_with_state(limiter, rate_limit::enforce);
     router.layer(layer)
+}
+
+/// Admits requests that carry the management token, as the OpenAPI
+/// document's handler does.
+#[cfg(feature = "openapi-ui")]
+async fn require_token(
+    State(token): State<Option<Secret>>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    if !authorized(request.headers(), token.as_ref()) {
+        return unauthorized();
+    }
+    next.run(request).await
 }
 
 pub(crate) fn openapi_response(document: Option<&Vec<u8>>) -> Response {

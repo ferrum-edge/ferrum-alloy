@@ -79,6 +79,7 @@ Not covered: an upstream reset after a connection is established, and per-attemp
 | rustls / tokio-rustls | 0.23.45 / 0.26.5 | `ring` provider only |
 | sqlx | 0.9.0 | PostgreSQL, runtime queries, `migrate!` |
 | utoipa / utoipa-axum | 6.0.0 / 0.3.0 | OpenAPI 3.1 documents |
+| Swagger UI (`swagger-ui-dist`) | 5.33.0 | Feature `openapi-ui`. JavaScript and CSS vendored in `crates/ferrum-alloy/assets/swagger-ui/5.33.0/` (Apache-2.0), checked against the npm `dist.integrity` and pinned by SHA-256. Not a Cargo dependency, so `cargo deny` does not cover it. |
 | jsonwebtoken | 11.1.0 | `rust_crypto` backend. See the advisory note in [security.md](security.md). |
 | reqwest | 0.13.5 | `rustls-no-provider` with an explicit ring configuration |
 | OpenTelemetry Collector | contrib 0.161.0, `otel/opentelemetry-collector-contrib@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1` | e2e only |

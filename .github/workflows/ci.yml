@@ -99,7 +99,7 @@ jobs:
         run: |
           set -euxo pipefail
           cargo check --locked -p ferrum-alloy --no-default-features
-          for feature in otel edge tls postgres openapi jwt http-client compression cors diagnostics; do
+          for feature in otel edge tls postgres openapi openapi-ui jwt http-client compression cors diagnostics; do
             cargo check --locked -p ferrum-alloy --no-default-features --features "$feature"
           done
           cargo check --locked -p ferrum-alloy --features full
@@ -251,6 +251,13 @@ jobs:
               | sed "s|^crates/ferrum-alloy-cli/|ferrum-alloy-cli-$version/|" | sort) \
             <(tar -tzf "target/package/ferrum-alloy-cli-$version.crate" \
               | grep "^ferrum-alloy-cli-$version/templates/" | grep -v '/$' | sort)
+          # The vendored documentation UI ships whole, with its license,
+          # notices, and hash manifest.
+          diff \
+            <(git ls-files crates/ferrum-alloy/assets \
+              | sed "s|^crates/ferrum-alloy/|ferrum-alloy-$version/|" | sort) \
+            <(tar -tzf "target/package/ferrum-alloy-$version.crate" \
+              | grep "^ferrum-alloy-$version/assets/" | grep -v '/$' | sort)
       - name: Build the packaged sources on their own
         # Unpack the packages into a new workspace, outside this one, whose
         # [patch.crates-io] points each registry dependency on a sibling at

@@ -876,6 +876,7 @@ dependencies = [
  "proptest",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",

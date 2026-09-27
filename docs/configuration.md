@@ -185,7 +185,7 @@ Each section below shows a key, its default, and its meaning.
 |---|---|---|
 | `enabled` | `true` | Serve the management listener. |
 | `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`, and is refused while diagnostic retrieval is installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)). |
-| `token` | none | Bearer token (at least 32 characters) for `/health`, `/metrics`, and the OpenAPI document. `/livez` and `/readyz` stay unauthenticated. |
+| `token` | none | Bearer token (at least 32 characters) for `/health`, `/metrics`, the OpenAPI document, and its documentation UI. `/livez` and `/readyz` stay unauthenticated. |
 
 #### `[management.rate_limit]`
 
@@ -316,6 +316,16 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 | `serve` | `true` | Serve a registered document on the management listener (token-protected). |
 | `path` | `/openapi.json` | Literal path. |
 | `public` | `false` | Also serve it unauthenticated on the application listener. |
+| `ui` | `false` | Serve the documentation UI (feature `openapi-ui`) wherever the document is served: on the management listener behind `management.token`, and on the application listener, unauthenticated, only with `public = true`. Needs a registered document and `serve = true`. |
+| `ui_path` | `/docs` | Path of the UI page; its assets are served beneath it. Segments of letters, digits, `-`, `.`, `_`, and `~`, with no trailing `/`. It must not be or contain another served path, and must be outside `/diagnostics`. |
+
+#### Documentation UI (feature `openapi-ui`)
+
+The UI is [Swagger UI](https://github.com/swagger-api/swagger-ui) 5.33.0, compiled into the binary from files vendored in `crates/ferrum-alloy/assets/swagger-ui/` (Apache-2.0; the directory carries its `LICENSE`, `NOTICE`, the bundled dependencies' notices, and the hashes the tests check). It makes no request to another origin: the page loads its script, stylesheet, and the OpenAPI document from the listener that served it. It is read-only; "Try it out" is disabled.
+
+With a management token, a browser must send `Authorization: Bearer <token>` with the page, its assets, and the document, for example through a local proxy or a header-injecting extension. Browsers do not add bearer tokens by themselves. A management listener on loopback without a token (the default) needs nothing.
+
+**Do not expose the UI publicly in production.** `ui` with `public` serves it, like the document, to anyone who can reach the application listener, and `ferrum-alloy check` and startup warn about that combination. Prefer the management listener, and reach it through a port-forward or tunnel. See [security](security.md#openapi-documentation-ui).
 
 ### `[database]` (feature `postgres`)
 
