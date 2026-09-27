@@ -22,6 +22,7 @@ use crate::lifecycle::{self, Lifecycle};
 use crate::limits::{AdmissionLayer, BodyLimitLayer, HeadersDeadlineLayer};
 use crate::management::{self, ManagementState};
 use crate::normalize::{NormalizeLayer, panic_response};
+use crate::rate_limit::RateLimiter;
 use crate::server::{self, ServeOptions, ServerStats};
 
 /// Who owns the global tracing subscriber.
@@ -339,6 +340,10 @@ impl AlloyApp {
             .clone()
             .unwrap_or_else(|| self.name.clone());
         let management_router = config.management.enabled.then(|| {
+            let rate_limit = &config.management.rate_limit;
+            let rate_limiter = rate_limit
+                .enabled
+                .then(|| Arc::new(RateLimiter::new(rate_limit)));
             management::router(
                 ManagementState {
                     readiness: Arc::clone(&readiness),
@@ -348,6 +353,7 @@ impl AlloyApp {
                     version: config.service.version.clone(),
                     app_stats: Arc::clone(&app_stats),
                     openapi: self.openapi.clone().filter(|_| config.openapi.serve),
+                    rate_limiter,
                 },
                 &config.openapi.path,
             )
@@ -392,7 +398,13 @@ pub struct AlloyParts {
     /// `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`) so peer
     /// trust can be evaluated.
     pub router: Router,
-    /// The management router, when enabled.
+    /// The management router, when enabled. Serve it with a listener that
+    /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):
+    /// its rate limits key clients by that transport address, and requests
+    /// without either all share one budget. Behind a proxy or sidecar, every
+    /// client is the proxy's address; Istio connects from 127.0.0.6. Add that
+    /// address to `management.rate_limit.exempt_networks` only if bypassing
+    /// the limits for all proxied clients is intended.
     pub management_router: Option<Router>,
     /// Shutdown coordination.
     pub lifecycle: Lifecycle,

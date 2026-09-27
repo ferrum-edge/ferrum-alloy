@@ -83,7 +83,8 @@ Consequently a plain GET 200 or 404 without cache headers carries neither header
 - `/livez` and `/readyz` return only a status. `/health` (check names and errors), `/metrics`, and `/openapi.json` require the token when one is configured.
 - Responses are `no-store`.
 - Readiness checks are cached (`health.cache_ttl_ms`) with single-flight refresh and per-check timeouts, so floods cannot probe dependencies.
-- Management endpoints are not rate-limited. Keep them on loopback or behind network policy.
+- Every request is rate-limited before any handler or token check runs, so token guessing and scrape floods are bounded, including requests from loopback. Endpoint requests are limited per client and for the whole listener. Probes have their own budget and client table and are limited per client only, so traffic to `/health` or `/metrics` never throttles `/livez` and `/readyz`, and no set of sources can use up the probes for everyone. A client is the transport peer address (an IPv6 prefix, /64 by default), never a forwarded header. Exempt networks default to empty; add the kubelet node network only when bypassing its probe budget is intended (`management.rate_limit.exempt_networks`). Client tables are bounded by `management.rate_limit.max_clients`; only admitted requests take an entry, and refilled entries are forgotten with bounded work per request. Excess requests get `429 rate-limited` with `Retry-After`. See [configuration](configuration.md#managementrate_limit).
+- Rate limits bound the rate, not the reach. Keep the listener on loopback or behind network policy anyway: many source addresses together can still use up the endpoint listener budget, and behind a proxy or sidecar all clients share the proxy's address. Istio's `127.0.0.6` sidecar address is rate-limited by default; exempting it bypasses limits for all proxied clients.
 
 ## Errors
 
@@ -161,6 +162,7 @@ The generated CI pins `actions/checkout` by commit, and the `postgres` starter's
 | A collector outage slows or fails requests | Bounded queue; drop and count | `collector_failures_never_fail_requests_and_are_counted`, `a_full_queue_drops_spans_instead_of_blocking_requests` |
 | Health floods probe the database | Cached, single-flight readiness | `readiness_checks_are_cached_and_single_flight` |
 | Management exposed without auth | Validation refuses a non-loopback bind without a token | `unsafe_combinations_fail_validation` |
+| Management token guessing or scrape floods | Per-client and listener token buckets keyed by transport address, per-client probe budget, exempt networks, bounded client tables that only admitted requests enter, `429` with `Retry-After` | `a_burst_beyond_the_limit_gets_a_429_problem`, `probes_are_served_while_metrics_is_saturated`, `clients_are_limited_independently_by_transport_address`, `the_client_table_stays_bounded_under_many_distinct_peers`, `loopback_and_exempt_networks_are_not_limited`, `management_rate_limits_are_validated`, `rate_limit::tests` |
 | JWT algorithm confusion, `alg=none`, key-refresh floods | Allowlist; JWKS-only keys; rate-limited refresh | `algorithm_confusion_and_unsigned_tokens_are_rejected`, `unknown_kids_refresh_at_most_once_per_interval`, `concurrent_requests_on_an_expired_set_refresh_once` |
 | A retired or compromised signing key keeps verifying | Bounded key-set lifetime with revalidation of known `kid`s; bounded stale window, then fail closed | `removed_keys_stop_verifying_after_the_max_age`, `a_replaced_key_with_the_same_kid_is_picked_up_after_the_max_age`, `failed_refreshes_serve_stale_keys_only_within_the_grace_period` |
 | Hostile diagnostic files | Bounds, schema checks, provenance downgrade, mutation testing | `crates/ferrum-alloy-diagnostics/tests/bounds_and_hostile_input.rs` |
@@ -172,6 +174,5 @@ The generated CI pins `actions/checkout` by commit, and the `postgres` starter's
 - Upgraded (WebSocket) sessions are not counted against `max_connections` and are not drained. Applications should watch `Lifecycle::shutdown_token`.
 - A response stalled on flow control counts as in flight: a peer that withholds HTTP/2 `WINDOW_UPDATE` or keeps a zero TCP receive window holds its connection slot despite `idle_timeout_ms`, until shutdown force-closes it at the drain budget ([#46](https://github.com/ferrum-edge/ferrum-alloy/issues/46)).
 - No certificate revocation checking.
-- No rate limiting on the management listener.
 - Network-boundary trust depends on deployment isolation that Alloy cannot verify.
 - The Edge v0.9.7 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.
