@@ -898,6 +898,7 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

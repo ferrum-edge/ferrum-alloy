@@ -71,6 +71,15 @@ pub struct ServerStats {
     pub rejected_connections: AtomicU64,
     /// TLS handshakes that failed or timed out.
     pub tls_handshake_failures: AtomicU64,
+    /// TLS reloads that swapped in changed certificates, key, client CA
+    /// bundle, or CRLs.
+    pub tls_reloads: AtomicU64,
+    /// TLS reloads whose files could not be read or failed validation, the
+    /// same way as at the reload before; the previous material kept serving.
+    pub tls_reload_failures: AtomicU64,
+    /// When the serving TLS certificate and client CRLs stop being valid.
+    #[cfg(feature = "tls")]
+    pub(crate) tls_expiry: std::sync::Mutex<crate::tls::Expiry>,
     /// Connections force-closed after the drain budget.
     pub force_closed_connections: AtomicU64,
     /// Connections closed because no request head arrived within the header
@@ -111,6 +120,18 @@ impl ServerStats {
                 &self.tls_handshake_failures,
             ),
             (
+                "ferrum_alloy_tls_reloads_total",
+                "counter",
+                "TLS reloads that swapped in changed certificates, key, client CAs, or CRLs.",
+                &self.tls_reloads,
+            ),
+            (
+                "ferrum_alloy_tls_reload_failures_total",
+                "counter",
+                "Repeated TLS reload failures; the previous material kept serving.",
+                &self.tls_reload_failures,
+            ),
+            (
                 "ferrum_alloy_force_closed_connections_total",
                 "counter",
                 "Connections force-closed after the drain budget.",
@@ -145,6 +166,14 @@ impl ServerStats {
                 "# HELP {name} {help}\n# TYPE {name} {kind}\n{name}{{listener=\"{listener}\"}} {}\n",
                 value.load(Ordering::Relaxed)
             ));
+        }
+        #[cfg(feature = "tls")]
+        {
+            let expiry = self
+                .tls_expiry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            out.push_str(&expiry.render_prometheus(listener));
         }
         out
     }
@@ -408,7 +437,7 @@ async fn handle(
 ) {
     #[cfg(feature = "tls")]
     if let Some(tls) = &options.tls {
-        let accept = tokio::time::timeout(tls.handshake_timeout, tls.acceptor.accept(stream));
+        let accept = tokio::time::timeout(tls.handshake_timeout, tls.acceptor().accept(stream));
         // A handshake that finishes after shutdown began could never serve a
         // request, so stop waiting for it.
         let handshake = tokio::select! {

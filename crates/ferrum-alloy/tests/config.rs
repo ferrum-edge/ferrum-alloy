@@ -715,6 +715,33 @@ fn client_crl_settings_are_validated() {
 }
 
 #[test]
+fn tls_reload_interval_defaults_to_a_minute_and_is_validated() {
+    let config = tls_config(&[]);
+    let tls = config.server.tls.as_ref().unwrap();
+    assert_eq!(tls.reload_interval_ms, 60_000);
+
+    for (value, valid) in [
+        ("0", true),
+        ("99", false),
+        ("100", true),
+        ("86400000", true),
+        ("86400001", false),
+    ] {
+        let config = tls_config(&[("FERRUM_ALLOY_TLS_RELOAD_INTERVAL_MS", value)]);
+        let tls = config.server.tls.as_ref().unwrap();
+        assert_eq!(tls.reload_interval_ms.to_string(), value);
+        match config.validate(&["tls"]) {
+            Ok(_) => assert!(valid, "{value} was accepted"),
+            Err(error) => {
+                let error = error.to_string();
+                assert!(!valid, "{value}: {error}");
+                assert!(error.contains("reload_interval_ms"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
 fn every_environment_variable_is_documented() {
     let docs = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/configuration.md"),

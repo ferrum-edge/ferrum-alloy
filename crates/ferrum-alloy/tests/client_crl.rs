@@ -46,6 +46,7 @@ impl Pki {
             client_crl_depth: CrlDepth::default(),
             client_crl_unknown_status: CrlUnknownStatus::default(),
             client_crl_expiration: CrlExpiration::default(),
+            reload_interval_ms: 0,
         };
         Self { dir, ca, tls }
     }
