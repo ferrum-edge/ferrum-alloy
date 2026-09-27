@@ -92,8 +92,12 @@ fn token(pair: &KeyPair, jwt: &JwtSettings, scope: &str) -> String {
 }
 
 /// The router under test, verifying tokens against `pair`'s JWKS.
+///
+/// The algorithm is pinned to the one `sign` uses, so changing `algorithms`
+/// in alloy.toml to match your issuer does not break these tests.
 async fn app(pair: &KeyPair) -> (Router, JwtSettings) {
     let mut jwt = configured();
+    jwt.algorithms = vec!["ES256".into()];
     jwt.jwks_url = Some(jwks_server(pair).await);
     let verifier = JwtVerifier::new(&jwt).expect("verifier");
     (auth::router(&verifier), jwt)
@@ -115,7 +119,7 @@ async fn get_me(router: Router, token: Option<&str>) -> (StatusCode, Value) {
 #[test]
 fn alloy_toml_bounds_the_key_set_lifetime() {
     let jwt = configured();
-    assert_eq!(jwt.algorithms, ["ES256"]);
+    assert!(!jwt.algorithms.is_empty());
     assert!((1..=MAX_JWKS_LIFETIME_MS).contains(&jwt.jwks_max_age_ms));
     assert!(jwt.jwks_max_stale_ms <= MAX_JWKS_LIFETIME_MS);
     assert!(jwt.jwks_min_refresh_interval_ms <= jwt.jwks_max_age_ms);
