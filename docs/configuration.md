@@ -33,7 +33,7 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 
 - They are held in `Secret`, and `Debug`, `Display`, and serialization print `<redacted>`.
 - `ferrum-alloy check --show-effective` and `AlloyConfig::redacted_toml()` never reveal them.
-- Each can be supplied as `FERRUM_ALLOY_<NAME>_FILE=/path`; one trailing newline is trimmed.
+- Each can be supplied as `FERRUM_ALLOY_<NAME>_FILE=/path`. Trailing `\n` and `\r` characters are trimmed.
 - Setting both `<NAME>` and `<NAME>_FILE` is an error.
 
 ## Environment variables
@@ -260,7 +260,7 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 |---|---|---|
 | `issuer` | required | Required `iss` |
 | `audiences` | required | Accepted `aud` values |
-| `algorithms` | `["RS256"]` | Asymmetric algorithms only. `none` and HMAC are rejected. |
+| `algorithms` | `["RS256"]` | Any of `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `EdDSA`. `none` and HMAC are rejected. |
 | `jwks_url` | required | `https`, or `http` to loopback only |
 | `jwks_min_refresh_interval_ms` | `60000` | Refresh rate limit (also applied for unknown `kid`s) |
 | `jwks_max_bytes` | `262144` | JWKS response size bound |
@@ -282,4 +282,9 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 ferrum-alloy check --config alloy.toml
 ```
 
-This runs the same validation as startup and prints disabled capabilities and warnings. `--show-effective` prints the redacted merged configuration.
+This runs the configuration validation that startup runs, without binding sockets or reading TLS files. It prints each capability as enabled or disabled, then warnings and errors, and exits `3` when the configuration is invalid.
+
+- `--features otel,tls,...` names the features your build compiles. By default every feature is assumed, so only feature-independent problems fail.
+- `--no-env` ignores `FERRUM_ALLOY_*` variables in the current environment.
+- `--show-effective` prints the merged configuration with secrets redacted.
+- `--format json` prints the result as JSON.

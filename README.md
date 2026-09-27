@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - `new`: starters that compile and pass their own tests;
   - `check`: configuration validation;
   - `openapi export`: with drift detection;
-  - `edge export`: Edge file-mode or GitForgeOps YAML, validated by the real gateway;
+  - `edge export`: Edge file-mode YAML (checked in CI with `ferrum-edge validate`) or a GitForgeOps tree;
   - `diagnose`: offline, deterministic explanations of evidence.
 
 ## Two ways to adopt it
