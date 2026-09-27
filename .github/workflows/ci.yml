@@ -69,23 +69,29 @@ jobs:
   features:
     name: Feature combinations
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Independently usable crates
         run: |
           set -euxo pipefail
           cargo check --locked -p ferrum-alloy-diagnostics --all-targets
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features axum
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features subscriber
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features x509
-          cargo check --locked -p ferrum-alloy-telemetry --features otel
-          cargo check --locked -p ferrum-alloy-edge --no-default-features
+          # Every target of the telemetry crate, including its tests, must
+          # build, lint, and pass with each feature alone.
+          cargo clippy --locked -p ferrum-alloy-telemetry --all-targets --no-default-features -- -D warnings
+          cargo test --locked -p ferrum-alloy-telemetry --no-default-features
+          for feature in axum subscriber x509 otel; do
+            cargo clippy --locked -p ferrum-alloy-telemetry --all-targets --no-default-features --features "$feature" -- -D warnings
+            cargo test --locked -p ferrum-alloy-telemetry --no-default-features --features "$feature"
+          done
+          cargo clippy --locked -p ferrum-alloy-telemetry --all-targets --features otel -- -D warnings
+          cargo clippy --locked -p ferrum-alloy-edge --all-targets --no-default-features -- -D warnings
+          cargo test --locked -p ferrum-alloy-edge --no-default-features
       - name: Each optional integration alone
         run: |
           set -euxo pipefail

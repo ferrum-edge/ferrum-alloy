@@ -1,5 +1,6 @@
 //! Gateway trust policy: identity handoff only from verified identities.
 
+#![cfg(feature = "axum")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::convert::Infallible;
