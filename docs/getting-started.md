@@ -78,7 +78,7 @@ This is `examples/minimal`. With no configuration it provides:
 | Limits | 2 MiB bodies, 100 headers / 64 KiB request head, 10 s head read, 30 s to response headers, 10 000 connections |
 | Telemetry | JSON logs with request ids and trace ids; one access event per request; Prometheus metrics |
 | Shutdown | SIGTERM/SIGINT: readiness reports `draining`, accepting stops, in-flight requests and streams get 30 s, then telemetry flushes |
-| Off | CORS, compression, public OpenAPI, OTLP export, TLS, gateway trust |
+| Off | CORS, compression, public OpenAPI, the OpenAPI documentation UI, OTLP export, TLS, gateway trust |
 
 Handlers stay plain Axum: `State<T>`, `FromRef`, `Json<T>`, `Path<T>`, `Query<T>`, `Extension<T>`, layers, and services all work. Supply state with `Router::with_state` before passing the router. For Problem Details on extractor failures, use `ferrum_alloy::extract::{Json, Path, Query, ValidJson}`. Raw axum extractors keep axum's own plain-text rejections.
 
@@ -243,6 +243,7 @@ Every refusal is the same `404`: a denied caller, another tenant's request, and 
 | `edge` | Ferrum Edge trust modes, consumer identity handoff | ferrum-alloy-edge |
 | `postgres` | SQLx pool, readiness, measured acquisition, migrations | sqlx 0.9 (postgres, rustls/ring) |
 | `openapi` | Serve a registered utoipa document; re-exports utoipa and utoipa-axum | utoipa 6, utoipa-axum 0.3 |
+| `openapi-ui` | A documentation UI for that document, under the same access policy (implies `openapi`; off until `openapi.ui = true`) | Swagger UI 5.33.0, embedded (Apache-2.0) |
 | `jwt` | JWT/JWKS verification and an authorization hook (implies `http-client`) | jsonwebtoken 11 (rust_crypto) |
 | `http-client` | Instrumented outbound client | reqwest 0.13 (rustls/ring), rustls-platform-verifier |
 | `compression` | gzip/br, never for SSE, `Set-Cookie`, or `no-store` responses | tower-http |

@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - route-template metrics;
   - accounting that ends when the response *body* ends, exactly once;
   - bounded OTLP export with counted loss.
-- **Optional batteries** (Cargo features): `otel`, `tls` (rustls, verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `jwt` (JWKS), `http-client`, `compression`, `cors`, `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service).
+- **Optional batteries** (Cargo features): `otel`, `tls` (rustls, verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `openapi-ui` (a protected Swagger UI from embedded assets), `jwt` (JWKS), `http-client`, `compression`, `cors`, `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service).
 - **CLI** (`ferrum-alloy`):
   - `new`: starters that compile and pass their own tests;
   - `check`: configuration validation;
@@ -96,3 +96,5 @@ The Ferrum Edge end-to-end stack is described in `examples/edge-observability/co
 ## License
 
 PolyForm Noncommercial 1.0.0 ([LICENSE](LICENSE)), with commercial licensing available ([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). "Ferrum Alloy" and the crate and command names are working names. Registry and trademark availability has not been verified.
+
+Files under [`crates/ferrum-alloy/assets/swagger-ui/`](crates/ferrum-alloy/assets/swagger-ui/) are third-party code (Swagger UI, feature `openapi-ui`) and are licensed only under their own terms: Apache-2.0, with the bundled MIT, BSD-3-Clause, and DOMPurify notices in that directory. They are not covered by the repository's PolyForm Noncommercial or commercial licensing.

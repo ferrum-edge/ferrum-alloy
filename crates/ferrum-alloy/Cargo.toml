@@ -11,8 +11,9 @@ keywords = ["axum", "api", "http", "server", "observability"]
 categories = ["web-programming::http-server", "asynchronous"]
 publish.workspace = true
 # Packaged files (docs/release.md). Tests read repository fixtures outside
-# this crate, so they stay out.
-include = ["/src/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
+# this crate, so they stay out. `assets/` holds the vendored documentation UI
+# with its license and notice (feature `openapi-ui`).
+include = ["/src/**", "/assets/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
 
 [features]
 default = []
@@ -21,13 +22,16 @@ edge = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/axum"]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:x509-parser", "dep:zeroize", "ferrum-alloy-telemetry/x509"]
 postgres = ["dep:sqlx"]
 openapi = ["dep:utoipa", "dep:utoipa-axum"]
+# The OpenAPI documentation UI: Swagger UI from embedded assets (Apache-2.0,
+# assets/swagger-ui/). No dependency beyond `openapi`.
+openapi-ui = ["openapi"]
 jwt = ["dep:jsonwebtoken", "http-client"]
 http-client = ["dep:reqwest", "dep:url", "dep:rustls", "dep:rustls-platform-verifier"]
 compression = ["tower-http/compression-gzip", "tower-http/compression-br"]
 cors = ["tower-http/cors"]
 # Authorized, tenant-scoped diagnostic retrieval (ADR 0008).
 diagnostics = ["dep:ferrum-alloy-diagnostics"]
-full = ["otel", "edge", "tls", "postgres", "openapi", "jwt", "http-client", "compression", "cors", "diagnostics"]
+full = ["otel", "edge", "tls", "postgres", "openapi", "openapi-ui", "jwt", "http-client", "compression", "cors", "diagnostics"]
 
 [dependencies]
 ferrum-alloy-telemetry = { workspace = true, features = ["axum", "subscriber"] }
@@ -90,6 +94,7 @@ tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { workspace = true, features = ["std"] }
 proptest = { workspace = true }
+ring = { workspace = true }
 
 [lints]
 workspace = true

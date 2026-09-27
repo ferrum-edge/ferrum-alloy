@@ -605,6 +605,11 @@ pub struct OpenApiSettings {
     pub path: String,
     /// Also serve it unauthenticated on the application listener.
     pub public: bool,
+    /// Serve the documentation UI (feature `openapi-ui`) wherever the
+    /// document is served, under the same access policy.
+    pub ui: bool,
+    /// Path of the documentation UI page. Its assets are served beneath it.
+    pub ui_path: String,
 }
 
 impl Default for OpenApiSettings {
@@ -613,6 +618,8 @@ impl Default for OpenApiSettings {
             serve: true,
             path: "/openapi.json".to_owned(),
             public: false,
+            ui: false,
+            ui_path: "/docs".to_owned(),
         }
     }
 }
@@ -1563,6 +1570,12 @@ impl AlloyConfig {
                 error("cors.allow_credentials cannot be combined with origin '*'".into());
             }
         }
+        if self.openapi.ui {
+            openapi_ui_issues(self, &mut error);
+            if !has("openapi-ui") {
+                error("openapi.ui is true but the `openapi-ui` feature is not enabled".into());
+            }
+        }
         if self.compression.enabled && !has("compression") {
             error(
                 "compression.enabled is true but the `compression` feature is not enabled".into(),
@@ -1671,6 +1684,9 @@ impl AlloyConfig {
                 warn("server.tls.client_crl_expiration = ignore keeps using CRLs past their nextUpdate time".into());
             }
         }
+        if self.openapi.ui && self.openapi.public {
+            warn("openapi.ui with openapi.public serves the documentation UI unauthenticated on the application listener; do not expose it publicly in production".into());
+        }
         if self.database.migrate_on_startup {
             warn("database.migrate_on_startup runs migrations from every replica at startup; prefer a separate migration step in production".into());
         }
@@ -1691,4 +1707,47 @@ impl AlloyConfig {
             Err(ConfigError::Invalid(errors))
         }
     }
+}
+
+/// Checks `openapi.ui_path`, which the documentation page embeds in its
+/// markup and serves its assets beneath, so it must neither need escaping
+/// nor shadow another route on either listener.
+fn openapi_ui_issues(config: &AlloyConfig, error: &mut impl FnMut(String)) {
+    let ui = config.openapi.ui_path.as_str();
+    if !is_ui_path(ui) {
+        error("openapi.ui_path must be a path like /docs: segments of letters, digits, '-', '.', '_', or '~', without a trailing '/'".into());
+        return;
+    }
+    // `path` is the UI page or beneath it.
+    let within = |path: &str| match path.strip_prefix(ui) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    };
+    let mut served = vec![
+        config.openapi.path.as_str(),
+        config.health.liveness_path.as_str(),
+        config.health.readiness_path.as_str(),
+    ];
+    served.extend(crate::management::FIXED_PATHS);
+    if served.into_iter().any(within) {
+        error("openapi.ui_path must not be or contain another served path (openapi.path, the health paths, or the management paths)".into());
+    }
+    if ui == "/diagnostics" || ui.starts_with("/diagnostics/") {
+        error("openapi.ui_path must be outside /diagnostics".into());
+    }
+}
+
+/// An absolute path of non-empty segments other than `.` and `..`, made only
+/// of unreserved URL characters.
+fn is_ui_path(path: &str) -> bool {
+    path.strip_prefix('/').is_some_and(|rest| {
+        rest.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+        })
+    })
 }

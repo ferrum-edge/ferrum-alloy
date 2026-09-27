@@ -24,6 +24,8 @@ use crate::lifecycle::{self, Lifecycle};
 use crate::limits::{AdmissionLayer, BodyLimitLayer, HeadersDeadlineLayer};
 use crate::management::{self, ManagementState};
 use crate::normalize::{NormalizeLayer, panic_response};
+#[cfg(feature = "openapi-ui")]
+use crate::openapi_ui::DocsUi;
 use crate::rate_limit::RateLimiter;
 use crate::server::{self, ServeOptions, ServerStats};
 
@@ -305,6 +307,13 @@ impl AlloyApp {
                     }),
                 );
         }
+        // The documentation UI goes wherever the document is served.
+        #[cfg(feature = "openapi-ui")]
+        let openapi_ui = {
+            let openapi = &config.openapi;
+            let served = openapi.ui && openapi.serve && self.openapi.is_some();
+            served.then(|| DocsUi::new(&openapi.ui_path, &openapi.path))
+        };
         if config.openapi.public
             && config.openapi.serve
             && let Some(document) = &self.openapi
@@ -317,6 +326,10 @@ impl AlloyApp {
                     async move { management::openapi_response(Some(&document)) }
                 }),
             );
+            #[cfg(feature = "openapi-ui")]
+            if let Some(ui) = &openapi_ui {
+                app = app.merge(ui.routes::<()>());
+            }
         }
         let limit = config.server.request_body_limit_bytes;
         #[allow(unused_mut, reason = "optional layers are feature-gated")]
@@ -383,6 +396,8 @@ impl AlloyApp {
                     version: config.service.version.clone(),
                     app_stats: Arc::clone(&app_stats),
                     openapi: self.openapi.clone().filter(|_| config.openapi.serve),
+                    #[cfg(feature = "openapi-ui")]
+                    openapi_ui,
                     rate_limiter,
                     #[cfg(feature = "diagnostics")]
                     diagnostics: evidence.map(|(authorizer, store)| Retrieval {

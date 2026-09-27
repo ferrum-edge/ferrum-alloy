@@ -5,6 +5,15 @@ Copyright (c) 2026 Ferrum Edge
 The software in this repository is licensed under the PolyForm Noncommercial
 License 1.0.0 for noncommercial use. See the [LICENSE](LICENSE) file for details.
 
+## Third-party files
+
+Files under `crates/ferrum-alloy/assets/swagger-ui/` are third-party code
+(Swagger UI, used by the `openapi-ui` feature) and are licensed only under
+their own terms: Apache-2.0, with the bundled MIT, BSD-3-Clause, and DOMPurify
+notices in that directory. They are not licensed under the PolyForm
+Noncommercial License or under a commercial license from Ferrum Edge, and this
+document grants no rights to them.
+
 ## Commercial Use
 
 If you wish to use Ferrum Alloy for commercial purposes, you must obtain a
