@@ -302,8 +302,7 @@ fn management_rate_limits_are_validated() {
     assert_eq!((limit.requests_per_second, limit.burst), (10, 20));
     assert_eq!(limit.max_clients, 1_024);
     assert_eq!(limit.ipv6_prefix_len, 64);
-    let loopback = limit.exempt_networks.iter().map(ToString::to_string);
-    assert!(loopback.eq(["127.0.0.0/8", "::1/128"]));
+    assert!(limit.exempt_networks.is_empty());
     config.validate(NO_FEATURES).unwrap();
 
     let bad = [
@@ -330,6 +329,17 @@ fn management_rate_limits_are_validated() {
         assert!(error.contains(expected), "{expected}: {error}");
     }
 
+    let vars = [(
+        "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS",
+        "::ffff:10.0.0.0/104",
+    )];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("must use IPv4 CIDRs instead of IPv4-mapped IPv6 CIDRs"),
+        "{error}"
+    );
+
     // The table must hold every client the listener admits at once.
     let vars = [
         ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST", "300"),
@@ -348,7 +358,10 @@ fn management_rate_limits_are_validated() {
     let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
     let limit = &config.management.rate_limit;
     assert_eq!(limit.ipv6_prefix_len, 56);
-    assert!(limit.exempt_networks.is_empty(), "exemptions can be removed");
+    assert!(
+        limit.exempt_networks.is_empty(),
+        "exemptions can be removed"
+    );
     config.validate(NO_FEATURES).unwrap();
 
     // Limits that are not enforced are not checked.
@@ -537,6 +550,7 @@ fn env_var_table_maps_to_real_config_paths() {
                 "FERRUM_ALLOY_SERVER_TIMING" => "disabled",
                 "FERRUM_ALLOY_EDGE_MODE" => "standalone",
                 "FERRUM_ALLOY_TLS_CLIENT_AUTH" => "none",
+                "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => "10.0.0.0/8",
                 _ => "value",
             },
         };

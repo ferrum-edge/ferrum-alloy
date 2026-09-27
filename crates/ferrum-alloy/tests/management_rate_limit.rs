@@ -76,8 +76,6 @@ async fn a_burst_beyond_the_limit_gets_a_429_problem() {
     let mut cfg = config();
     cfg.management.rate_limit.requests_per_second = 1;
     cfg.management.rate_limit.burst = 3;
-    // The test client connects from loopback, which is exempt by default.
-    cfg.management.rate_limit.exempt_networks.clear();
     let server = start(app(), cfg).await;
     let url = server.management_url("/metrics");
 
@@ -120,7 +118,6 @@ async fn probes_are_served_while_metrics_is_saturated() {
     limit.burst = 2;
     limit.global_requests_per_second = 1;
     limit.global_burst = 2;
-    limit.exempt_networks.clear();
     let server = start(app(), cfg).await;
 
     let mut saturated = false;
@@ -186,6 +183,8 @@ async fn the_client_table_stays_bounded_under_many_distinct_peers() {
     limit.global_requests_per_second = 1;
     limit.global_burst = 8;
     limit.max_clients = 8;
+    // Exempt loopback explicitly so the scrape can inspect the saturated table.
+    limit.exempt_networks.push("127.0.0.0/8".parse().unwrap());
     let parts = parts(cfg);
 
     for n in 0..500u32 {
@@ -195,7 +194,6 @@ async fn the_client_table_stays_bounded_under_many_distinct_peers() {
         assert!(status == 404 || status == 429, "{status}");
     }
 
-    // Loopback is exempt, so the scrape is served however long the loop took.
     let bearer = format!("Bearer {TOKEN}");
     let auth = [("authorization", bearer.as_str())];
     let reply = call(&parts, ip("127.0.0.1"), "/metrics", &auth).await;
@@ -226,6 +224,10 @@ async fn loopback_and_exempt_networks_are_not_limited() {
     limit.burst = 1;
     limit.probe_requests_per_second = 1;
     limit.probe_burst = 1;
+    limit.exempt_networks = vec![
+        "127.0.0.0/8".parse().unwrap(),
+        "::1/128".parse().unwrap(),
+    ];
     // A node network, so kubelet probes are never refused.
     limit.exempt_networks.push("10.244.0.0/16".parse().unwrap());
     let parts = parts(cfg);

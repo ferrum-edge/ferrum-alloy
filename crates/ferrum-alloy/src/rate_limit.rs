@@ -15,7 +15,7 @@
 //! `ConnectInfo`), never a request header. IPv4-mapped IPv6 addresses count
 //! as IPv4; other IPv6 addresses are keyed by their `ipv6_prefix_len`
 //! prefix, which a single host usually controls entirely. Peers in
-//! `exempt_networks` (loopback by default) are not limited at all.
+//! `exempt_networks` (empty by default) are not limited at all.
 //!
 //! Each client table holds at most `max_clients` entries. A client gets an
 //! entry only when a request of it is admitted, so rejected requests never

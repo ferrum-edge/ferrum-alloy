@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use ferrum_alloy_telemetry::init::LoggingConfig;
@@ -274,12 +274,6 @@ pub const MAX_RATE_LIMIT_CLIENTS: usize = 65_536;
 /// Bounds of `management.rate_limit.ipv6_prefix_len`.
 pub const RATE_LIMIT_IPV6_PREFIX_LENS: std::ops::RangeInclusive<u8> = 48..=128;
 
-/// Networks exempt from management rate limits by default: loopback.
-const LOOPBACK_NETWORKS: [IpNet; 2] = [
-    IpNet::new_assert(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)), 8),
-    IpNet::new_assert(IpAddr::V6(Ipv6Addr::LOCALHOST), 128),
-];
-
 /// Request rate limits of the management listener.
 ///
 /// Probes (`/livez` and `/readyz`) and every other path have separate
@@ -314,7 +308,7 @@ pub struct ManagementRateLimit {
     pub max_clients: usize,
     /// Leading bits of an IPv6 peer address that identify one client.
     pub ipv6_prefix_len: u8,
-    /// Peer networks that bypass the limits entirely. Loopback by default.
+    /// Peer networks that bypass the limits entirely. Empty by default.
     pub exempt_networks: Vec<IpNet>,
 }
 
@@ -330,7 +324,7 @@ impl Default for ManagementRateLimit {
             probe_burst: 40,
             max_clients: 1_024,
             ipv6_prefix_len: 64,
-            exempt_networks: LOOPBACK_NETWORKS.to_vec(),
+            exempt_networks: Vec::new(),
         }
     }
 }
@@ -1249,6 +1243,18 @@ impl AlloyConfig {
                 }
                 if rate.exempt_networks.iter().any(|n| n.prefix_len() == 0) {
                     error("management.rate_limit.exempt_networks must not contain a network of every address; set management.rate_limit.enabled = false instead".into());
+                }
+                if rate.exempt_networks.iter().any(|network| {
+                    matches!(
+                        network,
+                        IpNet::V6(v6)
+                            if v6.prefix_len() >= 96 && v6.addr().to_ipv4_mapped().is_some()
+                    )
+                }) {
+                    error(
+                        "management.rate_limit.exempt_networks must use IPv4 CIDRs instead of IPv4-mapped IPv6 CIDRs"
+                            .into(),
+                    );
                 }
             }
         }

@@ -402,8 +402,9 @@ pub struct AlloyParts {
     /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):
     /// its rate limits key clients by that transport address, and requests
     /// without either all share one budget. Behind a proxy or sidecar, every
-    /// client is the proxy's address; Istio connects from 127.0.0.6, which is
-    /// loopback and therefore exempt from the limits by default.
+    /// client is the proxy's address; Istio connects from 127.0.0.6. Add that
+    /// address to `management.rate_limit.exempt_networks` only if bypassing
+    /// the limits for all proxied clients is intended.
     pub management_router: Option<Router>,
     /// Shutdown coordination.
     pub lifecycle: Lifecycle,
