@@ -65,6 +65,7 @@ opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt"] }
 rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,61 @@
+# cargo-fuzz targets for Ferrum Alloy's untrusted-input parsers.
+#
+# This crate is its own workspace and is excluded from the main one, so
+# workspace builds, the MSRV check, and `cargo deny` are unaffected. It needs a
+# nightly toolchain and cargo-fuzz; see docs/testing.md.
+[package]
+name = "ferrum-alloy-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+ferrum-alloy = { path = "../crates/ferrum-alloy", default-features = false }
+ferrum-alloy-diagnostics = { path = "../crates/ferrum-alloy-diagnostics" }
+ferrum-alloy-telemetry = { path = "../crates/ferrum-alloy-telemetry", default-features = false }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "traceparent"
+path = "fuzz_targets/traceparent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request_id"
+path = "fuzz_targets/request_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diagnostic_report"
+path = "fuzz_targets/diagnostic_report.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otlp_import"
+path = "fuzz_targets/otlp_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_file"
+path = "fuzz_targets/config_file.rs"
+test = false
+doc = false
+bench = false

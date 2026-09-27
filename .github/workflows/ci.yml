@@ -194,6 +194,53 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-15
+      FUZZ_SECONDS: "60"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Start from the audited workspace lockfile
+        # Shared dependencies keep the versions `cargo deny` checks; cargo adds
+        # libfuzzer-sys and drops what the fuzz crate does not use.
+        run: cp Cargo.lock fuzz/Cargo.lock
+      - name: Build fuzz targets
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build
+      - name: Run each target for ${{ env.FUZZ_SECONDS }} seconds
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          run() {
+            target="$1"
+            shift
+            mkdir -p "$root/fuzz/corpus/$target"
+            cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target" "$root/fuzz/corpus/$target" "$@" -- \
+              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048
+          }
+          run traceparent "$root/fuzz/seeds/traceparent"
+          run request_id "$root/fuzz/seeds/request_id"
+          run diagnostic_report "$root/contracts/fixtures/reports"
+          run otlp_import "$root/contracts/fixtures/otlp"
+          run config_file "$root/contracts/fixtures/manifests" "$root/fuzz/seeds/config_file"
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   edge-e2e:
     name: Ferrum Edge end-to-end
     runs-on: ubuntu-latest
