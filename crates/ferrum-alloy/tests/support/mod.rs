@@ -10,11 +10,12 @@
 )]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use ferrum_alloy::config::AlloyConfig;
-use ferrum_alloy::{AlloyApp, AlloyError, Lifecycle, TelemetryInit};
+use ferrum_alloy::{AlloyApp, AlloyError, Lifecycle, ServerStats, TelemetryInit};
 use http::{HeaderMap, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
@@ -40,6 +41,8 @@ pub struct TestServer {
     pub addr: SocketAddr,
     pub management: SocketAddr,
     pub lifecycle: Lifecycle,
+    /// Connection counters of the application listener.
+    pub stats: Arc<ServerStats>,
     pub task: JoinHandle<Result<(), AlloyError>>,
 }
 
@@ -76,11 +79,13 @@ pub async fn start(app: AlloyApp, mut config: AlloyConfig) -> TestServer {
         .into_parts()
         .unwrap();
     let lifecycle = parts.lifecycle.clone();
+    let stats = parts.app_stats();
     let task = tokio::spawn(parts.serve_on(listener, Some(management)));
     TestServer {
         addr,
         management: management_addr,
         lifecycle,
+        stats,
         task,
     }
 }

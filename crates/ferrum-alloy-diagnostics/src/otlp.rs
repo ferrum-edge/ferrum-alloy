@@ -450,6 +450,32 @@ fn interval(span: &RawSpan) -> Option<Interval> {
     })
 }
 
+/// Clock-reading slack allowed when fitting the header phase inside its span.
+const HEADER_PHASE_SLACK_NANOS: u64 = 1_000_000;
+
+/// The header phase of an Alloy SERVER span: from the span start (middleware
+/// entry) until the span start plus the measured time to headers.
+///
+/// The span stays open through the response body, so its end is never used
+/// as the headers boundary. Both inputs come from the same span of the same
+/// process. When the duration is missing, or does not fit inside the span,
+/// the interval stays unknown.
+fn header_interval(span: &RawSpan, time_to_headers_ms: Option<f64>) -> Option<Interval> {
+    let whole = interval(span)?;
+    let nanos = time_to_headers_ms? * 1_000_000.0;
+    if !nanos.is_finite() || nanos < 0.0 {
+        return None;
+    }
+    let end = whole.start_unix_nano.checked_add(nanos.round() as u64)?;
+    if end > whole.end_unix_nano.saturating_add(HEADER_PHASE_SLACK_NANOS) {
+        return None;
+    }
+    Some(Interval {
+        start_unix_nano: whole.start_unix_nano,
+        end_unix_nano: end,
+    })
+}
+
 struct Draft<'a> {
     span: &'a RawSpan,
     id_suffix: &'a str,
@@ -629,7 +655,7 @@ fn alloy_observations(span: &RawSpan, report: &mut DiagnosticReport) {
             ),
             "alloy.server.time_to_headers_ms",
         ) {
-            o.interval = interval(span);
+            o.interval = header_interval(span, o.duration_ms());
             report.observations.push(o);
         }
         if let Some(mut o) = duration(
