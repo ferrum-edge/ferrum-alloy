@@ -109,10 +109,8 @@ impl Pki {
         let chain = vec![self.server.cert.clone()];
         let mut config = builder.with_single_cert(chain, self.server.key.clone_key())?;
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let mut alloy = TlsSettings::new(
-            self.server_cert_path.clone(),
-            self.server_key_path.clone(),
-        );
+        let mut alloy =
+            TlsSettings::new(self.server_cert_path.clone(), self.server_key_path.clone());
         alloy.client_ca_path = mtls.then(|| self.ca_path.clone());
         alloy.client_auth = if mtls {
             ClientAuth::Required
