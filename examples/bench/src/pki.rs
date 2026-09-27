@@ -123,6 +123,7 @@ impl Pki {
             client_crl_depth: Default::default(),
             client_crl_unknown_status: Default::default(),
             client_crl_expiration: Default::default(),
+            reload_interval_ms: 0,
         };
         Ok(ServerTls {
             rustls: Arc::new(config),

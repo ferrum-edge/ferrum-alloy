@@ -995,6 +995,7 @@ mod tls {
             client_crl_depth: Default::default(),
             client_crl_unknown_status: Default::default(),
             client_crl_expiration: Default::default(),
+            reload_interval_ms: 0,
         });
         config.shutdown.drain_timeout_ms = drain_timeout_ms;
         Tls {
