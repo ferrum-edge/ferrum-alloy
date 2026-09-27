@@ -32,6 +32,20 @@ pub enum AlloyError {
     /// Serving failed.
     #[error("serve: {0}")]
     Serve(std::io::Error),
+    /// An application route matches a path Alloy serves on the application
+    /// listener, ahead of the application's router, so the route would
+    /// never be reached.
+    #[error(
+        "application route {route} matches {path}, which Alloy serves on the application listener ({setting}), so the route would never be reached; change {setting} or the route"
+    )]
+    ShadowedRoute {
+        /// The application route's pattern.
+        route: String,
+        /// The path Alloy serves.
+        path: String,
+        /// The setting that places the path on the application listener.
+        setting: &'static str,
+    },
     /// An integration (database, auth) failed to start.
     #[error("{0}")]
     Integration(String),

@@ -23,6 +23,7 @@ mod management;
 mod rate_limit;
 
 mod server;
+mod shadow;
 
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;

@@ -97,7 +97,7 @@ The `openapi-ui` feature and `openapi.ui = true` serve Swagger UI at `openapi.ui
 - Every UI response carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, with no `unsafe-inline` or `unsafe-eval`, plus `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, and `Cross-Origin-Resource-Policy: same-origin`. The page has no inline script or style; Alloy's own initializer is a separate file.
 - The initializer loads the document from `openapi.path` on the listener that served the page, refuses a document URL of another origin, and ignores configuration in the page URL (`queryConfigEnabled: false`). The online validator badge is off (`validatorUrl: null`).
 - The UI is read-only: "Try it out" is disabled, so the page never sends requests to the API.
-- `openapi.ui_path` is limited to unreserved URL characters and may not shadow another Alloy route; `openapi.path` is escaped where the page embeds it. With `openapi.public`, the UI and document paths take precedence over the application's own router, whose routes at those paths become unreachable without an error; choose a `ui_path` the API does not use.
+- `openapi.ui_path` is limited to unreserved URL characters and may not shadow another Alloy route; `openapi.path` is escaped where the page embeds it. With `openapi.public`, the UI and document paths take precedence over the application's own router, so startup fails closed if an application route matches one of them, rather than leaving that route silently unreachable. See [route conflicts](configuration.md#route-conflicts-on-the-application-listener).
 
 ## Errors
 
@@ -237,4 +237,5 @@ The generated CI pins `actions/checkout` by commit, and the `postgres` starter's
 - Neither `idle_timeout_ms` nor `write_stall_timeout_ms` is a minimum transfer rate. A trickle reader that takes a little response data at a time, such as one byte of HTTP/2 window or one TCP segment every half period, keeps its connection open for as long as the response lasts, as with nginx `send_timeout`. `max_connections` bounds how many such connections one can hold.
 - Client certificate revocation uses only CRLs read from `client_crl_paths`, at startup and at each reload. There is no OCSP and no CRL fetching from distribution points. A revocation reaches connections established before it only when they close.
 - Network-boundary trust depends on deployment isolation that Alloy cannot verify.
+- The [route-conflict check](configuration.md#route-conflicts-on-the-application-listener) does not report a root catch-all route (`/{*path}`) or fallbacks, including nested routers' fallbacks: Alloy's paths on the application listener take precedence over them without an error.
 - The Edge v0.9.8 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.

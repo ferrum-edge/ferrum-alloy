@@ -115,6 +115,12 @@ impl AlloyApp {
     /// The application router, with its state already supplied
     /// (`Router::with_state`). Its handlers, extractors, and layers are used
     /// as-is.
+    ///
+    /// Alloy's own paths on the application listener (the health endpoints,
+    /// and with `openapi.public` the OpenAPI document and UI) take precedence
+    /// over it, so startup fails with [`AlloyError::ShadowedRoute`] when one
+    /// of its routes matches one of those paths, for any method. Finding out
+    /// runs none of the router's handlers, layers, or fallbacks.
     pub fn router(mut self, router: Router) -> Self {
         self.router = Some(router);
         self
@@ -292,7 +298,14 @@ impl AlloyApp {
         ));
 
         let mut app = Router::new();
+        // Alloy's paths on the application listener, with the setting that
+        // places each there. They take precedence over the application's
+        // router, so none may match one of its routes.
+        let mut served: Vec<(&'static str, String)> = Vec::new();
         if config.health.app_endpoints {
+            let health = &config.health;
+            served.push(("health.liveness_path", health.liveness_path.clone()));
+            served.push(("health.readiness_path", health.readiness_path.clone()));
             let (r, l) = (Arc::clone(&readiness), lifecycle.clone());
             app = app
                 .route(
@@ -318,6 +331,7 @@ impl AlloyApp {
             && config.openapi.serve
             && let Some(document) = &self.openapi
         {
+            served.push(("openapi.path", config.openapi.path.clone()));
             let document = Arc::clone(document);
             app = app.route(
                 &config.openapi.path,
@@ -328,9 +342,11 @@ impl AlloyApp {
             );
             #[cfg(feature = "openapi-ui")]
             if let Some(ui) = &openapi_ui {
+                served.extend(ui.paths().map(|path| ("openapi.ui_path", path)));
                 app = app.merge(ui.routes::<()>());
             }
         }
+        crate::shadow::check(&user_router, &served)?;
         let limit = config.server.request_body_limit_bytes;
         #[allow(unused_mut, reason = "optional layers are feature-gated")]
         let mut app = app
