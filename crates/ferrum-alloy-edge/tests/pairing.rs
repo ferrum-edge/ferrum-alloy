@@ -65,7 +65,9 @@ fn assert_pins_only(file: &str, text: &str, digests: &[&str]) {
         }
         let pin = &rest[..64];
         assert!(
-            digests.iter().any(|digest| digest.strip_prefix("sha256:") == Some(pin)),
+            digests
+                .iter()
+                .any(|digest| digest.strip_prefix("sha256:") == Some(pin)),
             "{file} pins an Edge image outside the support window: sha256:{pin}"
         );
     }
