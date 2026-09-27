@@ -1,7 +1,8 @@
 //! Connection hardening over real sockets: a peer that never sends a
-//! complete request head cannot keep a connection slot, on either listener
-//! and whatever protocol it starts, and shutdown leaves no connection behind,
-//! including one stuck in a TLS handshake.
+//! complete request head, or goes idle after a request, cannot keep a
+//! connection slot, on either listener and whatever protocol it starts, and
+//! shutdown leaves no connection or HTTP/2 handler behind, including a
+//! connection stuck in a TLS handshake.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -9,7 +10,8 @@ mod support;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -24,8 +26,10 @@ use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_millis(300);
+const IDLE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Upper bound for the server to act on a timer or shutdown. Generous, so
 /// slow CI hosts do not flake; the defects it catches never resolve at all.
 const WITHIN: Duration = Duration::from_secs(5);
@@ -33,6 +37,7 @@ const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// An empty SETTINGS frame: with the preface, a valid HTTP/2 connection with
 /// no request.
 const H2_EMPTY_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+const H2_HEADERS: u8 = 0x1;
 const H2_GOAWAY: u8 = 0x7;
 
 fn router() -> Router {
@@ -65,6 +70,38 @@ fn hardened() -> AlloyConfig {
     let mut config = support::config();
     config.server.header_read_timeout_ms = HEADER_READ_TIMEOUT.as_millis() as u64;
     config
+}
+
+fn idle_limited() -> AlloyConfig {
+    let mut config = hardened();
+    config.server.idle_timeout_ms = IDLE_TIMEOUT.as_millis() as u64;
+    config
+}
+
+/// A HEADERS frame for `GET /hello` on stream 1 that ends the stream: HPACK
+/// indexed `:method: GET` and `:scheme: http`, then literal `:path` and
+/// `:authority` without indexing.
+fn h2_get_hello() -> Vec<u8> {
+    let mut block = vec![0x82, 0x86];
+    for (index, value) in [(0x04, "/hello"), (0x01, "localhost")] {
+        block.push(index);
+        block.push(value.len() as u8);
+        block.extend_from_slice(value.as_bytes());
+    }
+    let mut frame = (block.len() as u32).to_be_bytes()[1..].to_vec();
+    // Type HEADERS, flags END_STREAM | END_HEADERS, stream 1.
+    frame.extend_from_slice(&[H2_HEADERS, 0x5, 0, 0, 0, 1]);
+    frame.extend_from_slice(&block);
+    frame
+}
+
+/// Sets its flag when dropped.
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 fn request(uri: &str) -> Request<Empty<Bytes>> {
@@ -220,6 +257,65 @@ async fn an_http2_connection_without_a_request_is_sent_goaway() {
     server.shutdown().await.unwrap();
 }
 
+/// A peer that sends one request and then only keeps the connection open is
+/// sent `GOAWAY` once no request has been in flight for the idle timeout,
+/// and its slot is freed.
+#[tokio::test]
+async fn an_idle_http2_connection_after_a_request_is_sent_goaway() {
+    let mut config = idle_limited();
+    config.server.max_connections = 1;
+    let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
+    let mut idle = TcpStream::connect(server.addr).await.unwrap();
+    idle.write_all(H2_PREFACE).await.unwrap();
+    idle.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    idle.write_all(&h2_get_hello()).await.unwrap();
+    let started = Instant::now();
+    let frames = frame_types_until_closed(&mut idle)
+        .await
+        .expect("the idle HTTP/2 connection is closed");
+    let elapsed = started.elapsed();
+    let response = frames.iter().position(|&kind| kind == H2_HEADERS);
+    let goaway = frames.iter().position(|&kind| kind == H2_GOAWAY);
+    assert!(
+        response.is_some() && goaway > response,
+        "the request is answered, then GOAWAY is sent (frame types: {frames:?})"
+    );
+    assert!(
+        elapsed >= IDLE_TIMEOUT / 2,
+        "closed by the idle timeout, not at once ({elapsed:?})"
+    );
+    let stats = &server.stats;
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.first_request_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    server.shutdown().await.unwrap();
+}
+
+/// A well-behaved client that keeps its HTTP/2 connection open after a
+/// request is disconnected by the idle timeout, and its slot is freed. A
+/// request that runs longer than the idle timeout is not idle time.
+#[tokio::test]
+async fn an_idle_http2_client_is_disconnected_and_releases_its_slot() {
+    let mut config = idle_limited();
+    config.server.max_connections = 1;
+    let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let io = TokioIo::new(tcp);
+    let (mut sender, connection) = http2::handshake(TokioExecutor::new(), io).await.unwrap();
+    let connection = tokio::spawn(connection);
+    let slow = format!("http://{}/slow", server.addr);
+    let response = sender.send_request(request(&slow)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // The client keeps `sender`, so only the server can end the connection.
+    let closed = tokio::time::timeout(WITHIN, connection).await;
+    assert!(closed.is_ok(), "the server closed the idle connection");
+    drop(sender);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    let stats = &server.stats;
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 1);
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn the_management_listener_closes_silent_connections_and_frees_its_slots() {
     let server = support::start(AlloyApp::new("hardening").router(router()), hardened()).await;
@@ -299,6 +395,64 @@ async fn every_connection_is_closed_when_serve_on_returns() {
     let text = server.stats.render_prometheus("app");
     assert!(
         text.contains("ferrum_alloy_force_closed_connections_total{listener=\"app\"} 1\n"),
+        "{text}"
+    );
+}
+
+/// HTTP/2 handlers run on stream tasks apart from their connection. One
+/// still running at the drain budget is cancelled and counted, and is gone
+/// by the time `serve_on` returns.
+#[tokio::test]
+async fn a_hanging_http2_handler_is_cancelled_at_the_drain_budget() {
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let hang = {
+        let entered = Arc::clone(&entered);
+        let dropped = Arc::clone(&dropped);
+        move || {
+            let entered = Arc::clone(&entered);
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _guard = SetOnDrop(dropped);
+                entered.notify_one();
+                tokio::time::sleep(Duration::from_secs(3_600)).await;
+                "done"
+            }
+        }
+    };
+    let mut config = hardened();
+    config.shutdown.drain_timeout_ms = 300;
+    let routes = router().route("/hang", get(hang));
+    let server = support::start(AlloyApp::new("hardening").router(routes), config).await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let io = TokioIo::new(tcp);
+    let (mut sender, connection) = http2::handshake(TokioExecutor::new(), io).await.unwrap();
+    tokio::spawn(connection);
+    let hang = format!("http://{}/hang", server.addr);
+    tokio::spawn(async move {
+        let _ = sender.send_request(request(&hang)).await;
+    });
+    tokio::time::timeout(WITHIN, entered.notified())
+        .await
+        .expect("the handler is running");
+    server.lifecycle.trigger_shutdown();
+    tokio::time::timeout(WITHIN, server.task)
+        .await
+        .expect("serve_on returned within the drain budget")
+        .unwrap()
+        .unwrap();
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the handler was cancelled before serve_on returned"
+    );
+    assert_eq!(
+        server.stats.force_closed_streams.load(Ordering::Relaxed),
+        1,
+        "the cancelled stream task is counted"
+    );
+    let text = server.stats.render_prometheus("app");
+    assert!(
+        text.contains("ferrum_alloy_force_closed_streams_total{listener=\"app\"} 1\n"),
         "{text}"
     );
 }
