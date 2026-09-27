@@ -855,6 +855,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "ferrum-alloy-diagnostics",
  "ferrum-alloy-edge",
  "ferrum-alloy-telemetry",
  "futures-util",
