@@ -49,15 +49,24 @@ fn assert_entry_shape(edge: &serde_json::Value) {
     assert!(is_lower_hex(digest, 64), "image {image}");
 }
 
-/// Every line of `text` that pins an Edge image names one of `digests`.
+/// Every Edge image pin in `text` (the digest prefix followed by exactly 64
+/// lowercase hex digits, so not a regex that describes one) names one of
+/// `digests`.
 fn assert_pins_only(file: &str, text: &str, digests: &[&str]) {
-    for line in text
-        .lines()
-        .filter(|l| l.contains("ferrumedge/ferrum-edge@sha256:"))
-    {
+    const PIN: &str = "ferrumedge/ferrum-edge@sha256:";
+    for (at, _) in text.match_indices(PIN) {
+        let rest = &text[at + PIN.len()..];
+        let hex_len = rest
+            .bytes()
+            .take_while(|&b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            .count();
+        if hex_len != 64 {
+            continue;
+        }
+        let pin = &rest[..64];
         assert!(
-            digests.iter().any(|digest| line.contains(digest)),
-            "{file} pins an Edge image outside the support window: {line}"
+            digests.iter().any(|digest| digest.strip_prefix("sha256:") == Some(pin)),
+            "{file} pins an Edge image outside the support window: sha256:{pin}"
         );
     }
 }
@@ -115,9 +124,9 @@ fn ci_tests_every_supported_edge_release() {
     let ci = repo(".github/workflows/ci.yml");
     assert!(ci.contains("jq -ce '.edge_support.tested"));
     for pattern in [
-        r#"test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}$")"#,
-        r#"test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")"#,
-        r#"test("^[0-9a-f]{40}$")"#,
+        r#"test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}\\z")"#,
+        r#"test("^v[0-9]+\\.[0-9]+\\.[0-9]+\\z")"#,
+        r#"test("^[0-9a-f]{40}\\z")"#,
     ] {
         assert!(ci.contains(pattern), "ci.yml edge-support lacks {pattern}");
     }

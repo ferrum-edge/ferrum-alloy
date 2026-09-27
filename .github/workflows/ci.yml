@@ -274,9 +274,9 @@ jobs:
           set -euo pipefail
           tested=$(jq -ce '.edge_support.tested
             | select(length == 2 and all(.[];
-                (.image | test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}$"))
-                and (.release | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
-                and (.source_commit | test("^[0-9a-f]{40}$"))))
+                (.image | test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}\\z"))
+                and (.release | test("^v[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
+                and (.source_commit | test("^[0-9a-f]{40}\\z"))))
             | [to_entries[] | .value + {slot: (["baseline", "previous"][.key])}]' docs/compatibility.json)
           echo "tested=$tested" >> "$GITHUB_OUTPUT"
 

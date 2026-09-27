@@ -227,6 +227,15 @@ jobs:
             git switch -c "$BRANCH"
             git commit -am "Pin Ferrum Edge $TAG"
             git push origin "HEAD:refs/heads/$BRANCH"
+          else
+            # An earlier run pushed this branch; open its pull request only if
+            # it pins the image this run just verified.
+            git fetch --no-tags --depth 1 origin "refs/heads/$BRANCH"
+            pinned=$(git show FETCH_HEAD:docs/compatibility.json | jq -er .edge.image)
+            if [ "$pinned" != "$IMAGE" ]; then
+              echo "::error::$BRANCH pins $pinned, not the verified $IMAGE"
+              exit 1
+            fi
           fi
 
           body="$RUNNER_TEMP/edge-bump.md"
