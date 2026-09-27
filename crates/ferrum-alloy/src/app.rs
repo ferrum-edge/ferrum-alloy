@@ -445,6 +445,11 @@ impl AlloyParts {
 
     /// Serves on already-bound listeners (useful for tests and socket
     /// activation).
+    ///
+    /// After shutdown it returns only once every connection on both listeners
+    /// is closed: connections still open when `shutdown.drain_timeout_ms`
+    /// runs out are force-closed first. Upgraded (WebSocket) sessions are not
+    /// connections here; see [`Lifecycle::shutdown_token`].
     pub async fn serve_on(
         mut self,
         app_listener: TcpListener,

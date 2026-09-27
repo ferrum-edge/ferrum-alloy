@@ -137,7 +137,8 @@ The generated CI pins `actions/checkout` by commit.
 | Gateway bypass | `gateway_required` with a verified SPIFFE identity; rogue CAs fail the handshake | `gateway_required_rejects_direct_callers_but_not_health_probes`, `certificates_from_another_ca_fail_the_handshake`, `edge-e2e` |
 | A cache replays another request's ids or timing | Request-specific headers only on non-shared-cacheable responses | `request_specific_headers_are_withheld_from_shared_cacheable_responses` |
 | High-cardinality labels exhaust memory | Route templates only; series cap and overflow bucket | `metric_series_are_capped`, `matched_unmatched_and_method_not_allowed_routes_use_bounded_labels` |
-| Slow-header or connection floods | `header_read_timeout_ms`, `max_headers`, `max_connections` | `slow_request_heads_are_cut_off`, `oversized_request_heads_are_rejected`, `connections_beyond_the_limit_are_closed` |
+| Slow-header or connection floods | `header_read_timeout_ms` (request heads, and the first request on every connection whatever the protocol, on both listeners), `max_headers`, `max_connections` | `slow_request_heads_are_cut_off`, `oversized_request_heads_are_rejected`, `connections_beyond_the_limit_are_closed`, `a_silent_connection_is_closed_and_releases_its_slot`, `a_partial_http2_preface_is_closed_and_releases_its_slot`, `an_http2_connection_without_a_request_is_closed`, `the_management_listener_closes_silent_connections_and_frees_its_slots` |
+| Stalled TLS handshakes or connections outlive shutdown | Handshakes are abandoned when draining starts; the listener waits for every connection task and aborts those left at the drain budget | `a_stalled_handshake_does_not_survive_a_short_drain`, `a_stalled_handshake_does_not_hold_up_a_long_drain`, `every_connection_is_closed_when_serve_on_returns` |
 | Oversized bodies | `Content-Length` precheck and streaming cap | `chunked_bodies_without_content_length_are_still_limited` |
 | A collector outage slows or fails requests | Bounded queue; drop and count | `collector_failures_never_fail_requests_and_are_counted`, `a_full_queue_drops_spans_instead_of_blocking_requests` |
 | Health floods probe the database | Cached, single-flight readiness | `readiness_checks_are_cached_and_single_flight` |
@@ -150,6 +151,7 @@ The generated CI pins `actions/checkout` by commit.
 
 - No live, tenant-scoped diagnostic retrieval endpoint. Detailed evidence is available only through telemetry export and offline reports.
 - Upgraded (WebSocket) sessions are not counted against `max_connections` and are not drained. Applications should watch `Lifecycle::shutdown_token`.
+- An HTTP/2 connection that goes idle after its first request is bounded only by keep-alive pings: a peer that keeps answering them keeps its connection slot.
 - No certificate revocation checking.
 - No rate limiting on the management listener.
 - Network-boundary trust depends on deployment isolation that Alloy cannot verify.

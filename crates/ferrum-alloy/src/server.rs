@@ -2,10 +2,17 @@
 //!
 //! The accept loop enforces a connection limit, request-head limits and
 //! read timeout, and hands each request the transport identity of its
-//! connection ([`PeerInfo`], and axum's `ConnectInfo`). On shutdown it stops
-//! accepting, asks every connection to finish (HTTP/1.1 `Connection: close`
-//! after the current response, HTTP/2 `GOAWAY`), waits up to the drain budget
-//! for in-flight requests and response streams, then force-closes the rest.
+//! connection ([`PeerInfo`], and axum's `ConnectInfo`). The header read
+//! timeout also bounds the time from a ready connection (after any TLS
+//! handshake) to its first request head, whatever the protocol, so a peer
+//! that sends nothing or only part of the HTTP/2 preface cannot keep a
+//! connection slot.
+//!
+//! On shutdown it stops accepting, abandons unfinished TLS handshakes, asks
+//! every connection to finish (HTTP/1.1 `Connection: close` after the current
+//! response, HTTP/2 `GOAWAY`), waits up to the drain budget for in-flight
+//! requests and response streams, then force-closes the rest. The listener
+//! returns only after every connection task has ended.
 //!
 //! Upgraded connections (WebSocket) leave Hyper's control after the `101`
 //! response: they are not counted against the connection limit and are not
@@ -15,7 +22,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -28,8 +35,8 @@ use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
-use tokio_util::task::TaskTracker;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tower::ServiceExt;
 
 use crate::lifecycle::Lifecycle;
@@ -86,6 +93,31 @@ impl ServerStats {
     }
 }
 
+/// Holds a connection slot and the `active_connections` gauge for the life of
+/// a connection task, including a task aborted at the end of the drain.
+struct ActiveConnection {
+    stats: Arc<ServerStats>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl ActiveConnection {
+    fn open(stats: Arc<ServerStats>, permit: OwnedSemaphorePermit) -> Self {
+        stats.active_connections.fetch_add(1, Ordering::Relaxed);
+        Self {
+            stats,
+            _permit: permit,
+        }
+    }
+}
+
+impl Drop for ActiveConnection {
+    fn drop(&mut self) {
+        self.stats
+            .active_connections
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Per-listener options.
 #[derive(Debug, Clone)]
 pub(crate) struct ServeOptions {
@@ -120,7 +152,9 @@ fn builder(options: &ServeOptions) -> Builder<TokioExecutor> {
 }
 
 /// Serves `app` on `listener` until the lifecycle stops accepting, then
-/// drains within the budget.
+/// drains within the budget. Returns once every connection task has ended:
+/// connections still open when the budget runs out are aborted and counted
+/// in `force_closed_connections`.
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -130,12 +164,14 @@ pub(crate) async fn serve(
 ) -> io::Result<()> {
     let builder = builder(&options);
     let permits = Arc::new(Semaphore::new(options.max_connections));
-    let tracker = TaskTracker::new();
+    let mut connections = JoinSet::new();
     let mut backoff = Duration::from_millis(5);
     loop {
         let accepted = tokio::select! {
             biased;
             () = lifecycle.stop_accepting().cancelled() => break,
+            // Reap finished connection tasks so the set stays small.
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
         let (stream, remote) = match accepted {
@@ -163,28 +199,33 @@ pub(crate) async fn serve(
         let lifecycle = lifecycle.clone();
         let stats = Arc::clone(&stats);
         let options = options.clone();
-        tracker.spawn(async move {
-            stats.active_connections.fetch_add(1, Ordering::Relaxed);
+        connections.spawn(async move {
+            let _active = ActiveConnection::open(Arc::clone(&stats), permit);
             handle(stream, remote, builder, app, &options, &lifecycle, &stats).await;
-            stats.active_connections.fetch_sub(1, Ordering::Relaxed);
-            drop(permit);
         });
     }
     drop(listener);
-    tracker.close();
     lifecycle.drain_connections().cancel();
-    if tokio::time::timeout(options.drain_timeout, tracker.wait())
-        .await
-        .is_err()
-    {
+    let drained = tokio::time::timeout(options.drain_timeout, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_ok();
+    if !drained {
+        while connections.try_join_next().is_some() {}
+        let remaining = connections.len();
         tracing::warn!(
             target: "ferrum_alloy::server",
             listener = options.name,
-            remaining = tracker.len(),
+            remaining,
             "drain budget exhausted; closing remaining connections"
         );
-        lifecycle.force_close().cancel();
-        let _ = tokio::time::timeout(Duration::from_secs(1), tracker.wait()).await;
+        stats
+            .force_closed_connections
+            .fetch_add(remaining as u64, Ordering::Relaxed);
+        // Aborting a task drops its connection and socket; `shutdown` returns
+        // once every task has ended.
+        connections.shutdown().await;
     }
     Ok(())
 }
@@ -200,8 +241,17 @@ async fn handle(
 ) {
     #[cfg(feature = "tls")]
     if let Some(tls) = &options.tls {
-        let handshake =
-            tokio::time::timeout(tls.handshake_timeout, tls.acceptor.accept(stream)).await;
+        let accept = tokio::time::timeout(tls.handshake_timeout, tls.acceptor.accept(stream));
+        // A handshake that finishes after shutdown began could never serve a
+        // request, so stop waiting for it.
+        let handshake = tokio::select! {
+            biased;
+            () = lifecycle.drain_connections().cancelled() => {
+                tracing::debug!(target: "ferrum_alloy::tls", %remote, "TLS handshake abandoned at shutdown");
+                return;
+            }
+            handshake = accept => handshake,
+        };
         let stream = match handshake {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
@@ -219,15 +269,15 @@ async fn handle(
             remote_addr: Some(remote),
             tls: crate::tls::peer_identity(stream.get_ref().1),
         };
-        serve_io(stream, peer, builder, app, lifecycle, stats).await;
+        serve_io(stream, peer, builder, app, options, lifecycle).await;
         return;
     }
-    let _ = options;
+    let _ = stats;
     let peer = PeerInfo {
         remote_addr: Some(remote),
         tls: None,
     };
-    serve_io(stream, peer, builder, app, lifecycle, stats).await;
+    serve_io(stream, peer, builder, app, options, lifecycle).await;
 }
 
 async fn serve_io<I>(
@@ -235,13 +285,16 @@ async fn serve_io<I>(
     peer: PeerInfo,
     builder: Builder<TokioExecutor>,
     app: Router,
+    options: &ServeOptions,
     lifecycle: &Lifecycle,
-    stats: &ServerStats,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let remote = peer.remote_addr;
+    let first_request = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&first_request);
     let service = app.map_request(move |request: http::Request<Incoming>| {
+        seen.store(true, Ordering::Release);
         let mut request = request.map(Body::new);
         request.extensions_mut().insert(peer.clone());
         if let Some(remote) = remote {
@@ -252,16 +305,28 @@ async fn serve_io<I>(
     let connection =
         builder.serve_connection_with_upgrades(TokioIo::new(io), TowerToHyperService::new(service));
     tokio::pin!(connection);
-    let result = tokio::select! {
-        result = connection.as_mut() => result,
-        () = lifecycle.drain_connections().cancelled() => {
-            connection.as_mut().graceful_shutdown();
-            tokio::select! {
-                result = connection.as_mut() => result,
-                () = lifecycle.force_close().cancelled() => {
-                    stats.force_closed_connections.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
+    // Protocol detection waits for enough bytes to rule out the HTTP/2
+    // preface before either protocol starts, Hyper's HTTP/1 header timer
+    // starts only after detection, and HTTP/2 has no request-head timer. This
+    // deadline covers all of it: no request head by then closes the
+    // connection. Once a request arrived, it no longer applies.
+    let first_request_deadline = tokio::time::sleep(options.header_read_timeout);
+    tokio::pin!(first_request_deadline);
+    let mut awaiting_first_request = true;
+    let mut draining = false;
+    let result = loop {
+        tokio::select! {
+            result = connection.as_mut() => break result,
+            () = first_request_deadline.as_mut(), if awaiting_first_request => {
+                awaiting_first_request = false;
+                if !first_request.load(Ordering::Acquire) {
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request head within the header read timeout; closing");
+                    return;
                 }
+            }
+            () = lifecycle.drain_connections().cancelled(), if !draining => {
+                draining = true;
+                connection.as_mut().graceful_shutdown();
             }
         }
     };
