@@ -628,7 +628,7 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
                     FindingBuilder::new(
                         "alloy.evidence.operation_exceeds_enclosing",
                         "alloy.r006",
-                        1,
+                        2,
                         "Nested operation is longer than its enclosing measurement",
                     )
                     .scope(SourceScope::UpstreamApplication)
@@ -640,6 +640,11 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
                     .explanation(
                         "An operation recorded inside the request's time-to-headers interval reports a longer duration than that interval. The measurements are inconsistent; no dominance claim is made.".into(),
                     )
+                    .does_not_prove(&[
+                        "which of the service time-to-headers measurement or operation duration is inaccurate",
+                        "whether clock skew or a misattributed parent span explains the apparent nesting",
+                        "that time was not double-counted in either measurement",
+                    ])
                     .build(),
                 );
             }
@@ -802,6 +807,10 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             .explanation(
                 "The gateway's backend measurement boundaries could not be matched to a service measurement (unknown response buffering mode or missing service measurement), so no difference is computed.".into(),
             )
+            .does_not_prove(&[
+                "whether the gateway or service was fast or slow",
+                "the size or cause of any gateway-to-service timing difference",
+            ])
             .missing(&["gateway response buffering mode", "matching service measurement"]);
             if let Some(first) = service.observations.first() {
                 builder = builder.cite(first, "alloy.server_span", "linked");
@@ -818,7 +827,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                 FindingBuilder::new(
                     "alloy.evidence.service_exceeds_gateway",
                     "alloy.r006",
-                    1,
+                    2,
                     "Service measured longer than the gateway's backend measurement",
                 )
                 .scope(SourceScope::GatewayToUpstream)
@@ -836,6 +845,10 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                 .alternatives(&[
                     "the measurements describe different requests or attempts",
                     "one producer's boundaries differ from its documentation",
+                ])
+                .does_not_prove(&[
+                    "which measurement is inaccurate",
+                    "whether clock skew or a misattributed parent span explains the difference",
                 ])
                 .build(),
             );
@@ -1018,7 +1031,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
             FindingBuilder::new(
                 "alloy.evidence.negative_measurement",
                 "alloy.r006",
-                1,
+                2,
                 "A measurement reported a negative value",
             )
             .scope(SourceScope::Unknown)
@@ -1030,6 +1043,10 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
                 "{} reported {value}, which a duration cannot be. The value is not clamped to zero and is excluded from comparisons.",
                 observation.name
             ))
+            .does_not_prove(&[
+                "why the producer reported a negative value",
+                "whether other measurements from the same producer are accurate",
+            ])
             .build(),
         );
     }

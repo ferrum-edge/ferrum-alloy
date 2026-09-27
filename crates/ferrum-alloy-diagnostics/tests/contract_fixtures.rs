@@ -27,6 +27,53 @@ fn findings(name: &str) -> Vec<Finding> {
     analyze(&parsed(name).report, &Thresholds::default())
 }
 
+#[test]
+fn operation_exceeding_its_enclosing_measurement_lists_unproven_claims() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("db-operation-dominates.json")).unwrap();
+    report["observations"][1]["value"] = serde_json::json!(300.0);
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.evidence.operation_exceeds_enclosing");
+    assert_eq!(finding.rule_id, "alloy.r006");
+    assert_eq!(finding.rule_version, 2);
+    assert!(!finding.does_not_prove.is_empty());
+}
+
+#[test]
+fn every_fixture_report_finding_lists_unproven_claims() {
+    let reports_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/fixtures/reports");
+    for entry in std::fs::read_dir(&reports_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed = match parse_offline(&bytes, &Limits::default()) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                // This parser rejection fixture cannot produce findings.
+                assert_eq!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("unsupported-major.json")
+                );
+                continue;
+            }
+        };
+        for finding in analyze(&parsed.report, &Thresholds::default()) {
+            assert!(
+                !finding.does_not_prove.is_empty(),
+                "{} produced finding {} without does_not_prove entries",
+                path.display(),
+                finding.code
+            );
+        }
+    }
+}
+
 fn by_code<'a>(findings: &'a [Finding], code: &str) -> &'a Finding {
     findings
         .iter()
