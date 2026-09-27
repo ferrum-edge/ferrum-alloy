@@ -87,7 +87,10 @@ async fn matched_unmatched_and_method_not_allowed_routes_use_bounded_labels() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "42:req-1", "handler sees the request context");
     assert_eq!(headers["x-app-middleware"], "ran");
-    assert_eq!(headers["x-request-id"], "req-1");
+    assert!(
+        !headers.contains_key("x-request-id"),
+        "a shared cache may store a bare GET 200, so the id is not echoed"
+    );
     assert_eq!(metrics.request_count("GET", "/orders/{id}", 200), 1);
 
     for path in ["/orders/43", "/orders/44"] {
@@ -103,8 +106,9 @@ async fn matched_unmatched_and_method_not_allowed_routes_use_bounded_labels() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(metrics.request_count("GET", "__unmatched__", 404), 1);
 
-    let (status, _, _) = send(service.clone(), "/orders/42", "DELETE").await;
+    let (status, _, headers) = send(service.clone(), "/orders/42", "DELETE").await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(headers["x-request-id"], "req-1", "DELETE is not storable");
     assert_eq!(metrics.request_count("DELETE", "/orders/{id}", 405), 1);
 
     let (_, _, _) = send(service.clone(), "/x", "BREW").await;

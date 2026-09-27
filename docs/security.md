@@ -61,11 +61,18 @@ Edge v0.9.7 reserves only `x-consumer-username` and `x-consumer-custom-id` on th
 - For an untrusted peer, Alloy starts a new trace and removes `traceparent`/`tracestate` from the request before handlers see it, so naive forwarding cannot leak caller-chosen ids. Optionally it records the untrusted context as a span link (`link_untrusted_parent`, off by default because links point at caller-chosen trace ids).
 - Sampling is parent-based only for accepted parents. An untrusted caller's sampled flag cannot force export (`untrusted_callers_cannot_force_sampling`).
 - `tracestate` is propagated only when accepted and valid, and Alloy never adds its own members. `baggage` is never parsed or propagated.
-- To correlate a re-rooted request, an operator uses the response `x-request-id`, and the span link if enabled.
+- To correlate a re-rooted request, an operator uses the response `x-request-id` (present when the response is not shared-cacheable, see below), and the span link if enabled.
 
 ## Response headers and caches
 
-`x-request-id` echo and `Server-Timing` are request-specific. Alloy adds them only when a shared cache cannot store the response (RFC 9111: `no-store`/`private`, or no explicit freshness and no validators, and so on). On a shared-cacheable response it withholds them and counts the suppression. Normal caching behavior is otherwise untouched.
+`x-request-id` echo and `Server-Timing` are request-specific. Alloy adds them only when a shared cache cannot store the response, and otherwise withholds them and counts the suppression (`ferrum_alloy_response_header_suppressions_total{reason="shared_cacheable"}`). Following RFC 9111 §3, §3.5, and §4.2.2, a response is treated as storable when:
+
+- it carries explicit freshness (`public`, `max-age`, `s-maxage`, or `Expires`) and the method is GET, HEAD, or POST; or
+- it answers a GET or HEAD with a heuristically cacheable status (200, 203, 204, 206, 300, 301, 308, 404, 405, 410, 414, 501), even with no freshness information and no validators. `Last-Modified` only feeds the heuristic freshness lifetime; it is not required for storage.
+
+A response is not storable when it carries `Cache-Control: no-store` or an unqualified `private`, when the method is not GET, HEAD, or POST, or when the request had `Authorization` and the response lacks `public`, `s-maxage`, or `must-revalidate`. `no-cache` and qualified `private="…"` still permit storage, so they do not restore the headers.
+
+Consequently a plain GET 200 or 404 without cache headers carries neither header. Alloy never changes the application's caching headers to make room for its own. An application that wants the echo or `Server-Timing` on such a response marks it `Cache-Control: private` or `no-store`, which is also the correct policy for any per-user or per-request body. Behind Ferrum Edge with the `correlation_id` plugin, Edge echoes `x-request-id` to the client on every response regardless.
 
 `Server-Timing` is off by default. When enabled it carries one bounded value, the service time to response headers, which may still reveal timing side channels such as authentication paths. Enable it for trusted peers only unless that is acceptable.
 
@@ -146,7 +153,7 @@ The generated CI pins `actions/checkout` by commit.
 | A caller forges `X-Forwarded-For` to gain trust | Trust never reads headers | `forwarded_headers_never_establish_trust` |
 | A caller picks trace ids or forces sampling | Re-root untrusted context; parent-based sampling only for accepted parents | `untrusted_trace_context_is_rerooted_and_not_forwarded`, `untrusted_callers_cannot_force_sampling` |
 | Gateway bypass | `gateway_required` with a verified SPIFFE identity; rogue CAs fail the handshake | `gateway_required_rejects_direct_callers_but_not_health_probes`, `certificates_from_another_ca_fail_the_handshake`, `edge-e2e` |
-| A cache replays another request's ids or timing | Request-specific headers only on non-shared-cacheable responses | `request_specific_headers_are_withheld_from_shared_cacheable_responses` |
+| A cache replays another request's ids or timing | Request-specific headers only on non-shared-cacheable responses, including heuristically cacheable ones without validators | `request_specific_headers_are_withheld_from_shared_cacheable_responses`, `heuristically_cacheable_responses_withhold_request_specific_headers`, `explicit_prohibitions_keep_request_specific_headers`, `authenticated_requests_keep_headers_unless_shared_storage_is_explicit` |
 | High-cardinality labels exhaust memory | Route templates only; series cap and overflow bucket | `metric_series_are_capped`, `matched_unmatched_and_method_not_allowed_routes_use_bounded_labels` |
 | Slow-header or connection floods | `header_read_timeout_ms` (request heads, and the first request on every connection whatever the protocol, on both listeners), `max_header_count`, `max_header_bytes`, `max_connections` | `slow_request_heads_are_cut_off`, `oversized_request_heads_are_rejected`, `connections_beyond_the_limit_are_closed`, `a_silent_connection_is_closed_and_releases_its_slot`, `a_partial_http2_preface_is_closed_and_releases_its_slot`, `an_http2_connection_without_a_request_is_closed`, `an_http2_connection_without_a_request_is_sent_goaway`, `the_management_listener_closes_silent_connections_and_frees_its_slots` |
 | Stalled TLS handshakes or connections outlive shutdown | Handshakes are abandoned when draining starts; the listener waits for every connection task and aborts those left at the drain budget, counted in `ferrum_alloy_force_closed_connections_total`. HTTP/2 stream handler tasks are not yet tracked ([#35](https://github.com/ferrum-edge/ferrum-alloy/issues/35)) | `a_stalled_handshake_does_not_survive_a_short_drain`, `a_stalled_handshake_does_not_hold_up_a_long_drain`, `every_connection_is_closed_when_serve_on_returns` |
