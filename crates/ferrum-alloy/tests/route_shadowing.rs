@@ -129,8 +129,8 @@ async fn a_route_beneath_the_public_ui_path_fails_startup() {
     let assets = [
         "/docs/swagger-ui.css",
         "/docs/swagger-ui-bundle.js",
-        "/docs/swagger-initializer.js",
         "/docs/swagger-ui-bundle.js.LICENSE.txt",
+        "/docs/swagger-initializer.js",
     ];
     let expected: Vec<_> = assets
         .iter()
