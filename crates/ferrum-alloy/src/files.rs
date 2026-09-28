@@ -25,6 +25,7 @@ pub enum ReadError {
     NotRegular,
     /// The file holds more than the limit.
     #[error("larger than {limit} bytes")]
+    #[non_exhaustive]
     TooLarge {
         /// The limit, in bytes.
         limit: u64,
@@ -36,12 +37,16 @@ pub enum ReadError {
 ///
 /// The type is checked on the path before opening, so a FIFO or device is
 /// never opened, and again on the opened handle, so a path swapped for one
-/// in between is still refused before any read. Opening a FIFO swapped in
-/// between the two checks blocks until a writer appears; the read that
-/// follows is still refused.
+/// in between is still refused before any read. On Unix the open does not
+/// wait for a writer, so a FIFO swapped in between never blocks it.
 pub fn read_regular_file_bounded(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
     check(&std::fs::metadata(path).map_err(ReadError::Io)?, max)?;
-    let file = std::fs::File::open(path).map_err(ReadError::Io)?;
+    read_opened(path, max)
+}
+
+/// Opens `path` and reads it, checking the type on the opened handle.
+fn read_opened(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
+    let file = open(path).map_err(ReadError::Io)?;
     let metadata = file.metadata().map_err(ReadError::Io)?;
     check(&metadata, max)?;
 
@@ -53,6 +58,23 @@ pub fn read_regular_file_bounded(path: &Path, max: u64) -> Result<Vec<u8>, ReadE
         return Err(ReadError::TooLarge { limit: max });
     }
     Ok(bytes)
+}
+
+/// Opens `path` for reading. `O_NONBLOCK` makes opening a FIFO return at
+/// once instead of waiting for a writer; it has no effect on reads of
+/// regular files, the only files read after the check on the handle.
+#[cfg(unix)]
+fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 fn check(metadata: &std::fs::Metadata, max: u64) -> Result<(), ReadError> {
@@ -119,6 +141,28 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), "not a regular file");
+        Ok(())
+    }
+
+    /// A FIFO swapped in after the check on the path reaches the open, which
+    /// returns at once; the check on the handle then refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_fifo_at_the_open_without_blocking() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("key.pem");
+        let status = std::process::Command::new("mkfifo").arg(&path).status()?;
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(read_opened(&path, 4));
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(10))?;
+
+        let Err(ReadError::NotRegular) = result else {
+            return Err(format!("a FIFO was not refused: {result:?}").into());
+        };
         Ok(())
     }
 

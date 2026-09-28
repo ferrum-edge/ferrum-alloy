@@ -21,7 +21,7 @@ pub(crate) fn describe(path: &Path, error: ReadError) -> String {
     match error {
         ReadError::Io(e) => format!("{path}: {e}"),
         ReadError::NotRegular => format!("{path} is not a regular file"),
-        ReadError::TooLarge { limit } => format!("{path} is larger than {limit} bytes"),
+        ReadError::TooLarge { limit, .. } => format!("{path} is larger than {limit} bytes"),
         other => format!("{path}: {other}"),
     }
 }
