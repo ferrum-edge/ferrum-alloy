@@ -8,6 +8,7 @@ members = [
     "crates/ferrum-alloy-cli",
     "examples/minimal",
     "examples/existing-axum",
+    "examples/openapi-ui",
     "examples/postgres-api",
     "examples/edge-observability",
     "examples/bench",
