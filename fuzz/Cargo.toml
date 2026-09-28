@@ -20,6 +20,7 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+tempfile = "3.27.0"
 ferrum-alloy = { path = "../crates/ferrum-alloy", default-features = false }
 ferrum-alloy-diagnostics = { path = "../crates/ferrum-alloy-diagnostics" }
 ferrum-alloy-telemetry = { path = "../crates/ferrum-alloy-telemetry", default-features = false }
