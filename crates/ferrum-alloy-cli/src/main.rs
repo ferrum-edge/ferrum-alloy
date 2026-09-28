@@ -15,6 +15,7 @@ mod check;
 mod diagnose;
 mod edge;
 mod error;
+mod input;
 mod live;
 mod new;
 mod openapi;

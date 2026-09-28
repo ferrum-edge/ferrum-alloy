@@ -20,6 +20,7 @@ use reqwest::Url;
 use reqwest::header::{ACCEPT, RETRY_AFTER};
 
 use crate::error::CliError;
+use crate::input::read_regular_file_bounded;
 
 /// Environment variable holding the credential for `--url`. Service
 /// configuration knows it as the command's own and ignores it.
@@ -40,15 +41,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliError> {
     let raw = match token_file {
         Some(path) => {
-            let invalid = |e: std::io::Error| CliError::Invalid(format!("{}: {e}", path.display()));
-            let size = std::fs::metadata(path).map_err(invalid)?.len();
-            if size > MAX_TOKEN_FILE_BYTES {
-                return Err(CliError::Invalid(format!(
-                    "{} is larger than {MAX_TOKEN_FILE_BYTES} bytes",
-                    path.display()
-                )));
-            }
-            std::fs::read_to_string(path).map_err(invalid)?
+            let bytes = read_regular_file_bounded(path, MAX_TOKEN_FILE_BYTES)
+                .map_err(|e| e.invalid(path, MAX_TOKEN_FILE_BYTES))?;
+            String::from_utf8(bytes)
+                .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?
         }
         None => match std::env::var(TOKEN_ENV) {
             Ok(value) => value,

@@ -5,7 +5,6 @@
 //! (see [`crate::live`]). Every input, live reports included, is read with
 //! `parse_offline` and never treated as authenticated.
 
-use std::io::Read;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -20,6 +19,7 @@ use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
 
 use crate::Format;
 use crate::error::CliError;
+use crate::input::read_regular_file_bounded;
 
 /// Arguments for `diagnose`.
 #[derive(Debug, Args)]
@@ -62,37 +62,9 @@ pub(crate) struct DiagnoseArgs {
 }
 
 fn read(path: &Path, max: usize) -> Result<Vec<u8>, CliError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))?;
-    let metadata = file
-        .metadata()
-        .map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))?;
-    if !metadata.is_file() {
-        return Err(CliError::Invalid(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
-    }
-    if metadata.len() > max as u64 {
-        return Err(CliError::Invalid(format!(
-            "{} is larger than {max} bytes",
-            path.display()
-        )));
-    }
-
-    // The handle metadata check rejects special files, while the bounded read
-    // also covers a regular file growing after that check.
-    let mut bytes = Vec::new();
-    file.take(max.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))?;
-    if bytes.len() > max {
-        return Err(CliError::Invalid(format!(
-            "{} is larger than {max} bytes",
-            path.display()
-        )));
-    }
-    Ok(bytes)
+    let max = u64::try_from(max).unwrap_or(u64::MAX);
+    read_regular_file_bounded(path, max)
+        .map_err(|e| e.invalid(path, max))
 }
 
 /// Unicode format characters (general category `Cf`, Unicode 16.0), and the
@@ -223,31 +195,6 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn read_enforces_the_limit() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("growing.json");
-        std::fs::write(&path, b"12345")?;
-
-        let Err(error) = read(&path, 4) else {
-            return Err("oversized input was accepted".into());
-        };
-
-        assert!(error.to_string().contains("is larger than 4 bytes"));
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_rejects_special_files() -> Result<(), Box<dyn std::error::Error>> {
-        let Err(error) = read(Path::new("/dev/zero"), 4) else {
-            return Err("device input was accepted".into());
-        };
-
-        assert!(error.to_string().contains("is not a regular file"));
-        Ok(())
-    }
 
     #[test]
     fn printable_text_replaces_control_and_format_characters() {
