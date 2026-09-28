@@ -873,7 +873,6 @@ mod tests {
         ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
         date_time_ymd,
     };
-    use rustls::server::ProducesTickets;
     use rustls::time_provider::TimeProvider;
     use rustls::{CertificateError, HandshakeKind};
     use rustls_pki_types::PrivatePkcs8KeyDer;
