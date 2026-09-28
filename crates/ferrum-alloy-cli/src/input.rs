@@ -41,7 +41,10 @@ mod tests {
         };
 
         let message = invalid(&path, error).to_string();
-        assert!(message.starts_with(&path.display().to_string()), "{message}");
+        assert!(
+            message.starts_with(&path.display().to_string()),
+            "{message}"
+        );
         assert!(message.ends_with("is larger than 4 bytes"), "{message}");
         Ok(())
     }

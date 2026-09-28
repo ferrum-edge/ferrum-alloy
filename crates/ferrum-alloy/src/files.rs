@@ -93,7 +93,10 @@ mod tests {
             return Err("oversized input was accepted".into());
         };
 
-        assert!(matches!(error, ReadError::TooLarge { limit: 4 }), "{error:?}");
+        assert!(
+            matches!(error, ReadError::TooLarge { limit: 4 }),
+            "{error:?}"
+        );
         assert_eq!(error.to_string(), "larger than 4 bytes");
         Ok(())
     }
