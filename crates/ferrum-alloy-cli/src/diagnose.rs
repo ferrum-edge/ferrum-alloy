@@ -19,7 +19,7 @@ use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
 
 use crate::Format;
 use crate::error::CliError;
-use crate::input::read_regular_file_bounded;
+use crate::input::{invalid, read_regular_file_bounded};
 
 /// Arguments for `diagnose`.
 #[derive(Debug, Args)]
@@ -63,7 +63,7 @@ pub(crate) struct DiagnoseArgs {
 
 fn read(path: &Path, max: usize) -> Result<Vec<u8>, CliError> {
     let max = u64::try_from(max).unwrap_or(u64::MAX);
-    read_regular_file_bounded(path, max).map_err(|e| e.invalid(path, max))
+    read_regular_file_bounded(path, max).map_err(|e| invalid(path, e))
 }
 
 /// Unicode format characters (general category `Cf`, Unicode 16.0), and the

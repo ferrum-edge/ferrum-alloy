@@ -20,6 +20,7 @@ use axum::routing::get;
 use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
 use ferrum_alloy::config::{AlloyConfig, ClientAuth, TlsSettings};
+use ferrum_alloy::tls::MAX_PEM_FILE_BYTES;
 use http::{Request, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use hyper::client::conn::http1::SendRequest;
@@ -82,6 +83,14 @@ impl Pki {
 fn replace(path: &Path, contents: impl AsRef<[u8]>) {
     let staged = path.with_extension("staged");
     std::fs::write(&staged, contents).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+/// Replaces `path` with a FIFO, which a reload refuses without opening it.
+fn replace_with_fifo(path: &Path) {
+    let staged = path.with_extension("fifo");
+    let mut mkfifo = std::process::Command::new("mkfifo");
+    assert!(mkfifo.arg(&staged).status().unwrap().success());
     std::fs::rename(&staged, path).unwrap();
 }
 
@@ -271,11 +280,16 @@ async fn a_serial_added_to_the_crl_is_refused_after_the_reload() {
 
 #[tokio::test]
 async fn invalid_replacements_keep_the_previous_material_serving_and_are_counted() {
-    for case in [
+    let mut cases = vec![
         "mismatched key",
         "unparsable CRL",
         "two CRLs from one issuer",
-    ] {
+        "oversized certificate",
+    ];
+    if cfg!(unix) {
+        cases.push("FIFO key");
+    }
+    for case in cases {
         let pki = Pki::new(ClientAuth::Required);
         let revoked = pki.ca.client(CLIENT);
         let valid = pki.ca.client(CLIENT);
@@ -293,6 +307,11 @@ async fn invalid_replacements_keep_the_previous_material_serving_and_are_counted
                 &ca_crl,
                 "-----BEGIN X509 CRL-----\nbm90IGEgQ1JM\n-----END X509 CRL-----\n",
             ),
+            "oversized certificate" => {
+                let size = usize::try_from(MAX_PEM_FILE_BYTES).unwrap() + 1;
+                replace(&pki.tls.cert_path, vec![b'#'; size]);
+            }
+            "FIFO key" => replace_with_fifo(&pki.tls.key_path),
             // A second CRL from the issuer of the first.
             _ => replace(&other_crl, pki.ca.crl(&[]).pem().unwrap()),
         }

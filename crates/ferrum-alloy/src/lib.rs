@@ -12,6 +12,7 @@
 pub mod config;
 pub mod error;
 pub mod extract;
+pub mod files;
 pub mod health;
 pub mod lifecycle;
 pub mod limits;

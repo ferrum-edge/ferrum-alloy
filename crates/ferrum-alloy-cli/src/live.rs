@@ -20,7 +20,7 @@ use reqwest::Url;
 use reqwest::header::{ACCEPT, RETRY_AFTER};
 
 use crate::error::CliError;
-use crate::input::read_regular_file_bounded;
+use crate::input::{invalid, read_regular_file_bounded};
 
 /// Environment variable holding the credential for `--url`. Service
 /// configuration knows it as the command's own and ignores it.
@@ -42,7 +42,7 @@ pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliErro
     let raw = match token_file {
         Some(path) => {
             let bytes = read_regular_file_bounded(path, MAX_TOKEN_FILE_BYTES)
-                .map_err(|e| e.invalid(path, MAX_TOKEN_FILE_BYTES))?;
+                .map_err(|e| invalid(path, e))?;
             String::from_utf8(bytes)
                 .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?
         }

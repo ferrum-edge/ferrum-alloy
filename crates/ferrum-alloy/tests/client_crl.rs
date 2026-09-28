@@ -1,6 +1,7 @@
 //! Client certificate revocation over real mTLS: CRLs from
 //! `server.tls.client_crl_paths` refuse revoked certificates at the
-//! handshake, and missing, unparsable, or expired CRLs fail startup.
+//! handshake, and missing, unparsable, or expired CRLs fail startup, as do
+//! oversized or special (device, FIFO) certificate, key, CA, and CRL files.
 
 #![cfg(feature = "tls")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -17,6 +18,7 @@ use bytes::Bytes;
 use ferrum_alloy::config::{
     AlloyConfig, ClientAuth, CrlDepth, CrlExpiration, CrlUnknownStatus, TlsSettings,
 };
+use ferrum_alloy::tls::{MAX_CRL_FILE_BYTES, MAX_PEM_FILE_BYTES};
 use ferrum_alloy::{AlloyApp, AlloyError, TelemetryInit};
 use http::{Request, StatusCode};
 use http_body_util::Empty;
@@ -327,6 +329,67 @@ fn one_bad_file_among_several_is_named() {
     let error = startup_error(pki.config(vec![good.clone(), bad.clone()])).to_string();
     assert!(error.contains(&bad.display().to_string()), "{error}");
     assert!(!error.contains(&good.display().to_string()), "{error}");
+}
+
+/// The configuration with the file of `what`, as errors name it, replaced
+/// by `path`, and one valid CRL otherwise.
+fn config_with(pki: &Pki, what: &str, path: PathBuf) -> AlloyConfig {
+    let crl = pki.file("ca.crl.pem", pki.ca.crl(&[]).pem().unwrap());
+    let mut config = pki.config(vec![crl]);
+    if let Some(tls) = config.server.tls.as_mut() {
+        match what {
+            "certificate chain" => tls.cert_path = path,
+            "private key" => tls.key_path = path,
+            "client CA bundle" => tls.client_ca_path = Some(path),
+            _ => tls.client_crl_paths = vec![path],
+        }
+    }
+    config
+}
+
+/// Each file is read only up to its limit: 1 MiB for the chain, key, and
+/// client CA bundle, and 16 MiB for each CRL.
+#[test]
+fn oversized_pem_files_fail_startup() {
+    let pki = Pki::new();
+    for (what, limit) in [
+        ("certificate chain", MAX_PEM_FILE_BYTES),
+        ("private key", MAX_PEM_FILE_BYTES),
+        ("client CA bundle", MAX_PEM_FILE_BYTES),
+        ("client CRL", MAX_CRL_FILE_BYTES),
+    ] {
+        let size = usize::try_from(limit).unwrap() + 1;
+        let path = pki.file("oversized.pem", vec![b'#'; size]);
+        let error = startup_error(config_with(&pki, what, path.clone())).to_string();
+        let named = format!("{what} {}", path.display());
+        let reason = format!("larger than {limit} bytes");
+        assert!(error.contains(&named), "{error}");
+        assert!(error.ends_with(&reason), "{error}");
+    }
+}
+
+/// Devices and FIFOs report a length of `0`, and reading one would never
+/// end. Neither is opened.
+#[cfg(unix)]
+#[test]
+fn special_pem_files_fail_startup() {
+    let pki = Pki::new();
+    let fifo = pki.dir.path().join("material.fifo");
+    let mut mkfifo = std::process::Command::new("mkfifo");
+    assert!(mkfifo.arg(&fifo).status().unwrap().success());
+    for what in [
+        "certificate chain",
+        "private key",
+        "client CA bundle",
+        "client CRL",
+    ] {
+        for path in [PathBuf::from("/dev/zero"), fifo.clone()] {
+            let error = startup_error(config_with(&pki, what, path.clone())).to_string();
+            let named = format!("{what} {}", path.display());
+            assert!(error.contains(&named), "{error}");
+            assert!(error.ends_with("not a regular file"), "{error}");
+        }
+    }
 }
 
 #[test]

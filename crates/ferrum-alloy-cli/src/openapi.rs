@@ -14,7 +14,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use crate::error::CliError;
-use crate::input::read_regular_file_bounded;
+use crate::input::{ReadError, describe, invalid, read_regular_file_bounded};
 
 /// `openapi` subcommands.
 #[derive(Debug, Subcommand)]
@@ -50,8 +50,7 @@ const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 
 fn load(args: &ExportArgs) -> Result<Vec<u8>, CliError> {
     if let Some(input) = &args.input {
-        return read_regular_file_bounded(input, MAX_DOCUMENT_BYTES)
-            .map_err(|e| e.invalid(input, MAX_DOCUMENT_BYTES));
+        return read_regular_file_bounded(input, MAX_DOCUMENT_BYTES).map_err(|e| invalid(input, e));
     }
     if !args
         .bin
@@ -138,12 +137,19 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
         serde_json::to_string_pretty(&document).map_err(|e| CliError::Io(e.to_string()))?
     );
     if args.check {
-        let existing = std::fs::read(&args.output).map_err(|e| {
-            CliError::Drift(format!(
-                "{}: {e}; run without --check to create it",
-                args.output.display()
-            ))
-        })?;
+        // The existing output may be laid out differently from `rendered`,
+        // which can exceed the input limit once pretty-printed.
+        let limit = MAX_DOCUMENT_BYTES.max(u64::try_from(rendered.len()).unwrap_or(u64::MAX));
+        let existing = match read_regular_file_bounded(&args.output, limit) {
+            Ok(existing) => existing,
+            Err(ReadError::Io(e)) => {
+                return Err(CliError::Drift(format!(
+                    "{}: {e}; run without --check to create it",
+                    args.output.display()
+                )));
+            }
+            Err(e) => return Err(CliError::Drift(describe(&args.output, e))),
+        };
         let existing: Value = serde_json::from_slice(&existing)
             .map_err(|e| CliError::Drift(format!("{} is not JSON: {e}", args.output.display())))?;
         if existing != document {

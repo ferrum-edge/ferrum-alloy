@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use ferrum_alloy::config::{
     AlloyConfig, CLI_ENV_VARS, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus,
-    DIAGNOSTICS_TOKEN_ENV, ENV_VARS, EdgeMode, JwtSettings, Overrides, Secret, TlsSettings,
-    load_from,
+    DIAGNOSTICS_TOKEN_ENV, ENV_VARS, EdgeMode, JwtSettings, MAX_CONFIG_FILE_BYTES,
+    MAX_SECRET_FILE_BYTES, Overrides, Secret, TlsSettings, load_from,
 };
 
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -589,6 +589,84 @@ fn secrets_are_never_printed() {
     assert!(rendered.contains("<redacted>"));
     let debug = format!("{config:?}");
     assert!(!debug.contains("hunter2") && !debug.contains("super-secret"));
+}
+
+/// A FIFO named `name` in `dir`. Reading one blocks until a writer appears.
+#[cfg(unix)]
+fn fifo(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    let mut mkfifo = std::process::Command::new("mkfifo");
+    assert!(mkfifo.arg(&path).status().unwrap().success());
+    path
+}
+
+/// The configuration file read stops at its limit, even for a file that
+/// would parse.
+#[test]
+fn oversized_configuration_files_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.toml");
+    // One TOML comment, one byte over the limit.
+    let size = usize::try_from(MAX_CONFIG_FILE_BYTES).unwrap() + 1;
+    std::fs::write(&path, vec![b'#'; size]).unwrap();
+
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+    let message = error.to_string();
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.ends_with("larger than 1048576 bytes"), "{message}");
+}
+
+/// Devices and FIFOs report a length of `0`, and reading one would never
+/// end. Neither is opened.
+#[cfg(unix)]
+#[test]
+fn special_configuration_files_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in [PathBuf::from("/dev/zero"), fifo(&dir, "config.fifo")] {
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        assert!(matches!(error, ConfigError::Read { .. }), "{error}");
+        let message = error.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(message.ends_with("not a regular file"), "{message}");
+    }
+}
+
+/// A `_FILE` secret read stops at its limit, and the refusal names the
+/// variable without quoting the file.
+#[test]
+fn oversized_secret_files_are_refused_without_quoting_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let size = usize::try_from(MAX_SECRET_FILE_BYTES).unwrap() + 1;
+    let path = write(&dir, "token", &"s3cret-".repeat(size / 7 + 1));
+
+    let file = path.to_str().unwrap();
+    let vars = env(&[("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", file)]);
+    let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE"),
+        "{message}"
+    );
+    assert!(message.ends_with("larger than 65536 bytes"), "{message}");
+    assert!(!message.contains("s3cret"), "quoted: {message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn special_secret_files_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in [PathBuf::from("/dev/zero"), fifo(&dir, "token.fifo")] {
+        let file = path.to_str().unwrap();
+        let vars = env(&[("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", file)]);
+        let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE"),
+            "{message}"
+        );
+        assert!(message.ends_with("not a regular file"), "{message}");
+    }
 }
 
 #[test]

@@ -40,6 +40,7 @@ use x509_parser::time::ASN1Time;
 use zeroize::Zeroizing;
 
 use crate::config::{ClientAuth, CrlDepth, CrlExpiration, CrlUnknownStatus, TlsSettings};
+use crate::files::read_regular_file_bounded;
 use crate::server::ServerStats;
 
 /// TLS configuration errors.
@@ -468,6 +469,15 @@ fn pem_reason(error: &pem::Error) -> &'static str {
     }
 }
 
+/// Maximum size of the certificate chain, private key, and client CA bundle
+/// files. A bundle of every public root CA is a few hundred KiB.
+pub const MAX_PEM_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Maximum size of each client CRL file. A CRL lists every revoked
+/// certificate that has not expired yet, so the CRL of a large CA can reach
+/// several MiB.
+pub const MAX_CRL_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 const CHAIN: &str = "certificate chain";
 const KEY: &str = "private key";
 const CLIENT_CA: &str = "client CA bundle";
@@ -485,17 +495,18 @@ pub(crate) struct Sources<'a> {
 
 impl<'a> Sources<'a> {
     pub(crate) fn read(settings: &'a TlsSettings) -> Result<Self, TlsError> {
-        let cert = read_file(CHAIN, &settings.cert_path)?;
-        let key = Zeroizing::new(read_file(KEY, &settings.key_path)?);
+        let cert = read_file(CHAIN, &settings.cert_path, MAX_PEM_FILE_BYTES)?;
+        let key = Zeroizing::new(read_file(KEY, &settings.key_path, MAX_PEM_FILE_BYTES)?);
         let client_auth = settings.client_auth != ClientAuth::None;
         let client_ca = match &settings.client_ca_path {
-            Some(path) if client_auth => Some(read_file(CLIENT_CA, path)?),
+            Some(path) if client_auth => Some(read_file(CLIENT_CA, path, MAX_PEM_FILE_BYTES)?),
             _ => None,
         };
         let mut crls = Vec::new();
         if client_auth {
             for path in &settings.client_crl_paths {
-                crls.push((path.as_path(), read_file(CRL, path)?));
+                let crl = read_file(CRL, path, MAX_CRL_FILE_BYTES)?;
+                crls.push((path.as_path(), crl));
             }
         }
         Ok(Self {
@@ -523,8 +534,11 @@ impl<'a> Sources<'a> {
     }
 }
 
-fn read_file(what: &'static str, path: &Path) -> Result<Vec<u8>, TlsError> {
-    std::fs::read(path).map_err(|e| pem_error(what, path, e))
+/// Reads the regular file at `path`, holding at most `max` bytes. A reload
+/// that refuses a file fails like any other, and the previous material
+/// keeps serving.
+fn read_file(what: &'static str, path: &Path, max: u64) -> Result<Vec<u8>, TlsError> {
+    read_regular_file_bounded(path, max).map_err(|e| pem_error(what, path, e))
 }
 
 fn certificates(
@@ -1200,6 +1214,61 @@ mod tests {
         std::fs::write(&key_path, &new_key).unwrap();
         assert_eq!(reloader.reload(now).await, Outcome::Swapped);
         assert!(!Arc::ptr_eq(&initial, &serving(&server)));
+    }
+
+    /// Fails the next two reloads of `reloader` with an error containing
+    /// every one of `parts`, keeping `initial` serving.
+    async fn fails_twice(
+        reloader: &mut Reloader,
+        initial: &Arc<rustls::ServerConfig>,
+        parts: &[&str],
+    ) {
+        let now = UnixTime::now();
+        let outcome = reloader.reload(now).await;
+        assert!(matches!(outcome, Outcome::Unconfirmed(_)), "{outcome:?}");
+        let Outcome::Failed(error) = reloader.reload(now).await else {
+            panic!("the same failure was not counted");
+        };
+        for part in parts {
+            assert!(error.contains(part), "{error}");
+        }
+        assert!(Arc::ptr_eq(initial, &serving(&reloader.tls)));
+    }
+
+    #[tokio::test]
+    async fn a_reload_refuses_oversized_and_special_files_and_keeps_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let (server, cert_path, key_path) = reloadable(dir.path(), ca_path, &issuer);
+        let initial = serving(&server);
+        let cert = std::fs::read(&cert_path).unwrap();
+        let key = std::fs::read(&key_path).unwrap();
+        let mut reloader = Reloader::new(server.clone(), Duration::ZERO);
+
+        let size = usize::try_from(MAX_PEM_FILE_BYTES).unwrap() + 1;
+        std::fs::write(&cert_path, vec![b'#'; size]).unwrap();
+        let path = cert_path.display().to_string();
+        let parts = [CHAIN, path.as_str(), "larger than 1048576 bytes"];
+        fails_twice(&mut reloader, &initial, &parts).await;
+        std::fs::write(&cert_path, &cert).unwrap();
+
+        // Devices and FIFOs report a length of `0`, and reading one would
+        // never end. Neither is opened.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&key_path).unwrap();
+            let mut mkfifo = std::process::Command::new("mkfifo");
+            assert!(mkfifo.arg(&key_path).status().unwrap().success());
+            let path = key_path.display().to_string();
+            let parts = [KEY, path.as_str(), "not a regular file"];
+            fails_twice(&mut reloader, &initial, &parts).await;
+            std::fs::remove_file(&key_path).unwrap();
+        }
+        std::fs::write(&key_path, &key).unwrap();
+
+        let outcome = reloader.reload(UnixTime::now()).await;
+        assert_eq!(outcome, Outcome::Unchanged);
+        assert!(Arc::ptr_eq(&initial, &serving(&server)));
     }
 
     #[test]
