@@ -205,8 +205,10 @@ impl<'a> Index<'a> {
     }
 
     /// Returns the nearest id in `span`'s lineage that `accept` matches: the
-    /// span itself, its own parent, then its Alloy ancestors. The walk stops
-    /// after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle cannot loop.
+    /// span itself, its own parent, then its parent's Alloy ancestors. The walk
+    /// starts at the span's own parent, so a span that is not an Alloy span
+    /// still reaches the gateway above its Alloy parent. It stops after
+    /// [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle cannot loop.
     fn nearest_in_lineage<'s>(
         &'s self,
         span: &'s SpanRef,
@@ -215,11 +217,10 @@ impl<'a> Index<'a> {
         if accept(span.span_id.as_str()) {
             return Some(span.span_id.as_str());
         }
-        let parent = span.parent_span_id.as_deref();
-        if let Some(parent) = parent.filter(|&parent| accept(parent)) {
-            return Some(parent);
+        let mut current: &'s str = span.parent_span_id.as_deref()?;
+        if accept(current) {
+            return Some(current);
         }
-        let mut current: &'s str = span.span_id.as_str();
         for _ in 0..MAX_ANCESTOR_HOPS {
             let parent = self.alloy_parents.get(current).copied().flatten()?;
             if accept(parent) {

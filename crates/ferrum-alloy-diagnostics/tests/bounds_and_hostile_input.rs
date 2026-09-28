@@ -334,7 +334,7 @@ fn degraded_citations_stay_within_explicit_caps_at_hostile_scale() {
     assert_eq!(
         cited + omitted,
         degraded,
-        "every degraded observation is either cited or counted as not cited"
+        "no gateway here is served or untimed, so every degraded observation is cited or counted"
     );
 
     let first = r004.iter().find(|f| cites(f, "edge-0")).unwrap();
