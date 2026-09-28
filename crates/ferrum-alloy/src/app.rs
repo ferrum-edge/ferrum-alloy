@@ -302,10 +302,17 @@ impl AlloyApp {
         // places each there. They take precedence over the application's
         // router, so none may match one of its routes.
         let mut served: Vec<(&'static str, String)> = Vec::new();
+        // Paths that skip `gateway_required`. The health paths qualify only
+        // here, where Alloy's status-only handlers own them for every method;
+        // otherwise a request to them would reach the application's router.
+        #[cfg(feature = "edge")]
+        let mut exempt_paths: Vec<String> = Vec::new();
         if config.health.app_endpoints {
             let health = &config.health;
             served.push(("health.liveness_path", health.liveness_path.clone()));
             served.push(("health.readiness_path", health.readiness_path.clone()));
+            #[cfg(feature = "edge")]
+            exempt_paths.extend([health.liveness_path.clone(), health.readiness_path.clone()]);
             let (r, l) = (Arc::clone(&readiness), lifecycle.clone());
             app = app
                 .route(
@@ -382,10 +389,7 @@ impl AlloyApp {
             };
             policy_config.accept_consumer_identity = config.edge.accept_consumer_identity;
             let policy = ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier))
-                .with_exempt_paths(vec![
-                    config.health.liveness_path.clone(),
-                    config.health.readiness_path.clone(),
-                ]);
+                .with_exempt_paths(exempt_paths);
             app = app.layer(ferrum_alloy_edge::EdgeLayer::new(policy));
         }
         #[cfg(not(feature = "edge"))]

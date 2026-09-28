@@ -6,7 +6,7 @@
 //! `parse_offline` and never treated as authenticated.
 
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
 
 use crate::Format;
 use crate::error::CliError;
+use crate::input::read_regular_file_bounded;
 
 /// Arguments for `diagnose`.
 #[derive(Debug, Args)]
@@ -60,16 +61,9 @@ pub(crate) struct DiagnoseArgs {
     format: Format,
 }
 
-fn read(path: &PathBuf, max: usize) -> Result<Vec<u8>, CliError> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))?;
-    if metadata.len() > max as u64 {
-        return Err(CliError::Invalid(format!(
-            "{} is larger than {max} bytes",
-            path.display()
-        )));
-    }
-    std::fs::read(path).map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))
+fn read(path: &Path, max: usize) -> Result<Vec<u8>, CliError> {
+    let max = u64::try_from(max).unwrap_or(u64::MAX);
+    read_regular_file_bounded(path, max).map_err(|e| e.invalid(path, max))
 }
 
 /// Unicode format characters (general category `Cf`, Unicode 16.0), and the
