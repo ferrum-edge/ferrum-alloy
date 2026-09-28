@@ -225,11 +225,19 @@ test('the management listener serves the UI only with the token', async ({
   baseURL,
 }, testInfo) => {
   test.skip(testInfo.project.name !== 'management', 'the public listener has no token');
-  const anonymous = await playwright.request.newContext({ baseURL });
-  try {
-    const response = await anonymous.get(UI_PATH);
-    expect(response.status()).toBe(401);
-  } finally {
-    await anonymous.dispose();
+  // A context created inside a test inherits the project's `use` options,
+  // including the token in `extraHTTPHeaders`, so each one here sets its
+  // headers explicitly.
+  for (const [label, headers] of [
+    ['no token', {}],
+    ['a wrong token', { authorization: 'Bearer not-the-management-token' }],
+  ] as const) {
+    const context = await playwright.request.newContext({ baseURL, extraHTTPHeaders: headers });
+    try {
+      const response = await context.get(UI_PATH);
+      expect(response.status(), `${UI_PATH} with ${label}`).toBe(401);
+    } finally {
+      await context.dispose();
+    }
   }
 });
