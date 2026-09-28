@@ -188,23 +188,37 @@ async fn gateway_required_rejects_direct_callers_but_not_health_probes() {
 
 #[tokio::test]
 async fn disabled_health_endpoints_are_not_exempt_from_gateway_required() {
-    let pki = pki();
-    let mut cfg = config(&pki, EdgeMode::GatewayRequired);
-    cfg.health.app_endpoints = false;
-    let app = Router::new().route("/livez", get(|| async { "application secret" }));
-    let server = support::start(AlloyApp::new("mtls").router(app), cfg).await;
-
-    let reply = tls_get(
-        server.addr,
-        pki::client_config(&pki.ca, None),
-        "/livez",
-        &[],
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply.status, 403, "{}", reply.body);
-    assert!(!reply.body.contains("application secret"));
-    server.shutdown().await.unwrap();
+    let secret = || async { "application secret" };
+    let routes = Router::new()
+        .route("/livez", get(secret))
+        .route("/readyz", get(secret));
+    let catch_all = Router::new().route("/{*path}", get(secret));
+    let fallback = Router::new().fallback(secret);
+    for app in [routes, catch_all, fallback] {
+        let pki = pki();
+        let mut cfg = config(&pki, EdgeMode::GatewayRequired);
+        cfg.health.app_endpoints = false;
+        let server = support::start(AlloyApp::new("mtls").router(app), cfg).await;
+        let anonymous = pki::client_config(&pki.ca, None);
+        let gateway = pki.ca.client(GATEWAY);
+        let verified = pki::client_config(&pki.ca, Some(&gateway));
+        for path in ["/livez", "/readyz"] {
+            let reply = tls_get(server.addr, Arc::clone(&anonymous), path, &[])
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 403, "{path}: {}", reply.body);
+            assert_eq!(
+                json(&reply)["type"],
+                "tag:ferrumedge.com,2026:alloy/problem/gateway-required"
+            );
+            let reply = tls_get(server.addr, Arc::clone(&verified), path, &[])
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 200, "{path}: {}", reply.body);
+            assert_eq!(reply.body, "application secret");
+        }
+        server.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
