@@ -234,10 +234,25 @@ test('the management listener serves the UI only with the token', async ({
   ] as const) {
     const context = await playwright.request.newContext({ baseURL, extraHTTPHeaders: headers });
     try {
-      const response = await context.get(UI_PATH);
-      expect(response.status(), `${UI_PATH} with ${label}`).toBe(401);
+      for (const path of [UI_PATH, `${UI_PATH}/swagger-ui-bundle.js`, DOCUMENT_PATH]) {
+        const response = await context.get(path);
+        expect(response.status(), `${path} with ${label}`).toBe(401);
+      }
     } finally {
       await context.dispose();
     }
+  }
+  // And the same request with the token is served, so the 401s above come
+  // from the token check, not from a missing route.
+  const token = process.env.FERRUM_ALLOY_MANAGEMENT_TOKEN;
+  const authorized = await playwright.request.newContext({
+    baseURL,
+    extraHTTPHeaders: { authorization: `Bearer ${token}` },
+  });
+  try {
+    const response = await authorized.get(UI_PATH);
+    expect(response.status(), `${UI_PATH} with the token`).toBe(200);
+  } finally {
+    await authorized.dispose();
   }
 });

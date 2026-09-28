@@ -28,7 +28,7 @@ For each listener, `ci/browser-smoke/tests/openapi-ui.spec.ts`:
 - checks that the page and each asset it loaded carry exactly the policy defined in `crates/ferrum-alloy/src/openapi_ui.rs`;
 - as a negative control, injects an inline `<script>` and requires the browser to block it and report one `script-src` violation, so a clean run cannot pass vacuously.
 
-On the management listener it also checks that the page needs the token. The job uploads the screenshots, the Playwright report and failure traces, and the server log as the `openapi-ui-browser-smoke` artifact, on success and on failure.
+On the management listener it also checks that the page, a script asset and the OpenAPI document are refused with `401` without the token or with a wrong one, and served with it. The job uploads the screenshots, the Playwright report and failure traces, and the server log as the `openapi-ui-browser-smoke` artifact, on success and on failure.
 
 To run it locally, start `cargo run -p example-openapi-ui` with `FERRUM_ALLOY_MANAGEMENT_TOKEN` set to at least 32 characters, then run `npm ci --ignore-scripts && npm test` in `ci/browser-smoke/` with the same variable. Google Chrome must be installed.
 
