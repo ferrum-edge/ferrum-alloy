@@ -123,7 +123,7 @@ rustls with the `ring` provider, passed explicitly. Alloy never installs a proce
 
 ### Session resumption
 
-Client-certificate authentication (`server.tls.client_auth` `optional` or `required`) disables TLS session resumption: the server keeps no session cache and issues no session tickets. Client certificate validity (`notAfter`) and revocation (the configured CRLs, including their `nextUpdate` time under `client_crl_expiration = "enforce"`) are therefore re-checked on every handshake, never carried over from an earlier session. The cost is a full handshake, with its key exchange and certificate verification, on every new connection; clients that keep connections open (HTTP/1.1 keep-alive, HTTP/2) pay it less often. Without client authentication, sessions resume, except across a reload.
+Client-certificate authentication (`server.tls.client_auth` `optional` or `required`) disables TLS session resumption: the server keeps no session cache and issues no session tickets. Client certificate validity (`notAfter`) and revocation (the configured CRLs, including their `nextUpdate` time under `client_crl_expiration = "enforce"`) are therefore re-checked on every handshake, never carried over from an earlier session. The cost is a full handshake, with its key exchange and certificate verification, on every new connection; clients that keep connections open (HTTP/1.1 keep-alive, HTTP/2) pay it less often. Without client authentication, sessions resume, except across a reload. The check runs at the handshake only: a connection that is already open is not checked again when its certificate or a CRL later expires; `server.idle_timeout_ms` closes it once it goes idle, but a connection kept busy stays open.
 
 ### Client certificate revocation
 
