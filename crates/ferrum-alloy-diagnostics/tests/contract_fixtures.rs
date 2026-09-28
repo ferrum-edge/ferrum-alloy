@@ -404,6 +404,80 @@ fn missing_service_findings_only_cite_degraded_evidence_for_their_request() {
         1,
         "span-linked degraded evidence belongs to only its gateway request"
     );
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+    assert_eq!(unlinked.rule_version, 2);
+    assert_eq!(
+        unlinked.supporting_observations,
+        ["alloy-not-sampled"],
+        "span-less degraded evidence is cited once instead of being dropped"
+    );
+    assert!(!unlinked.does_not_prove.is_empty());
+}
+
+/// Adds a not-sampled service observation whose span links to no gateway
+/// span, as when the service's trust policy re-rooted the trace.
+fn push_rerooted_degraded(report: &mut serde_json::Value) {
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut rerooted = observations[1].clone();
+    rerooted["id"] = serde_json::json!("alloy-not-sampled-rerooted");
+    rerooted["span"] = serde_json::json!({
+        "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7",
+        "span_id": "aaaabbbbccccdddd",
+        "parent_span_id": "eeeeffff00001111"
+    });
+    observations.push(rerooted);
+}
+
+#[test]
+fn rerooted_degraded_evidence_is_cited_on_the_only_missing_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    push_rerooted_degraded(&mut report);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.telemetry.service_span_missing");
+
+    assert_eq!(finding.rule_id, "alloy.r004");
+    assert_eq!(finding.rule_version, 2);
+    assert_eq!(
+        finding.supporting_observations,
+        ["alloy-not-sampled", "alloy-not-sampled-rerooted", "edge-ttfb"],
+        "with one missing request, unlinked evidence can describe only that request"
+    );
+    assert!(
+        !codes(&findings).contains(&"alloy.telemetry.degraded_evidence_unlinked"),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+#[test]
+fn rerooted_degraded_evidence_is_cited_once_when_the_request_is_ambiguous() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    push_rerooted_degraded(&mut report);
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut second_edge = observations[0].clone();
+    second_edge["id"] = serde_json::json!("edge-ttfb-2");
+    second_edge["span"]["span_id"] = serde_json::json!("5555666677778888");
+    observations.push(second_edge);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+
+    assert_eq!(
+        unlinked.supporting_observations,
+        ["alloy-not-sampled", "alloy-not-sampled-rerooted"]
+    );
+    for finding in &findings {
+        if finding.code == "alloy.telemetry.service_span_missing" {
+            assert_eq!(finding.evidence.len(), 1, "{:?}", finding.evidence);
+        }
+    }
 }
 
 #[test]

@@ -12,7 +12,7 @@
 //! Rules never sum overlapping durations, never clamp negative residuals to
 //! zero, and never convert missing telemetry into a networking diagnosis.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::{self, EDGE_GATEWAY_ERROR_TOKENS, EDGE_PRE_UPSTREAM_PHASES};
 use crate::model::{
@@ -50,6 +50,17 @@ impl Default for Thresholds {
         }
     }
 }
+
+/// Most parent hops followed when linking a span to an ancestor. The walk is
+/// bounded, so a parent cycle in hostile input cannot loop forever.
+const MAX_ANCESTOR_HOPS: usize = 64;
+
+/// Most unsampled, dropped, or unexported observations one finding cites.
+pub const MAX_DEGRADED_CITATIONS_PER_FINDING: usize = 32;
+
+/// Most unsampled, dropped, or unexported observations cited across one
+/// [`analyze`] run. A finding that reaches either cap says how many it left out.
+pub const MAX_DEGRADED_CITATIONS_PER_RUN: usize = 512;
 
 /// Runs every rule and returns findings in deterministic order.
 pub fn analyze(report: &DiagnosticReport, thresholds: &Thresholds) -> Vec<Finding> {
@@ -183,7 +194,7 @@ impl<'a> Index<'a> {
     /// Returns `true` when `span_id` descends from `ancestor` through Alloy spans.
     fn descends_from(&self, span_id: &str, ancestor: &str) -> bool {
         let mut current = span_id;
-        for _ in 0..64 {
+        for _ in 0..MAX_ANCESTOR_HOPS {
             match self.alloy_parents.get(current).copied().flatten() {
                 Some(parent) if parent == ancestor => return true,
                 Some(parent) => current = parent,
@@ -191,6 +202,32 @@ impl<'a> Index<'a> {
             }
         }
         false
+    }
+
+    /// Returns the nearest id in `span`'s lineage that `accept` matches: the
+    /// span itself, its own parent, then its Alloy ancestors. The walk stops
+    /// after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle cannot loop.
+    fn nearest_in_lineage<'s>(
+        &'s self,
+        span: &'s SpanRef,
+        accept: impl Fn(&str) -> bool,
+    ) -> Option<&'s str> {
+        if accept(span.span_id.as_str()) {
+            return Some(span.span_id.as_str());
+        }
+        let parent = span.parent_span_id.as_deref();
+        if let Some(parent) = parent.filter(|&parent| accept(parent)) {
+            return Some(parent);
+        }
+        let mut current: &'s str = span.span_id.as_str();
+        for _ in 0..MAX_ANCESTOR_HOPS {
+            let parent = self.alloy_parents.get(current).copied().flatten()?;
+            if accept(parent) {
+                return Some(parent);
+            }
+            current = parent;
+        }
+        None
     }
 }
 
@@ -266,6 +303,36 @@ impl FindingBuilder {
         });
         if !self.0.supporting_observations.contains(&observation.id) {
             self.0.supporting_observations.push(observation.id.clone());
+        }
+        self
+    }
+    /// Cites degraded observations up to [`MAX_DEGRADED_CITATIONS_PER_FINDING`]
+    /// and the run's remaining `budget`, then says in the explanation how many
+    /// were left out. Call it after [`Self::explanation`].
+    fn cite_degraded(mut self, observations: &[&Observation], budget: &mut usize) -> Self {
+        let cited = observations
+            .len()
+            .min(MAX_DEGRADED_CITATIONS_PER_FINDING)
+            .min(*budget);
+        for observation in observations.iter().take(cited) {
+            self = self.cite(
+                observation,
+                &observation.name,
+                observation.availability.as_str(),
+            );
+        }
+        *budget -= cited;
+        let omitted = observations.len() - cited;
+        if omitted > 0 {
+            let noun = if omitted == 1 {
+                "observation is"
+            } else {
+                "observations are"
+            };
+            let note = format!(
+                " {omitted} more degraded {noun} not cited; the citation limit was reached."
+            );
+            self.0.explanation.push_str(&note);
         }
         self
     }
@@ -1060,6 +1127,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R004: telemetry is too incomplete to localize the delay.
 fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r004";
+    const VERSION: u32 = 2;
     let degraded: Vec<&Observation> = index
         .report
         .observations
@@ -1071,31 +1139,58 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
             )
         })
         .collect();
+    let mut budget = MAX_DEGRADED_CITATIONS_PER_RUN;
 
-    let missing_service_views: Vec<&RequestView<'_>> = index
+    // Gateway spans that some service request names as its parent.
+    let served: BTreeSet<&str> = index
+        .service
+        .values()
+        .filter_map(|view| view.span.and_then(|span| span.parent_span_id.as_deref()))
+        .collect();
+    // Gateway requests with a measured backend exchange and no service child,
+    // each with its time-to-headers and the degraded observations linked to it.
+    let mut missing: BTreeMap<&str, (&Observation, Vec<&Observation>)> = index
         .edge
         .values()
-        .filter(|view| {
-            let Some(edge_span) = view.span_id() else {
-                return false;
-            };
-            view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS)
-                .is_some_and(|ttfb| ttfb.duration_ms().is_some())
-                && index.services_under(edge_span).is_empty()
+        .filter_map(|view| {
+            let edge_span = view.span_id().filter(|span| !served.contains(span))?;
+            let ttfb = view
+                .named(catalog::EDGE_BACKEND_TIME_TO_HEADERS)
+                .filter(|ttfb| ttfb.duration_ms().is_some())?;
+            Some((edge_span, (ttfb, Vec::new())))
         })
         .collect();
+    let requests = missing.len();
 
-    for view in &missing_service_views {
-        let Some(edge_span) = view.span_id() else {
-            continue;
-        };
-        let Some(ttfb) = view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS) else {
-            continue;
-        };
-        let mut builder = FindingBuilder::new(
+    // Each degraded observation belongs to the nearest gateway span in its
+    // lineage, which is walked once, so the cost is linear in the report.
+    let mut unlinked: Vec<&Observation> = Vec::new();
+    if requests > 0 {
+        let is_gateway = |id: &str| index.edge.contains_key(id);
+        for observation in &degraded {
+            let gateway = observation
+                .span
+                .as_ref()
+                .and_then(|span| index.nearest_in_lineage(span, is_gateway));
+            let cited = match gateway {
+                // Evidence for a gateway request that has service telemetry
+                // belongs to that request, not to this rule.
+                Some(span) => missing.get_mut(span).map(|(_, cited)| cited),
+                // With one missing request, unlinked evidence can describe only it.
+                None if requests == 1 => missing.values_mut().next().map(|(_, cited)| cited),
+                None => Some(&mut unlinked),
+            };
+            if let Some(cited) = cited {
+                cited.push(*observation);
+            }
+        }
+    }
+
+    for (ttfb, cited) in missing.values() {
+        let builder = FindingBuilder::new(
             "alloy.telemetry.service_span_missing",
             RULE,
-            1,
+            VERSION,
             "No service telemetry is linked to this gateway request",
         )
         .scope(SourceScope::Unknown)
@@ -1117,25 +1212,40 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
             "packet loss or any other network fault",
         ])
         .missing(&["alloy.server span whose parent is the gateway span"]);
-        for observation in degraded.iter().filter(|observation| {
-            observation.span.as_ref().map_or_else(
-                // An unlinked observation is useful only when there is no
-                // ambiguity about which missing request it describes.
-                || missing_service_views.len() == 1,
-                |span| {
-                    span.span_id == edge_span
-                        || span.parent_span_id.as_deref() == Some(edge_span)
-                        || index.descends_from(&span.span_id, edge_span)
-                },
-            )
-        }) {
-            builder = builder.cite(
-                observation,
-                &observation.name,
-                observation.availability.as_str(),
-            );
-        }
-        out.push(builder.build());
+        out.push(builder.cite_degraded(cited, &mut budget).build());
+    }
+
+    // With several missing requests, evidence that links to none of them is
+    // cited once here rather than dropped or copied into every request.
+    if !unlinked.is_empty() {
+        let explanation = format!(
+            "{requests} gateway requests have no linked service span. The unsampled, dropped, or \
+             unexported observations cited here link to no gateway span, so they cannot be \
+             attributed to one request."
+        );
+        let builder = FindingBuilder::new(
+            "alloy.telemetry.degraded_evidence_unlinked",
+            RULE,
+            VERSION,
+            "Degraded telemetry is not linked to a gateway request",
+        )
+        .scope(SourceScope::Unknown)
+        .severity(Severity::Info)
+        .owner(Owner::Unknown)
+        .confidence(Confidence::Unknown)
+        .explanation(explanation)
+        .alternatives(&[
+            "the observations carry no span",
+            "the service's trust policy re-rooted the trace",
+            "the observations describe a request that is not in this report",
+        ])
+        .does_not_prove(&[
+            "which gateway request the observations describe",
+            "that the service was never reached",
+            "packet loss or any other network fault",
+        ])
+        .missing(&["a span linking each degraded observation to its gateway span"]);
+        out.push(builder.cite_degraded(&unlinked, &mut budget).build());
     }
 
     let has_measurement = index
@@ -1144,10 +1254,10 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         .iter()
         .any(|o| o.duration_ms().is_some());
     if !has_measurement {
-        let mut builder = FindingBuilder::new(
+        let builder = FindingBuilder::new(
             "alloy.telemetry.insufficient",
             RULE,
-            1,
+            VERSION,
             "Telemetry is insufficient to localize any delay",
         )
         .scope(SourceScope::Unknown)
@@ -1160,20 +1270,13 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         )
         .does_not_prove(&["that any component was slow or fast"])
         .missing(&["gateway backend timing", "service time-to-headers"]);
-        for observation in &degraded {
-            builder = builder.cite(
-                observation,
-                &observation.name,
-                observation.availability.as_str(),
-            );
-        }
-        out.push(builder.build());
+        out.push(builder.cite_degraded(&degraded, &mut budget).build());
     } else if index.edge.is_empty() && !index.service.is_empty() {
         out.push(
             FindingBuilder::new(
                 "alloy.telemetry.gateway_evidence_missing",
                 RULE,
-                1,
+                VERSION,
                 "No gateway telemetry is present",
             )
             .scope(SourceScope::Unknown)
