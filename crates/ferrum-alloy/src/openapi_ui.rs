@@ -93,11 +93,23 @@ impl DocsUi {
         let page = self.page.clone();
         router = router.route(&self.path, get(move || respond(HTML, page)));
         for (name, content_type, contents) in ASSETS {
-            let path = format!("{}/{name}", self.path);
             let body = Bytes::from_static(contents);
+            let path = self.asset_path(name);
             router = router.route(&path, get(move || respond(content_type, body)));
         }
         router
+    }
+
+    /// The page's path and the path of every asset beneath it.
+    pub(crate) fn paths(&self) -> impl Iterator<Item = String> + '_ {
+        let assets = ASSETS
+            .into_iter()
+            .map(move |(name, _, _)| self.asset_path(name));
+        std::iter::once(self.path.clone()).chain(assets)
+    }
+
+    fn asset_path(&self, name: &str) -> String {
+        format!("{}/{name}", self.path)
     }
 }
 

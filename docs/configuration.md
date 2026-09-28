@@ -218,11 +218,25 @@ Every rate and burst must be greater than zero when `enabled` is `true`. Rejecti
 
 | Key | Default | Meaning |
 |---|---|---|
-| `app_endpoints` | `true` | Also serve liveness and readiness on the application listener, for gateway checks. These take precedence over app routes with the same path. |
+| `app_endpoints` | `true` | Also serve liveness and readiness on the application listener, for gateway checks. These take precedence over app routes, so startup fails if an app route matches either path (see [route conflicts](#route-conflicts-on-the-application-listener)). |
 | `liveness_path` | `/livez` | Literal path |
 | `readiness_path` | `/readyz` | Literal path |
 | `cache_ttl_ms` | `5000` | Readiness results are reused for this long, with single-flight refresh. |
 | `check_timeout_ms` | `2000` | Per-check timeout |
+
+#### Route conflicts on the application listener
+
+Alloy serves its own paths on the application listener ahead of your router, which is Alloy's fallback: the health paths with `app_endpoints = true`, and, with `openapi.public = true` and a registered document, `openapi.path` and (with `openapi.ui`) `openapi.ui_path` and every asset beneath it. A route of yours that matches one of those paths would never be reached, for any method, so startup fails closed with `AlloyError::ShadowedRoute`. It lists every conflict at once, each naming the path, the route that requests for it would never reach (or, for a `nest_service`, that its prefix contains the path), and the setting that serves the path. Change that setting, or move or remove the route. Paths served only on the management listener cannot conflict.
+
+A root parameter route such as `/{code}` matches both default health paths, `/livez` and `/readyz`. To keep it, move `liveness_path` and `readiness_path` under a prefix, such as `/_alloy/livez` and `/_alloy/readyz` (a parameter matches a single segment), or set `health.app_endpoints = false` and serve health only on the management listener.
+
+axum cannot list a router's routes, so `AlloyApp` asks your router instead. At startup it routes a `GET` for each of those paths through a copy of your router whose every endpoint (handlers, method-not-allowed handlers, nested services, and fallbacks) is replaced by a stub that never calls it, and reads which kind of endpoint matched. None of your handlers, layers, or fallbacks runs, so the check has no side effects. What counts:
+
+- Any route that matches the path is a conflict, whatever its methods: a literal route (`/docs`), a parameter (`/docs/{file}` matches `/docs/swagger-ui.css`; `/{code}` matches `/livez`), a nested router's route, or a nested service (`nest_service`).
+- A root catch-all route (`/{*path}`) matches every path, so it is treated like a fallback and is not a conflict: Alloy's paths take precedence over it, as they do over your fallback.
+- Fallbacks, including nested routers' fallbacks, are not routes and are not conflicts.
+
+`ferrum-alloy check` validates configuration only and cannot see your router; the check runs when the application composes (`AlloyApp::run` or `AlloyApp::into_parts`).
 
 ### `[logging]`
 
@@ -317,13 +331,13 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 | `path` | `/openapi.json` | Literal path. |
 | `public` | `false` | Also serve it unauthenticated on the application listener. |
 | `ui` | `false` | Serve the documentation UI (feature `openapi-ui`) wherever the document is served: on the management listener behind `management.token`, and on the application listener, unauthenticated, only with `public = true`. Needs a registered document and `serve = true`. |
-| `ui_path` | `/docs` | Path of the UI page; its assets are served beneath it. Segments of letters, digits, `-`, `.`, `_`, and `~`, with no trailing `/`. It must not be or contain another served path, and must be outside `/diagnostics`. See the note on user routes below. |
+| `ui_path` | `/docs` | Path of the UI page; its assets are served beneath it. Segments of letters, digits, `-`, `.`, `_`, and `~`, with no trailing `/`. It must not be or contain another served path, and must be outside `/diagnostics`. See the note on your routes below. |
 
 #### Documentation UI (feature `openapi-ui`)
 
 The UI is [Swagger UI](https://github.com/swagger-api/swagger-ui) 5.33.0, compiled into the binary from files vendored in `crates/ferrum-alloy/assets/swagger-ui/` (Apache-2.0; the directory carries its `LICENSE`, `NOTICE`, the bundled dependencies' notices, and the hashes the tests check). It makes no request to another origin: the page loads its script, stylesheet, and the OpenAPI document from the listener that served it. It is read-only; "Try it out" is disabled. The page's assets are `swagger-ui.css`, `swagger-ui-bundle.js`, `swagger-initializer.js`, and `swagger-ui-bundle.js.LICENSE.txt` (the bundle's license notices, which its first line points to, served as `text/plain`), all beneath `ui_path` and under the same access policy.
 
-**Route conflicts on the application listener.** With `public = true`, Alloy serves `path` (`/openapi.json`), `ui_path`, and every asset beneath `ui_path` on the application listener, ahead of your router. Your router is Alloy's fallback, so a route of yours at any of those paths is not an error: it is never reached, for any method, and startup does not report it. `ferrum-alloy check` cannot see your routes either. If your API has a route at `/docs` (or beneath it) or at `/openapi.json`, pick a different `ui_path` (or `path`).
+**Your routes.** With `public = true`, Alloy serves `path` (`/openapi.json`), `ui_path`, and every asset beneath `ui_path` on the application listener, ahead of your router, so startup fails if one of your routes matches any of them (see [route conflicts](#route-conflicts-on-the-application-listener)). If your API has a route at `/docs` (or beneath it) or at `/openapi.json`, pick a different `ui_path` (or `path`).
 
 With a management token, a browser must send `Authorization: Bearer <token>` with the page, its assets, and the document, for example through a local proxy or a header-injecting extension. Browsers do not add bearer tokens by themselves. A management listener on loopback without a token (the default) needs nothing.
 
