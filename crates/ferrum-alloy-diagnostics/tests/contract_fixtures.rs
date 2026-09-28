@@ -443,7 +443,11 @@ fn rerooted_degraded_evidence_is_cited_on_the_only_missing_request() {
     assert_eq!(finding.rule_version, 2);
     assert_eq!(
         finding.supporting_observations,
-        ["alloy-not-sampled", "alloy-not-sampled-rerooted", "edge-ttfb"],
+        [
+            "alloy-not-sampled",
+            "alloy-not-sampled-rerooted",
+            "edge-ttfb"
+        ],
         "with one missing request, unlinked evidence can describe only that request"
     );
     assert!(

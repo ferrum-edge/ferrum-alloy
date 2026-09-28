@@ -325,12 +325,8 @@ fn degraded_citations_stay_within_explicit_caps_at_hostile_scale() {
 
     assert_eq!(r004.len(), GATEWAYS + 1);
     for finding in &r004 {
-        assert!(
-            degraded_citations(finding) <= MAX_DEGRADED_CITATIONS_PER_FINDING
-        );
-        assert!(
-            finding.evidence.len() <= MAX_DEGRADED_CITATIONS_PER_FINDING + 1
-        );
+        assert!(degraded_citations(finding) <= MAX_DEGRADED_CITATIONS_PER_FINDING);
+        assert!(finding.evidence.len() <= MAX_DEGRADED_CITATIONS_PER_FINDING + 1);
     }
     let cited: usize = r004.iter().copied().map(degraded_citations).sum();
     let omitted: usize = r004.iter().copied().map(omitted_citations).sum();
@@ -351,7 +347,9 @@ fn degraded_citations_stay_within_explicit_caps_at_hostile_scale() {
         MAX_DEGRADED_CITATIONS_PER_FINDING
     );
     assert!(
-        first.explanation.contains("more degraded observations are not cited"),
+        first
+            .explanation
+            .contains("more degraded observations are not cited"),
         "{}",
         first.explanation
     );
