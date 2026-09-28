@@ -11,6 +11,7 @@ use ferrum_alloy_edge::export;
 use ferrum_alloy_edge::manifest::ServiceManifest;
 
 use crate::error::CliError;
+use crate::input::{ReadError, read_regular_file_bounded};
 
 /// Output kinds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -50,16 +51,20 @@ pub(crate) struct ExportArgs {
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 
 pub(crate) fn read_manifest(path: &Path) -> Result<ServiceManifest, CliError> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))?;
-    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-        return Err(CliError::Invalid(format!(
-            "{} must be a regular file of at most {MAX_MANIFEST_BYTES} bytes",
-            path.display()
-        )));
-    }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| CliError::Invalid(format!("{}: {e}", path.display())))?;
+    let bytes = match read_regular_file_bounded(path, MAX_MANIFEST_BYTES) {
+        Ok(bytes) => bytes,
+        Err(ReadError::Io(e)) => {
+            return Err(CliError::Invalid(format!("{}: {e}", path.display())));
+        }
+        Err(ReadError::NotRegular | ReadError::TooLarge) => {
+            return Err(CliError::Invalid(format!(
+                "{} must be a regular file of at most {MAX_MANIFEST_BYTES} bytes",
+                path.display()
+            )));
+        }
+    };
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?;
     ServiceManifest::from_toml(&text).map_err(|e| CliError::Invalid(e.to_string()))
 }
 

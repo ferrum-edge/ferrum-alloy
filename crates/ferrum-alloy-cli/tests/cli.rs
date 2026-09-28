@@ -150,6 +150,35 @@ fn diagnose_reads_otlp_exports() {
     assert_eq!(code(&again), 0, "{}", stderr(&again));
 }
 
+/// Devices and FIFOs report a length of `0`; reading one would never end.
+#[cfg(unix)]
+#[test]
+fn diagnose_refuses_special_files_with_exit_3() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("report.fifo");
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success());
+    for path in ["/dev/zero", fifo.to_str().unwrap()] {
+        for flag in ["--input", "--otlp"] {
+            let output = run(&["diagnose", flag, path]);
+            assert_eq!(code(&output), 3, "{flag} {path}: {}", stderr(&output));
+            assert!(stderr(&output).contains("is not a regular file"));
+        }
+        let args = [
+            "diagnose",
+            "--url",
+            "http://127.0.0.1:9/",
+            "--request-id",
+            "req-7",
+            "--token-file",
+            path,
+        ];
+        let output = bin().env_remove(TOKEN_ENV).args(args).output().unwrap();
+        assert_eq!(code(&output), 3, "token {path}: {}", stderr(&output));
+        assert!(stderr(&output).contains("is not a regular file"));
+    }
+}
+
 /// The credential variable of `diagnose --url`.
 const TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
 

@@ -187,6 +187,8 @@ With the `diagnostics` feature, a service can serve one request's evidence from 
 
 Reports and OTLP files are untrusted input. They are bounded (size, nesting depth, string length, counts, time range) and validated. Mutation tests confirm parsing never panics.
 
+The CLI reads the files named by `diagnose --input`, `--otlp`, and `--token-file`, by `openapi export --input`, and by the `--manifest` of `edge export` and `openapi export` only from regular files (symbolic links followed). It refuses devices, FIFOs, sockets, and directories before opening them (a path swapped for a FIFO between that check and the open can still block the open, so point these options only at files you control), checks the type again on the opened file, and stops reading one byte past the size limit, so a file that reports a length of `0` (such as those in `/proc`) or grows after the check is still bounded.
+
 A `verified` claim in a file is downgraded to `unverified` and reported, so file input can never produce `confirmed` findings.
 
 Rules are deterministic. They run no commands, make no network calls, and use no AI service. Remediation text is prose, never an executable command.

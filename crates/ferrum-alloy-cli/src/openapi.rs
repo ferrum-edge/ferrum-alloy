@@ -14,6 +14,7 @@ use clap::{Args, Subcommand};
 use serde_json::Value;
 
 use crate::error::CliError;
+use crate::input::read_regular_file_bounded;
 
 /// `openapi` subcommands.
 #[derive(Debug, Subcommand)]
@@ -49,16 +50,8 @@ const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 
 fn load(args: &ExportArgs) -> Result<Vec<u8>, CliError> {
     if let Some(input) = &args.input {
-        let metadata = std::fs::metadata(input)
-            .map_err(|e| CliError::Invalid(format!("{}: {e}", input.display())))?;
-        if metadata.len() > MAX_DOCUMENT_BYTES {
-            return Err(CliError::Invalid(format!(
-                "{} is larger than {MAX_DOCUMENT_BYTES} bytes",
-                input.display()
-            )));
-        }
-        return std::fs::read(input)
-            .map_err(|e| CliError::Invalid(format!("{}: {e}", input.display())));
+        return read_regular_file_bounded(input, MAX_DOCUMENT_BYTES)
+            .map_err(|e| e.invalid(input, MAX_DOCUMENT_BYTES));
     }
     if !args
         .bin
