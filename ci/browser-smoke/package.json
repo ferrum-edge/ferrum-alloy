@@ -1,0 +1,11 @@
+{
+  "name": "ferrum-alloy-browser-smoke",
+  "private": true,
+  "description": "Loads Ferrum Alloy's OpenAPI documentation UI in Google Chrome under its Content-Security-Policy",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
