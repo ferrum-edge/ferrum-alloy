@@ -1,8 +1,8 @@
 //! TLS material reload over real TLS: a rotated certificate and key, client
 //! CA bundle, or CRL is picked up by new handshakes without a restart,
 //! established connections keep their session, sessions are not resumed
-//! across a reload, and invalid replacements leave the previous material
-//! serving and are counted.
+//! across a reload, client certificates never resume a session, and invalid
+//! replacements leave the previous material serving and are counted.
 
 #![cfg(feature = "tls")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -177,12 +177,18 @@ async fn a_rotated_certificate_serves_new_handshakes_and_established_connections
     let mut established = connect(server.addr, Arc::clone(&client)).await.unwrap();
     assert_eq!(established.get().await.unwrap(), StatusCode::OK);
     assert_eq!(established.server_cert, pki.server.cert_der);
+    // Without client authentication, sessions resume until the reload.
+    let resumed = connect(server.addr, Arc::clone(&client)).await.unwrap();
+    assert_eq!(resumed.handshake_kind, Some(HandshakeKind::Resumed));
+    drop(resumed);
 
     let rotated = pki.ca.server();
     replace(&pki.tls.cert_path, &rotated.cert_pem);
     replace(&pki.tls.key_path, &rotated.key_pem);
     wait_for(&server.stats.tls_reloads, 1).await;
 
+    // A resumed session would report the certificate of the session it
+    // resumed, so the new certificate shows a full handshake.
     let (cert, status) = probe(server.addr, client).await.unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cert, rotated.cert_der, "the new certificate serves");
@@ -210,11 +216,11 @@ async fn a_rotated_client_ca_refuses_old_client_certificates_and_accepts_new_one
         probe(server.addr, Arc::clone(&new)).await.is_err(),
         "the new client CA is not trusted before the reload"
     );
-    // Until the reload, the old certificate resumes its session, so the
-    // refusal after it shows that the reload dropped the session cache.
-    let resumed = connect(server.addr, Arc::clone(&old)).await.unwrap();
-    assert_eq!(resumed.handshake_kind, Some(HandshakeKind::Resumed));
-    drop(resumed);
+    // A client certificate never resumes a session, so it is verified
+    // again on every connection.
+    let second = connect(server.addr, Arc::clone(&old)).await.unwrap();
+    assert_eq!(second.handshake_kind, Some(HandshakeKind::Full));
+    drop(second);
 
     replace(pki.tls.client_ca_path.as_ref().unwrap(), &new_ca.cert_pem);
     wait_for(&server.stats.tls_reloads, 1).await;
@@ -244,11 +250,11 @@ async fn a_serial_added_to_the_crl_is_refused_after_the_reload() {
     let config = pki::client_config(&pki.ca, Some(&client));
     let (_, status) = probe(server.addr, Arc::clone(&config)).await.unwrap();
     assert_eq!(status, StatusCode::OK);
-    // Until the reload, the certificate resumes its session, so the refusal
-    // after it shows that the reload dropped the session cache.
-    let resumed = connect(server.addr, Arc::clone(&config)).await.unwrap();
-    assert_eq!(resumed.handshake_kind, Some(HandshakeKind::Resumed));
-    drop(resumed);
+    // A client certificate never resumes a session, so its revocation is
+    // checked again on every connection.
+    let second = connect(server.addr, Arc::clone(&config)).await.unwrap();
+    assert_eq!(second.handshake_kind, Some(HandshakeKind::Full));
+    drop(second);
 
     replace(&crl_path, pki.ca.crl(&[&client.serial]).pem().unwrap());
     wait_for(&server.stats.tls_reloads, 1).await;

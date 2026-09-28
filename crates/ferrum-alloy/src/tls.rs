@@ -86,9 +86,10 @@ struct Material {
 
 struct Current {
     /// A whole server configuration, so a certificate, its key, and the
-    /// client verifier always change together. A new configuration also
-    /// starts with an empty session cache, so no session resumed after a
-    /// reload skips the new client verifier.
+    /// client verifier always change together. With a client verifier it
+    /// resumes no sessions (see `build`); without one, a new configuration
+    /// starts with an empty session cache, so no session is resumed across
+    /// a reload.
     config: Arc<rustls::ServerConfig>,
     /// [`Sources::fingerprint`] of the files `config` was built from.
     fingerprint: u64,
@@ -594,7 +595,9 @@ fn build(
         .map_err(|e| TlsError::Config(e.to_string()))?;
     // `None` only when the settings, which a reload never changes, ask for
     // no client authentication.
-    let (builder, earliest_crl) = match client_verifier(settings, sources, provider, now)? {
+    let client = client_verifier(settings, sources, provider, now)?;
+    let verifies_clients = client.is_some();
+    let (builder, earliest_crl) = match client {
         Some(client) => (
             builder.with_client_cert_verifier(client.verifier),
             client.earliest_crl,
@@ -606,6 +609,16 @@ fn build(
         .with_single_cert(chain, key)
         .map_err(|e| chain_and_key_error(settings, e))?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    if verifies_clients {
+        // A resumed session restores the client certificate chain of the
+        // original handshake without running the verifier again, and is
+        // issued new tickets. Disable resumption, so client certificate
+        // validity (`notAfter`) and revocation (including a CRL's
+        // `nextUpdate`) are re-checked on every connection. No ticketer is
+        // set, so no stateless tickets are issued either.
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
     Ok(Current {
         config: Arc::new(config),
         fingerprint: sources.fingerprint(),
@@ -853,13 +866,15 @@ pub(crate) fn peer_identity(connection: &rustls::ServerConnection) -> Option<Tls
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
 
     use rcgen::{
         BasicConstraints, CertificateParams, CertificateRevocationListParams,
         ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
         date_time_ymd,
     };
-    use rustls::CertificateError;
+    use rustls::time_provider::TimeProvider;
+    use rustls::{CertificateError, HandshakeKind};
     use rustls_pki_types::PrivatePkcs8KeyDer;
 
     use super::*;
@@ -945,6 +960,138 @@ mod tests {
             verifier.verify_client_cert(&client, &[], now).err(),
             Some(rustls::Error::InvalidCertificate(expired))
         );
+    }
+
+    /// Settings that serve a certificate from `issuer`, written to `dir`,
+    /// and verify client certificates from the CA at `ca_path` as
+    /// `client_auth` says, without CRLs or reloading.
+    fn settings(
+        dir: &Path,
+        ca_path: PathBuf,
+        issuer: &Issuer<'static, KeyPair>,
+        client_auth: ClientAuth,
+    ) -> TlsSettings {
+        let (cert, key) = server_pem(issuer);
+        let cert_path = dir.join("server.pem");
+        let key_path = dir.join("server.key");
+        std::fs::write(&cert_path, cert).unwrap();
+        std::fs::write(&key_path, key).unwrap();
+        TlsSettings {
+            cert_path,
+            key_path,
+            client_ca_path: Some(ca_path),
+            client_auth,
+            handshake_timeout_ms: 2_000,
+            client_crl_paths: Vec::new(),
+            client_crl_depth: CrlDepth::default(),
+            client_crl_unknown_status: CrlUnknownStatus::default(),
+            client_crl_expiration: CrlExpiration::default(),
+            reload_interval_ms: 0,
+        }
+    }
+
+    #[test]
+    fn verifying_client_certificates_disables_session_resumption() {
+        for (client_auth, crls, expiration) in [
+            (ClientAuth::Required, false, CrlExpiration::Enforce),
+            (ClientAuth::Optional, false, CrlExpiration::Enforce),
+            (ClientAuth::Required, true, CrlExpiration::Enforce),
+            (ClientAuth::Required, true, CrlExpiration::Ignore),
+            (ClientAuth::Optional, true, CrlExpiration::Ignore),
+        ] {
+            let case = format!("{client_auth:?}, CRLs: {crls}, {expiration:?}");
+            let dir = tempfile::tempdir().unwrap();
+            let (ca_path, issuer) = ca(dir.path());
+            let mut settings = settings(dir.path(), ca_path, &issuer, client_auth);
+            if crls {
+                settings.client_crl_paths = vec![crl(dir.path(), &issuer)];
+            }
+            settings.client_crl_expiration = expiration;
+            // September 2020, while the CRL is current.
+            let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
+
+            let config = serving(&load_at(&settings, startup).unwrap());
+            assert!(!config.session_storage.can_cache(), "{case}");
+            assert_eq!(config.send_tls13_tickets, 0, "{case}");
+            assert!(!config.ticketer.enabled(), "{case}");
+        }
+    }
+
+    #[test]
+    fn without_client_authentication_sessions_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let mut settings = settings(dir.path(), ca_path.clone(), &issuer, ClientAuth::None);
+        settings.client_ca_path = None;
+
+        let config = serving(&load(&settings).unwrap());
+        assert!(config.session_storage.can_cache());
+        assert!(config.send_tls13_tickets > 0);
+        let client = client_config(&ca_path, &issuer);
+        let first = handshake(Arc::clone(&config), Arc::clone(&client));
+        assert_eq!(first, Ok(Some(HandshakeKind::Full)));
+        let second = handshake(config, client);
+        assert_eq!(second, Ok(Some(HandshakeKind::Resumed)));
+    }
+
+    /// A clock that tests set, in Unix seconds.
+    #[derive(Debug)]
+    struct Clock(AtomicU64);
+
+    impl TimeProvider for Clock {
+        fn current_time(&self) -> Option<UnixTime> {
+            let secs = self.0.load(Ordering::Relaxed);
+            Some(UnixTime::since_unix_epoch(Duration::from_secs(secs)))
+        }
+    }
+
+    #[test]
+    fn a_client_certificate_is_verified_again_on_every_connection() {
+        // An hour before and an hour after 2021-01-01T00:00:00Z, when the
+        // client certificate expires in the first case and the CRL in the
+        // second; well within the lifetime of any ticket issued before.
+        let before = NEXT_UPDATE_SECS - 3_600;
+        let after = NEXT_UPDATE_SECS + 3_600;
+        let expired_at = UnixTime::since_unix_epoch(Duration::from_secs(after));
+        let deadline = UnixTime::since_unix_epoch(Duration::from_secs(NEXT_UPDATE_SECS));
+        for crls in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (ca_path, issuer) = ca(dir.path());
+            let mut settings = settings(dir.path(), ca_path.clone(), &issuer, ClientAuth::Required);
+            let mut params = CertificateParams::default();
+            let expired = if crls {
+                settings.client_crl_paths = vec![crl(dir.path(), &issuer)];
+                CertificateError::ExpiredRevocationListContext {
+                    time: expired_at,
+                    next_update: deadline,
+                }
+            } else {
+                params.not_after = date_time_ymd(2021, 1, 1);
+                CertificateError::ExpiredContext {
+                    time: expired_at,
+                    not_after: deadline,
+                }
+            };
+            let clock = Arc::new(Clock(AtomicU64::new(before)));
+            let time: Arc<dyn TimeProvider> = Arc::<Clock>::clone(&clock);
+            let startup = UnixTime::since_unix_epoch(Duration::from_secs(before));
+            let server = load_at(&settings, startup).unwrap();
+            let mut config = rustls::ServerConfig::clone(&serving(&server));
+            config.time_provider = Arc::clone(&time);
+            let config = Arc::new(config);
+            let client = client_config_at(&ca_path, &issuer, params, time);
+
+            let first = handshake(Arc::clone(&config), Arc::clone(&client));
+            assert_eq!(first, Ok(Some(HandshakeKind::Full)), "CRLs: {crls}");
+            let second = handshake(Arc::clone(&config), Arc::clone(&client));
+            assert_eq!(second, Ok(Some(HandshakeKind::Full)), "CRLs: {crls}");
+            clock.0.store(after, Ordering::Relaxed);
+            assert_eq!(
+                handshake(config, client),
+                Err(rustls::Error::InvalidCertificate(expired)),
+                "CRLs: {crls}"
+            );
+        }
     }
 
     /// A server certificate and key issued by `issuer`, as PEM.
@@ -1084,7 +1231,19 @@ mod tests {
         ca_path: &Path,
         issuer: &Issuer<'static, KeyPair>,
     ) -> Arc<rustls::ClientConfig> {
-        let mut params = CertificateParams::default();
+        let time = Arc::new(rustls::time_provider::DefaultTimeProvider);
+        client_config_at(ca_path, issuer, CertificateParams::default(), time)
+    }
+
+    /// [`client_config`], presenting a certificate made from `params`, and
+    /// with `time` deciding whether the server certificate and session
+    /// tickets are current.
+    fn client_config_at(
+        ca_path: &Path,
+        issuer: &Issuer<'static, KeyPair>,
+        mut params: CertificateParams,
+        time: Arc<dyn TimeProvider>,
+    ) -> Arc<rustls::ClientConfig> {
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let key = KeyPair::generate().unwrap();
         let cert = params.signed_by(&key, issuer).unwrap().der().clone();
@@ -1093,7 +1252,7 @@ mod tests {
         let ca = CertificateDer::from_pem_file(ca_path).unwrap();
         roots.add(ca).unwrap();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
+        let config = rustls::ClientConfig::builder_with_details(provider, time)
             .with_safe_default_protocol_versions()
             .unwrap()
             .with_root_certificates(roots)
@@ -1102,12 +1261,14 @@ mod tests {
         Arc::new(config)
     }
 
-    /// Runs a handshake between `client` and `server` in memory. The server
-    /// verifies the client certificate at the current time.
+    /// Runs a handshake between `client` and `server` in memory, and
+    /// returns whether it resumed a session. The server verifies the client
+    /// certificate at the time of its `time_provider`, the current time
+    /// unless a test sets one.
     fn handshake(
         server: Arc<rustls::ServerConfig>,
         client: Arc<rustls::ClientConfig>,
-    ) -> Result<(), rustls::Error> {
+    ) -> Result<Option<HandshakeKind>, rustls::Error> {
         let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
         let mut client = rustls::ClientConnection::new(client, name)?;
         let mut server = rustls::ServerConnection::new(server)?;
@@ -1131,7 +1292,7 @@ mod tests {
                 client.process_new_packets()?;
             }
             if !client.is_handshaking() && !server.is_handshaking() {
-                return Ok(());
+                return Ok(client.handshake_kind());
             }
         }
         Err(rustls::Error::General(
