@@ -93,6 +93,7 @@ impl TrustClassifier for TrustNobody {
 /// Trusted peer configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TrustedPeersConfig {
     /// Exact identities accepted from verified client certificates:
     /// `spiffe://...` ids, or `dns:<name>` for a DNS SAN.

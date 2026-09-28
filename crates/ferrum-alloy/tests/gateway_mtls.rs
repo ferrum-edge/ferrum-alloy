@@ -53,13 +53,14 @@ fn pki() -> Pki {
     let dir = tempfile::tempdir().unwrap();
     let ca = Ca::new("alloy-test-ca");
     let server = ca.server();
-    let tls = TlsSettings {
-        cert_path: pki::write(dir.path(), "server.pem", &server.cert_pem),
-        key_path: pki::write(dir.path(), "server.key", &server.key_pem),
-        client_ca_path: Some(pki::write(dir.path(), "ca.pem", &ca.cert_pem)),
-        client_auth: ClientAuth::Optional,
-        handshake_timeout_ms: 2_000,
-    };
+    let mut tls = TlsSettings::new(
+        pki::write(dir.path(), "server.pem", &server.cert_pem),
+        pki::write(dir.path(), "server.key", &server.key_pem),
+    );
+    tls.client_ca_path = Some(pki::write(dir.path(), "ca.pem", &ca.cert_pem));
+    tls.client_auth = ClientAuth::Optional;
+    tls.handshake_timeout_ms = 2_000;
+    tls.reload_interval_ms = 0;
     Pki { _dir: dir, ca, tls }
 }
 

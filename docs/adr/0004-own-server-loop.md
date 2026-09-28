@@ -11,9 +11,11 @@
 `AlloyParts::serve` runs its own accept loop on `hyper_util::server::conn::auto`:
 
 - `max_headers`, `max_buf_size`, `header_read_timeout`, HTTP/2 `max_concurrent_streams`, header list size, and keep-alive;
-- a semaphore connection limit, with excess connections closed immediately;
+- a semaphore connection limit, with excess connections closed immediately, and a per-connection first-request and idle deadline that counts requests in flight and response data written after a response body ends, so a peer cannot hold a slot with HTTP/2 keep-alive pings alone;
+- a per-connection write stall deadline: the transport records response data written (HTTP/2 `DATA` frames only) and whether a write is blocked, and response bodies record when they wait on the connection, so a peer that takes no response data, by flow control or a zero TCP window, cannot hold a slot either;
 - a rustls acceptor with a handshake timeout; the verified identity becomes `PeerInfo`;
 - shutdown: readiness reports draining, optionally for a grace period; accepting stops; each connection gets `graceful_shutdown` (HTTP/1.1 closes after the current response, HTTP/2 sends GOAWAY); the service waits up to the drain budget, force-closes, and flushes telemetry within its own budget;
+- HTTP/2 stream tasks spawned through a tracking executor rather than `TokioExecutor`, so the drain waits for handlers and cancels those left at the budget;
 - per-connection cancellation tokens rather than hyper-util's `GracefulShutdown`, whose watchers subscribe lazily and would miss connections that finish a TLS handshake after shutdown starts.
 
 `AlloyParts::router` stays a normal `axum::Router`. Applications can serve it with anything, as shown in `into_parts_router_can_be_served_by_plain_axum`.

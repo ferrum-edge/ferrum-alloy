@@ -1,0 +1,2 @@
+[database]
+url = "postgres://u:fuzz:canary/0123456789@db/x" extra

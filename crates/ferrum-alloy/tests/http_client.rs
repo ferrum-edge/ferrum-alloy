@@ -12,9 +12,7 @@ use axum::response::Redirect;
 use axum::routing::get;
 use ferrum_alloy::config::HttpClientSettings;
 use ferrum_alloy::http_client::AlloyClient;
-use ferrum_alloy::telemetry::PeerTrust;
-use ferrum_alloy::telemetry::context::{RequestContext, TraceDecision};
-use ferrum_alloy::telemetry::request_id::{RequestId, RequestIdSource};
+use ferrum_alloy::telemetry::context::RequestContext;
 use ferrum_alloy::telemetry::trace_context::{SpanId, TraceId};
 
 async fn server(other: Option<SocketAddr>) -> SocketAddr {
@@ -51,29 +49,16 @@ async fn server(other: Option<SocketAddr>) -> SocketAddr {
 }
 
 fn context() -> RequestContext {
-    RequestContext {
-        request_id: RequestId::generate(),
-        request_id_source: RequestIdSource::Generated,
-        trace_id: TraceId([0x11; 16]),
-        span_id: SpanId([0x22; 8]),
-        sampled: true,
-        exported: false,
-        trace_decision: TraceDecision::Root,
-        remote_parent: None,
-        tracestate: None,
-        peer_trust: PeerTrust::Untrusted,
-        span: tracing::Span::none(),
-    }
+    RequestContext::new(TraceId([0x11; 16]), SpanId([0x22; 8]), true)
 }
 
 fn client(propagate: &[&str], redirects: usize) -> AlloyClient {
-    AlloyClient::new(&HttpClientSettings {
-        connect_timeout_ms: 1_000,
-        request_timeout_ms: 500,
-        max_redirects: redirects,
-        propagate_trace_context_to: propagate.iter().map(|s| (*s).to_owned()).collect(),
-    })
-    .unwrap()
+    let mut settings = HttpClientSettings::default();
+    settings.connect_timeout_ms = 1_000;
+    settings.request_timeout_ms = 500;
+    settings.max_redirects = redirects;
+    settings.propagate_trace_context_to = propagate.iter().map(|s| (*s).to_owned()).collect();
+    AlloyClient::new(&settings).unwrap()
 }
 
 async fn echo(
@@ -207,7 +192,7 @@ async fn redirects_are_same_origin_only() {
 }
 
 #[tokio::test]
-async fn timeouts_and_refused_connections_fail_fast() {
+async fn request_timeouts_fail_fast() {
     let addr = server(None).await;
     let client = client(&[], 0);
     let started = std::time::Instant::now();
@@ -224,9 +209,21 @@ async fn timeouts_and_refused_connections_fail_fast() {
         )
         .await
         .unwrap_err();
-    assert!(error.is_timeout());
+    assert!(error.is_timeout(), "{error:?}");
+    assert!(!error.is_connect(), "{error:?}");
     assert!(started.elapsed() < Duration::from_secs(2));
+}
 
+#[tokio::test]
+async fn refused_connections_are_reported_as_refusals() {
+    // Deadlines well above the refusal time, so a refusal can never be
+    // misreported as a timeout. Windows retries a refused connect for about
+    // two seconds before reporting it, which the 500 ms request deadline of
+    // the shared test client would otherwise cut short.
+    let mut settings = HttpClientSettings::default();
+    settings.connect_timeout_ms = 5_000;
+    settings.request_timeout_ms = 10_000;
+    let client = AlloyClient::new(&settings).unwrap();
     let closed = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -245,25 +242,29 @@ async fn timeouts_and_refused_connections_fail_fast() {
         )
         .await
         .unwrap_err();
-    // Windows retries refused connections for about two seconds, so the
-    // request timeout can fire before the refusal is reported.
+    let mut refused = false;
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            refused |= io.kind() == std::io::ErrorKind::ConnectionRefused;
+        }
+        source = cause.source();
+    }
+    assert!(error.is_connect(), "{error:?}");
+    assert!(!error.is_timeout(), "{error:?}");
     assert!(
-        error.is_connect() || (cfg!(windows) && error.is_timeout()),
-        "{error:?}"
+        refused,
+        "no ConnectionRefused in the error chain: {error:?}"
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // The refusal arrives before the connect deadline on every platform.
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
 fn invalid_host_rules_are_rejected() {
     for rule in ["http://x", "a/b", "*.example.com", "user@host"] {
-        assert!(
-            AlloyClient::new(&HttpClientSettings {
-                propagate_trace_context_to: vec![rule.into()],
-                ..HttpClientSettings::default()
-            })
-            .is_err(),
-            "{rule}"
-        );
+        let mut settings = HttpClientSettings::default();
+        settings.propagate_trace_context_to = vec![rule.into()];
+        assert!(AlloyClient::new(&settings).is_err(), "{rule}");
     }
 }

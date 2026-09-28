@@ -8,10 +8,13 @@ members = [
     "crates/ferrum-alloy-cli",
     "examples/minimal",
     "examples/existing-axum",
+    "examples/openapi-ui",
     "examples/postgres-api",
     "examples/edge-observability",
     "examples/bench",
 ]
+# cargo-fuzz targets build on nightly in their own workspace (docs/testing.md).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,16 +22,17 @@ edition = "2024"
 rust-version = "1.94"
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/ferrum-edge/ferrum-alloy"
-homepage = "https://github.com/ferrum-edge/ferrum-alloy"
 # Nothing is published until licensing, naming, and release decisions are approved.
 publish = false
 
 [workspace.dependencies]
-# Internal crates. Paths only; no crate in this workspace is published.
-ferrum-alloy = { path = "crates/ferrum-alloy", default-features = false }
-ferrum-alloy-telemetry = { path = "crates/ferrum-alloy-telemetry", default-features = false }
-ferrum-alloy-edge = { path = "crates/ferrum-alloy-edge", default-features = false }
-ferrum-alloy-diagnostics = { path = "crates/ferrum-alloy-diagnostics" }
+# Internal crates. The version lets `cargo package` write a registry
+# dependency into each packaged manifest; builds here still use the path.
+# Nothing is published (docs/release.md).
+ferrum-alloy = { path = "crates/ferrum-alloy", version = "0.1.0", default-features = false }
+ferrum-alloy-telemetry = { path = "crates/ferrum-alloy-telemetry", version = "0.1.0", default-features = false }
+ferrum-alloy-edge = { path = "crates/ferrum-alloy-edge", version = "0.1.0", default-features = false }
+ferrum-alloy-diagnostics = { path = "crates/ferrum-alloy-diagnostics", version = "0.1.0" }
 
 # HTTP stack
 axum = { version = "0.8.9", default-features = false }
@@ -75,6 +79,7 @@ tokio-rustls = { version = "0.26.5", default-features = false }
 rustls-pki-types = "1.15.1"
 rustls-platform-verifier = "0.7.1"
 x509-parser = { version = "0.18.1", default-features = false }
+zeroize = "1.9.0"
 url = "2.5.8"
 
 # CLI
@@ -83,6 +88,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 # Test-only
 tempfile = "3.27.0"
 rcgen = { version = "0.14.10", default-features = false }
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+ring = { version = "0.17.14", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

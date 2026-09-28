@@ -10,7 +10,9 @@
 //!   It never applies to response body streaming (SSE) or upgraded sessions.
 //!
 //! Request-head read time is bounded separately by the server
-//! (`server.header_read_timeout_ms`), and shutdown drain by
+//! (`server.header_read_timeout_ms`), idle connections by
+//! `server.idle_timeout_ms`, responses the peer does not take by
+//! `server.write_stall_timeout_ms`, and shutdown drain by
 //! `shutdown.drain_timeout_ms`.
 
 use std::sync::Arc;

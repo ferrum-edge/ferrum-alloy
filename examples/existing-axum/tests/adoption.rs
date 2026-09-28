@@ -19,6 +19,7 @@ async fn existing_router_state_and_middleware_keep_working() {
         .await
         .unwrap();
     assert_eq!(response.headers()["x-powered-by"], "existing-app");
+    assert_eq!(response.headers()["cache-control"], "private");
     assert_eq!(response.headers()["x-request-id"], "abc");
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, "hello ada (visit 1, request abc)");

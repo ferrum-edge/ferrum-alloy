@@ -2,7 +2,7 @@
 //! utoipa. Routes are registered once through `OpenApiRouter`, so the served
 //! routes and the OpenAPI document cannot drift apart.
 
-use std::sync::Arc;
+{{starter_modules}}use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;

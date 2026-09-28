@@ -9,3 +9,4 @@
 | [0005](0005-diagnostic-evidence-model.md) | Versioned, language-neutral evidence with deterministic rules | Accepted |
 | [0006](0006-bounded-telemetry-export.md) | Bounded span processor with exact loss accounting | Accepted |
 | [0007](0007-real-gateway-integration-testing.md) | Prove Edge integration with a pinned real gateway, not mocks | Accepted |
+| [0008](0008-tenant-scoped-diagnostic-retrieval.md) | Tenant-scoped diagnostic retrieval from a running service | Accepted |

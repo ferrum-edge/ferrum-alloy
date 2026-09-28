@@ -6,7 +6,9 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use ferrum_alloy::config::{
-    AlloyConfig, ConfigError, ENV_VARS, EdgeMode, Overrides, Secret, load_from,
+    AlloyConfig, CLI_ENV_VARS, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus,
+    DIAGNOSTICS_TOKEN_ENV, ENV_VARS, EdgeMode, JwtSettings, Overrides, Secret, TlsSettings,
+    load_from,
 };
 
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -39,9 +41,30 @@ fn defaults_are_safe_and_valid() {
         !config.openapi.public,
         "documentation is not public by default"
     );
+    assert!(!config.openapi.ui, "the documentation UI is off by default");
     assert_eq!(config.edge.mode, EdgeMode::Standalone);
     assert!(sources.file.is_none());
     config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn constructors_match_sections_configured_with_only_their_required_fields() {
+    let vars = [
+        ("FERRUM_ALLOY_TLS_CERT_PATH", "server.pem"),
+        ("FERRUM_ALLOY_TLS_KEY_PATH", "server.key"),
+        ("FERRUM_ALLOY_JWT_ISSUER", "https://issuer.test"),
+        ("FERRUM_ALLOY_JWT_AUDIENCES", "orders-api,billing-api"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    assert_eq!(
+        config.server.tls,
+        Some(TlsSettings::new("server.pem", "server.key"))
+    );
+    let audiences = vec!["orders-api".to_owned(), "billing-api".to_owned()];
+    assert_eq!(
+        config.auth.jwt,
+        Some(JwtSettings::new("https://issuer.test", audiences))
+    );
 }
 
 #[test]
@@ -131,6 +154,27 @@ fn unknown_keys_and_variables_are_rejected() {
 }
 
 #[test]
+fn command_variables_are_ignored_not_rejected() {
+    assert!(CLI_ENV_VARS.contains(&DIAGNOSTICS_TOKEN_ENV));
+    for name in CLI_ENV_VARS {
+        assert!(name.starts_with("FERRUM_ALLOY_"), "{name}");
+        assert!(ENV_VARS.iter().all(|var| var.name != *name), "{name}");
+        let vars = env(&[(*name, "a-cli-credential")]);
+        let (config, sources) = load_from(None, vars, &Overrides::default()).unwrap();
+        assert_eq!(config, AlloyConfig::default(), "{name}");
+        assert!(sources.env.is_empty(), "{name}");
+    }
+    // Only the variables themselves: a `_FILE` form is still unknown.
+    let file = format!("{DIAGNOSTICS_TOKEN_ENV}_FILE");
+    let vars = env(&[(file.as_str(), "/nonexistent")]);
+    let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+    assert!(
+        matches!(&error, ConfigError::Env { name, .. } if *name == file),
+        "{error}"
+    );
+}
+
+#[test]
 fn invalid_values_are_rejected_not_defaulted() {
     for (name, value) in [
         ("FERRUM_ALLOY_REQUEST_TIMEOUT_MS", "-5"),
@@ -161,6 +205,331 @@ fn invalid_values_are_rejected_not_defaulted() {
         load_from(Some(&missing), env(&[]), &Overrides::default()).unwrap_err(),
         ConfigError::Read { .. }
     ));
+}
+
+#[test]
+fn idle_timeout_defaults_to_a_minute_reads_the_environment_and_rejects_zero() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.server.idle_timeout_ms, 60_000);
+
+    let (config, sources) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_IDLE_TIMEOUT_MS", "1500")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.server.idle_timeout_ms, 1_500);
+    assert_eq!(sources.env, vec!["FERRUM_ALLOY_IDLE_TIMEOUT_MS"]);
+    config.validate(NO_FEATURES).unwrap();
+
+    let (config, _) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_IDLE_TIMEOUT_MS", "0")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("server.idle_timeout_ms must be greater than zero"),
+        "{error}"
+    );
+}
+
+#[test]
+fn write_stall_timeout_defaults_to_a_minute_reads_the_environment_and_rejects_zero() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.server.write_stall_timeout_ms, 60_000);
+
+    let (config, sources) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_WRITE_STALL_TIMEOUT_MS", "2500")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.server.write_stall_timeout_ms, 2_500);
+    assert_eq!(sources.env, vec!["FERRUM_ALLOY_WRITE_STALL_TIMEOUT_MS"]);
+    config.validate(NO_FEATURES).unwrap();
+
+    let (config, _) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_WRITE_STALL_TIMEOUT_MS", "0")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("server.write_stall_timeout_ms must be greater than zero"),
+        "{error}"
+    );
+}
+
+#[test]
+fn syntax_errors_report_the_location_without_the_source_line() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text, secret) in [
+        (
+            "token.toml",
+            "[management]\ntoken = \"SYNTHETIC-TOKEN-0123456789ABCDEF\" extra\n",
+            "SYNTHETIC-TOKEN",
+        ),
+        (
+            "database.toml",
+            "[database]\nurl = \"postgres://u:SYNTHETIC-PASSWORD@db/x\" extra\n",
+            "SYNTHETIC-PASSWORD",
+        ),
+    ] {
+        let path = write(&dir, name, text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(!format!("{error:?}").contains(secret), "{error:?}");
+        assert!(rendered.contains(name), "names the file: {rendered}");
+        assert!(rendered.contains("at line 2, column "), "{rendered}");
+        let ConfigError::Syntax { line, column, .. } = &error else {
+            panic!("expected a syntax error, got {error}");
+        };
+        assert_eq!(*line, Some(2));
+        assert!(column.is_some_and(|c| c > 1), "{column:?}");
+    }
+}
+
+#[test]
+fn schema_errors_name_keys_but_never_values() {
+    let dir = tempfile::tempdir().unwrap();
+    for (text, secret, kind, key) in [
+        (
+            "[management]\ntoken = 4242424242\n",
+            "4242424242",
+            "invalid type",
+            "management.token",
+        ),
+        (
+            "[server]\nmax_connections = \"SYNTH-S1\"\n",
+            "SYNTH-S1",
+            "invalid type",
+            "server.max_connections",
+        ),
+        (
+            "[server.tls]\ncert_path = \"c\"\nkey_path = \"k\"\nclient_auth = \"SYNTH-S2\"\n",
+            "SYNTH-S2",
+            "unknown variant",
+            "server.tls.client_auth",
+        ),
+        (
+            "[database]\n\"postgres://u:SYNTH-S3@db/x\" = 1\n",
+            "SYNTH-S3",
+            "unknown field",
+            "database",
+        ),
+    ] {
+        let path = write(&dir, "schema.toml", text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(matches!(error, ConfigError::Schema(_)), "{rendered}");
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(!format!("{error:?}").contains(secret), "{error:?}");
+        assert!(rendered.contains(kind), "{rendered}");
+        assert!(rendered.contains(&format!("`{key}`")), "{rendered}");
+    }
+    for (name, token) in [
+        ("hex", "0123456789abcdef0123456789abcdef"),
+        ("alnum", "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0"),
+    ] {
+        let path = write(&dir, "token.toml", &format!("[database]\n{token} = 1\n"));
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains(token), "{name}: {rendered}");
+        assert!(rendered.contains("(key redacted)"), "{name}: {rendered}");
+    }
+    // The expected type or variants still come through.
+    let path = write(&dir, "variant.toml", "[logging]\nformat = \"xml\"\n");
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    assert!(error.to_string().contains("expected one of"), "{error}");
+}
+
+#[test]
+fn schema_errors_ignore_text_inside_unknown_variants_and_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let variant = "x, expected hunter2\ny";
+    let files = [
+        (
+            "[logging]\nformat = \"x, expected hunter2\\ny\"\n",
+            "unknown variant (value redacted), expected one of `json`",
+            "(at `logging.format`)",
+        ),
+        (
+            "[database]\n\"x`, expected hunter2\\n\" = 1\n",
+            "unknown field (key redacted), expected one of `url`",
+            "(at `database`)",
+        ),
+        (
+            "\"x`, expected hunter2\\n\" = 1\n",
+            "unknown field (key redacted), expected one of `service`",
+            "",
+        ),
+        (
+            "[database]\n\"x`, there are no fields\\nin `hunter2\" = 1\n",
+            "unknown field (key redacted), expected one of `url`",
+            "(at `database`)",
+        ),
+    ];
+    let mut errors = Vec::new();
+    for (text, message, at) in files {
+        let path = write(&dir, "echo.toml", text);
+        let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+        errors.push((error, message, at));
+    }
+    let vars = env(&[("FERRUM_ALLOY_LOG_FORMAT", variant)]);
+    let error = load_from(None, vars, &Overrides::default()).unwrap_err();
+    errors.push((
+        error,
+        "unknown variant (value redacted), expected one of `json`",
+        "(at `logging.format`)",
+    ));
+    for (error, message, at) in errors {
+        let rendered = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(matches!(error, ConfigError::Schema(_)), "{rendered}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(rendered.contains(message), "{rendered}");
+        assert!(rendered.contains(at), "{rendered}");
+    }
+    // A short bare key is still named, with the schema's own key list.
+    let path = write(&dir, "typo.toml", "[database]\nurll = 1\n");
+    let error = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap_err();
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("unknown field `urll`, expected one of `url`"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn jwt_key_lifetime_settings_are_validated() {
+    let jwt = [
+        ("FERRUM_ALLOY_JWT_ISSUER", "https://issuer.test"),
+        ("FERRUM_ALLOY_JWT_AUDIENCES", "orders-api"),
+        ("FERRUM_ALLOY_JWT_JWKS_URL", "https://issuer.test/jwks"),
+    ];
+    let (config, _) = load_from(None, env(&jwt), &Overrides::default()).unwrap();
+    let settings = config.auth.jwt.as_ref().unwrap();
+    assert_eq!(settings.jwks_max_age_ms, 300_000, "bounded by default");
+    assert_eq!(settings.jwks_max_stale_ms, 300_000);
+    config.validate(&["jwt"]).unwrap();
+
+    let mut vars = jwt.to_vec();
+    vars.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "1000"));
+    vars.push(("FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS", "0"));
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let settings = config.auth.jwt.as_ref().unwrap();
+    assert_eq!(settings.jwks_max_age_ms, 1_000);
+    assert_eq!(settings.jwks_max_stale_ms, 0);
+    let error = config.validate(&["jwt"]).unwrap_err().to_string();
+    assert!(error.contains("must not exceed"), "{error}");
+
+    let mut zero = jwt.to_vec();
+    zero.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "0"));
+    let (config, _) = load_from(None, env(&zero), &Overrides::default()).unwrap();
+    let error = config.validate(&["jwt"]).unwrap_err().to_string();
+    assert!(error.contains("greater than zero"), "{error}");
+
+    // Both bounds are capped at 24 hours.
+    let mut long = jwt.to_vec();
+    long.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "86400001"));
+    long.push(("FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS", "86400001"));
+    let (config, _) = load_from(None, env(&long), &Overrides::default()).unwrap();
+    let error = config.validate(&["jwt"]).unwrap_err().to_string();
+    assert!(
+        error.contains("jwks_max_age_ms must not exceed 24 hours"),
+        "{error}"
+    );
+    assert!(
+        error.contains("jwks_max_stale_ms must not exceed 24 hours"),
+        "{error}"
+    );
+    let mut day = jwt.to_vec();
+    day.push(("FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS", "86400000"));
+    day.push(("FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS", "86400000"));
+    let (config, _) = load_from(None, env(&day), &Overrides::default()).unwrap();
+    config.validate(&["jwt"]).unwrap();
+}
+
+#[test]
+fn management_rate_limits_are_validated() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert!(limit.enabled, "on by default");
+    assert_eq!((limit.requests_per_second, limit.burst), (10, 20));
+    assert_eq!(limit.max_clients, 1_024);
+    assert_eq!(limit.ipv6_prefix_len, 64);
+    assert!(limit.exempt_networks.is_empty());
+    config.validate(NO_FEATURES).unwrap();
+
+    let bad = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST", "5"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST", "0"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS", "65537"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN", "32"),
+        (
+            "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS",
+            "10.0.0.0/8, ::/0",
+        ),
+    ];
+    let (config, _) = load_from(None, env(&bad), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert_eq!(limit.burst, 5);
+    assert_eq!(limit.exempt_networks.len(), 2);
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    for expected in [
+        "probe_burst must be greater than zero",
+        "management.rate_limit.max_clients must be within 1..=65536",
+        "management.rate_limit.ipv6_prefix_len must be within 48..=128",
+        "management.rate_limit.exempt_networks must not contain",
+    ] {
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+
+    let vars = [(
+        "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS",
+        "::ffff:10.0.0.0/104",
+    )];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("must use IPv4 CIDRs instead of IPv4-mapped IPv6 CIDRs"),
+        "{error}"
+    );
+
+    // The table must hold every client the listener admits at once.
+    let vars = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST", "300"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS", "299"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("max_clients must be at least management.rate_limit.global_burst"),
+        "{error}"
+    );
+    let vars = [
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN", "56"),
+        ("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS", ""),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    let limit = &config.management.rate_limit;
+    assert_eq!(limit.ipv6_prefix_len, 56);
+    assert!(
+        limit.exempt_networks.is_empty(),
+        "exemptions can be removed"
+    );
+    config.validate(NO_FEATURES).unwrap();
+
+    // Limits that are not enforced are not checked.
+    let mut off = bad.to_vec();
+    off.push(("FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED", "false"));
+    let (config, _) = load_from(None, env(&off), &Overrides::default()).unwrap();
+    config.validate(NO_FEATURES).unwrap();
 }
 
 #[test]
@@ -271,6 +640,70 @@ fn unsafe_combinations_fail_validation() {
 }
 
 #[test]
+fn openapi_ui_needs_its_feature_and_a_path_of_its_own() {
+    let features = &["openapi", "openapi-ui"];
+    let mut config = AlloyConfig::default();
+    config.openapi.ui = true;
+    config.validate(features).unwrap();
+    let error = config.validate(&["openapi"]).unwrap_err().to_string();
+    assert!(error.contains("`openapi-ui` feature"), "{error}");
+
+    for (ui_path, expected) in [
+        ("docs", "openapi.ui_path must be a path like /docs"),
+        ("/", "openapi.ui_path must be a path like /docs"),
+        ("/docs/", "openapi.ui_path must be a path like /docs"),
+        (
+            "//evil.example",
+            "openapi.ui_path must be a path like /docs",
+        ),
+        ("/a/../docs", "openapi.ui_path must be a path like /docs"),
+        ("/do cs", "openapi.ui_path must be a path like /docs"),
+        (r#"/docs"x"#, "openapi.ui_path must be a path like /docs"),
+        ("/docs?x", "openapi.ui_path must be a path like /docs"),
+        ("/openapi.json", "another served path"),
+        ("/health", "another served path"),
+        ("/metrics", "another served path"),
+        ("/livez", "another served path"),
+        ("/readyz", "another served path"),
+        ("/diagnostics", "outside /diagnostics"),
+        ("/diagnostics/ui", "outside /diagnostics"),
+    ] {
+        let mut config = AlloyConfig::default();
+        config.openapi.ui = true;
+        config.openapi.ui_path = ui_path.into();
+        let error = config.validate(features).unwrap_err().to_string();
+        assert!(error.contains(expected), "{ui_path}: {error}");
+    }
+
+    let mut config = AlloyConfig::default();
+    config.openapi.ui = true;
+    config.openapi.ui_path = "/api".into();
+    config.openapi.path = "/api/openapi.json".into();
+    let error = config.validate(features).unwrap_err().to_string();
+    assert!(error.contains("another served path"), "{error}");
+    config.openapi.ui_path = "/api/docs".into();
+    config.validate(features).unwrap();
+
+    let mut config = AlloyConfig::default();
+    config.openapi.ui_path = "not checked while the UI is off".into();
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn a_public_openapi_ui_is_flagged() {
+    let mut config = AlloyConfig::default();
+    config.openapi.ui = true;
+    config.openapi.public = true;
+    let warnings = config.validate(&["openapi", "openapi-ui"]).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("documentation UI unauthenticated")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
 fn gateway_modes_require_verified_identities() {
     let features = &["edge"];
     let mut config = AlloyConfig::default();
@@ -307,6 +740,156 @@ fn warnings_flag_risky_but_valid_choices() {
     );
 }
 
+/// A TLS configuration with required client authentication, plus `extra`
+/// variables.
+fn tls_config(extra: &[(&str, &str)]) -> AlloyConfig {
+    let mut vars = vec![
+        ("FERRUM_ALLOY_TLS_CERT_PATH", "c"),
+        ("FERRUM_ALLOY_TLS_KEY_PATH", "k"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CA_PATH", "ca.pem"),
+        ("FERRUM_ALLOY_TLS_CLIENT_AUTH", "required"),
+    ];
+    vars.extend_from_slice(extra);
+    load_from(None, env(&vars), &Overrides::default())
+        .unwrap()
+        .0
+}
+
+#[test]
+fn client_crl_settings_default_to_fail_closed_and_read_the_environment() {
+    let config = tls_config(&[]);
+    let tls = config.server.tls.as_ref().unwrap();
+    assert!(tls.client_crl_paths.is_empty());
+    assert_eq!(tls.client_crl_depth, CrlDepth::Chain);
+    assert_eq!(tls.client_crl_unknown_status, CrlUnknownStatus::Deny);
+    assert_eq!(tls.client_crl_expiration, CrlExpiration::Enforce);
+    assert!(config.validate(&["tls"]).unwrap().is_empty());
+
+    let config = tls_config(&[
+        (
+            "FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS",
+            "root.crl, intermediate.crl",
+        ),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH", "end_entity"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS", "allow"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION", "ignore"),
+    ]);
+    let tls = config.server.tls.as_ref().unwrap();
+    let expected: Vec<PathBuf> = vec!["root.crl".into(), "intermediate.crl".into()];
+    assert_eq!(tls.client_crl_paths, expected);
+    assert_eq!(tls.client_crl_depth, CrlDepth::EndEntity);
+    assert_eq!(tls.client_crl_unknown_status, CrlUnknownStatus::Allow);
+    assert_eq!(tls.client_crl_expiration, CrlExpiration::Ignore);
+    let warnings = config.validate(&["tls"]).unwrap();
+    let text: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(
+        text.iter().any(|w| w.contains("unknown_status = allow")),
+        "{text:?}"
+    );
+    assert!(
+        text.iter().any(|w| w.contains("expiration = ignore")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn client_crl_settings_are_validated() {
+    let mut config = tls_config(&[("FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS", "ca.crl")]);
+    if let Some(tls) = config.server.tls.as_mut() {
+        tls.client_auth = ClientAuth::None;
+        tls.client_ca_path = None;
+    }
+    let error = config.validate(&["tls"]).unwrap_err().to_string();
+    assert!(
+        error.contains("server.tls.client_crl_paths is set but client_auth is none"),
+        "{error}"
+    );
+
+    for (name, value) in [
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH", "end_entity"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS", "allow"),
+        ("FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION", "ignore"),
+    ] {
+        let error = tls_config(&[(name, value)])
+            .validate(&["tls"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("has no effect without client_crl_paths"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn tls_reload_interval_defaults_to_a_minute_and_is_validated() {
+    let config = tls_config(&[]);
+    let tls = config.server.tls.as_ref().unwrap();
+    assert_eq!(tls.reload_interval_ms, 60_000);
+
+    for (value, valid) in [
+        ("0", true),
+        ("99", false),
+        ("100", true),
+        ("86400000", true),
+        ("86400001", false),
+    ] {
+        let config = tls_config(&[("FERRUM_ALLOY_TLS_RELOAD_INTERVAL_MS", value)]);
+        let tls = config.server.tls.as_ref().unwrap();
+        assert_eq!(tls.reload_interval_ms.to_string(), value);
+        match config.validate(&["tls"]) {
+            Ok(_) => assert!(valid, "{value} was accepted"),
+            Err(error) => {
+                let error = error.to_string();
+                assert!(!valid, "{value}: {error}");
+                assert!(error.contains("reload_interval_ms"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn diagnostics_retention_bounds_are_validated() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.diagnostics.max_records, 1_024);
+    assert_eq!(config.diagnostics.max_bytes, 1024 * 1024);
+
+    let vars = [
+        ("FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS", "65536"),
+        ("FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES", "4096"),
+    ];
+    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+    assert_eq!(config.diagnostics.max_records, 65_536);
+    config.validate(NO_FEATURES).unwrap();
+
+    for (name, value, expected) in [
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS",
+            "0",
+            "diagnostics.max_records must be within 1..=65536",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS",
+            "65537",
+            "diagnostics.max_records must be within 1..=65536",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES",
+            "4095",
+            "diagnostics.max_bytes must be within 4096..=67108864",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES",
+            "67108865",
+            "diagnostics.max_bytes must be within 4096..=67108864",
+        ),
+    ] {
+        let (config, _) = load_from(None, env(&[(name, value)]), &Overrides::default()).unwrap();
+        let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+        assert!(error.contains(expected), "{name}={value}: {error}");
+    }
+}
+
 #[test]
 fn every_environment_variable_is_documented() {
     let docs = std::fs::read_to_string(
@@ -318,6 +901,12 @@ fn every_environment_variable_is_documented() {
             docs.contains(var.name),
             "{} is missing from docs/configuration.md",
             var.name
+        );
+    }
+    for name in CLI_ENV_VARS {
+        assert!(
+            docs.contains(*name),
+            "{name} is missing from docs/configuration.md"
         );
     }
     assert!(docs.contains("FERRUM_ALLOY_CONFIG"));
@@ -333,6 +922,7 @@ fn env_var_table_maps_to_real_config_paths() {
             ferrum_alloy::config::EnvKind::Bool => "false",
             ferrum_alloy::config::EnvKind::List => match var.name {
                 "FERRUM_ALLOY_TRUSTED_NETWORKS" => "10.0.0.0/8",
+                "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => "10.0.0.0/8",
                 _ => "a,b",
             },
             _ => match var.name {
@@ -342,6 +932,9 @@ fn env_var_table_maps_to_real_config_paths() {
                 "FERRUM_ALLOY_SERVER_TIMING" => "disabled",
                 "FERRUM_ALLOY_EDGE_MODE" => "standalone",
                 "FERRUM_ALLOY_TLS_CLIENT_AUTH" => "none",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH" => "end_entity",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS" => "allow",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION" => "ignore",
                 _ => "value",
             },
         };

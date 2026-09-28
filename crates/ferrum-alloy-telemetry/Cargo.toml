@@ -6,14 +6,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["axum", "tower", "tracing", "opentelemetry", "observability"]
+categories = ["web-programming::http-server", "development-tools::debugging"]
 publish.workspace = true
+# Packaged files (docs/release.md). Tests read repository fixtures outside
+# this crate, so they stay out.
+include = ["/src/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
 
 [features]
 default = ["axum", "subscriber"]
 # Read axum's `MatchedPath` route template and `ConnectInfo` peer address.
 axum = ["dep:axum"]
 # Explicit, application-invoked global subscriber initialization helpers.
-subscriber = ["dep:tracing-subscriber"]
+subscriber = ["dep:tracing-subscriber", "dep:serde_json"]
 # OpenTelemetry bridge and bounded OTLP/HTTP export.
 # Extract SPIFFE / DNS SAN identity from verified peer certificates.
 x509 = ["dep:x509-parser"]
@@ -43,7 +49,9 @@ tracing = { workspace = true, features = ["std"] }
 
 axum = { workspace = true, optional = true, features = ["matched-path", "tokio"] }
 x509-parser = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true, features = ["std", "fmt", "json", "env-filter", "registry", "ansi", "smallvec"] }
+tracing-subscriber = { workspace = true, optional = true, features = ["std", "fmt", "env-filter", "registry", "ansi", "smallvec"] }
+# Number formatting for the JSON log layer (already a tracing-subscriber dependency).
+serde_json = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, optional = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, optional = true, features = ["trace", "http-proto", "reqwest-blocking-client"] }
@@ -63,8 +71,10 @@ tower = { workspace = true, features = ["util"] }
 serde_json = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
-tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt"] }
+# `json`: the JSON log layer's tests compare it with tracing-subscriber's formatter.
+tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt", "json"] }
 rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,22 @@
+
+[auth.jwt]
+# Your identity provider. Tokens must carry this `iss`, one of these `aud`
+# values, and an unexpired `exp`. Override with FERRUM_ALLOY_JWT_ISSUER,
+# FERRUM_ALLOY_JWT_AUDIENCES, and FERRUM_ALLOY_JWT_JWKS_URL.
+issuer = "https://auth.example.com/"
+audiences = ["{{name}}"]
+# Asymmetric algorithms only; list just the ones your issuer signs with.
+# Many issuers use RS256. The tests sign with ES256 and set it themselves.
+algorithms = ["ES256"]
+# Keys come only from here: https, or http to loopback.
+jwks_url = "https://auth.example.com/.well-known/jwks.json"
+# A fetched key set is trusted for at most jwks_max_age_ms (a shorter
+# Cache-Control: max-age wins) and then revalidated, so removed keys stop
+# verifying. While revalidation fails, known keys keep verifying for at most
+# jwks_max_stale_ms more; then requests fail closed with 503. Both are capped
+# at 24 hours, and jwks_min_refresh_interval_ms must not exceed
+# jwks_max_age_ms.
+jwks_min_refresh_interval_ms = 60000
+jwks_max_age_ms = 300000
+jwks_max_stale_ms = 300000
+jwks_timeout_ms = 5000

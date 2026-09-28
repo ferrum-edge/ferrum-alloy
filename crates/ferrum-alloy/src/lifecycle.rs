@@ -24,7 +24,6 @@ struct Inner {
     shutdown: CancellationToken,
     stop_accepting: CancellationToken,
     drain_connections: CancellationToken,
-    force_close: CancellationToken,
     metrics: Arc<Metrics>,
 }
 
@@ -38,7 +37,6 @@ impl Lifecycle {
                 shutdown: CancellationToken::new(),
                 stop_accepting: CancellationToken::new(),
                 drain_connections: CancellationToken::new(),
-                force_close: CancellationToken::new(),
                 metrics,
             }),
         }
@@ -76,10 +74,6 @@ impl Lifecycle {
 
     pub(crate) fn drain_connections(&self) -> &CancellationToken {
         &self.inner.drain_connections
-    }
-
-    pub(crate) fn force_close(&self) -> &CancellationToken {
-        &self.inner.force_close
     }
 }
 

@@ -8,12 +8,20 @@
 //! 4. defaults.
 //!
 //! Invalid supplied configuration is rejected: unknown keys, unknown
-//! `FERRUM_ALLOY_*` variables, unparsable values, and unsafe combinations are
+//! `FERRUM_ALLOY_*` variables (other than the command's own,
+//! [`CLI_ENV_VARS`]), unparsable values, and unsafe combinations are
 //! errors, never silent fallbacks. Every section parses regardless of which
 //! Cargo features are compiled, so enabling a section whose feature is missing
 //! is reported instead of ignored.
 //!
 //! Secrets are held in [`Secret`] and never printed.
+//!
+//! The configuration structs are `#[non_exhaustive]`, so adding a setting is
+//! not a breaking change. Outside this crate, start from `Default` (or
+//! [`TlsSettings::new`] and [`JwtSettings::new`], whose sections have
+//! required fields) and assign the fields to change. The enums are
+//! `#[non_exhaustive]` too, so a `match` on them outside this crate needs a
+//! wildcard arm.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -22,13 +30,28 @@ use std::path::{Path, PathBuf};
 
 use ferrum_alloy_telemetry::init::LoggingConfig;
 use ferrum_alloy_telemetry::{TelemetryConfig, TrustedPeersConfig};
+use ipnet::IpNet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Maximum configuration file size.
 pub const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Upper bound, in milliseconds, of `auth.jwt.jwks_max_age_ms` and
+/// `auth.jwt.jwks_max_stale_ms`: 24 hours.
+pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// The environment variable naming the configuration file.
 pub const CONFIG_FILE_ENV: &str = "FERRUM_ALLOY_CONFIG";
+
+/// The credential `ferrum-alloy diagnose --url` sends to a service's
+/// diagnostic retrieval endpoint. A variable of the command, not of service
+/// configuration (see [`CLI_ENV_VARS`]).
+pub const DIAGNOSTICS_TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
+
+/// `FERRUM_ALLOY_*` variables that belong to the `ferrum-alloy` command
+/// rather than to service configuration. Loading configuration ignores them
+/// instead of rejecting them as unknown, and never reads their values.
+pub const CLI_ENV_VARS: &[&str] = &[DIAGNOSTICS_TOKEN_ENV];
 
 /// A secret value. `Debug`, `Display`, and `Serialize` never reveal it.
 #[derive(Clone, PartialEq, Eq)]
@@ -73,6 +96,7 @@ impl<'de> Deserialize<'de> for Secret {
 /// Complete Alloy configuration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct AlloyConfig {
     /// Service identity.
     pub service: ServiceConfig,
@@ -106,11 +130,15 @@ pub struct AlloyConfig {
     pub auth: AuthSettings,
     /// Outbound HTTP client (feature `http-client`).
     pub http_client: HttpClientSettings,
+    /// Evidence retained for authorized diagnostic retrieval (feature
+    /// `diagnostics`).
+    pub diagnostics: DiagnosticsSettings,
 }
 
 /// Service identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ServiceConfig {
     /// Service name. The builder's name is an explicit override.
     pub name: Option<String>,
@@ -133,6 +161,7 @@ impl Default for ServiceConfig {
 /// Application listener configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ServerConfig {
     /// Listen address. Defaults to loopback; bind `0.0.0.0` explicitly in
     /// containers.
@@ -149,6 +178,16 @@ pub struct ServerConfig {
     pub http2_max_concurrent_streams: u32,
     /// Time allowed to receive a request head (slow-header protection).
     pub header_read_timeout_ms: u64,
+    /// Time a connection may stay open with no request in flight and no
+    /// response data written after its first request, before it is closed
+    /// (HTTP/2 `GOAWAY`). Behind a load balancer that pools connections, set
+    /// it above the balancer's idle timeout.
+    pub idle_timeout_ms: u64,
+    /// Time a connection may go without writing any response data while
+    /// response data waits to be written (the peer withholds HTTP/2
+    /// `WINDOW_UPDATE` or keeps a zero TCP receive window), before it is
+    /// closed (HTTP/2 `GOAWAY`).
+    pub write_stall_timeout_ms: u64,
     /// Deadline for producing response *headers*. Never applied to response
     /// body streaming (SSE) or upgraded connections. `0` disables it.
     pub request_timeout_ms: u64,
@@ -171,6 +210,8 @@ impl Default for ServerConfig {
             max_connections: 10_000,
             http2_max_concurrent_streams: 256,
             header_read_timeout_ms: 10_000,
+            idle_timeout_ms: 60_000,
+            write_stall_timeout_ms: 60_000,
             request_timeout_ms: 30_000,
             max_in_flight_requests: 0,
             admission_wait_timeout_ms: 0,
@@ -182,6 +223,7 @@ impl Default for ServerConfig {
 /// Client certificate policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ClientAuth {
     /// No client certificates.
     #[default]
@@ -195,6 +237,7 @@ pub enum ClientAuth {
 /// TLS listener settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TlsSettings {
     /// PEM certificate chain.
     pub cert_path: PathBuf,
@@ -209,15 +252,99 @@ pub struct TlsSettings {
     /// TLS handshake timeout.
     #[serde(default = "default_handshake_timeout_ms")]
     pub handshake_timeout_ms: u64,
+    /// PEM or DER certificate revocation lists (CRLs) checked against
+    /// client certificates. Empty disables revocation checking.
+    #[serde(default)]
+    pub client_crl_paths: Vec<PathBuf>,
+    /// Which client certificates have their revocation status checked.
+    #[serde(default)]
+    pub client_crl_depth: CrlDepth,
+    /// How a certificate is treated when no configured CRL covers it.
+    #[serde(default)]
+    pub client_crl_unknown_status: CrlUnknownStatus,
+    /// Whether a CRL past its `nextUpdate` time is rejected.
+    #[serde(default)]
+    pub client_crl_expiration: CrlExpiration,
+    /// How often the certificate chain, private key, client CA bundle, and
+    /// CRLs are read again and, when they changed and validate, swapped in
+    /// for new handshakes. `0` disables reloading.
+    #[serde(default = "default_reload_interval_ms")]
+    pub reload_interval_ms: u64,
+}
+
+impl TlsSettings {
+    /// Settings for the given certificate chain and private key, with every
+    /// other setting at its default, as when only `cert_path` and `key_path`
+    /// are configured.
+    pub fn new(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+            client_ca_path: None,
+            client_auth: ClientAuth::default(),
+            handshake_timeout_ms: default_handshake_timeout_ms(),
+            client_crl_paths: Vec::new(),
+            client_crl_depth: CrlDepth::default(),
+            client_crl_unknown_status: CrlUnknownStatus::default(),
+            client_crl_expiration: CrlExpiration::default(),
+            reload_interval_ms: default_reload_interval_ms(),
+        }
+    }
+}
+
+/// Which certificates of a client chain are checked against the CRLs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CrlDepth {
+    /// The leaf and every intermediate. Trust anchors are never checked.
+    #[default]
+    Chain,
+    /// Only the leaf.
+    EndEntity,
+}
+
+/// Policy for a certificate whose revocation status no configured CRL
+/// determines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CrlUnknownStatus {
+    /// Refuse the handshake.
+    #[default]
+    Deny,
+    /// Accept the certificate.
+    Allow,
+}
+
+/// Policy for a CRL whose `nextUpdate` time has passed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CrlExpiration {
+    /// Fail startup, and refuse handshakes once a loaded CRL expires.
+    #[default]
+    Enforce,
+    /// Keep using the CRL.
+    Ignore,
 }
 
 fn default_handshake_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_reload_interval_ms() -> u64 {
+    60_000
+}
+
+/// Accepted nonzero `server.tls.reload_interval_ms` values: 100 ms to one
+/// day.
+const TLS_RELOAD_INTERVAL_MS: std::ops::RangeInclusive<u64> = 100..=24 * 60 * 60 * 1000;
+
 /// Graceful shutdown budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ShutdownConfig {
     /// After a shutdown signal, keep accepting while readiness reports
     /// `draining`, so load balancers stop routing first.
@@ -241,6 +368,7 @@ impl Default for ShutdownConfig {
 /// Management listener.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManagementConfig {
     /// Serve the management listener.
     pub enabled: bool,
@@ -248,6 +376,8 @@ pub struct ManagementConfig {
     pub bind: SocketAddr,
     /// Bearer token for detailed health, metrics, and OpenAPI.
     pub token: Option<Secret>,
+    /// Request rate limits.
+    pub rate_limit: ManagementRateLimit,
 }
 
 impl Default for ManagementConfig {
@@ -256,6 +386,69 @@ impl Default for ManagementConfig {
             enabled: true,
             bind: SocketAddr::from(([127, 0, 0, 1], 9090)),
             token: None,
+            rate_limit: ManagementRateLimit::default(),
+        }
+    }
+}
+
+/// Upper bound of `management.rate_limit.max_clients`.
+pub const MAX_RATE_LIMIT_CLIENTS: usize = 65_536;
+
+/// Bounds of `management.rate_limit.ipv6_prefix_len`.
+pub const RATE_LIMIT_IPV6_PREFIX_LENS: std::ops::RangeInclusive<u8> = 48..=128;
+
+/// Request rate limits of the management listener.
+///
+/// Probes (`/livez` and `/readyz`) and every other path have separate
+/// budgets and client tables, so traffic to one never throttles the other.
+/// Endpoint requests are charged to a token bucket of their client and one
+/// of the whole listener; probes only to one of their client. A client is
+/// the transport peer address (an IPv6 address by its `ipv6_prefix_len`
+/// prefix), never a request header. Peers in `exempt_networks` are not
+/// limited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct ManagementRateLimit {
+    /// Enforce the limits.
+    pub enabled: bool,
+    /// Sustained requests per second from one client, other than probes.
+    pub requests_per_second: u32,
+    /// Requests one client may send at once, other than probes.
+    pub burst: u32,
+    /// Sustained requests per second from all clients together, other than
+    /// probes.
+    pub global_requests_per_second: u32,
+    /// Requests all clients together may send at once, other than probes.
+    pub global_burst: u32,
+    /// Sustained probe requests per second from one client.
+    pub probe_requests_per_second: u32,
+    /// Probe requests one client may send at once.
+    pub probe_burst: u32,
+    /// Clients tracked individually, per budget. When a table is full of
+    /// clients still spending their budget, endpoint requests from further
+    /// clients share one per-client budget and probes from further clients
+    /// are served untracked.
+    pub max_clients: usize,
+    /// Leading bits of an IPv6 peer address that identify one client.
+    pub ipv6_prefix_len: u8,
+    /// Peer networks that bypass the limits entirely. Empty by default.
+    pub exempt_networks: Vec<IpNet>,
+}
+
+impl Default for ManagementRateLimit {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            requests_per_second: 10,
+            burst: 20,
+            global_requests_per_second: 100,
+            global_burst: 200,
+            probe_requests_per_second: 20,
+            probe_burst: 40,
+            max_clients: 1_024,
+            ipv6_prefix_len: 64,
+            exempt_networks: Vec::new(),
         }
     }
 }
@@ -263,6 +456,7 @@ impl Default for ManagementConfig {
 /// Health endpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HealthConfig {
     /// Also serve minimal liveness/readiness on the application listener
     /// (for gateway health checks). They take precedence over app routes.
@@ -292,6 +486,7 @@ impl Default for HealthConfig {
 /// OpenTelemetry OTLP/HTTP export settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct OtlpSettings {
     /// Export traces.
     pub enabled: bool,
@@ -335,6 +530,7 @@ impl Default for OtlpSettings {
 /// How the service relates to Ferrum Edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EdgeMode {
     /// No gateway assumptions; direct requests work normally.
     #[default]
@@ -348,6 +544,7 @@ pub enum EdgeMode {
 /// Ferrum Edge integration settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct EdgeSettings {
     /// Deployment mode.
     pub mode: EdgeMode,
@@ -359,6 +556,7 @@ pub struct EdgeSettings {
 /// CORS settings. Nothing is permitted unless listed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct CorsSettings {
     /// Enable CORS handling.
     pub enabled: bool,
@@ -377,6 +575,7 @@ pub struct CorsSettings {
 /// Compression settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct CompressionSettings {
     /// Enable response compression. Compressing responses that mix secrets
     /// with attacker-reflected input enables BREACH-style attacks; enable it
@@ -398,6 +597,7 @@ impl Default for CompressionSettings {
 /// OpenAPI serving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct OpenApiSettings {
     /// Serve the registered document on the management listener.
     pub serve: bool,
@@ -405,6 +605,11 @@ pub struct OpenApiSettings {
     pub path: String,
     /// Also serve it unauthenticated on the application listener.
     pub public: bool,
+    /// Serve the documentation UI (feature `openapi-ui`) wherever the
+    /// document is served, under the same access policy.
+    pub ui: bool,
+    /// Path of the documentation UI page. Its assets are served beneath it.
+    pub ui_path: String,
 }
 
 impl Default for OpenApiSettings {
@@ -413,6 +618,8 @@ impl Default for OpenApiSettings {
             serve: true,
             path: "/openapi.json".to_owned(),
             public: false,
+            ui: false,
+            ui_path: "/docs".to_owned(),
         }
     }
 }
@@ -420,6 +627,7 @@ impl Default for OpenApiSettings {
 /// PostgreSQL pool settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct DatabaseSettings {
     /// Connection URL (secret).
     pub url: Option<Secret>,
@@ -461,6 +669,7 @@ impl Default for DatabaseSettings {
 /// Authentication settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct AuthSettings {
     /// JWT bearer verification.
     pub jwt: Option<JwtSettings>,
@@ -469,6 +678,7 @@ pub struct AuthSettings {
 /// JWT verification policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct JwtSettings {
     /// Required `iss`.
     pub issuer: String,
@@ -480,9 +690,23 @@ pub struct JwtSettings {
     /// JWKS URL (https, or http to loopback only).
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Minimum interval between JWKS refreshes.
+    /// Minimum interval between JWKS refresh attempts, whatever triggers
+    /// them (expiry or unknown `kid`). Also the lower bound of the key-set
+    /// lifetime.
     #[serde(default = "default_jwks_refresh_ms")]
     pub jwks_min_refresh_interval_ms: u64,
+    /// Maximum time a fetched key set is trusted before it must be
+    /// revalidated, even for known `kid`s. A `Cache-Control: max-age` on the
+    /// JWKS response shortens it, never extends it. At most
+    /// [`MAX_JWKS_LIFETIME_MS`].
+    #[serde(default = "default_jwks_max_age_ms")]
+    pub jwks_max_age_ms: u64,
+    /// How long an expired key set keeps verifying known `kid`s while it is
+    /// revalidated or while refreshes fail. After that, verification fails
+    /// closed with `503 auth-unavailable`. `0` fails closed as soon as the
+    /// key set expires. At most [`MAX_JWKS_LIFETIME_MS`].
+    #[serde(default = "default_jwks_max_stale_ms")]
+    pub jwks_max_stale_ms: u64,
     /// Maximum JWKS response size.
     #[serde(default = "default_jwks_max_bytes")]
     pub jwks_max_bytes: usize,
@@ -494,11 +718,37 @@ pub struct JwtSettings {
     pub leeway_seconds: u64,
 }
 
+impl JwtSettings {
+    /// A policy requiring `issuer` and accepting `audiences`, with every
+    /// other setting at its default, as when only `issuer` and `audiences`
+    /// are configured. `jwks_url` must still be set.
+    pub fn new(issuer: impl Into<String>, audiences: Vec<String>) -> Self {
+        Self {
+            issuer: issuer.into(),
+            audiences,
+            algorithms: default_algorithms(),
+            jwks_url: None,
+            jwks_min_refresh_interval_ms: default_jwks_refresh_ms(),
+            jwks_max_age_ms: default_jwks_max_age_ms(),
+            jwks_max_stale_ms: default_jwks_max_stale_ms(),
+            jwks_max_bytes: default_jwks_max_bytes(),
+            jwks_timeout_ms: default_jwks_timeout_ms(),
+            leeway_seconds: default_leeway(),
+        }
+    }
+}
+
 fn default_algorithms() -> Vec<String> {
     vec!["RS256".to_owned()]
 }
 fn default_jwks_refresh_ms() -> u64 {
     60_000
+}
+fn default_jwks_max_age_ms() -> u64 {
+    300_000
+}
+fn default_jwks_max_stale_ms() -> u64 {
+    300_000
 }
 fn default_jwks_max_bytes() -> usize {
     256 * 1024
@@ -513,6 +763,7 @@ fn default_leeway() -> u64 {
 /// Outbound HTTP client settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HttpClientSettings {
     /// Connection establishment timeout.
     pub connect_timeout_ms: u64,
@@ -533,6 +784,38 @@ impl Default for HttpClientSettings {
             request_timeout_ms: 10_000,
             max_redirects: 0,
             propagate_trace_context_to: Vec::new(),
+        }
+    }
+}
+
+/// Upper bound of `diagnostics.max_records`.
+pub const MAX_DIAGNOSTICS_RECORDS: usize = 65_536;
+
+/// Bounds of `diagnostics.max_bytes`: 4 KiB to 64 MiB.
+pub const DIAGNOSTICS_BYTES: std::ops::RangeInclusive<usize> = 4_096..=64 * 1024 * 1024;
+
+/// Retention of request evidence for authorized diagnostic retrieval
+/// (feature `diagnostics`).
+///
+/// It applies only when the application installs a
+/// `diagnostics::DiagnosticsAuthorizer`; otherwise nothing is retained. The
+/// evidence lives in memory in this process. When either bound would be
+/// exceeded, the oldest records are evicted first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct DiagnosticsSettings {
+    /// Most requests retained.
+    pub max_records: usize,
+    /// Most estimated bytes retained.
+    pub max_bytes: usize,
+}
+
+impl Default for DiagnosticsSettings {
+    fn default() -> Self {
+        Self {
+            max_records: 1_024,
+            max_bytes: 1024 * 1024,
         }
     }
 }
@@ -583,17 +866,34 @@ env_vars! {
     "FERRUM_ALLOY_REQUEST_BODY_LIMIT_BYTES" => ["server", "request_body_limit_bytes"]: Uint,
     "FERRUM_ALLOY_REQUEST_TIMEOUT_MS" => ["server", "request_timeout_ms"]: Uint,
     "FERRUM_ALLOY_HEADER_READ_TIMEOUT_MS" => ["server", "header_read_timeout_ms"]: Uint,
+    "FERRUM_ALLOY_IDLE_TIMEOUT_MS" => ["server", "idle_timeout_ms"]: Uint,
+    "FERRUM_ALLOY_WRITE_STALL_TIMEOUT_MS" => ["server", "write_stall_timeout_ms"]: Uint,
     "FERRUM_ALLOY_MAX_CONNECTIONS" => ["server", "max_connections"]: Uint,
     "FERRUM_ALLOY_MAX_IN_FLIGHT_REQUESTS" => ["server", "max_in_flight_requests"]: Uint,
     "FERRUM_ALLOY_TLS_CERT_PATH" => ["server", "tls", "cert_path"]: Str,
     "FERRUM_ALLOY_TLS_KEY_PATH" => ["server", "tls", "key_path"]: Str,
     "FERRUM_ALLOY_TLS_CLIENT_CA_PATH" => ["server", "tls", "client_ca_path"]: Str,
     "FERRUM_ALLOY_TLS_CLIENT_AUTH" => ["server", "tls", "client_auth"]: Str,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_PATHS" => ["server", "tls", "client_crl_paths"]: List,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH" => ["server", "tls", "client_crl_depth"]: Str,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS" => ["server", "tls", "client_crl_unknown_status"]: Str,
+    "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION" => ["server", "tls", "client_crl_expiration"]: Str,
+    "FERRUM_ALLOY_TLS_RELOAD_INTERVAL_MS" => ["server", "tls", "reload_interval_ms"]: Uint,
     "FERRUM_ALLOY_SHUTDOWN_READINESS_GRACE_MS" => ["shutdown", "readiness_grace_ms"]: Uint,
     "FERRUM_ALLOY_SHUTDOWN_DRAIN_TIMEOUT_MS" => ["shutdown", "drain_timeout_ms"]: Uint,
     "FERRUM_ALLOY_MANAGEMENT_ENABLED" => ["management", "enabled"]: Bool,
     "FERRUM_ALLOY_MANAGEMENT_BIND" => ["management", "bind"]: Str,
     "FERRUM_ALLOY_MANAGEMENT_TOKEN" => ["management", "token"]: Secret,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_ENABLED" => ["management", "rate_limit", "enabled"]: Bool,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_REQUESTS_PER_SECOND" => ["management", "rate_limit", "requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_BURST" => ["management", "rate_limit", "burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_REQUESTS_PER_SECOND" => ["management", "rate_limit", "global_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_GLOBAL_BURST" => ["management", "rate_limit", "global_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_REQUESTS_PER_SECOND" => ["management", "rate_limit", "probe_requests_per_second"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_PROBE_BURST" => ["management", "rate_limit", "probe_burst"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS" => ["management", "rate_limit", "max_clients"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN" => ["management", "rate_limit", "ipv6_prefix_len"]: Uint,
+    "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => ["management", "rate_limit", "exempt_networks"]: List,
     "FERRUM_ALLOY_LOG_FORMAT" => ["logging", "format"]: Str,
     "FERRUM_ALLOY_LOG_FILTER" => ["logging", "filter"]: Str,
     "FERRUM_ALLOY_OTLP_ENABLED" => ["otlp", "enabled"]: Bool,
@@ -611,7 +911,11 @@ env_vars! {
     "FERRUM_ALLOY_JWT_ISSUER" => ["auth", "jwt", "issuer"]: Str,
     "FERRUM_ALLOY_JWT_AUDIENCES" => ["auth", "jwt", "audiences"]: List,
     "FERRUM_ALLOY_JWT_JWKS_URL" => ["auth", "jwt", "jwks_url"]: Str,
+    "FERRUM_ALLOY_JWT_JWKS_MAX_AGE_MS" => ["auth", "jwt", "jwks_max_age_ms"]: Uint,
+    "FERRUM_ALLOY_JWT_JWKS_MAX_STALE_MS" => ["auth", "jwt", "jwks_max_stale_ms"]: Uint,
     "FERRUM_ALLOY_CORS_ALLOWED_ORIGINS" => ["cors", "allowed_origins"]: List,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS" => ["diagnostics", "max_records"]: Uint,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES" => ["diagnostics", "max_bytes"]: Uint,
 }
 
 /// Configuration errors.
@@ -625,12 +929,20 @@ pub enum ConfigError {
         /// Reason.
         message: String,
     },
-    /// The file is not valid TOML.
-    #[error("configuration file {path} is not valid TOML: {message}")]
+    /// The file is not valid TOML. The message never quotes the file's
+    /// contents, which may hold secrets.
+    #[error(
+        "configuration file {path} is not valid TOML{}: {message}",
+        location_suffix(.line, .column)
+    )]
     Syntax {
         /// File path.
         path: PathBuf,
-        /// Parser message.
+        /// 1-based line of the error, when known.
+        line: Option<usize>,
+        /// 1-based column (in characters) of the error, when known.
+        column: Option<usize>,
+        /// Parser message, without source excerpts.
         message: String,
     },
     /// An environment variable is unknown or invalid.
@@ -641,12 +953,176 @@ pub enum ConfigError {
         /// Reason.
         message: String,
     },
-    /// The merged configuration does not match the schema.
+    /// The merged configuration does not match the schema. The message
+    /// names keys and expected types, never the supplied values.
     #[error("invalid configuration: {0}")]
     Schema(String),
     /// Semantic validation failed.
     #[error("invalid configuration:\n  - {}", .0.join("\n  - "))]
     Invalid(Vec<String>),
+}
+
+fn location_suffix(line: &Option<usize>, column: &Option<usize>) -> String {
+    match (*line, *column) {
+        (Some(line), Some(column)) => format!(" at line {line}, column {column}"),
+        (Some(line), None) => format!(" at line {line}"),
+        _ => String::new(),
+    }
+}
+
+/// 1-based line and column (in characters) of byte `offset` in `text`.
+fn line_column(text: &str, offset: usize) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    let before = bytes.get(..offset.min(bytes.len())).unwrap_or_default();
+    let line_start = before
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1);
+    let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+    let current = before.get(line_start..).unwrap_or_default();
+    let column = String::from_utf8_lossy(current).chars().count() + 1;
+    (line, column)
+}
+
+/// A TOML syntax error without the source excerpt that
+/// `toml::de::Error`'s `Display` prints: the offending line may hold a
+/// secret. Only the parser's own message and the location are kept.
+fn syntax_error(path: &Path, text: &str, error: &toml::de::Error) -> ConfigError {
+    let (line, column) = match error.span() {
+        Some(span) => {
+            let (line, column) = line_column(text, span.start);
+            (Some(line), Some(column))
+        }
+        None => (None, None),
+    };
+    let message = error.message().lines().next().unwrap_or_default();
+    ConfigError::Syntax {
+        path: path.to_owned(),
+        line,
+        column,
+        message: message.to_owned(),
+    }
+}
+
+/// `true` for text that is safe to echo as a key name: a short bare TOML
+/// key. Anything else (quoted keys with URLs, long tokens) is redacted,
+/// including keys with at least 16 bytes mixing letters and digits, or any
+/// key at least 33 bytes long, which look more like tokens than key names.
+fn is_plain_key(key: &str) -> bool {
+    let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    let token_like = key.len() >= 33
+        || (key.len() >= 16
+            && key.bytes().any(|b| b.is_ascii_alphabetic())
+            && key.bytes().any(|b| b.is_ascii_digit()));
+    !key.is_empty() && key.len() <= 64 && !token_like && key.bytes().all(plain)
+}
+
+fn redact_segment(segment: &str) -> &str {
+    if is_plain_key(segment) {
+        segment
+    } else {
+        "<redacted>"
+    }
+}
+
+/// Rewrites a serde/toml schema error so it names keys and expected types
+/// but never a supplied value. serde's standard messages quote the value
+/// (`invalid type: string "postgres://u:pw@db", expected ...`), and
+/// `toml::de::Error`'s `Display` appends the key path.
+fn schema_error(error: &toml::de::Error) -> ConfigError {
+    let message = error.message();
+    // With no source input, `Display` prints the message and then, when the
+    // failing key is known, "in `a.b.c`". The message is stripped whole
+    // rather than split into lines, because a supplied value or key may
+    // itself hold a newline.
+    let rendered = error.to_string();
+    let path: Vec<&str> = rendered
+        .strip_prefix(message)
+        .and_then(|rest| rest.strip_prefix("\nin `"))
+        .and_then(|rest| rest.strip_suffix("`\n"))
+        .map(|path| path.split('.').collect())
+        .unwrap_or_default();
+    let mut redacted = redact_schema_message(message, &path);
+    if !path.is_empty() {
+        let segments: Vec<&str> = path.iter().copied().map(redact_segment).collect();
+        redacted.push_str(&format!(" (at `{}`)", segments.join(".")));
+    }
+    ConfigError::Schema(redacted)
+}
+
+/// The `", expected ..."` part of an `invalid type` or `invalid value`
+/// message, or nothing. serde quotes the value with escapes and puts the
+/// schema's expectation last, so the last separator is the real one even
+/// when the value contains the same text.
+fn expectation(message: &str) -> &str {
+    message
+        .rfind(", expected ")
+        .and_then(|at| message.get(at..))
+        .filter(|tail| !tail.chars().any(char::is_control))
+        .unwrap_or_default()
+}
+
+/// Stands in for a supplied variant or key when asking the schema what it
+/// expects. It holds no backtick and no `, expected `.
+const PROBE: &str = "?";
+
+/// The schema's own text after an unknown variant at `path` (`field` false),
+/// or after an unknown key in the table at `path` (`field` true), such as
+/// `, expected one of ...` or `, there are no fields`. It comes from
+/// deserializing a table that holds only [`PROBE`], so it never contains
+/// supplied text.
+fn schema_expectation(path: &[&str], field: bool) -> Option<String> {
+    let mut table = toml::Table::new();
+    let prefix = if field {
+        let mut at = path.to_vec();
+        at.push(PROBE);
+        insert(&mut table, &at, toml::Value::Integer(0));
+        format!("unknown field `{PROBE}`")
+    } else {
+        insert(&mut table, path, toml::Value::String(PROBE.to_owned()));
+        format!("unknown variant `{PROBE}`")
+    };
+    let probed: Result<AlloyConfig, _> = toml::Value::Table(table).try_into();
+    let error = probed.err()?;
+    let tail = error.message().strip_prefix(&prefix)?;
+    if tail.chars().any(char::is_control) {
+        return None;
+    }
+    Some(tail.to_owned())
+}
+
+fn redact_schema_message(message: &str, path: &[&str]) -> String {
+    for kind in ["invalid type", "invalid value"] {
+        if message.starts_with(kind) {
+            return format!("{kind} (value redacted){}", expectation(message));
+        }
+    }
+    // serde repeats an unknown variant or key verbatim, and it may hold a
+    // newline or `, expected `. Nothing after the prefix is kept; the valid
+    // variants or keys are asked of the schema instead.
+    if message.starts_with("unknown variant") {
+        let tail = schema_expectation(path, false).unwrap_or_default();
+        return format!("unknown variant (value redacted){tail}");
+    }
+    if let Some(rest) = message.strip_prefix("unknown field `") {
+        let tail = schema_expectation(path, true);
+        // With the schema's text known exactly, the key is what precedes it.
+        let key = tail
+            .as_deref()
+            .and_then(|tail| rest.strip_suffix(tail)?.strip_suffix('`'));
+        let tail = tail.as_deref().unwrap_or_default();
+        return match key {
+            Some(key) if is_plain_key(key) => format!("unknown field `{key}`{tail}"),
+            _ => format!("unknown field (key redacted){tail}"),
+        };
+    }
+    // Field names in these come from the schema, not from the input.
+    for kind in ["missing field `", "duplicate field `", "invalid length "] {
+        if message.starts_with(kind) {
+            return message.to_owned();
+        }
+    }
+    "a value does not match the expected type or format".to_owned()
 }
 
 /// Where configuration values came from.
@@ -724,10 +1200,7 @@ pub fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
         )));
     }
     let text = std::fs::read_to_string(path).map_err(|e| read_error(e.to_string()))?;
-    toml::from_str(&text).map_err(|e| ConfigError::Syntax {
-        path: path.to_owned(),
-        message: e.to_string(),
-    })
+    toml::from_str(&text).map_err(|e| syntax_error(path, &text, &e))
 }
 
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
@@ -742,7 +1215,10 @@ where
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with("FERRUM_ALLOY_") || name == CONFIG_FILE_ENV {
+        if !name.starts_with("FERRUM_ALLOY_")
+            || name == CONFIG_FILE_ENV
+            || CLI_ENV_VARS.contains(&name)
+        {
             continue;
         }
         let env_error = |message: String| ConfigError::Env {
@@ -854,7 +1330,7 @@ where
     merge(&mut merged, overrides.values.clone());
     let config: AlloyConfig = toml::Value::Table(merged)
         .try_into()
-        .map_err(|e: toml::de::Error| ConfigError::Schema(e.to_string()))?;
+        .map_err(|e: toml::de::Error| schema_error(&e))?;
     let sources = ConfigSources {
         file: file_path,
         env: env_applied,
@@ -915,6 +1391,11 @@ impl AlloyConfig {
                 "server.header_read_timeout_ms",
                 server.header_read_timeout_ms,
             ),
+            ("server.idle_timeout_ms", server.idle_timeout_ms),
+            (
+                "server.write_stall_timeout_ms",
+                server.write_stall_timeout_ms,
+            ),
             ("shutdown.drain_timeout_ms", self.shutdown.drain_timeout_ms),
             ("health.cache_ttl_ms", self.health.cache_ttl_ms),
             ("health.check_timeout_ms", self.health.check_timeout_ms),
@@ -952,6 +1433,37 @@ impl AlloyConfig {
             if tls.client_auth == ClientAuth::None && tls.client_ca_path.is_some() {
                 error("server.tls.client_ca_path is set but client_auth is none".into());
             }
+            if tls.client_auth == ClientAuth::None && !tls.client_crl_paths.is_empty() {
+                error("server.tls.client_crl_paths is set but client_auth is none".into());
+            }
+            let interval = tls.reload_interval_ms;
+            if interval != 0 && !TLS_RELOAD_INTERVAL_MS.contains(&interval) {
+                error(format!(
+                    "server.tls.reload_interval_ms must be 0 (disabled) or between {} and {}",
+                    TLS_RELOAD_INTERVAL_MS.start(),
+                    TLS_RELOAD_INTERVAL_MS.end()
+                ));
+            }
+            if tls.client_crl_paths.is_empty() {
+                for (name, changed) in [
+                    (
+                        "server.tls.client_crl_depth",
+                        tls.client_crl_depth != CrlDepth::default(),
+                    ),
+                    (
+                        "server.tls.client_crl_unknown_status",
+                        tls.client_crl_unknown_status != CrlUnknownStatus::default(),
+                    ),
+                    (
+                        "server.tls.client_crl_expiration",
+                        tls.client_crl_expiration != CrlExpiration::default(),
+                    ),
+                ] {
+                    if changed {
+                        error(format!("{name} has no effect without client_crl_paths"));
+                    }
+                }
+            }
         }
 
         let management = &self.management;
@@ -969,6 +1481,63 @@ impl AlloyConfig {
             }
             if management.bind == server.bind {
                 error("management.bind must differ from server.bind".into());
+            }
+            let rate = &management.rate_limit;
+            if rate.enabled {
+                for (name, value) in [
+                    (
+                        "management.rate_limit.requests_per_second",
+                        rate.requests_per_second,
+                    ),
+                    ("management.rate_limit.burst", rate.burst),
+                    (
+                        "management.rate_limit.global_requests_per_second",
+                        rate.global_requests_per_second,
+                    ),
+                    ("management.rate_limit.global_burst", rate.global_burst),
+                    (
+                        "management.rate_limit.probe_requests_per_second",
+                        rate.probe_requests_per_second,
+                    ),
+                    ("management.rate_limit.probe_burst", rate.probe_burst),
+                ] {
+                    if value == 0 {
+                        error(format!("{name} must be greater than zero"));
+                    }
+                }
+                if rate.max_clients == 0 || rate.max_clients > MAX_RATE_LIMIT_CLIENTS {
+                    error(format!(
+                        "management.rate_limit.max_clients must be within 1..={MAX_RATE_LIMIT_CLIENTS}"
+                    ));
+                }
+                // Clients admitted at once must fit, or a burst of newcomers
+                // would push returning clients into the shared budget.
+                let admitted_at_once = usize::try_from(rate.global_burst).unwrap_or(usize::MAX);
+                if rate.max_clients < admitted_at_once {
+                    error("management.rate_limit.max_clients must be at least management.rate_limit.global_burst".into());
+                }
+                if !RATE_LIMIT_IPV6_PREFIX_LENS.contains(&rate.ipv6_prefix_len) {
+                    error(format!(
+                        "management.rate_limit.ipv6_prefix_len must be within {}..={}",
+                        RATE_LIMIT_IPV6_PREFIX_LENS.start(),
+                        RATE_LIMIT_IPV6_PREFIX_LENS.end()
+                    ));
+                }
+                if rate.exempt_networks.iter().any(|n| n.prefix_len() == 0) {
+                    error("management.rate_limit.exempt_networks must not contain a network of every address; set management.rate_limit.enabled = false instead".into());
+                }
+                if rate.exempt_networks.iter().any(|network| {
+                    matches!(
+                        network,
+                        IpNet::V6(v6)
+                            if v6.prefix_len() >= 96 && v6.addr().to_ipv4_mapped().is_some()
+                    )
+                }) {
+                    error(
+                        "management.rate_limit.exempt_networks must use IPv4 CIDRs instead of IPv4-mapped IPv6 CIDRs"
+                            .into(),
+                    );
+                }
             }
         }
 
@@ -999,6 +1568,12 @@ impl AlloyConfig {
             }
             if self.cors.allow_credentials && self.cors.allowed_origins.iter().any(|o| o == "*") {
                 error("cors.allow_credentials cannot be combined with origin '*'".into());
+            }
+        }
+        if self.openapi.ui {
+            openapi_ui_issues(self, &mut error);
+            if !has("openapi-ui") {
+                error("openapi.ui is true but the `openapi-ui` feature is not enabled".into());
             }
         }
         if self.compression.enabled && !has("compression") {
@@ -1035,6 +1610,21 @@ impl AlloyConfig {
                     ));
                 }
             }
+            if jwt.jwks_max_age_ms == 0 {
+                error("auth.jwt.jwks_max_age_ms must be greater than zero".into());
+            }
+            if jwt.jwks_max_age_ms > MAX_JWKS_LIFETIME_MS {
+                error("auth.jwt.jwks_max_age_ms must not exceed 24 hours (86400000)".into());
+            }
+            if jwt.jwks_max_stale_ms > MAX_JWKS_LIFETIME_MS {
+                error("auth.jwt.jwks_max_stale_ms must not exceed 24 hours (86400000)".into());
+            }
+            if jwt.jwks_min_refresh_interval_ms > jwt.jwks_max_age_ms {
+                error(
+                    "auth.jwt.jwks_min_refresh_interval_ms must not exceed auth.jwt.jwks_max_age_ms"
+                        .into(),
+                );
+            }
             match &jwt.jwks_url {
                 None => error("auth.jwt.jwks_url is required".into()),
                 Some(url) => {
@@ -1049,6 +1639,20 @@ impl AlloyConfig {
                     }
                 }
             }
+        }
+
+        let diagnostics = &self.diagnostics;
+        if diagnostics.max_records == 0 || diagnostics.max_records > MAX_DIAGNOSTICS_RECORDS {
+            error(format!(
+                "diagnostics.max_records must be within 1..={MAX_DIAGNOSTICS_RECORDS}"
+            ));
+        }
+        if !DIAGNOSTICS_BYTES.contains(&diagnostics.max_bytes) {
+            error(format!(
+                "diagnostics.max_bytes must be within {}..={}",
+                DIAGNOSTICS_BYTES.start(),
+                DIAGNOSTICS_BYTES.end()
+            ));
         }
 
         let mut warn = |message: String| {
@@ -1070,6 +1674,19 @@ impl AlloyConfig {
         if self.trust.identities.is_empty() && !self.trust.networks.is_empty() {
             warn("trust relies on network boundaries only; prefer verified mTLS identities for gateway metadata".into());
         }
+        if let Some(tls) = &server.tls
+            && !tls.client_crl_paths.is_empty()
+        {
+            if tls.client_crl_unknown_status == CrlUnknownStatus::Allow {
+                warn("server.tls.client_crl_unknown_status = allow accepts client certificates that no configured CRL covers".into());
+            }
+            if tls.client_crl_expiration == CrlExpiration::Ignore {
+                warn("server.tls.client_crl_expiration = ignore keeps using CRLs past their nextUpdate time".into());
+            }
+        }
+        if self.openapi.ui && self.openapi.public {
+            warn("openapi.ui with openapi.public serves the documentation UI unauthenticated on the application listener; do not expose it publicly in production".into());
+        }
         if self.database.migrate_on_startup {
             warn("database.migrate_on_startup runs migrations from every replica at startup; prefer a separate migration step in production".into());
         }
@@ -1090,4 +1707,47 @@ impl AlloyConfig {
             Err(ConfigError::Invalid(errors))
         }
     }
+}
+
+/// Checks `openapi.ui_path`, which the documentation page embeds in its
+/// markup and serves its assets beneath, so it must neither need escaping
+/// nor shadow another route on either listener.
+fn openapi_ui_issues(config: &AlloyConfig, error: &mut impl FnMut(String)) {
+    let ui = config.openapi.ui_path.as_str();
+    if !is_ui_path(ui) {
+        error("openapi.ui_path must be a path like /docs: segments of letters, digits, '-', '.', '_', or '~', without a trailing '/'".into());
+        return;
+    }
+    // `path` is the UI page or beneath it.
+    let within = |path: &str| match path.strip_prefix(ui) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    };
+    let mut served = vec![
+        config.openapi.path.as_str(),
+        config.health.liveness_path.as_str(),
+        config.health.readiness_path.as_str(),
+    ];
+    served.extend(crate::management::FIXED_PATHS);
+    if served.into_iter().any(within) {
+        error("openapi.ui_path must not be or contain another served path (openapi.path, the health paths, or the management paths)".into());
+    }
+    if ui == "/diagnostics" || ui.starts_with("/diagnostics/") {
+        error("openapi.ui_path must be outside /diagnostics".into());
+    }
+}
+
+/// An absolute path of non-empty segments other than `.` and `..`, made only
+/// of unreserved URL characters.
+fn is_ui_path(path: &str) -> bool {
+    path.strip_prefix('/').is_some_and(|rest| {
+        rest.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+        })
+    })
 }

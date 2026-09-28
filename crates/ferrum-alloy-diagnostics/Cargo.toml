@@ -6,12 +6,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["diagnostics", "tracing", "latency", "opentelemetry", "evidence"]
+categories = ["development-tools::debugging"]
 publish.workspace = true
+# Packaged files (docs/release.md). Tests read repository fixtures outside
+# this crate, so they stay out.
+include = ["/src/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [lints]
 workspace = true

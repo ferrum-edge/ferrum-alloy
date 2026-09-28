@@ -27,6 +27,53 @@ fn findings(name: &str) -> Vec<Finding> {
     analyze(&parsed(name).report, &Thresholds::default())
 }
 
+#[test]
+fn operation_exceeding_its_enclosing_measurement_lists_unproven_claims() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("db-operation-dominates.json")).unwrap();
+    report["observations"][1]["value"] = serde_json::json!(300.0);
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.evidence.operation_exceeds_enclosing");
+    assert_eq!(finding.rule_id, "alloy.r006");
+    assert_eq!(finding.rule_version, 2);
+    assert!(!finding.does_not_prove.is_empty());
+}
+
+#[test]
+fn every_fixture_report_finding_lists_unproven_claims() {
+    let reports_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/reports");
+    for entry in std::fs::read_dir(&reports_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed = match parse_offline(&bytes, &Limits::default()) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                // This parser rejection fixture cannot produce findings.
+                assert_eq!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("unsupported-major.json")
+                );
+                continue;
+            }
+        };
+        for finding in analyze(&parsed.report, &Thresholds::default()) {
+            assert!(
+                !finding.does_not_prove.is_empty(),
+                "{} produced finding {} without does_not_prove entries",
+                path.display(),
+                finding.code
+            );
+        }
+    }
+}
+
 fn by_code<'a>(findings: &'a [Finding], code: &str) -> &'a Finding {
     findings
         .iter()
@@ -67,6 +114,7 @@ fn every_fixture_avoids_invalid_explanations() {
     for name in [
         "edge-rejected-before-upstream.json",
         "db-operation-dominates.json",
+        "db-operation-after-headers.json",
         "unattributed-interval.json",
         "service-span-missing.json",
         "service-exceeds-gateway.json",
@@ -243,6 +291,25 @@ fn dominance_compares_the_largest_single_operation_and_never_sums() {
 }
 
 #[test]
+fn operations_outside_the_header_phase_are_not_blamed_on_time_to_headers() {
+    // The database call runs while the body streams and the cache fill
+    // crosses the headers boundary; the only operation inside the header
+    // phase is too small to dominate.
+    let findings = findings("db-operation-after-headers.json");
+    let found = codes(&findings);
+    assert!(
+        !found.contains(&"alloy.service.operation_dominates"),
+        "{found:?}"
+    );
+    assert!(
+        !found.contains(&"alloy.evidence.operation_exceeds_enclosing"),
+        "{found:?}"
+    );
+    let streaming = by_code(&findings, "alloy.response.streaming_dominates");
+    assert_eq!(streaming.confidence, Confidence::Likely);
+}
+
+#[test]
 fn unattributed_interval_is_not_called_network_latency() {
     let findings = findings("unattributed-interval.json");
     let finding = by_code(&findings, "alloy.gateway.unattributed_interval");
@@ -359,9 +426,33 @@ fn newer_minor_version_preserves_unknown_fields_without_interpreting_them() {
 }
 
 #[test]
+fn request_timeout_token_is_recognized_and_capped_at_likely() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("gateway-error-token.json")).unwrap();
+    report["observations"][0]["attributes"]["value"] = serde_json::json!("request_timeout");
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.edge.gateway_error_token");
+    assert_eq!(finding.confidence, Confidence::Likely);
+    assert!(finding.explanation.contains("before any backend held"));
+    for claim in [
+        "that the service received the request",
+        "which gateway phase used up the deadline",
+    ] {
+        assert!(
+            finding.does_not_prove.iter().any(|d| d == claim),
+            "missing {claim:?}"
+        );
+    }
+}
+
+#[test]
 fn analysis_and_rendering_are_deterministic() {
     for name in [
         "db-operation-dominates.json",
+        "db-operation-after-headers.json",
         "unattributed-interval.json",
         "gateway-error-token.json",
     ] {

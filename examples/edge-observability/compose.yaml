@@ -21,9 +21,17 @@ services:
     ports:
       # Direct access from the host, used only to prove bypass rejection.
       - "127.0.0.1:18443:8443"
+    networks:
+      default:
+        # A second name for Alloy that only the e2e-reuse proxy uses, so its
+        # first request needs a new gateway connection (see
+        # src/bin/gen_e2e_edge_config.rs).
+        aliases: [alloy-reuse]
 
   edge:
-    build: { <<: *build, target: edge }
+    # EDGE_IMAGE, when set in the environment, overrides the Dockerfile's
+    # default Edge image (CI's support-window matrix).
+    build: { <<: *build, target: edge, args: [EDGE_IMAGE] }
     depends_on: [alloy, otel-collector]
     environment:
       FERRUM_MODE: file
@@ -31,5 +39,10 @@ services:
       FERRUM_PROXY_BIND_ADDRESS: 0.0.0.0
       FERRUM_ADMIN_HTTP_PORT: "0"
       FERRUM_LOG_LEVEL: info
+      # Deterministic connection cases for edge-e2e: no connection is opened
+      # before the first request, and each backend host gets one HTTP/2
+      # connection that concurrent requests multiplex over.
+      FERRUM_POOL_WARMUP_ENABLED: "false"
+      FERRUM_POOL_HTTP2_CONNECTIONS_PER_HOST: "1"
     ports:
       - "127.0.0.1:18000:8000"

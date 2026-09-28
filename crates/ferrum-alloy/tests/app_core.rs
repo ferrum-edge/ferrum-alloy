@@ -162,7 +162,10 @@ async fn routes_state_and_minimal_health_work() {
     let reply = fetch(&server.url("/hello")).await;
     assert_eq!(reply.status, 200);
     assert_eq!(reply.text(), "Hello from Ferrum Alloy");
-    assert!(reply.headers.contains_key("x-request-id"));
+    assert!(
+        !reply.headers.contains_key("x-request-id"),
+        "a shared cache may store a bare GET 200, so the id is not echoed"
+    );
 
     assert_eq!(fetch(&server.url("/state")).await.text(), "0");
     assert_eq!(fetch(&server.url("/state")).await.text(), "1");
@@ -203,6 +206,10 @@ async fn framework_errors_are_problem_details_and_app_bodies_are_untouched() {
     assert_eq!(method.status, 405);
     assert_eq!(method.json()["status"], 405);
     assert!(method.headers.contains_key("allow"));
+    assert!(
+        method.headers.contains_key("x-request-id"),
+        "DELETE is not storable"
+    );
 
     let malformed = send(json_post(
         &server.url("/orders"),

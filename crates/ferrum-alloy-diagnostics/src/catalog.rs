@@ -54,7 +54,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         name: ALLOY_TIME_TO_HEADERS,
         start: "alloy.middleware_entry",
         end: "alloy.response_headers_produced",
-        meaning: "Alloy telemetry middleware entry until the inner service returned response headers to Hyper. Excludes accept, TLS handshake, and request-head parsing before the service was called.",
+        meaning: "Alloy telemetry middleware entry until the inner service returned response headers to Hyper. Excludes accept, TLS handshake, and request-head parsing before the service was called. Its interval ends at the server span start plus this duration, never at the span end, which is body finalization.",
     },
     CatalogEntry {
         name: ALLOY_BODY_DURATION,
@@ -132,7 +132,8 @@ pub fn is_known(name: &str) -> bool {
 }
 
 /// Ferrum Edge `rejection_phase` values that run before any upstream attempt
-/// (Edge `docs/plugin_execution_order.md`, v0.9.7).
+/// (Edge `docs/plugin_execution_order.md`; the same set in v0.9.7 and v0.9.8, except the
+/// HTTP/3-only `route_request_timeout_h3_upload` added in v0.9.8, which is not yet mapped).
 pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "allowed_methods",
     "on_request_received",
@@ -150,8 +151,11 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "adaptive_concurrency",
 ];
 
-/// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.7
-/// (`src/retry.rs`), with the only meaning each token supports.
+/// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.8
+/// (`src/retry.rs`), with the only meaning each token supports. v0.9.8 added
+/// `request_timeout`. A header carries no Edge version, so each meaning also
+/// holds for v0.9.7: there, `backend_timeout` also covered route deadlines that
+/// expired before any backend held the request.
 pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     (
         "connection_failure",
@@ -180,5 +184,9 @@ pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     (
         "concurrency_limit",
         "An adaptive or static gateway concurrency limit rejected the request.",
+    ),
+    (
+        "request_timeout",
+        "A gateway route's total request deadline expired before any backend held the request.",
     ),
 ];

@@ -10,11 +10,12 @@
 )]
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use ferrum_alloy::config::AlloyConfig;
-use ferrum_alloy::{AlloyApp, AlloyError, Lifecycle, TelemetryInit};
+use ferrum_alloy::{AlloyApp, AlloyError, Lifecycle, ServerStats, TelemetryInit};
 use http::{HeaderMap, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
@@ -40,6 +41,8 @@ pub struct TestServer {
     pub addr: SocketAddr,
     pub management: SocketAddr,
     pub lifecycle: Lifecycle,
+    /// Connection counters of the application listener.
+    pub stats: Arc<ServerStats>,
     pub task: JoinHandle<Result<(), AlloyError>>,
 }
 
@@ -62,8 +65,14 @@ impl TestServer {
 }
 
 /// Starts `app` with `config` on ephemeral loopback ports.
-pub async fn start(app: AlloyApp, mut config: AlloyConfig) -> TestServer {
+pub async fn start(app: AlloyApp, config: AlloyConfig) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    start_on(app, config, listener).await
+}
+
+/// Starts `app` with `config`, serving the application on `listener` and
+/// management on an ephemeral loopback port.
+pub async fn start_on(app: AlloyApp, mut config: AlloyConfig, listener: TcpListener) -> TestServer {
     let management = TcpListener::bind("127.0.0.1:0").await.unwrap();
     config.server.bind = listener.local_addr().unwrap();
     config.management.bind = management.local_addr().unwrap();
@@ -76,11 +85,13 @@ pub async fn start(app: AlloyApp, mut config: AlloyConfig) -> TestServer {
         .into_parts()
         .unwrap();
     let lifecycle = parts.lifecycle.clone();
+    let stats = parts.app_stats();
     let task = tokio::spawn(parts.serve_on(listener, Some(management)));
     TestServer {
         addr,
         management: management_addr,
         lifecycle,
+        stats,
         task,
     }
 }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
-use ferrum_alloy::config::{AlloyConfig, ClientAuth, EdgeMode, Overrides, load_from};
+use ferrum_alloy::config::{AlloyConfig, ClientAuth, ConfigError, EdgeMode, Overrides, load_from};
 
 use crate::Format;
 use crate::error::{CliError, INVALID};
@@ -39,10 +39,12 @@ const ALL_FEATURES: &[&str] = &[
     "tls",
     "postgres",
     "openapi",
+    "openapi-ui",
     "jwt",
     "http-client",
     "compression",
     "cors",
+    "diagnostics",
 ];
 
 fn capabilities(config: &AlloyConfig) -> Vec<(&'static str, bool, &'static str)> {
@@ -65,6 +67,7 @@ fn capabilities(config: &AlloyConfig) -> Vec<(&'static str, bool, &'static str)>
         ),
         ("cors", config.cors.enabled, "cors"),
         ("compression", config.compression.enabled, "compression"),
+        ("openapi-ui", config.openapi.ui, "openapi-ui"),
         ("postgres", config.database.url.is_some(), "postgres"),
         ("jwt", config.auth.jwt.is_some(), "jwt"),
         ("management-listener", config.management.enabled, "-"),
@@ -92,12 +95,21 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
     let (config, sources) = match load_from(args.config.as_deref(), env, &Overrides::default()) {
         Ok(loaded) => loaded,
         Err(error) => {
+            // `ConfigError` names files, keys, and locations, but never
+            // configuration values or source excerpts, which may be secrets.
             return match args.format {
                 Format::Json => {
-                    crate::print(&format!(
-                        "{:#}\n",
-                        serde_json::json!({ "valid": false, "errors": [error.to_string()] })
-                    ))?;
+                    let mut value =
+                        serde_json::json!({ "valid": false, "errors": [error.to_string()] });
+                    if let ConfigError::Syntax { line, column, .. } = &error
+                        && let Some(map) = value.as_object_mut()
+                    {
+                        map.insert(
+                            "location".into(),
+                            serde_json::json!({ "line": line, "column": column }),
+                        );
+                    }
+                    crate::print(&format!("{value:#}\n"))?;
                     Ok(ExitCode::from(INVALID))
                 }
                 Format::Human => Err(CliError::Invalid(error.to_string())),

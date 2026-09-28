@@ -28,7 +28,22 @@ The generated project contains:
 - a README;
 - a GitHub Actions workflow.
 
-With `--with openapi` it also includes an `openapi` binary and a parity test. CI generates projects, builds them, runs their tests, and runs `clippy -D warnings` and `rustfmt --check` on them.
+`--with` takes a comma-separated list of `openapi`, `otel`, `edge`, `tls`, `postgres`, `jwt`, and `http-client`, which become Cargo features of the dependency. Some also add code:
+
+| Option | Adds |
+|---|---|
+| `openapi` | An `openapi` binary and a parity test |
+| `postgres` | `src/db.rs` (`POST /notes`, `GET /notes/{id}`) over a pool built from `[database]`, the `postgres` readiness check, `migrations/`, a `migrate` subcommand, tests, and a PostgreSQL service container in the generated CI |
+| `jwt` | `src/auth.rs` (`GET /me`) with a verifier built from `[auth.jwt]` and an `Authorize` scope policy, and tests that sign tokens with a local key and serve its JWKS on loopback |
+| `http-client` | `src/upstream.rs` (`GET /upstream`, calling `UPSTREAM_URL`) with the client built from `[http_client]`: explicit timeouts, no redirects, and an empty trace-propagation allow-list, and a test against a local server |
+
+Options combine. CI generates a plain project, one each with `openapi`, `postgres`, `jwt`, and `http-client`, and one with all four, builds them, runs their tests (the database tests against a PostgreSQL service container), and runs `clippy -D warnings` and `rustfmt --check` on them. CI does not generate projects with `otel`, `edge`, or `tls`, which only add Cargo features; the workspace CI checks those features on the library.
+
+The `postgres` starter never migrates implicitly. `cargo run -- migrate` applies the embedded migrations and exits; run it once per release, before the new version serves traffic. `database.migrate_on_startup = true` migrates at every start instead, which is for local development only. Queries are checked at runtime, so building needs neither a database nor `.sqlx/` offline metadata. Only the tests that need a database do: they are ignored unless you set `TEST_DATABASE_URL` and pass `--include-ignored`, which the generated CI workflow does against a PostgreSQL service container.
+
+The `jwt` starter's `alloy.toml` sets the JWKS lifetime explicitly, using the defaults: `jwks_max_age_ms = 300000` (a shorter `Cache-Control: max-age` wins), `jwks_max_stale_ms = 300000`, and `jwks_min_refresh_interval_ms = 60000`. Replace the example issuer, audience, and JWKS URL, or set `FERRUM_ALLOY_JWT_ISSUER`, `FERRUM_ALLOY_JWT_AUDIENCES`, and `FERRUM_ALLOY_JWT_JWKS_URL`.
+
+The generated `Cargo.toml` follows the `main` branch by default. Pass `--alloy-rev <40-character commit>` to pin a commit, or `--alloy-path <checkout>/crates/ferrum-alloy` to use a local checkout.
 
 `ferrum-alloy new` refuses non-empty or symlinked targets, validates the name, never overwrites files, and downloads nothing. Cargo fetches dependencies when you build.
 
@@ -63,7 +78,7 @@ This is `examples/minimal`. With no configuration it provides:
 | Limits | 2 MiB bodies, 100 headers / 64 KiB request head, 10 s head read, 30 s to response headers, 10 000 connections |
 | Telemetry | JSON logs with request ids and trace ids; one access event per request; Prometheus metrics |
 | Shutdown | SIGTERM/SIGINT: readiness reports `draining`, accepting stops, in-flight requests and streams get 30 s, then telemetry flushes |
-| Off | CORS, compression, public OpenAPI, OTLP export, TLS, gateway trust |
+| Off | CORS, compression, public OpenAPI, the OpenAPI documentation UI, OTLP export, TLS, gateway trust |
 
 Handlers stay plain Axum: `State<T>`, `FromRef`, `Json<T>`, `Path<T>`, `Query<T>`, `Extension<T>`, layers, and services all work. Supply state with `Router::with_state` before passing the router. For Problem Details on extractor failures, use `ferrum_alloy::extract::{Json, Path, Query, ValidJson}`. Raw axum extractors keep axum's own plain-text rejections.
 
@@ -125,15 +140,14 @@ let app = Router::new().fallback_service(telemetry.layer(router)); // outermost
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 ```
 
-Handlers can take `ferrum_alloy_telemetry::RequestContext` (request id, trace id, span id, trust, trace decision). Nothing installs a global subscriber. To export traces, compose `ferrum_alloy_telemetry::otel::OtelPipeline::layer()` into your own subscriber (feature `otel`).
+Handlers can take `ferrum_alloy_telemetry::RequestContext` (request id, trace id, span id, trust, trace decision). Tests that call handlers without the telemetry layer build one with `RequestContext::new(trace_id, span_id, sampled)`, an untrusted root context, rather than a struct literal: new fields may be added. Nothing installs a global subscriber. To export traces, compose `ferrum_alloy_telemetry::otel::OtelPipeline::layer()` into your own subscriber (feature `otel`).
 
 To trust a gateway's trace context, pass a classifier:
 
 ```rust
-let peers = TrustedPeers::new(&TrustedPeersConfig {
-    identities: vec!["spiffe://example.org/ns/edge/sa/gateway".into()],
-    networks: vec![],
-})?;
+let mut trust = TrustedPeersConfig::default();
+trust.identities = vec!["spiffe://example.org/ns/edge/sa/gateway".into()];
+let peers = TrustedPeers::new(&trust)?;
 let telemetry = TelemetryLayer::new(config)?.with_classifier(Arc::new(peers));
 ```
 
@@ -169,7 +183,7 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
 
    Build with `features = ["tls", "edge"]`, and add `"otel"` for trace export. Handlers can take `Option<ferrum_alloy::edge::GatewayContext>` for Edge's authenticated consumer.
 
-3. `examples/edge-observability` runs Edge v0.9.7, Alloy, and an OpenTelemetry Collector together:
+3. `examples/edge-observability` runs Edge v0.9.8, Alloy, and an OpenTelemetry Collector together:
 
    ```bash
    docker compose -f examples/edge-observability/compose.yaml up -d --build
@@ -185,7 +199,39 @@ ferrum-alloy diagnose --otlp traces.jsonl --trace-id <id>
 ferrum-alloy diagnose --input report.json --format json
 ```
 
-Diagnosis is offline and deterministic. It explains only the supplied evidence, and file input is never treated as authenticated. See [measurement-semantics.md](measurement-semantics.md) for what each timing means.
+Diagnosis is deterministic. It explains only the supplied evidence, and input is never treated as authenticated. See [measurement-semantics.md](measurement-semantics.md) for what each timing means.
+
+### From a running service (feature `diagnostics`)
+
+A service can keep recent evidence in memory and serve one request's report to an authorized caller ([ADR 0008](adr/0008-tenant-scoped-diagnostic-retrieval.md)). The application attributes each request to a tenant and supplies the authorizer that decides which tenant a caller may read:
+
+```rust
+use ferrum_alloy::diagnostics::{DiagnosticsAccess, DiagnosticsRequest, TenantTag};
+
+async fn orders(tenant: TenantTag) -> &'static str {
+    tenant.set("acme"); // after authenticating the caller
+    "ok"
+}
+
+async fn authorize(request: DiagnosticsRequest) -> DiagnosticsAccess {
+    // Verify a tenant-scoped credential; a header that names a tenant proves nothing.
+    match request.bearer_token() {
+        Some(token) if verified_for_acme(token) => DiagnosticsAccess::tenant("acme"),
+        _ => DiagnosticsAccess::Deny,
+    }
+}
+
+// AlloyApp::new("orders").router(router).diagnostics_authorizer(authorize)
+```
+
+Then, with the credential in the environment or a file:
+
+```bash
+FERRUM_ALLOY_DIAGNOSTICS_TOKEN=... ferrum-alloy diagnose --url http://127.0.0.1:9090 --request-id <id>
+ferrum-alloy diagnose --url https://ops.example/orders --request-id <id> --token-file token.txt
+```
+
+Every refusal is the same `404`: a denied caller, another tenant's request, and an unknown or evicted id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
 
 ## Feature matrix
 
@@ -193,12 +239,14 @@ Diagnosis is offline and deterministic. It explains only the supplied evidence, 
 |---|---|---|
 | (none) | App builder, config, problems, health, limits, server, telemetry, metrics | axum, hyper, hyper-util, tokio, tower-http (catch-panic), tracing-subscriber |
 | `otel` | OTLP/HTTP trace export with a bounded processor | opentelemetry 0.33, opentelemetry-otlp, tracing-opentelemetry 0.34, reqwest (blocking), rustls |
-| `tls` | rustls listener, client-certificate identity | rustls (ring), tokio-rustls, x509-parser |
+| `tls` | rustls listener, client-certificate identity | rustls (ring), tokio-rustls, x509-parser, zeroize |
 | `edge` | Ferrum Edge trust modes, consumer identity handoff | ferrum-alloy-edge |
 | `postgres` | SQLx pool, readiness, measured acquisition, migrations | sqlx 0.9 (postgres, rustls/ring) |
 | `openapi` | Serve a registered utoipa document; re-exports utoipa and utoipa-axum | utoipa 6, utoipa-axum 0.3 |
+| `openapi-ui` | A documentation UI for that document, under the same access policy (implies `openapi`; off until `openapi.ui = true`) | Swagger UI 5.33.0, embedded (Apache-2.0) |
 | `jwt` | JWT/JWKS verification and an authorization hook (implies `http-client`) | jsonwebtoken 11 (rust_crypto) |
 | `http-client` | Instrumented outbound client | reqwest 0.13 (rustls/ring), rustls-platform-verifier |
 | `compression` | gzip/br, never for SSE, `Set-Cookie`, or `no-store` responses | tower-http |
 | `cors` | Explicit allowlist CORS | tower-http |
+| `diagnostics` | Tenant-scoped retrieval of one request's evidence on the management listener, behind an application-supplied authorizer | ferrum-alloy-diagnostics |
 | `full` | All of the above | — |

@@ -40,6 +40,13 @@ allow = [
     "Zlib",
 ]
 
+# libfuzzer-sys bundles LLVM's libFuzzer (NCSA). It is only in the fuzz/
+# crate's graph, which CI checks with `--manifest-path fuzz/Cargo.toml`, and
+# it is never linked into Alloy or a generated project.
+exceptions = [
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+
 [licenses.private]
 ignore = true
 

@@ -16,12 +16,17 @@ use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::config::{AlloyConfig, ConfigIssue, EdgeMode, Overrides};
+#[cfg(feature = "diagnostics")]
+use crate::diagnostics::{EvidenceStore, Retrieval};
 use crate::error::AlloyError;
 use crate::health::{self, HealthCheck, Readiness};
 use crate::lifecycle::{self, Lifecycle};
 use crate::limits::{AdmissionLayer, BodyLimitLayer, HeadersDeadlineLayer};
 use crate::management::{self, ManagementState};
 use crate::normalize::{NormalizeLayer, panic_response};
+#[cfg(feature = "openapi-ui")]
+use crate::openapi_ui::DocsUi;
+use crate::rate_limit::RateLimiter;
 use crate::server::{self, ServeOptions, ServerStats};
 
 /// Who owns the global tracing subscriber.
@@ -62,6 +67,8 @@ pub struct AlloyApp {
     classifier: Option<SharedClassifier>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     openapi: Option<Arc<Vec<u8>>>,
+    #[cfg(feature = "diagnostics")]
+    diagnostics: Option<Arc<dyn crate::diagnostics::DiagnosticsAuthorizer>>,
     prepared: Option<Prepared>,
 }
 
@@ -99,6 +106,8 @@ impl AlloyApp {
             classifier: None,
             shutdown_signal: None,
             openapi: None,
+            #[cfg(feature = "diagnostics")]
+            diagnostics: None,
             prepared: None,
         }
     }
@@ -106,6 +115,12 @@ impl AlloyApp {
     /// The application router, with its state already supplied
     /// (`Router::with_state`). Its handlers, extractors, and layers are used
     /// as-is.
+    ///
+    /// Alloy's own paths on the application listener (the health endpoints,
+    /// and with `openapi.public` the OpenAPI document and UI) take precedence
+    /// over it, so startup fails with [`AlloyError::ShadowedRoute`] when one
+    /// of its routes matches one of those paths, for any method. Finding out
+    /// runs none of the router's handlers, layers, or fallbacks.
     pub fn router(mut self, router: Router) -> Self {
         self.router = Some(router);
         self
@@ -181,6 +196,23 @@ impl AlloyApp {
         self
     }
 
+    /// Enables authorized, tenant-scoped diagnostic retrieval (ADR 0008).
+    ///
+    /// Requests the application tags with a tenant
+    /// ([`crate::diagnostics::TenantTag`]) are retained in memory within the
+    /// `[diagnostics]` bounds, and `GET /diagnostics/v1/requests/{request_id}`
+    /// on the management listener serves one tenant's evidence to callers
+    /// that `authorizer` admits for that tenant. Startup fails when the
+    /// management listener or its rate limit is disabled.
+    #[cfg(feature = "diagnostics")]
+    pub fn diagnostics_authorizer(
+        mut self,
+        authorizer: impl crate::diagnostics::DiagnosticsAuthorizer,
+    ) -> Self {
+        self.diagnostics = Some(Arc::new(authorizer));
+        self
+    }
+
     /// Loads and validates configuration and initializes telemetry. Call it
     /// before building resources that need configuration (database pools);
     /// later calls return the same configuration.
@@ -245,6 +277,20 @@ impl AlloyApp {
             .map_err(|e| AlloyError::Internal(e.to_string()))?
             .with_classifier(Arc::clone(&classifier))
             .with_metrics(Arc::clone(&prepared.metrics));
+        #[cfg(feature = "diagnostics")]
+        let evidence = match self.diagnostics.take() {
+            Some(authorizer) => {
+                crate::diagnostics::check_config(&config)?;
+                let store = Arc::new(EvidenceStore::new(&config.diagnostics));
+                Some((authorizer, store))
+            }
+            None => None,
+        };
+        #[cfg(feature = "diagnostics")]
+        let telemetry_layer = match &evidence {
+            Some((_, store)) => telemetry_layer.with_evidence_sink(store.clone()),
+            None => telemetry_layer,
+        };
         let readiness = Arc::new(Readiness::new(
             std::mem::take(&mut self.checks),
             Duration::from_millis(config.health.cache_ttl_ms),
@@ -252,7 +298,14 @@ impl AlloyApp {
         ));
 
         let mut app = Router::new();
+        // Alloy's paths on the application listener, with the setting that
+        // places each there. They take precedence over the application's
+        // router, so none may match one of its routes.
+        let mut served: Vec<(&'static str, String)> = Vec::new();
         if config.health.app_endpoints {
+            let health = &config.health;
+            served.push(("health.liveness_path", health.liveness_path.clone()));
+            served.push(("health.readiness_path", health.readiness_path.clone()));
             let (r, l) = (Arc::clone(&readiness), lifecycle.clone());
             app = app
                 .route(
@@ -267,10 +320,18 @@ impl AlloyApp {
                     }),
                 );
         }
+        // The documentation UI goes wherever the document is served.
+        #[cfg(feature = "openapi-ui")]
+        let openapi_ui = {
+            let openapi = &config.openapi;
+            let served = openapi.ui && openapi.serve && self.openapi.is_some();
+            served.then(|| DocsUi::new(&openapi.ui_path, &openapi.path))
+        };
         if config.openapi.public
             && config.openapi.serve
             && let Some(document) = &self.openapi
         {
+            served.push(("openapi.path", config.openapi.path.clone()));
             let document = Arc::clone(document);
             app = app.route(
                 &config.openapi.path,
@@ -279,7 +340,13 @@ impl AlloyApp {
                     async move { management::openapi_response(Some(&document)) }
                 }),
             );
+            #[cfg(feature = "openapi-ui")]
+            if let Some(ui) = &openapi_ui {
+                served.extend(ui.paths().map(|path| ("openapi.ui_path", path)));
+                app = app.merge(ui.routes::<()>());
+            }
         }
+        crate::shadow::check(&user_router, &served)?;
         let limit = config.server.request_body_limit_bytes;
         #[allow(unused_mut, reason = "optional layers are feature-gated")]
         let mut app = app
@@ -307,25 +374,18 @@ impl AlloyApp {
         }
         #[cfg(feature = "edge")]
         {
-            let policy = ferrum_alloy_edge::EdgePolicy::new(
-                ferrum_alloy_edge::EdgePolicyConfig {
-                    mode: match config.edge.mode {
-                        EdgeMode::Standalone => ferrum_alloy_edge::DeploymentMode::Standalone,
-                        EdgeMode::GatewayPreferred => {
-                            ferrum_alloy_edge::DeploymentMode::GatewayPreferred
-                        }
-                        EdgeMode::GatewayRequired => {
-                            ferrum_alloy_edge::DeploymentMode::GatewayRequired
-                        }
-                    },
-                    accept_consumer_identity: config.edge.accept_consumer_identity,
-                },
-                Arc::clone(&classifier),
-            )
-            .with_exempt_paths(vec![
-                config.health.liveness_path.clone(),
-                config.health.readiness_path.clone(),
-            ]);
+            let mut policy_config = ferrum_alloy_edge::EdgePolicyConfig::default();
+            policy_config.mode = match config.edge.mode {
+                EdgeMode::Standalone => ferrum_alloy_edge::DeploymentMode::Standalone,
+                EdgeMode::GatewayPreferred => ferrum_alloy_edge::DeploymentMode::GatewayPreferred,
+                EdgeMode::GatewayRequired => ferrum_alloy_edge::DeploymentMode::GatewayRequired,
+            };
+            policy_config.accept_consumer_identity = config.edge.accept_consumer_identity;
+            let policy = ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier))
+                .with_exempt_paths(vec![
+                    config.health.liveness_path.clone(),
+                    config.health.readiness_path.clone(),
+                ]);
             app = app.layer(ferrum_alloy_edge::EdgeLayer::new(policy));
         }
         #[cfg(not(feature = "edge"))]
@@ -339,6 +399,10 @@ impl AlloyApp {
             .clone()
             .unwrap_or_else(|| self.name.clone());
         let management_router = config.management.enabled.then(|| {
+            let rate_limit = &config.management.rate_limit;
+            let rate_limiter = rate_limit
+                .enabled
+                .then(|| Arc::new(RateLimiter::new(rate_limit)));
             management::router(
                 ManagementState {
                     readiness: Arc::clone(&readiness),
@@ -348,6 +412,15 @@ impl AlloyApp {
                     version: config.service.version.clone(),
                     app_stats: Arc::clone(&app_stats),
                     openapi: self.openapi.clone().filter(|_| config.openapi.serve),
+                    #[cfg(feature = "openapi-ui")]
+                    openapi_ui,
+                    rate_limiter,
+                    #[cfg(feature = "diagnostics")]
+                    diagnostics: evidence.map(|(authorizer, store)| Retrieval {
+                        authorizer,
+                        store,
+                        service: service_name.clone(),
+                    }),
                 },
                 &config.openapi.path,
             )
@@ -392,7 +465,13 @@ pub struct AlloyParts {
     /// `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`) so peer
     /// trust can be evaluated.
     pub router: Router,
-    /// The management router, when enabled.
+    /// The management router, when enabled. Serve it with a listener that
+    /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):
+    /// its rate limits key clients by that transport address, and requests
+    /// without either all share one budget. Behind a proxy or sidecar, every
+    /// client is the proxy's address; Istio connects from 127.0.0.6. Add that
+    /// address to `management.rate_limit.exempt_networks` only if bypassing
+    /// the limits for all proxied clients is intended.
     pub management_router: Option<Router>,
     /// Shutdown coordination.
     pub lifecycle: Lifecycle,
@@ -419,6 +498,13 @@ impl std::fmt::Debug for AlloyParts {
 }
 
 impl AlloyParts {
+    /// Connection counters of the application listener, as rendered on the
+    /// management `/metrics` endpoint. They stay readable after serving
+    /// returns.
+    pub fn app_stats(&self) -> Arc<ServerStats> {
+        Arc::clone(&self.app_stats)
+    }
+
     /// Binds the configured addresses and serves until shutdown.
     pub async fn serve(self) -> Result<(), AlloyError> {
         let app = TcpListener::bind(self.config.server.bind)
@@ -445,6 +531,13 @@ impl AlloyParts {
 
     /// Serves on already-bound listeners (useful for tests and socket
     /// activation).
+    ///
+    /// After shutdown it returns only once every connection socket on both
+    /// listeners is closed and no HTTP/2 stream handler is still running:
+    /// connections still open when `shutdown.drain_timeout_ms` runs out are
+    /// force-closed and stream tasks still running are cancelled, and it
+    /// also waits for those tasks to finish unwinding. Upgraded (WebSocket)
+    /// sessions are not connections here; see [`Lifecycle::shutdown_token`].
     pub async fn serve_on(
         mut self,
         app_listener: TcpListener,
@@ -458,6 +551,8 @@ impl AlloyParts {
             max_header_bytes: config.server.max_header_bytes,
             http2_max_concurrent_streams: config.server.http2_max_concurrent_streams,
             header_read_timeout: Duration::from_millis(config.server.header_read_timeout_ms),
+            idle_timeout: Duration::from_millis(config.server.idle_timeout_ms),
+            write_stall_timeout: Duration::from_millis(config.server.write_stall_timeout_ms),
             drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
             #[cfg(feature = "tls")]
             tls: self.tls.clone(),
@@ -482,6 +577,15 @@ impl AlloyParts {
             self.lifecycle.clone(),
             Arc::clone(&self.app_stats),
         ));
+        // New handshakes keep getting reloaded material until accepting stops.
+        #[cfg(feature = "tls")]
+        if let Some(tls) = self.tls.clone() {
+            tokio::spawn(crate::tls::reload_until(
+                tls,
+                Arc::clone(&self.app_stats),
+                self.lifecycle.stop_accepting().clone(),
+            ));
+        }
         let management_task = match (management_listener, self.management_router.clone()) {
             (Some(listener), Some(router)) => Some(tokio::spawn(server::serve(
                 listener,
@@ -600,18 +704,17 @@ impl TelemetryGuard {
                 instance_id: None,
                 environment: Some(config.service.environment.clone()),
             };
-            let otlp = ferrum_alloy_telemetry::otel::OtlpConfig {
-                enabled: true,
-                endpoint: config.otlp.endpoint.clone(),
-                timeout_ms: config.otlp.timeout_ms,
-                max_export_retries: config.otlp.max_export_retries,
-                sampling_ratio: config.otlp.sampling_ratio,
-                max_queue_spans: config.otlp.max_queue_spans,
-                max_queue_bytes: config.otlp.max_queue_bytes,
-                max_export_batch: config.otlp.max_export_batch,
-                max_request_bytes: config.otlp.max_request_bytes,
-                scheduled_delay_ms: config.otlp.scheduled_delay_ms,
-            };
+            let mut otlp = ferrum_alloy_telemetry::otel::OtlpConfig::default();
+            otlp.enabled = true;
+            otlp.endpoint = config.otlp.endpoint.clone();
+            otlp.timeout_ms = config.otlp.timeout_ms;
+            otlp.max_export_retries = config.otlp.max_export_retries;
+            otlp.sampling_ratio = config.otlp.sampling_ratio;
+            otlp.max_queue_spans = config.otlp.max_queue_spans;
+            otlp.max_queue_bytes = config.otlp.max_queue_bytes;
+            otlp.max_export_batch = config.otlp.max_export_batch;
+            otlp.max_request_bytes = config.otlp.max_request_bytes;
+            otlp.scheduled_delay_ms = config.otlp.scheduled_delay_ms;
             let pipeline = init::init_logging_and_otel(&config.logging, &resource, &otlp, metrics)
                 .map_err(|e| AlloyError::Telemetry(e.to_string()))?;
             return Ok(Self {

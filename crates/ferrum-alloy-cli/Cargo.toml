@@ -1,12 +1,19 @@
 [package]
 name = "ferrum-alloy-cli"
-description = "ferrum-alloy command-line tool: starters, configuration checks, artifact export, offline diagnosis"
+description = "ferrum-alloy command-line tool: starters, configuration checks, artifact export, diagnosis"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["axum", "cli", "scaffolding", "api-gateway", "diagnostics"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
 publish.workspace = true
+# Packaged files (docs/release.md). The embedded project templates must ship:
+# `src/new.rs` compiles them in with `include_str!`. Tests read repository
+# fixtures outside this crate, so they stay out.
+include = ["/src/**", "/templates/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCIAL.md"]
 
 [[bin]]
 name = "ferrum-alloy"
@@ -17,6 +24,11 @@ ferrum-alloy = { workspace = true }
 ferrum-alloy-edge = { workspace = true }
 ferrum-alloy-diagnostics = { workspace = true }
 clap = { workspace = true }
+# `diagnose --url`: one blocking GET with rustls, the `ring` provider passed
+# explicitly, and the platform trust store.
+reqwest = { workspace = true, features = ["blocking", "rustls-no-provider"] }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

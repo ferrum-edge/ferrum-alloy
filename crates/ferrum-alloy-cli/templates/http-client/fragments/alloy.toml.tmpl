@@ -1,0 +1,8 @@
+
+[http_client]
+connect_timeout_ms = 2000
+request_timeout_ms = 10000
+# Only same-origin redirects are ever followed; 0 follows none.
+max_redirects = 0
+# Hosts (exact, or .suffix) that receive traceparent. Empty: none do.
+propagate_trace_context_to = []

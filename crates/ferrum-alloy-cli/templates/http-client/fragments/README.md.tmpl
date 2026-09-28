@@ -1,0 +1,9 @@
+
+## Outbound HTTP
+
+`GET /upstream` calls `UPSTREAM_URL` (default: this service's own `/hello`; a value that is not an `http` or `https` URL, or that contains credentials, stops startup) with the client configured by `[http_client]` in `alloy.toml`: explicit connect and request timeouts, no redirects, and no automatic retries. Trace context goes only to hosts listed in `http_client.propagate_trace_context_to`, which is empty, and credentials and cookies are never added.
+
+```bash
+UPSTREAM_URL=http://127.0.0.1:8080/hello cargo run
+curl -s localhost:8080/upstream
+```

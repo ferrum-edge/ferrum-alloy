@@ -16,6 +16,10 @@ name = "gen-demo-certs"
 path = "src/bin/gen_demo_certs.rs"
 
 [[bin]]
+name = "gen-e2e-edge-config"
+path = "src/bin/gen_e2e_edge_config.rs"
+
+[[bin]]
 name = "edge-e2e"
 path = "src/bin/edge_e2e.rs"
 

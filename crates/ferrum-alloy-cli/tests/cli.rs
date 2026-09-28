@@ -49,7 +49,7 @@ fn version_reports_contract_versions() {
     let output = run(&["version", "--format", "json"]);
     assert_eq!(code(&output), 0);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["edge_contract"]["release"], "v0.9.7");
+    assert_eq!(json["edge_contract"]["release"], "v0.9.8");
     assert!(
         json["diagnostic_report_schema"]
             .as_str()
@@ -150,6 +150,213 @@ fn diagnose_reads_otlp_exports() {
     assert_eq!(code(&again), 0, "{}", stderr(&again));
 }
 
+/// The credential variable of `diagnose --url`.
+const TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
+
+/// A live report as a service serves it, with a forged `verified` claim
+/// and a request id carrying a terminal escape sequence and a bidirectional
+/// override.
+fn live_report() -> String {
+    serde_json::json!({
+        "schema": "ferrum.diagnostic_report",
+        "schema_version": "1.0",
+        "collection": {
+            "collector": { "kind": "alloy", "name": "ferrum-alloy" },
+            "method": "live_export",
+            "verification": "verified"
+        },
+        "subject": { "request_id": "req-7\u{1b}[2J\u{202E}", "service": "orders" },
+        "observations": [{
+            "id": "alloy:00f067aa0ba902b7:time_to_headers",
+            "producer": { "kind": "alloy", "name": "ferrum-alloy-telemetry" },
+            "kind": "measurement",
+            "name": "alloy.server.time_to_headers",
+            "availability": "measured",
+            "value": 12.5,
+            "unit": "ms",
+            "clock": "monotonic_local",
+            "scope": { "leg": "service", "service": "orders" },
+            "span": {
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b7"
+            },
+            "trust": "verified"
+        }]
+    })
+    .to_string()
+}
+
+/// Answers one HTTP/1.1 request on a loopback port with `status` and
+/// `body`. The handle yields the request head it received, and fails when
+/// no request arrives within 20 seconds.
+fn serve_once(status: &'static str, body: String) -> (u16, std::thread::JoinHandle<String>) {
+    use std::io::{ErrorKind, Read as _, Write as _};
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("no request arrived: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            head.push(byte[0]);
+        }
+        let length = body.len();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n{body}"
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        String::from_utf8_lossy(&head).into_owned()
+    });
+    (port, handle)
+}
+
+#[test]
+fn diagnose_url_fetches_a_live_report_with_the_credential_from_the_environment() {
+    let (port, server) = serve_once("200 OK", live_report());
+    let url = format!("http://127.0.0.1:{port}");
+    let args = [
+        "diagnose",
+        "--url",
+        &url,
+        "--request-id",
+        "req-7",
+        "--format",
+        "json",
+    ];
+    let output = bin()
+        .env(TOKEN_ENV, "live-secret-credential")
+        .args(args)
+        .output()
+        .unwrap();
+    let head = server.join().unwrap();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+    let expected = "GET /diagnostics/v1/requests/req-7 HTTP/1.1";
+    assert_eq!(head.lines().next(), Some(expected));
+    let head = head.to_ascii_lowercase();
+    assert!(head.contains("authorization: bearer live-secret-credential"));
+
+    let text = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(!text.contains("live-secret-credential"), "{text}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["claimed_verification"], "verified");
+    let collection = &value["report"]["collection"];
+    assert_eq!(collection["verification"], "unverified");
+    assert_eq!(collection["method"], "live_export");
+    for finding in value["report"]["findings"].as_array().into_iter().flatten() {
+        assert_ne!(finding["confidence"], "confirmed", "{finding}");
+    }
+}
+
+#[test]
+fn diagnose_url_reads_a_token_file_and_keeps_escapes_off_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = write(dir.path(), "token", "file-secret-credential\n");
+    let (port, server) = serve_once("200 OK", live_report());
+    let url = format!("http://127.0.0.1:{port}/");
+    let args = [
+        "diagnose",
+        "--url",
+        &url,
+        "--request-id",
+        "req-7",
+        "--token-file",
+        &token,
+    ];
+    let output = bin().env_remove(TOKEN_ENV).args(args).output().unwrap();
+    let head = server.join().unwrap().to_ascii_lowercase();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(head.contains("authorization: bearer file-secret-credential"));
+    let text = stdout(&output);
+    assert!(text.contains("provenance is unverified"), "{text}");
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert!(!text.contains('\u{202E}'), "{text:?}");
+    assert!(!text.contains("file-secret-credential"));
+}
+
+#[test]
+fn diagnose_url_reports_a_refusal_without_details() {
+    let problem = r#"{"title":"Not found","status":404}"#;
+    let (port, server) = serve_once("404 Not Found", problem.to_owned());
+    let url = format!("http://127.0.0.1:{port}");
+    let args = ["diagnose", "--url", &url, "--request-id", "req-7"];
+    let output = bin()
+        .env(TOKEN_ENV, "a-credential")
+        .args(args)
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(code(&output), 1);
+    let error = stderr(&output);
+    assert!(error.contains("no report"), "{error}");
+}
+
+#[test]
+fn diagnose_url_never_takes_a_credential_from_arguments() {
+    let url = "http://127.0.0.1:9";
+    for flag in [["--token", "argv-secret"], ["--bearer", "argv-secret"]] {
+        let mut args = vec!["diagnose", "--url", url, "--request-id", "req-7"];
+        args.extend(flag);
+        let output = bin().env_remove(TOKEN_ENV).args(&args).output().unwrap();
+        assert_eq!(code(&output), 2, "{}", stderr(&output));
+    }
+    let output = run(&[
+        "diagnose",
+        "--url",
+        url,
+        "--request-id",
+        "req-7",
+        "--token=argv-secret",
+    ]);
+    assert_eq!(code(&output), 2);
+    // Credentials in the URL are refused, and never repeated.
+    let output = run(&[
+        "diagnose",
+        "--url",
+        "http://user:argv-secret@127.0.0.1:9",
+        "--request-id",
+        "req-7",
+    ]);
+    assert_eq!(code(&output), 3);
+    let error = stderr(&output);
+    assert!(!error.contains("argv-secret"), "{error}");
+}
+
+#[test]
+fn diagnose_url_sends_credentials_over_plain_http_only_to_loopback() {
+    let args = [
+        "diagnose",
+        "--url",
+        "http://192.0.2.1:9090",
+        "--request-id",
+        "req-7",
+    ];
+    let output = bin()
+        .env(TOKEN_ENV, "a-credential")
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 3);
+    let error = stderr(&output);
+    assert!(error.contains("loopback"), "{error}");
+}
+
 fn write(dir: &Path, name: &str, text: &str) -> String {
     let path = dir.join(name);
     std::fs::write(&path, text).unwrap();
@@ -218,6 +425,49 @@ fn check_never_prints_secrets() {
         "json",
     ]);
     assert!(!stdout(&output).contains("hunter2"));
+}
+
+#[test]
+fn check_never_prints_secrets_from_malformed_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text, secret) in [
+        (
+            "token.toml",
+            "[management]\ntoken = \"SYNTHETIC-AUDIT-TOKEN-0123456789ABCDEF\" extra\n",
+            "SYNTHETIC-AUDIT-TOKEN",
+        ),
+        (
+            "database.toml",
+            "[database]\nurl = \"postgres://u:SYNTHETIC-PASSWORD@db/x\" extra\n",
+            "SYNTHETIC-PASSWORD",
+        ),
+        (
+            "typed.toml",
+            "[database]\nmax_connections = \"postgres://u:SYNTHETIC-TYPED@db/x\"\n",
+            "SYNTHETIC-TYPED",
+        ),
+    ] {
+        let path = write(dir.path(), name, text);
+        for fmt in ["human", "json"] {
+            let output = run(&["check", "--config", &path, "--format", fmt]);
+            assert_eq!(code(&output), 3, "{name} {fmt}");
+            let printed = format!("{}{}", stdout(&output), stderr(&output));
+            assert!(!printed.contains(secret), "{name} {fmt}: {printed}");
+        }
+    }
+
+    // Syntax errors keep the file and a useful location in both formats.
+    let path = write(dir.path(), "bad.toml", "[server]\nbind = \"x\" extra\n");
+    let message = stderr(&run(&["check", "--config", &path]));
+    assert!(message.contains("bad.toml"), "{message}");
+    assert!(message.contains("at line 2, column "), "{message}");
+    let json = run(&["check", "--config", &path, "--format", "json"]);
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["valid"], false);
+    assert!(value["errors"][0].as_str().unwrap().contains("bad.toml"));
+    assert_eq!(value["location"]["line"], 2);
+    let column = value["location"]["column"].as_u64().unwrap();
+    assert!(column > 1, "{column}");
 }
 
 #[test]
@@ -488,12 +738,82 @@ fn new_generates_a_complete_project() {
     assert_eq!(code(&export), 0, "{}", stderr(&export));
 }
 
+fn read(dir: &Path, file: &str) -> String {
+    std::fs::read_to_string(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"))
+}
+
+#[test]
+fn new_generates_database_auth_and_client_starters() {
+    let dir = tempfile::tempdir().unwrap();
+    let with = ["openapi", "postgres", "jwt", "http-client"];
+    let target = generate(dir.path(), "notes-api", &with);
+    for file in [
+        "src/db.rs",
+        "src/auth.rs",
+        "src/upstream.rs",
+        "tests/db.rs",
+        "tests/auth.rs",
+        "tests/upstream.rs",
+        "migrations/0001_create_notes.sql",
+    ] {
+        assert!(!read(&target, file).contains("{{"), "{file}");
+    }
+    let cargo = read(&target, "Cargo.toml");
+    let features = r#"features = ["openapi", "postgres", "jwt", "http-client"]"#;
+    assert!(cargo.contains(features), "{cargo}");
+    assert!(cargo.contains(r#"default-run = "notes-api""#), "{cargo}");
+    let lib = read(&target, "src/lib.rs");
+    let modules = "pub mod auth;\npub mod db;\npub mod upstream;\n";
+    assert!(lib.contains(modules), "{lib}");
+    let main = read(&target, "src/main.rs");
+    for expected in [
+        "use notes_api::{auth, db, upstream};",
+        "postgres::migrate(&pool, &db::MIGRATOR)",
+        "Some(\"migrate\") => true,",
+        "app = app.router(routes).openapi(&document);",
+    ] {
+        assert!(main.contains(expected), "{expected}: {main}");
+    }
+    let ci = read(&target, ".github/workflows/ci.yml");
+    assert!(ci.contains("TEST_DATABASE_URL"), "{ci}");
+    assert!(ci.contains("cargo test -- --include-ignored"), "{ci}");
+    let readme = read(&target, "README.md");
+    assert!(readme.contains("cargo run -- migrate"), "{readme}");
+    // The generated configuration passes the tool's own validation.
+    let config = target.join("alloy.toml").to_string_lossy().into_owned();
+    let check = run(&["check", "--config", &config, "--no-env"]);
+    assert_eq!(code(&check), 0, "{}", stdout(&check));
+
+    // Each starter also stands alone.
+    for (with, module) in [
+        ("postgres", "db"),
+        ("jwt", "auth"),
+        ("http-client", "upstream"),
+    ] {
+        let target = generate(dir.path(), &format!("only-{module}"), &[with]);
+        let main = read(&target, "src/main.rs");
+        let import = format!("use only_{module}::{module};");
+        assert!(main.contains(&import), "{main}");
+        assert!(target.join(format!("src/{module}.rs")).is_file());
+    }
+}
+
 /// Compiles and tests generated projects. Slow; CI runs it with `--ignored`.
 #[test]
 #[ignore = "builds generated projects with cargo; run with --ignored"]
 fn generated_projects_build_and_pass_their_tests() {
     let dir = tempfile::tempdir().unwrap();
-    for (name, with) in [("plain-api", vec![]), ("documented-api", vec!["openapi"])] {
+    for (name, with) in [
+        ("plain-api", vec![]),
+        ("documented-api", vec!["openapi"]),
+        ("postgres-api", vec!["postgres"]),
+        ("jwt-api", vec!["jwt"]),
+        ("client-api", vec!["http-client"]),
+        (
+            "starters-api",
+            vec!["openapi", "postgres", "jwt", "http-client"],
+        ),
+    ] {
         let target = generate(dir.path(), name, &with);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let status = Command::new(&cargo)
@@ -520,6 +840,19 @@ fn generated_projects_build_and_pass_their_tests() {
             status.success(),
             "{name}: generated code is not rustfmt-clean"
         );
+        // With a database (the CI `generator` job has its own service
+        // container), also run the generated tests that need one.
+        let database = std::env::var_os("FERRUM_ALLOY_TEST_DATABASE_URL");
+        if let Some(url) = database.filter(|_| with.contains(&"postgres")) {
+            let status = Command::new(&cargo)
+                .args(["test", "--quiet", "--", "--include-ignored"])
+                .current_dir(&target)
+                .env("CARGO_TARGET_DIR", dir.path().join("target"))
+                .env("TEST_DATABASE_URL", url)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}: database tests failed");
+        }
         if with.contains(&"openapi") {
             let output = bin()
                 .current_dir(&target)
@@ -532,7 +865,7 @@ fn generated_projects_build_and_pass_their_tests() {
                 &std::fs::read_to_string(target.join("openapi.json")).unwrap(),
             )
             .unwrap();
-            assert_eq!(document["servers"][0]["url"], "/documented-api");
+            assert_eq!(document["servers"][0]["url"], format!("/{name}"));
             assert!(document["paths"]["/items/{id}"].is_object());
             let check = bin()
                 .current_dir(&target)
@@ -547,6 +880,21 @@ fn generated_projects_build_and_pass_their_tests() {
                 .output()
                 .unwrap();
             assert_eq!(code(&check), 0, "{}", stderr(&check));
+        }
+        // The JWT tests pin the algorithm they sign with, so switching
+        // alloy.toml to an issuer's algorithm does not break them.
+        if with.contains(&"jwt") {
+            let config = read(&target, "alloy.toml");
+            let config = config.replace("\"ES256\"", "\"RS256\"");
+            assert!(config.contains(r#"algorithms = ["RS256"]"#), "{config}");
+            std::fs::write(target.join("alloy.toml"), config).unwrap();
+            let status = Command::new(&cargo)
+                .args(["test", "--quiet", "--test", "auth"])
+                .current_dir(&target)
+                .env("CARGO_TARGET_DIR", dir.path().join("target"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}: tests broke on RS256");
         }
     }
 }
@@ -564,6 +912,12 @@ fn generated_code_is_rustfmt_clean_for_short_and_long_names() {
         (
             "a-rather-long-service-name-that-changes-line-widths-oa",
             vec!["openapi"],
+        ),
+        ("ab-starters", vec!["postgres", "jwt", "http-client"]),
+        ("ab-oa-db", vec!["openapi", "postgres"]),
+        (
+            "a-rather-long-service-name-that-changes-line-widths-st",
+            vec!["openapi", "postgres", "jwt", "http-client"],
         ),
     ] {
         let target = generate(dir.path(), name, &with);

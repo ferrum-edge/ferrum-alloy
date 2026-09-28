@@ -26,6 +26,7 @@ pub enum LogFormat {
 /// Logging configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct LoggingConfig {
     /// Output format.
     pub format: LogFormat,
@@ -80,19 +81,18 @@ pub fn build_filter(config: &LoggingConfig) -> Result<EnvFilter, InitError> {
         })
 }
 
-/// A formatting layer for `config`.
+/// A formatting layer for `config`, writing to standard output.
+///
+/// `json` uses [`crate::json::JsonLayer`], whose lines match
+/// tracing-subscriber's JSON formatter with flattened event fields, the
+/// current span, and no span list.
 pub fn fmt_layer<S>(config: &LoggingConfig) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     let base = tracing_subscriber::fmt::layer().with_target(true);
     match config.format {
-        LogFormat::Json => Box::new(
-            base.json()
-                .with_current_span(true)
-                .with_span_list(false)
-                .flatten_event(true),
-        ),
+        LogFormat::Json => Box::new(crate::json::JsonLayer::new()),
         LogFormat::Pretty => Box::new(base.pretty().with_ansi(config.ansi)),
         LogFormat::Compact => Box::new(base.compact().with_ansi(config.ansi)),
     }

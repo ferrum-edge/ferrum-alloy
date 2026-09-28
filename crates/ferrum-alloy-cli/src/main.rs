@@ -1,5 +1,5 @@
 //! `ferrum-alloy`: project starters, configuration checks, artifact export,
-//! and offline diagnosis.
+//! and diagnosis.
 //!
 //! Exit codes: `0` success, `1` unexpected failure, `2` usage error,
 //! `3` invalid input (configuration, manifest, report), `4` a `--check`
@@ -15,6 +15,7 @@ mod check;
 mod diagnose;
 mod edge;
 mod error;
+mod live;
 mod new;
 mod openapi;
 
@@ -53,7 +54,8 @@ enum Command {
         #[command(subcommand)]
         command: edge::EdgeCommand,
     },
-    /// Explain a diagnostic report or an OTLP/JSON trace export offline.
+    /// Explain a diagnostic report, an OTLP/JSON trace export, or a live
+    /// report fetched from a running service.
     Diagnose(diagnose::DiagnoseArgs),
     /// Print tool and contract versions.
     Version {

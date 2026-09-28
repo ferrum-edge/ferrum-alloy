@@ -19,7 +19,7 @@ Ferrum Alloy is a batteries-included toolkit for Rust API services built on [Axu
 
 Alloy works on its own. Behind [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge), it also shows a verified request story shared with the gateway. You can see which gateway span each service span belongs to and whether the gateway's identity was cryptographically verified. You can also see what the evidence does and does not prove about where the time went.
 
-> **Pre-release.** Nothing is published to crates.io yet, and APIs and contracts may change. [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
+> **Pre-release.** Nothing is published to crates.io yet (see [release readiness](docs/release.md)), and APIs and contracts may change. [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
 
 ## Quick start
 
@@ -59,7 +59,7 @@ To go further, read [Getting started](docs/getting-started.md).
 | **Health** | Minimal liveness, cached single-flight readiness, and a draining state. Detailed health sits on a token-protected management listener. |
 | **Limits & lifecycle** | Body, header, connection, and admission limits. A deadline on time to response headers, which never cuts SSE streams. SIGTERM draining with a time budget and forced close. |
 | **Truthful telemetry** | Request ids and route-template metrics. W3C trace context is accepted only from trusted transport peers. Accounting ends exactly once, when the response *body* ends. OTLP export is bounded and counts any loss. |
-| **Optional batteries** | Cargo features: `otel`, `tls` (rustls with verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `jwt` (JWKS), `http-client`, `compression`, and `cors`. |
+| **Optional batteries** | Cargo features: `otel`, `tls` (rustls with verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `openapi-ui` (a protected Swagger UI from embedded assets), `jwt` (JWKS), `http-client`, `compression`, `cors`, and `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service). |
 
 ### CLI
 
@@ -68,8 +68,8 @@ To go further, read [Getting started](docs/getting-started.md).
 | `ferrum-alloy new` | Creates a starter project that compiles and passes its own tests |
 | `ferrum-alloy check` | Validates configuration |
 | `ferrum-alloy openapi export` | Exports the OpenAPI spec and detects drift |
-| `ferrum-alloy edge export` | Exports Edge file-mode or GitForgeOps YAML, validated by the real gateway |
-| `ferrum-alloy diagnose` | Explains evidence offline, with deterministic rules |
+| `ferrum-alloy edge export` | Exports Edge file-mode YAML (checked in CI with `ferrum-edge validate`) or a GitForgeOps tree |
+| `ferrum-alloy diagnose` | Explains evidence deterministically, from files or from one request's live report fetched from a running service on explicit request |
 
 ## Workspace
 
@@ -80,7 +80,7 @@ To go further, read [Getting started](docs/getting-started.md).
 | [`ferrum-alloy-edge`](crates/ferrum-alloy-edge) | Ferrum Edge contracts, gateway trust modes, the service manifest, and config export |
 | [`ferrum-alloy-diagnostics`](crates/ferrum-alloy-diagnostics) | Versioned evidence schema, bounded parser, deterministic rules, and OTLP/JSON import |
 | [`ferrum-alloy-cli`](crates/ferrum-alloy-cli) | The `ferrum-alloy` command |
-| [`examples/`](examples) | `minimal`, `existing-axum`, `postgres-api`, `edge-observability` (real Edge and Collector), and `bench` (overhead harness) |
+| [`examples/`](examples) | `minimal`, `existing-axum`, `postgres-api`, `edge-observability` (real Edge and Collector), `openapi-ui` (the documentation UI for CI's browser smoke test), and `bench` (overhead harness) |
 
 ## Documentation
 
@@ -94,7 +94,9 @@ To go further, read [Getting started](docs/getting-started.md).
 | [Compatibility](docs/compatibility.md) | The exact tested matrix |
 | [Architecture decisions](docs/adr/README.md) | ADRs |
 | [Implementation status](docs/implementation-status.md) | What is built and tested |
+| [Testing](docs/testing.md) | Property tests and fuzz targets for untrusted input |
 | [Benchmarks](docs/benchmarks.md) | Local, same-host overhead measurements and their limits |
+| [Release readiness](docs/release.md) | Packaging checks, the release checklist, and open owner decisions |
 
 ## Development
 
@@ -117,3 +119,5 @@ The Ferrum Edge end-to-end stack is defined in [`examples/edge-observability/com
 ## License
 
 Ferrum Alloy is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), and commercial licensing is available ([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). "Ferrum Alloy" and the crate and command names are working names. Registry and trademark availability has not been verified.
+
+Files under [`crates/ferrum-alloy/assets/swagger-ui/`](crates/ferrum-alloy/assets/swagger-ui/) are third-party code (Swagger UI, feature `openapi-ui`) and are licensed only under their own terms: Apache-2.0, with the bundled MIT, BSD-3-Clause, and DOMPurify notices in that directory. They are not covered by the repository's PolyForm Noncommercial or commercial licensing.

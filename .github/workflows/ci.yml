@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # Property tests draw the same cases on every run, so a failure reproduces.
+  # Explore other cases locally with a different or unset seed (docs/testing.md).
+  PROPTEST_RNG_SEED: "20260927"
 
 jobs:
   fmt:
@@ -69,28 +72,34 @@ jobs:
   features:
     name: Feature combinations
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Independently usable crates
         run: |
           set -euxo pipefail
           cargo check --locked -p ferrum-alloy-diagnostics --all-targets
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features axum
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features subscriber
-          cargo check --locked -p ferrum-alloy-telemetry --no-default-features --features x509
-          cargo check --locked -p ferrum-alloy-telemetry --features otel
-          cargo check --locked -p ferrum-alloy-edge --no-default-features
+          # Every target of the telemetry crate, including its tests, must
+          # build, lint, and pass with each feature alone.
+          cargo clippy --locked -p ferrum-alloy-telemetry --all-targets --no-default-features -- -D warnings
+          cargo test --locked -p ferrum-alloy-telemetry --no-default-features
+          for feature in axum subscriber x509 otel; do
+            cargo clippy --locked -p ferrum-alloy-telemetry --all-targets --no-default-features --features "$feature" -- -D warnings
+            cargo test --locked -p ferrum-alloy-telemetry --no-default-features --features "$feature"
+          done
+          cargo clippy --locked -p ferrum-alloy-telemetry --all-targets --features otel -- -D warnings
+          cargo clippy --locked -p ferrum-alloy-edge --all-targets --no-default-features -- -D warnings
+          cargo test --locked -p ferrum-alloy-edge --no-default-features
       - name: Each optional integration alone
         run: |
           set -euxo pipefail
           cargo check --locked -p ferrum-alloy --no-default-features
-          for feature in otel edge tls postgres openapi jwt http-client compression cors; do
+          for feature in otel edge tls postgres openapi openapi-ui jwt http-client compression cors diagnostics; do
             cargo check --locked -p ferrum-alloy --no-default-features --features "$feature"
           done
           cargo check --locked -p ferrum-alloy --features full
@@ -98,7 +107,7 @@ jobs:
         run: |
           set -euxo pipefail
           tree=$(cargo tree --locked -p ferrum-alloy --no-default-features -e normal --prefix none)
-          for forbidden in sqlx jsonwebtoken utoipa reqwest opentelemetry rustls ferrum-alloy-edge; do
+          for forbidden in sqlx jsonwebtoken utoipa reqwest opentelemetry rustls ferrum-alloy-edge ferrum-alloy-diagnostics; do
             if grep -q "^$forbidden " <<<"$tree"; then
               echo "::error::$forbidden is in the minimal dependency graph"
               exit 1
@@ -115,12 +124,28 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo +1.94.0 check --workspace --all-features --locked
+      - run: cargo +1.94.0 check --workspace --all-targets --all-features --locked
 
   generator:
     name: Generated projects
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: alloy
+          POSTGRES_PASSWORD: alloy
+          POSTGRES_DB: alloy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U alloy"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FERRUM_ALLOY_TEST_DATABASE_URL: postgres://alloy:alloy@127.0.0.1:5432/alloy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -161,6 +186,89 @@ jobs:
       - name: Example CRUD service against the database
         run: cargo test --locked -p example-postgres-api -- --include-ignored
 
+  openapi-ui-browser:
+    name: OpenAPI UI in a real browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SMOKE_OUT: target/browser-smoke
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          cache: npm
+          cache-dependency-path: ci/browser-smoke/package-lock.json
+      - name: Install Playwright from the lockfile
+        # No install scripts and no browser download: the tests drive the
+        # runner's preinstalled Google Chrome (channel "chrome").
+        working-directory: ci/browser-smoke
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          npm ci --ignore-scripts
+          google-chrome --version
+      - name: Build the smoke server
+        run: cargo build --locked -p example-openapi-ui
+      - name: Start the smoke server
+        # examples/openapi-ui/alloy.toml: the application listener on
+        # 127.0.0.1:18080 and the management listener on 127.0.0.1:19090.
+        env:
+          # A throwaway credential for the smoke server's management listener,
+          # which listens on this runner's loopback only. Set only on the two
+          # steps that need it.
+          FERRUM_ALLOY_MANAGEMENT_TOKEN: browser-smoke-management-token-0123456789
+        run: |
+          set -euo pipefail
+          mkdir -p "$SMOKE_OUT"
+          ./target/debug/example-openapi-ui > "$SMOKE_OUT/server.log" 2>&1 &
+          echo "$!" > "$SMOKE_OUT/server.pid"
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/readyz \
+              && curl -fsS -o /dev/null http://127.0.0.1:19090/livez; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$SMOKE_OUT/server.pid")" 2> /dev/null; then
+              cat "$SMOKE_OUT/server.log"
+              echo "::error::the smoke server exited"
+              exit 1
+            fi
+            sleep 1
+          done
+          cat "$SMOKE_OUT/server.log"
+          echo "::error::the smoke server did not become ready"
+          exit 1
+      - name: Load the documentation UI in Google Chrome
+        working-directory: ci/browser-smoke
+        env:
+          FERRUM_ALLOY_MANAGEMENT_TOKEN: browser-smoke-management-token-0123456789
+        run: npm test
+      - name: Stop the smoke server
+        if: always()
+        run: |
+          if [ -f "$SMOKE_OUT/server.pid" ]; then
+            kill "$(cat "$SMOKE_OUT/server.pid")" 2> /dev/null || true
+          fi
+      - name: Upload screenshots and report
+        # On success and on failure. Failure traces include the throwaway
+        # token above, nothing else secret.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: openapi-ui-browser-smoke
+          path: |
+            ci/browser-smoke/screenshots/
+            ci/browser-smoke/test-results/
+            ci/browser-smoke/playwright-report/
+            target/browser-smoke/server.log
+          if-no-files-found: warn
+
   dependencies:
     name: Dependency policy
     runs-on: ubuntu-latest
@@ -171,13 +279,194 @@ jobs:
         with:
           tool: cargo-deny
       - run: cargo deny check
+      - name: Fuzz crate dependencies
+        # The fuzz crate is its own workspace with its own lockfile. Alloy's
+        # optional batteries are off there, so an advisory ignored for them
+        # may not be detected.
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check -A advisory-not-detected
+
+  package:
+    name: Package dry run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CRATES: >-
+        ferrum-alloy-diagnostics ferrum-alloy-telemetry ferrum-alloy-edge
+        ferrum-alloy ferrum-alloy-cli
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Package every library and CLI crate
+        # Nothing is uploaded: `cargo package` never publishes, and every crate
+        # stays `publish = false` (docs/release.md). The crates depend on each
+        # other and none is in a registry, so Cargo can neither generate a
+        # packaged Cargo.lock nor verify a crate against its siblings (it
+        # resolves them from crates.io). --exclude-lockfile and --no-verify
+        # skip both; the next step builds the packaged sources instead.
+        run: |
+          set -euxo pipefail
+          args=()
+          for crate in $CRATES; do
+            args+=(-p "$crate")
+          done
+          cargo package --locked --no-verify --exclude-lockfile "${args[@]}"
+      - name: Check the packaged files
+        run: |
+          set -euxo pipefail
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "ferrum-alloy") | .version')
+          for crate in $CRATES; do
+            file="target/package/$crate-$version.crate"
+            for path in Cargo.toml README.md LICENSE LICENSE-COMMERCIAL.md; do
+              tar -xzOf "$file" "$crate-$version/$path" > /dev/null
+            done
+            # The license files are symlinks to the repository's; the package
+            # must carry their contents.
+            tar -xzOf "$file" "$crate-$version/LICENSE" | cmp - LICENSE
+            tar -xzOf "$file" "$crate-$version/LICENSE-COMMERCIAL.md" | cmp - LICENSE-COMMERCIAL.md
+          done
+          # Every committed CLI template ships, including dot-directories.
+          diff \
+            <(git ls-files crates/ferrum-alloy-cli/templates \
+              | sed "s|^crates/ferrum-alloy-cli/|ferrum-alloy-cli-$version/|" | sort) \
+            <(tar -tzf "target/package/ferrum-alloy-cli-$version.crate" \
+              | grep "^ferrum-alloy-cli-$version/templates/" | grep -v '/$' | sort)
+          # The vendored documentation UI ships whole, with its license,
+          # notices, and hash manifest.
+          diff \
+            <(git ls-files crates/ferrum-alloy/assets \
+              | sed "s|^crates/ferrum-alloy/|ferrum-alloy-$version/|" | sort) \
+            <(tar -tzf "target/package/ferrum-alloy-$version.crate" \
+              | grep "^ferrum-alloy-$version/assets/" | grep -v '/$' | sort)
+      - name: Build the packaged sources on their own
+        # Unpack the packages into a new workspace, outside this one, whose
+        # [patch.crates-io] points each registry dependency on a sibling at
+        # its unpacked package. This catches a file a crate needs but does not
+        # package, such as an include_str! template. The committed lockfile
+        # keeps third-party versions as tested.
+        run: |
+          set -euxo pipefail
+          root="$RUNNER_TEMP/packaged"
+          mkdir -p "$root"
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "ferrum-alloy") | .version')
+          {
+            echo '[workspace]'
+            echo 'resolver = "3"'
+            echo 'members = ["ferrum-alloy*"]'
+            echo '[patch.crates-io]'
+          } > "$root/Cargo.toml"
+          for crate in $CRATES; do
+            tar -xzf "target/package/$crate-$version.crate" -C "$root"
+            echo "$crate = { path = \"$crate-$version\" }" >> "$root/Cargo.toml"
+          done
+          cp Cargo.lock "$root/"
+          cat "$root/Cargo.toml"
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          cargo check --manifest-path "$root/Cargo.toml" --workspace --all-features
+          cargo check --manifest-path "$root/Cargo.toml" --workspace
+          # A sibling must resolve to its unpacked package, never to a
+          # registry crate of the same name.
+          if awk '/^name = /{name=$3} /^source = / && name ~ /^"ferrum-alloy/{found=1} END{exit !found}' \
+            "$root/Cargo.lock"; then
+            echo "::error::a ferrum-alloy crate resolved from a registry"
+            exit 1
+          fi
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-15
+      FUZZ_SECONDS: "60"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Check the committed fuzz lockfile
+        # cargo-fuzz has no --locked flag. Resolve first and fail, showing the
+        # difference, if fuzz/Cargo.lock would change.
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- fuzz/Cargo.lock
+          cargo "+$FUZZ_TOOLCHAIN" fetch --manifest-path fuzz/Cargo.toml --locked
+      - name: Build fuzz targets
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build
+      - name: Run each target for ${{ env.FUZZ_SECONDS }} seconds
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          run() {
+            target="$1"
+            shift
+            mkdir -p "$root/fuzz/corpus/$target"
+            dict=()
+            if [ -f "$root/fuzz/dicts/$target.dict" ]; then
+              dict=("-dict=$root/fuzz/dicts/$target.dict")
+            fi
+            cargo "+$FUZZ_TOOLCHAIN" fuzz run "$target" "$root/fuzz/corpus/$target" "$@" -- \
+              -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 "${dict[@]}"
+          }
+          run traceparent "$root/fuzz/seeds/traceparent"
+          run request_id "$root/fuzz/seeds/request_id"
+          run diagnostic_report "$root/contracts/fixtures/reports"
+          run otlp_import "$root/contracts/fixtures/otlp"
+          run config_file "$root/contracts/fixtures/manifests" "$root/fuzz/seeds/config_file"
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  edge-support:
+    name: Edge support window
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tested: ${{ steps.read.outputs.tested }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - name: Read the tested Edge releases
+        id: read
+        # Every Edge image the jobs below run comes from this list (newest
+        # first), so a release bump never edits this workflow. Each entry must
+        # be a digest-pinned image with a release tag and full source commit,
+        # and gets a stable slot name for the job names: baseline, previous.
+        run: |
+          set -euo pipefail
+          tested=$(jq -ce '.edge_support.tested
+            | select(length == 2 and all(.[];
+                (.image | test("^ferrumedge/ferrum-edge@sha256:[0-9a-f]{64}\\z"))
+                and (.release | test("^v[0-9]+\\.[0-9]+\\.[0-9]+\\z"))
+                and (.source_commit | test("^[0-9a-f]{40}\\z"))))
+            | [to_entries[] | .value + {slot: (["baseline", "previous"][.key])}]' docs/compatibility.json)
+          echo "tested=$tested" >> "$GITHUB_OUTPUT"
 
   edge-e2e:
-    name: Ferrum Edge end-to-end
+    name: Ferrum Edge end-to-end (${{ matrix.edge.slot }})
+    needs: edge-support
+    strategy:
+      fail-fast: false
+      matrix:
+        edge: ${{ fromJSON(needs.edge-support.outputs.tested) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       COMPOSE_FILE: examples/edge-observability/compose.yaml
+      # Build argument of the demo Dockerfile's edge stage (compose.yaml).
+      EDGE_IMAGE: ${{ matrix.edge.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -186,9 +475,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build the driver
         run: cargo build --locked -p example-edge-observability --bin edge-e2e
-      - name: Build images (Edge v0.9.7, Collector 0.161.0, Alloy)
+      - name: Build images (Edge ${{ matrix.edge.release }}, Collector 0.161.0, Alloy)
         run: docker compose -f "$COMPOSE_FILE" build
-      - name: ferrum-edge validate (v0.9.7) on the generated TLS configuration
+      - name: ferrum-edge validate (${{ matrix.edge.release }}) on the generated TLS configuration
         run: docker compose -f "$COMPOSE_FILE" run --rm --no-deps edge validate -m file -c /config/edge.yaml
       - name: Start the stack
         run: docker compose -f "$COMPOSE_FILE" up -d
@@ -201,7 +490,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: edge-e2e-evidence
+          name: edge-e2e-evidence-${{ matrix.edge.release }}
           path: |
             target/e2e/
             target/e2e-logs.txt
@@ -211,16 +500,23 @@ jobs:
         run: docker compose -f "$COMPOSE_FILE" down -v
 
   edge-config:
-    name: Generated Edge configuration validates
+    name: Generated Edge configuration validates (${{ matrix.edge.slot }})
+    needs: edge-support
+    strategy:
+      fail-fast: false
+      matrix:
+        edge: ${{ fromJSON(needs.edge-support.outputs.tested) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - name: ferrum-edge validate (v0.9.7) on the plain-HTTP fixture
+      - name: ferrum-edge validate (${{ matrix.edge.release }}) on the plain-HTTP fixture
+        env:
+          EDGE_IMAGE: ${{ matrix.edge.image }}
         run: |
           set -euxo pipefail
           docker run --rm \
             -e FERRUM_NAMESPACE=retail \
             -v "$PWD/contracts/fixtures/manifests:/config:ro" \
-            ferrumedge/ferrum-edge@sha256:4c9530e09443649526dc4fbbec0720ba7b47ceb91b0dd5cb06db85430908874a \
+            "$EDGE_IMAGE" \
             validate -m file -c /config/plain-http.edge.yaml

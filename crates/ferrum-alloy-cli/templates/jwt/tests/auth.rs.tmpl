@@ -1,0 +1,193 @@
+//! Bearer authentication with the `[auth.jwt]` policy from alloy.toml,
+//! against a locally generated key whose JWKS is served on loopback.
+
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use axum::routing::get;
+use ferrum_alloy::config::{JwtSettings, MAX_JWKS_LIFETIME_MS, Overrides, load_from};
+use ferrum_alloy::jwt::JwtVerifier;
+use http_body_util::BodyExt;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rcgen::KeyPair;
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use tower::ServiceExt;
+
+use {{crate_name}}::auth;
+
+const KID: &str = "local-test-key";
+
+/// `[auth.jwt]` from alloy.toml, without environment overrides.
+fn configured() -> JwtSettings {
+    let file = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/alloy.toml"));
+    let loaded = load_from(Some(file), std::iter::empty(), &Overrides::default());
+    let (config, _) = loaded.expect("alloy.toml loads");
+    config.auth.jwt.expect("[auth.jwt] in alloy.toml")
+}
+
+fn b64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = match chunk.len() {
+            3 => (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]),
+            2 => (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8),
+            _ => u32::from(chunk[0]) << 16,
+        };
+        let symbols = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+        for symbol in &symbols[..chunk.len() + 1] {
+            out.push(ALPHABET[*symbol as usize] as char);
+        }
+    }
+    out
+}
+
+/// The public half of a P-256 key pair as a JWK.
+fn jwk(pair: &KeyPair) -> Value {
+    let raw = pair.public_key_raw();
+    json!({
+        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": KID,
+        "x": b64url(&raw[1..33]), "y": b64url(&raw[33..65]),
+    })
+}
+
+/// Serves `pair`'s JWKS on loopback and returns its URL.
+async fn jwks_server(pair: &KeyPair) -> String {
+    let body = json!({ "keys": [jwk(pair)] }).to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let app = Router::new().route("/jwks", get(|| async move { body }));
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    format!("http://{addr}/jwks")
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// Claims that `jwt` accepts, granting `scope`.
+fn valid_claims(jwt: &JwtSettings, scope: &str) -> Value {
+    json!({
+        "iss": jwt.issuer, "aud": jwt.audiences[0], "sub": "user-1",
+        "exp": now() + 300, "scope": scope,
+    })
+}
+
+fn sign(pair: &KeyPair, claims: &Value) -> String {
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(KID.into());
+    let key = EncodingKey::from_ec_der(&pair.serialize_der());
+    encode(&header, claims, &key).expect("sign")
+}
+
+fn token(pair: &KeyPair, jwt: &JwtSettings, scope: &str) -> String {
+    sign(pair, &valid_claims(jwt, scope))
+}
+
+/// The router under test, verifying tokens against `pair`'s JWKS.
+///
+/// The algorithm is pinned to the one `sign` uses, so changing `algorithms`
+/// in alloy.toml to match your issuer does not break these tests.
+async fn app(pair: &KeyPair) -> (Router, JwtSettings) {
+    let mut jwt = configured();
+    jwt.algorithms = vec!["ES256".into()];
+    jwt.jwks_url = Some(jwks_server(pair).await);
+    let verifier = JwtVerifier::new(&jwt).expect("verifier");
+    (auth::router(&verifier), jwt)
+}
+
+async fn get_me(router: Router, token: Option<&str>) -> (StatusCode, Value) {
+    let mut request = Request::get("/me");
+    if let Some(token) = token {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let request = request.body(Body::empty()).expect("request");
+    let response = router.oneshot(request).await.expect("infallible");
+    let status = response.status();
+    let body = response.into_body().collect().await.expect("body");
+    let json = serde_json::from_slice(&body.to_bytes()).unwrap_or(Value::Null);
+    (status, json)
+}
+
+#[test]
+fn alloy_toml_bounds_the_key_set_lifetime() {
+    let jwt = configured();
+    assert!(!jwt.algorithms.is_empty());
+    assert!((1..=MAX_JWKS_LIFETIME_MS).contains(&jwt.jwks_max_age_ms));
+    assert!(jwt.jwks_max_stale_ms <= MAX_JWKS_LIFETIME_MS);
+    assert!(jwt.jwks_min_refresh_interval_ms <= jwt.jwks_max_age_ms);
+}
+
+#[tokio::test]
+async fn a_request_without_a_token_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, _) = app(&pair).await;
+    let (status, _) = get_me(router, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_granting_the_scope_is_accepted() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let token = token(&pair, &jwt, auth::READ_SCOPE);
+    let (status, json) = get_me(router, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["subject"], "user-1");
+}
+
+#[tokio::test]
+async fn a_token_without_the_scope_is_forbidden() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let token = token(&pair, &jwt, "other:scope");
+    let (status, _) = get_me(router, Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_token_signed_by_another_key_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let other = KeyPair::generate().expect("key pair");
+    let token = token(&other, &jwt, auth::READ_SCOPE);
+    let (status, _) = get_me(router, Some(&token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_from_another_issuer_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let mut claims = valid_claims(&jwt, auth::READ_SCOPE);
+    claims["iss"] = json!("https://other-issuer.example.com/");
+    let (status, _) = get_me(router, Some(&sign(&pair, &claims))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_for_another_audience_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let mut claims = valid_claims(&jwt, auth::READ_SCOPE);
+    claims["aud"] = json!("another-service");
+    let (status, _) = get_me(router, Some(&sign(&pair, &claims))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_expired_token_is_unauthorized() {
+    let pair = KeyPair::generate().expect("key pair");
+    let (router, jwt) = app(&pair).await;
+    let mut claims = valid_claims(&jwt, auth::READ_SCOPE);
+    claims["exp"] = json!(now() - 3600);
+    let (status, _) = get_me(router, Some(&sign(&pair, &claims))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

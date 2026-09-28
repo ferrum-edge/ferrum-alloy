@@ -5,8 +5,14 @@
 //! clients. Alloy therefore adds request-specific headers only when the
 //! response is not storable by a shared cache (RFC 9111), and otherwise leaves
 //! the application's caching behavior untouched.
+//!
+//! A GET or HEAD response with a heuristically cacheable status is storable
+//! even without explicit freshness or validators (RFC 9111 §3 and §4.2.2):
+//! `Last-Modified` only feeds the heuristic freshness lifetime. Applications
+//! that want the request-specific headers on such responses mark them
+//! `Cache-Control: private` or `no-store`.
 
-use http::header::{CACHE_CONTROL, EXPIRES, HeaderMap, LAST_MODIFIED};
+use http::header::{CACHE_CONTROL, EXPIRES, HeaderMap};
 use http::{Method, StatusCode};
 
 /// Status codes that are heuristically cacheable (RFC 9110 §15.1).
@@ -30,7 +36,9 @@ pub fn is_shared_cacheable(
             .any(|d| d == name || d.starts_with(&format!("{name}=")))
     };
 
-    if has("no-store") || has("private") {
+    // A qualified `private="field"` still lets a shared cache store the rest
+    // of the response (RFC 9111 §5.2.2.7), so only the bare form prohibits it.
+    if has("no-store") || directives.iter().any(|d| d == "private") {
         return false;
     }
     let explicit_shared_freshness = has("public") || has("s-maxage");
@@ -44,10 +52,9 @@ pub fn is_shared_cacheable(
     }
 
     match *method {
+        // Heuristic freshness needs no validator (RFC 9111 §4.2.2).
         Method::GET | Method::HEAD => {
-            explicit_freshness
-                || (HEURISTICALLY_CACHEABLE.contains(&status.as_u16())
-                    && response_headers.contains_key(LAST_MODIFIED))
+            explicit_freshness || HEURISTICALLY_CACHEABLE.contains(&status.as_u16())
         }
         // POST responses are storable only with explicit freshness; other
         // methods are not storable.
