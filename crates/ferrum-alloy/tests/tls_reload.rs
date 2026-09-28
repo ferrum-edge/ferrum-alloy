@@ -244,11 +244,11 @@ async fn a_serial_added_to_the_crl_is_refused_after_the_reload() {
     let config = pki::client_config(&pki.ca, Some(&client));
     let (_, status) = probe(server.addr, Arc::clone(&config)).await.unwrap();
     assert_eq!(status, StatusCode::OK);
-    // Until the reload, the certificate resumes its session, so the refusal
-    // after it shows that the reload dropped the session cache.
-    let resumed = connect(server.addr, Arc::clone(&config)).await.unwrap();
-    assert_eq!(resumed.handshake_kind, Some(HandshakeKind::Resumed));
-    drop(resumed);
+    // Enforced CRL expiration disables resumption so every new connection
+    // checks that the loaded CRL is still current.
+    let second = connect(server.addr, Arc::clone(&config)).await.unwrap();
+    assert_eq!(second.handshake_kind, Some(HandshakeKind::Full));
+    drop(second);
 
     replace(&crl_path, pki.ca.crl(&[&client.serial]).pem().unwrap());
     wait_for(&server.stats.tls_reloads, 1).await;

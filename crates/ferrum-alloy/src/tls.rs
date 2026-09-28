@@ -606,6 +606,13 @@ fn build(
         .with_single_cert(chain, key)
         .map_err(|e| chain_and_key_error(settings, e))?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    if !sources.crls.is_empty() && settings.client_crl_expiration == CrlExpiration::Enforce {
+        // Resumption restores the client certificate authenticated by the
+        // original handshake without running the verifier again. Disable it
+        // so a CRL that has since expired is checked on every new connection.
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
     Ok(Current {
         config: Arc::new(config),
         fingerprint: sources.fingerprint(),
@@ -945,6 +952,35 @@ mod tests {
             verifier.verify_client_cert(&client, &[], now).err(),
             Some(rustls::Error::InvalidCertificate(expired))
         );
+    }
+
+    #[test]
+    fn enforced_crl_expiration_disables_session_resumption() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let (cert, key) = server_pem(&issuer);
+        let cert_path = dir.path().join("server.pem");
+        let key_path = dir.path().join("server.key");
+        std::fs::write(&cert_path, cert).unwrap();
+        std::fs::write(&key_path, key).unwrap();
+        let settings = TlsSettings {
+            cert_path,
+            key_path,
+            client_ca_path: Some(ca_path),
+            client_auth: ClientAuth::Required,
+            handshake_timeout_ms: 2_000,
+            client_crl_paths: vec![crl(dir.path(), &issuer)],
+            client_crl_depth: CrlDepth::default(),
+            client_crl_unknown_status: CrlUnknownStatus::default(),
+            client_crl_expiration: CrlExpiration::Enforce,
+            reload_interval_ms: 0,
+        };
+        let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
+
+        let server = load_at(&settings, startup).unwrap();
+        let config = serving(&server);
+        assert!(!config.session_storage.can_cache());
+        assert_eq!(config.send_tls13_tickets, 0);
     }
 
     /// A server certificate and key issued by `issuer`, as PEM.
