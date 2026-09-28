@@ -1072,16 +1072,26 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         })
         .collect();
 
-    for view in index.edge.values() {
+    let missing_service_views: Vec<&RequestView<'_>> = index
+        .edge
+        .values()
+        .filter(|view| {
+            let Some(edge_span) = view.span_id() else {
+                return false;
+            };
+            view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS)
+                .is_some_and(|ttfb| ttfb.duration_ms().is_some())
+                && index.services_under(edge_span).is_empty()
+        })
+        .collect();
+
+    for view in &missing_service_views {
         let Some(edge_span) = view.span_id() else {
             continue;
         };
         let Some(ttfb) = view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS) else {
             continue;
         };
-        if ttfb.duration_ms().is_none() || !index.services_under(edge_span).is_empty() {
-            continue;
-        }
         let mut builder = FindingBuilder::new(
             "alloy.telemetry.service_span_missing",
             RULE,
@@ -1107,7 +1117,18 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
             "packet loss or any other network fault",
         ])
         .missing(&["alloy.server span whose parent is the gateway span"]);
-        for observation in &degraded {
+        for observation in degraded.iter().filter(|observation| {
+            observation.span.as_ref().map_or_else(
+                // An unlinked observation is useful only when there is no
+                // ambiguity about which missing request it describes.
+                || missing_service_views.len() == 1,
+                |span| {
+                    span.span_id == edge_span
+                        || span.parent_span_id.as_deref() == Some(edge_span)
+                        || index.descends_from(&span.span_id, edge_span)
+                },
+            )
+        }) {
             builder = builder.cite(
                 observation,
                 &observation.name,

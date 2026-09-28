@@ -355,6 +355,58 @@ fn missing_service_span_is_unknown_and_not_a_network_fault() {
 }
 
 #[test]
+fn missing_service_findings_only_cite_degraded_evidence_for_their_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    let observations = report["observations"].as_array_mut().unwrap();
+
+    let mut second_edge = observations[0].clone();
+    second_edge["id"] = serde_json::json!("edge-ttfb-2");
+    second_edge["span"]["span_id"] = serde_json::json!("5555666677778888");
+    observations.push(second_edge);
+
+    let mut linked_degraded = observations[1].clone();
+    linked_degraded["id"] = serde_json::json!("alloy-not-sampled-linked");
+    linked_degraded["producer"]["kind"] = serde_json::json!("user");
+    linked_degraded["span"] = serde_json::json!({
+        "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7",
+        "span_id": "9999000011112222",
+        "parent_span_id": "1111222233334444"
+    });
+    observations.push(linked_degraded);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let missing: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.code == "alloy.telemetry.service_span_missing")
+        .collect();
+
+    assert_eq!(missing.len(), 2);
+    assert_eq!(
+        missing
+            .iter()
+            .map(|finding| finding.evidence.len())
+            .sum::<usize>(),
+        3,
+        "unlinked degraded evidence must not be copied into every request finding"
+    );
+    assert_eq!(
+        missing
+            .iter()
+            .filter(|finding| {
+                finding
+                    .supporting_observations
+                    .contains(&"alloy-not-sampled-linked".to_owned())
+            })
+            .count(),
+        1,
+        "span-linked degraded evidence belongs to only its gateway request"
+    );
+}
+
+#[test]
 fn negative_residual_is_preserved_as_conflicting_evidence() {
     let findings = findings("service-exceeds-gateway.json");
     let finding = by_code(&findings, "alloy.evidence.service_exceeds_gateway");
