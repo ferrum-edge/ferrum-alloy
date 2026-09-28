@@ -121,6 +121,10 @@ Parsing fails before values reach `Secret`, so syntax and schema (type) errors n
 
 rustls with the `ring` provider, passed explicitly. Alloy never installs a process-wide crypto provider. OpenSSL, native-tls, and aws-lc are banned in `deny.toml`. Client-certificate verification uses rustls' WebPKI verifier.
 
+### Session resumption
+
+Client-certificate authentication (`server.tls.client_auth` `optional` or `required`) disables TLS session resumption: the server keeps no session cache and issues no session tickets. Client certificate validity (`notAfter`) and revocation (the configured CRLs, including their `nextUpdate` time under `client_crl_expiration = "enforce"`) are therefore re-checked on every handshake, never carried over from an earlier session. The cost is a full handshake, with its key exchange and certificate verification, on every new connection; clients that keep connections open (HTTP/1.1 keep-alive, HTTP/2) pay it less often. Without client authentication, sessions resume, except across a reload. The check runs at the handshake only: a connection that is already open is not checked again when its certificate or a CRL later expires; `server.idle_timeout_ms` closes it once it goes idle, but a connection kept busy stays open.
+
 ### Client certificate revocation
 
 Revocation is checked only against certificate revocation lists (CRLs) named in `server.tls.client_crl_paths`. Without them, a leaked client certificate stays valid until it expires, so rotate short-lived certificates (SVIDs) or configure CRLs. The defaults fail closed:
@@ -142,7 +146,7 @@ Every `server.tls.reload_interval_ms` (a minute by default), Alloy reads the cer
 - Invalid material is never used. The previous material keeps serving, and the error is logged without quoting any file. Once the same files fail twice in a row, `ferrum_alloy_tls_reload_failures_total` counts the failure at every interval until the files are fixed; the error is logged at error level when it starts or changes. Files that change between the two reads at three reloads in a row are never used either; that is logged once as a warning and counted in `ferrum_alloy_tls_reload_stalls_total`. Alert on both counters: a certificate that cannot be replaced eventually expires.
 - `ferrum_alloy_tls_server_cert_not_after_timestamp_seconds` and `ferrum_alloy_tls_client_crl_next_update_timestamp_seconds` give the `notAfter` time of the serving certificate and the earliest `nextUpdate` time of the serving CRLs. Alert when either is near: with `client_crl_expiration = "enforce"`, an expired CRL fails every handshake it covers. While a serving CRL expires within 24 hours, the warning log is repeated about once an hour.
 - A reload cannot weaken client authentication. The policy (`client_auth` and the `client_crl_*` settings) comes from the configuration, which a reload never re-reads, so an empty or missing CA bundle or CRL fails the reload instead of turning verification off.
-- Connections established before a reload keep their negotiated session and the identity verified then, until they close. A client whose certificate is revoked or whose CA is removed keeps any connection it already has: `server.idle_timeout_ms` closes it once it goes idle, but a connection kept busy stays open. Sessions cannot be resumed across a reload, so every new handshake is verified against the new material.
+- Connections established before a reload keep their negotiated session and the identity verified then, until they close. A client whose certificate is revoked or whose CA is removed keeps any connection it already has: `server.idle_timeout_ms` closes it once it goes idle, but a connection kept busy stays open. Sessions cannot be resumed across a reload, and with client authentication they are never resumed (see [Session resumption](#session-resumption)), so every new handshake is verified against the new material.
 
 ## JWT / JWKS (feature `jwt`)
 
