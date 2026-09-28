@@ -355,6 +355,282 @@ fn missing_service_span_is_unknown_and_not_a_network_fault() {
 }
 
 #[test]
+fn missing_service_findings_only_cite_degraded_evidence_for_their_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    let observations = report["observations"].as_array_mut().unwrap();
+
+    let mut second_edge = observations[0].clone();
+    second_edge["id"] = serde_json::json!("edge-ttfb-2");
+    second_edge["span"]["span_id"] = serde_json::json!("5555666677778888");
+    observations.push(second_edge);
+
+    let mut linked_degraded = observations[1].clone();
+    linked_degraded["id"] = serde_json::json!("alloy-not-sampled-linked");
+    linked_degraded["producer"]["kind"] = serde_json::json!("user");
+    linked_degraded["span"] = serde_json::json!({
+        "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7",
+        "span_id": "9999000011112222",
+        "parent_span_id": "1111222233334444"
+    });
+    observations.push(linked_degraded);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let missing: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.code == "alloy.telemetry.service_span_missing")
+        .collect();
+
+    assert_eq!(missing.len(), 2);
+    assert_eq!(
+        missing
+            .iter()
+            .map(|finding| finding.evidence.len())
+            .sum::<usize>(),
+        3,
+        "unlinked degraded evidence must not be copied into every request finding"
+    );
+    assert_eq!(
+        missing
+            .iter()
+            .filter(|finding| {
+                finding
+                    .supporting_observations
+                    .contains(&"alloy-not-sampled-linked".to_owned())
+            })
+            .count(),
+        1,
+        "span-linked degraded evidence belongs to only its gateway request"
+    );
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+    assert_eq!(unlinked.rule_version, 2);
+    assert_eq!(
+        unlinked.supporting_observations,
+        ["alloy-not-sampled"],
+        "span-less degraded evidence is cited once instead of being dropped"
+    );
+    assert!(!unlinked.does_not_prove.is_empty());
+}
+
+/// Adds a not-sampled service observation whose span links to no gateway
+/// span, as when the service's trust policy re-rooted the trace.
+fn push_rerooted_degraded(report: &mut serde_json::Value) {
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut rerooted = observations[1].clone();
+    rerooted["id"] = serde_json::json!("alloy-not-sampled-rerooted");
+    rerooted["span"] = serde_json::json!({
+        "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7",
+        "span_id": "aaaabbbbccccdddd",
+        "parent_span_id": "eeeeffff00001111"
+    });
+    observations.push(rerooted);
+}
+
+#[test]
+fn rerooted_degraded_evidence_is_cited_on_the_only_missing_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    push_rerooted_degraded(&mut report);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.telemetry.service_span_missing");
+
+    assert_eq!(finding.rule_id, "alloy.r004");
+    assert_eq!(finding.rule_version, 2);
+    assert_eq!(
+        finding.supporting_observations,
+        [
+            "alloy-not-sampled",
+            "alloy-not-sampled-rerooted",
+            "edge-ttfb"
+        ],
+        "with one missing request, unlinked evidence can describe only that request"
+    );
+    assert!(
+        !codes(&findings).contains(&"alloy.telemetry.degraded_evidence_unlinked"),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+#[test]
+fn rerooted_degraded_evidence_is_cited_once_when_the_request_is_ambiguous() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    push_rerooted_degraded(&mut report);
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut second_edge = observations[0].clone();
+    second_edge["id"] = serde_json::json!("edge-ttfb-2");
+    second_edge["span"]["span_id"] = serde_json::json!("5555666677778888");
+    observations.push(second_edge);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+
+    assert_eq!(
+        unlinked.supporting_observations,
+        ["alloy-not-sampled", "alloy-not-sampled-rerooted"]
+    );
+    for finding in &findings {
+        if finding.code == "alloy.telemetry.service_span_missing" {
+            assert_eq!(finding.evidence.len(), 1, "{:?}", finding.evidence);
+        }
+    }
+}
+
+/// Adds a gateway request on `gateway_span` whose service span
+/// `service_span` has a measured time-to-headers.
+fn push_served_gateway(report: &mut serde_json::Value, gateway_span: &str, service_span: &str) {
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut edge = observations[0].clone();
+    edge["id"] = serde_json::json!("edge-ttfb-served");
+    edge["span"]["span_id"] = serde_json::json!(gateway_span);
+    observations.push(edge);
+
+    let mut served = observations[1].clone();
+    served["id"] = serde_json::json!("alloy-served");
+    served["availability"] = serde_json::json!("measured");
+    served["value"] = serde_json::json!(1700.0);
+    served["unit"] = serde_json::json!("ms");
+    served["span"] = serde_json::json!({
+        "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7",
+        "span_id": service_span,
+        "parent_span_id": gateway_span
+    });
+    observations.push(served);
+}
+
+/// Adds a not-sampled observation from `kind` on `span` under `parent`.
+fn push_degraded_child(
+    report: &mut serde_json::Value,
+    id: &str,
+    kind: &str,
+    span: &str,
+    parent: &str,
+) {
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut degraded = observations[1].clone();
+    degraded["id"] = serde_json::json!(id);
+    degraded["producer"]["kind"] = serde_json::json!(kind);
+    degraded["span"] = serde_json::json!({
+        "trace_id": "6c9f0a1b2c3d4e5f60718293a4b5c6d7",
+        "span_id": span,
+        "parent_span_id": parent
+    });
+    observations.push(degraded);
+}
+
+#[test]
+fn degraded_child_of_a_served_request_is_not_cited_on_the_only_missing_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    push_served_gateway(&mut report, "5555666677778888", "7777000011112222");
+    // Not an Alloy span, so the lineage walk must start at its Alloy parent.
+    push_degraded_child(
+        &mut report,
+        "user-not-sampled-served",
+        "user",
+        "9999000011112222",
+        "7777000011112222",
+    );
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let missing: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.code == "alloy.telemetry.service_span_missing")
+        .collect();
+
+    assert_eq!(missing.len(), 1);
+    assert_eq!(
+        missing[0].supporting_observations,
+        ["alloy-not-sampled", "edge-ttfb"],
+        "evidence under a request that has service telemetry is not attributed to another request"
+    );
+    assert!(
+        !codes(&findings).contains(&"alloy.telemetry.degraded_evidence_unlinked"),
+        "{:?}",
+        codes(&findings)
+    );
+}
+
+#[test]
+fn degraded_evidence_under_a_served_or_untimed_gateway_is_not_cited() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    // A second missing request, so span-less evidence is aggregated.
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut second_edge = observations[0].clone();
+    second_edge["id"] = serde_json::json!("edge-ttfb-2");
+    second_edge["span"]["span_id"] = serde_json::json!("2222333344445555");
+    observations.push(second_edge);
+    // A gateway request with no measured backend timing.
+    let mut untimed = observations[0].clone();
+    untimed["id"] = serde_json::json!("edge-untimed");
+    untimed["availability"] = serde_json::json!("not_sampled");
+    untimed["span"]["span_id"] = serde_json::json!("3333444455556666");
+    untimed.as_object_mut().unwrap().remove("value");
+    observations.push(untimed);
+    push_served_gateway(&mut report, "5555666677778888", "7777000011112222");
+    push_degraded_child(
+        &mut report,
+        "user-not-sampled-served",
+        "user",
+        "8888000011112222",
+        "7777000011112222",
+    );
+    push_degraded_child(
+        &mut report,
+        "user-not-sampled-untimed",
+        "user",
+        "9999000011112222",
+        "3333444455556666",
+    );
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let r004: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.rule_id == "alloy.r004")
+        .collect();
+
+    // Accepted gap: this evidence belongs to a request R004 does not report,
+    // so it is neither cited nor counted in the unlinked aggregate.
+    for id in [
+        "user-not-sampled-served",
+        "user-not-sampled-untimed",
+        "edge-untimed",
+    ] {
+        assert!(
+            r004.iter()
+                .all(|finding| !finding.supporting_observations.contains(&id.to_owned())),
+            "{id} is not cited by R004"
+        );
+    }
+    assert_eq!(
+        r004.iter()
+            .filter(|finding| finding.code == "alloy.telemetry.service_span_missing")
+            .count(),
+        2
+    );
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+    assert_eq!(unlinked.supporting_observations, ["alloy-not-sampled"]);
+    assert!(
+        !unlinked.explanation.contains("more degraded observations"),
+        "{}",
+        unlinked.explanation
+    );
+}
+
+#[test]
 fn negative_residual_is_preserved_as_conflicting_evidence() {
     let findings = findings("service-exceeds-gateway.json");
     let finding = by_code(&findings, "alloy.evidence.service_exceeds_gateway");
