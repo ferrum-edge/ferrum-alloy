@@ -833,6 +833,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-openapi-ui"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ferrum-alloy",
+ "serde",
+ "tokio",
+ "utoipa",
+]
+
+[[package]]
 name = "example-postgres-api"
 version = "0.1.0"
 dependencies = [

@@ -65,7 +65,7 @@ See [docs/getting-started.md](docs/getting-started.md).
 | `crates/ferrum-alloy-edge` | Ferrum Edge contracts, gateway trust modes, service manifest, config export |
 | `crates/ferrum-alloy-diagnostics` | Versioned evidence schema, bounded parser, deterministic rules, OTLP/JSON import |
 | `crates/ferrum-alloy-cli` | The `ferrum-alloy` command |
-| `examples/` | `minimal`, `existing-axum`, `postgres-api`, `edge-observability` (real Edge + Collector), `bench` (overhead harness) |
+| `examples/` | `minimal`, `existing-axum`, `postgres-api`, `edge-observability` (real Edge + Collector), `openapi-ui` (the documentation UI for CI's browser smoke test), `bench` (overhead harness) |
 
 ## Documentation
 
