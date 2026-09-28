@@ -187,6 +187,27 @@ async fn gateway_required_rejects_direct_callers_but_not_health_probes() {
 }
 
 #[tokio::test]
+async fn disabled_health_endpoints_are_not_exempt_from_gateway_required() {
+    let pki = pki();
+    let mut cfg = config(&pki, EdgeMode::GatewayRequired);
+    cfg.health.app_endpoints = false;
+    let app = Router::new().route("/livez", get(|| async { "application secret" }));
+    let server = support::start(AlloyApp::new("mtls").router(app), cfg).await;
+
+    let reply = tls_get(
+        server.addr,
+        pki::client_config(&pki.ca, None),
+        "/livez",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply.status, 403, "{}", reply.body);
+    assert!(!reply.body.contains("application secret"));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_different_identity_from_the_same_ca_is_not_the_gateway() {
     let pki = pki();
     let server = support::start(

@@ -381,11 +381,17 @@ impl AlloyApp {
                 EdgeMode::GatewayRequired => ferrum_alloy_edge::DeploymentMode::GatewayRequired,
             };
             policy_config.accept_consumer_identity = config.edge.accept_consumer_identity;
-            let policy = ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier))
-                .with_exempt_paths(vec![
+            let exempt_paths = config.health.app_endpoints.then(|| {
+                vec![
                     config.health.liveness_path.clone(),
                     config.health.readiness_path.clone(),
-                ]);
+                ]
+            });
+            let mut policy =
+                ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier));
+            if let Some(paths) = exempt_paths {
+                policy = policy.with_exempt_paths(paths);
+            }
             app = app.layer(ferrum_alloy_edge::EdgeLayer::new(policy));
         }
         #[cfg(not(feature = "edge"))]
