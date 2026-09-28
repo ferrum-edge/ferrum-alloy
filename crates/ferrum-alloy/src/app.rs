@@ -312,10 +312,7 @@ impl AlloyApp {
             served.push(("health.liveness_path", health.liveness_path.clone()));
             served.push(("health.readiness_path", health.readiness_path.clone()));
             #[cfg(feature = "edge")]
-            exempt_paths.extend([
-                health.liveness_path.clone(),
-                health.readiness_path.clone(),
-            ]);
+            exempt_paths.extend([health.liveness_path.clone(), health.readiness_path.clone()]);
             let (r, l) = (Arc::clone(&readiness), lifecycle.clone());
             app = app
                 .route(
