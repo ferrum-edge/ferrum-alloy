@@ -1,6 +1,6 @@
 # Testing
 
-Hosted CI (`.github/workflows/ci.yml`) is the source of truth. This page covers the fuzz and property tests for untrusted input. The example-based tests are listed in [implementation-status.md](implementation-status.md).
+Hosted CI (`.github/workflows/ci.yml`) is the source of truth. This page covers the fuzz and property tests for untrusted input, and the browser smoke test of the OpenAPI documentation UI. The example-based tests are listed in [implementation-status.md](implementation-status.md).
 
 ## Property tests
 
@@ -16,6 +16,21 @@ CI sets `PROPTEST_RNG_SEED` in `.github/workflows/ci.yml`, so every run draws th
 | `crates/ferrum-alloy/tests/config_properties.rs` | A value in a wrong-typed field, an invalid address, an unknown variant, an unknown quoted key, a TOML syntax error, or an invalid `FERRUM_ALLOY_*` variable never appears, even when it holds a newline, a backtick, or `, expected `, in the error's `Display` or `Debug` output. A secret set through the environment never appears in `redacted_toml()` or `Debug`. |
 
 A failing case is shrunk and printed by `proptest`, which also records its seed in a `proptest-regressions/<test file>.txt` file next to the test. Commit that file with the fix: `proptest` replays the recorded cases first on every later run, whatever the seed. Also keep the shrunk input as an example-based regression test next to the related tests.
+
+## Browser smoke test
+
+The `openapi-ui-browser` CI job (Ubuntu) proves that the OpenAPI documentation UI (feature `openapi-ui`) works under its Content-Security-Policy in a real browser, which the header checks in `crates/ferrum-alloy/tests/openapi_ui.rs` cannot. It builds `examples/openapi-ui`, a small service whose `alloy.toml` serves the UI at `/docs` on the application listener (`127.0.0.1:18080`, with `openapi.public`) and on the management listener (`127.0.0.1:19090`, behind a throwaway token the job sets in `FERRUM_ALLOY_MANAGEMENT_TOKEN`), starts it, and waits for it to be ready. It then runs `ci/browser-smoke/`, a [Playwright](https://playwright.dev) project pinned to an exact version with a committed `package-lock.json` and installed with `npm ci --ignore-scripts`. The tests drive the runner's preinstalled Google Chrome (`channel: "chrome"`), so no browser is downloaded.
+
+For each listener, `ci/browser-smoke/tests/openapi-ui.spec.ts`:
+
+- loads `/docs` and waits until Swagger UI shows the document's title, both operations, and the schema section, with the stylesheet applied, and expands an operation;
+- fails on any `securitypolicyviolation` event (recorded by a script registered before navigation), any console error or uncaught exception, any failed request, and any request to another origin (`data:` URIs are inline content);
+- checks that the page and each asset it loaded carry exactly the policy defined in `crates/ferrum-alloy/src/openapi_ui.rs`;
+- as a negative control, injects an inline `<script>` and requires the browser to block it and report one `script-src` violation, so a clean run cannot pass vacuously.
+
+On the management listener it also checks that the page needs the token. The job uploads the screenshots, the Playwright report and failure traces, and the server log as the `openapi-ui-browser-smoke` artifact, on success and on failure.
+
+To run it locally, start `cargo run -p example-openapi-ui` with `FERRUM_ALLOY_MANAGEMENT_TOKEN` set to at least 32 characters, then run `npm ci --ignore-scripts && npm test` in `ci/browser-smoke/` with the same variable. Google Chrome must be installed.
 
 ## Fuzz targets
 

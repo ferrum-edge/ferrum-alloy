@@ -1,0 +1,19 @@
+# Configuration for the browser smoke test (ci/browser-smoke). Supply the
+# management token through the environment:
+#   FERRUM_ALLOY_MANAGEMENT_TOKEN=<at least 32 characters>
+# Fixed loopback ports, so the browser test knows where to go.
+[server]
+bind = "127.0.0.1:18080"
+
+[management]
+bind = "127.0.0.1:19090"
+
+# The UI on the management listener behind the token, and, for the smoke test
+# only, unauthenticated on the application listener as well. Do not expose
+# the UI publicly in production (docs/configuration.md).
+[openapi]
+ui = true
+public = true
+
+[logging]
+format = "compact"

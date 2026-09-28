@@ -186,6 +186,85 @@ jobs:
       - name: Example CRUD service against the database
         run: cargo test --locked -p example-postgres-api -- --include-ignored
 
+  openapi-ui-browser:
+    name: OpenAPI UI in a real browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # A throwaway credential for the smoke server's management listener,
+      # which listens on this runner's loopback only.
+      FERRUM_ALLOY_MANAGEMENT_TOKEN: browser-smoke-management-token-0123456789
+      SMOKE_OUT: target/browser-smoke
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ci/browser-smoke/package-lock.json
+      - name: Install Playwright from the lockfile
+        # No install scripts and no browser download: the tests drive the
+        # runner's preinstalled Google Chrome (channel "chrome").
+        working-directory: ci/browser-smoke
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          npm ci --ignore-scripts
+          google-chrome --version
+      - name: Build the smoke server
+        run: cargo build --locked -p example-openapi-ui
+      - name: Start the smoke server
+        # examples/openapi-ui/alloy.toml: the application listener on
+        # 127.0.0.1:18080 and the management listener on 127.0.0.1:19090.
+        run: |
+          set -euo pipefail
+          mkdir -p "$SMOKE_OUT"
+          ./target/debug/example-openapi-ui > "$SMOKE_OUT/server.log" 2>&1 &
+          echo "$!" > "$SMOKE_OUT/server.pid"
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/readyz \
+              && curl -fsS -o /dev/null http://127.0.0.1:19090/livez; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$SMOKE_OUT/server.pid")" 2> /dev/null; then
+              cat "$SMOKE_OUT/server.log"
+              echo "::error::the smoke server exited"
+              exit 1
+            fi
+            sleep 1
+          done
+          cat "$SMOKE_OUT/server.log"
+          echo "::error::the smoke server did not become ready"
+          exit 1
+      - name: Load the documentation UI in Google Chrome
+        working-directory: ci/browser-smoke
+        run: npm test
+      - name: Stop the smoke server
+        if: always()
+        run: |
+          if [ -f "$SMOKE_OUT/server.pid" ]; then
+            kill "$(cat "$SMOKE_OUT/server.pid")" 2> /dev/null || true
+          fi
+      - name: Upload screenshots and report
+        # On success and on failure. Failure traces include the throwaway
+        # token above, nothing else secret.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: openapi-ui-browser-smoke
+          path: |
+            ci/browser-smoke/screenshots/
+            ci/browser-smoke/test-results/
+            ci/browser-smoke/playwright-report/
+            target/browser-smoke/server.log
+          if-no-files-found: warn
+
   dependencies:
     name: Dependency policy
     runs-on: ubuntu-latest
