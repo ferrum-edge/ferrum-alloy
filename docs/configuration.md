@@ -300,7 +300,7 @@ Trust affects only propagation metadata and gateway-asserted headers. It never a
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `standalone` | `standalone`, `gateway_preferred`, or `gateway_required`. `gateway_required` needs `trust.identities`; health paths stay reachable. |
+| `mode` | `standalone` | `standalone`, `gateway_preferred`, or `gateway_required`. `gateway_required` needs `trust.identities`. The health paths are exempt from it only when `health.app_endpoints = true`, where Alloy's status-only handlers serve them. With `app_endpoints = false`, probe the management listener, bound to an address the node can reach rather than loopback. |
 | `accept_consumer_identity` | `false` | Expose Edge's `X-Consumer-Username` / `X-Consumer-Custom-Id` as `GatewayContext`, only from a verified mTLS identity. Unverified copies are always removed. |
 
 ### `[cors]` (feature `cors`)

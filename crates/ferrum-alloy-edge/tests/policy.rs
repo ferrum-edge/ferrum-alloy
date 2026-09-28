@@ -189,6 +189,25 @@ async fn gateway_required_rejects_unverified_peers_with_a_problem() {
 }
 
 #[tokio::test]
+async fn exempt_paths_match_the_exact_path_only() {
+    let policy = policy(DeploymentMode::GatewayRequired, true);
+    for path in [
+        "/readyz/",
+        "//readyz",
+        "/%72eadyz",
+        "/READYZ",
+        "/readyz/../orders",
+    ] {
+        let (status, seen, _) = run(policy.clone(), request(path, untrusted(), &[])).await;
+        assert_eq!(status, 403, "{path} is not the exempt path");
+        assert!(seen.is_none(), "{path} must not reach the handler");
+    }
+    let (status, seen, _) = run(policy, request("/readyz?x=1", untrusted(), &[])).await;
+    assert_eq!(status, 200, "the query is not part of the path");
+    assert!(seen.is_some());
+}
+
+#[tokio::test]
 async fn unverified_certificates_and_ambiguous_values_are_not_identity() {
     let mut forged = verified();
     if let Some(tls) = forged.tls.as_mut() {

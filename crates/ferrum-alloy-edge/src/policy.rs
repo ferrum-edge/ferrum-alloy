@@ -35,8 +35,9 @@ pub enum DeploymentMode {
     Standalone,
     /// Use verified gateway metadata when present; accept direct requests.
     GatewayPreferred,
-    /// Reject requests without a verified gateway identity (except exempt
-    /// health paths).
+    /// Reject requests without a verified gateway identity, except on exempt
+    /// paths. Exempt only paths whose handlers are safe for unauthenticated
+    /// callers, such as status-only health probes.
     GatewayRequired,
 }
 
@@ -83,6 +84,10 @@ impl EdgePolicy {
 
     /// Paths reachable without a gateway identity in `gateway_required`
     /// mode (health probes). Exact matches only.
+    ///
+    /// Exempt only paths served by a handler that is safe for
+    /// unauthenticated callers. An exempt path that falls through to an
+    /// application route or fallback bypasses the gateway requirement.
     #[must_use]
     pub fn with_exempt_paths(mut self, paths: Vec<String>) -> Self {
         self.exempt_paths = Arc::new(paths);
