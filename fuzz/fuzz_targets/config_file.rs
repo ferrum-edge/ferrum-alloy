@@ -47,23 +47,26 @@ impl InputFile {
     }
 }
 
-fn input_file() -> Option<&'static Mutex<InputFile>> {
-    static INPUT_FILE: OnceLock<Option<Mutex<InputFile>>> = OnceLock::new();
-    INPUT_FILE
-        .get_or_init(|| InputFile::create().ok().map(Mutex::new))
-        .as_ref()
+/// The temporary directory lives for the whole fuzzing process. Rust does not
+/// run destructors for statics and libFuzzer exits without unwinding, so one
+/// directory per process is left behind in the temp dir; that is intentional.
+fn input_file() -> &'static Mutex<InputFile> {
+    static INPUT_FILE: OnceLock<Mutex<InputFile>> = OnceLock::new();
+    INPUT_FILE.get_or_init(|| {
+        // A setup failure must stop the run, never silently skip every input.
+        let file = InputFile::create()
+            .unwrap_or_else(|error| panic!("cannot create the fuzz input file: {error}"));
+        Mutex::new(file)
+    })
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some(input_file) = input_file() else {
-        return;
-    };
-    let Ok(mut input_file) = input_file.lock() else {
-        return;
-    };
-    let Ok(path) = input_file.write(data) else {
-        return;
-    };
+    let mut input_file = input_file()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = input_file
+        .write(data)
+        .unwrap_or_else(|error| panic!("cannot write the fuzz input file: {error}"));
     let env: [(OsString, OsString); 0] = [];
     match load_from(Some(path), env, &Overrides::default()) {
         Ok((config, _sources)) => {
