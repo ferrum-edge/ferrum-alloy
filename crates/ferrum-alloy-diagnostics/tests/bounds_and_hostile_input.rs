@@ -194,6 +194,38 @@ fn unavailable_values_are_not_treated_as_zero() {
     );
 }
 
+/// The duration one parsed observation yields with `fields` replaced.
+fn parsed_duration(fields: &[(&str, Value)]) -> Option<f64> {
+    let mut observation = observation("o1");
+    for (field, value) in fields {
+        observation[*field] = value.clone();
+    }
+    let mut report = base();
+    report["observations"] = json!([observation]);
+    parse(&report).unwrap().report.observations[0].duration_ms()
+}
+
+#[test]
+fn only_valid_duration_measurements_are_timing_evidence() {
+    assert_eq!(parsed_duration(&[]), Some(1.0));
+    assert_eq!(parsed_duration(&[("unit", json!("s"))]), Some(1_000.0));
+    for (field, value) in [
+        ("kind", json!("event")),
+        ("kind", json!("future-kind")),
+        ("value", json!(-1.0)),
+        ("unit", json!("bytes")),
+        ("unit", json!("future-unit")),
+    ] {
+        let duration = parsed_duration(&[(field, value.clone())]);
+        assert_eq!(duration, None, "{field} = {value}");
+    }
+    let overflow = parsed_duration(&[("value", json!(f64::MAX)), ("unit", json!("s"))]);
+    assert_eq!(
+        overflow, None,
+        "a value that overflows when converted is not a duration"
+    );
+}
+
 const TRACE: &str = "6c9f0a1b2c3d4e5f60718293a4b5c6d7";
 
 /// Span id number `index` in the id range `range`, one hex digit.
@@ -380,7 +412,7 @@ fn insufficient_telemetry_cites_degraded_evidence_within_the_cap() {
         .find(|finding| finding.code == "alloy.telemetry.insufficient")
         .unwrap();
 
-    assert_eq!(finding.rule_version, 2);
+    assert_eq!(finding.rule_version, 3);
     assert_eq!(
         degraded_citations(finding),
         MAX_DEGRADED_CITATIONS_PER_FINDING

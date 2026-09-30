@@ -177,22 +177,29 @@ pub struct Observation {
 }
 
 impl Observation {
-    /// The measured value converted to milliseconds, if this is an available
-    /// duration measurement.
+    /// The measured value converted to milliseconds, when this observation is
+    /// usable duration evidence: its kind is `measurement`, its availability
+    /// is `measured`, its unit is a time unit, and its value is finite and not
+    /// negative both before and after conversion.
+    ///
+    /// Anything else yields `None`, so no timing rule uses it: an event, an
+    /// unrecognized kind, unit, or availability, a negative value, or a value
+    /// that overflows when converted. Invalid values stay in the report, where
+    /// the contradiction rules still report them.
     pub fn duration_ms(&self) -> Option<f64> {
-        if self.availability != Availability::Measured {
+        if self.kind != ObservationKind::Measurement
+            || self.availability != Availability::Measured
+        {
             return None;
         }
-        let value = self.value?;
-        if !value.is_finite() {
-            return None;
-        }
-        match self.unit.as_ref()? {
-            Unit::Microseconds => Some(value / 1_000.0),
-            Unit::Milliseconds => Some(value),
-            Unit::Seconds => Some(value * 1_000.0),
-            _ => None,
-        }
+        let value = self.value.filter(|value| value.is_finite() && *value >= 0.0)?;
+        let milliseconds = match self.unit.as_ref()? {
+            Unit::Microseconds => value / 1_000.0,
+            Unit::Milliseconds => value,
+            Unit::Seconds => value * 1_000.0,
+            _ => return None,
+        };
+        milliseconds.is_finite().then_some(milliseconds)
     }
 
     /// Reads a string attribute.

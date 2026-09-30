@@ -26,6 +26,21 @@ Every timing Alloy exposes, whether as a span attribute, metric, log field, `Ser
 
 A missing span is `unknown`. It is never proof that the service was not reached or that a packet was lost.
 
+## Duration evidence
+
+A diagnosis rule uses an observation as a duration only when all of these hold (`Observation::duration_ms`):
+
+- its kind is `measurement` (not `event` or an unrecognized kind);
+- its availability is `measured`;
+- its unit is `us`, `ms`, or `s`;
+- its value is finite and not negative, both as reported and after conversion to milliseconds.
+
+Any other observation is kept in the report but never enters a subtraction, dominance comparison, or streaming comparison. A negative measured value is reported as `conflicting_evidence` (`alloy.evidence.negative_measurement`) and is never clamped to zero or used to derive another timing.
+
+## Span linkage
+
+Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Observations from different traces are never joined, even when their span ids match, and an observation without a span is linked to nothing.
+
 ## Alloy service measurements
 
 All are measured by `ferrum-alloy-telemetry`'s layer in the service process, with a monotonic clock, scoped to one HTTP request (one stream on HTTP/2) as seen by that process.
@@ -81,13 +96,13 @@ HTTP/2 connection setup would be connection-scoped. If Edge ever exports it, All
 
 Diagnosis rule `alloy.r003` subtracts a service measurement from a gateway measurement only when all of these hold:
 
-1. **Linkage.** The Alloy SERVER span's parent is the Edge SERVER span. This comes from explicit span ids, never timestamps.
+1. **Linkage.** The Alloy SERVER span's parent is the Edge SERVER span, in the same trace. This comes from explicit trace and span ids, never timestamps.
 2. **Single attempt reached the service.** Exactly one Alloy SERVER span is linked. With more than one, Alloy reports `alloy.gateway.multiple_service_attempts` and makes no comparison.
 3. **Matching boundaries.**
    - Streamed responses: Edge `backend_ttfb` against Alloy `time_to_headers`.
    - Buffered responses: Edge `backend_ttfb` (which includes the body) against Alloy `duration`.
    - Unknown buffering mode: no comparison (`alloy.gateway.timings_not_comparable`).
-4. **Both values measured.**
+4. **Both values are usable durations** (see [Duration evidence](#duration-evidence)).
 
 The result is an **unattributed residual**, never "network latency". It can include:
 
@@ -97,7 +112,7 @@ The result is an **unattributed residual**, never "network latency". It can incl
 - intermediaries;
 - response header transfer (streamed) or body transfer and flow control (buffered).
 
-Because Edge v0.9.8 and v0.9.7 record no attempt identity, a residual is at most `likely`.
+Because Edge v0.9.8 and v0.9.7 record no attempt identity, a residual is at most `likely`. The residual depends on both measurements, so `confirmed` requires a verified collection path, verified provenance for both the gateway and the service measurement, and a gateway attempt index. Otherwise the finding stays `likely`, and `missing_evidence` names what is missing: the attempt identity, verified gateway provenance, or verified service provenance.
 
 A **negative** residual is not clamped to zero. It is reported as `conflicting_evidence` (`alloy.evidence.service_exceeds_gateway`), and the comparison is suppressed.
 
@@ -105,7 +120,7 @@ Default reporting thresholds are ≥ 50 ms and ≥ 20 % of the gateway measureme
 
 ## Dominance of an instrumented operation
 
-Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span when it takes ≥ 50 % of that span's time to headers. Services whose time to headers is under 5 ms are skipped. It never adds operations together.
+Rule `alloy.r002` reports the single largest instrumented operation that descends from a service span, through parent span ids in the same trace, when it takes ≥ 50 % of that span's time to headers. Services whose time to headers is under 5 ms are skipped. It never adds operations together.
 
 The comparison is limited to the **header phase**. Diagnostic imports give `alloy.server.time_to_headers` an interval that starts at the Alloy SERVER span's start (middleware entry) and ends at that start plus `alloy.server.time_to_headers_ms`. This adds a local duration to one timestamp of the same span; no two timestamps are subtracted. The interval never ends at the span's end, because the span stays open through the response body. If the duration is missing, or ends more than 1 ms after the span ends, the header-phase interval is unknown and none is made up.
 
