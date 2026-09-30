@@ -33,8 +33,14 @@ use ferrum_alloy_telemetry::{TelemetryConfig, TrustedPeersConfig};
 use ipnet::IpNet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::files::read_regular_file_bounded;
+
 /// Maximum configuration file size.
 pub const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Maximum size of a file named by a `FERRUM_ALLOY_*_FILE` variable. Secrets
+/// are tokens and connection strings; 64 KiB leaves ample room.
+pub const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
 
 /// Upper bound, in milliseconds, of `auth.jwt.jwks_max_age_ms` and
 /// `auth.jwt.jwks_max_stale_ms`: 24 hours.
@@ -1190,16 +1196,9 @@ pub fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
         path: path.to_owned(),
         message,
     };
-    let metadata = std::fs::metadata(path).map_err(|e| read_error(e.to_string()))?;
-    if !metadata.is_file() {
-        return Err(read_error("not a regular file".into()));
-    }
-    if metadata.len() > MAX_CONFIG_FILE_BYTES {
-        return Err(read_error(format!(
-            "larger than {MAX_CONFIG_FILE_BYTES} bytes"
-        )));
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| read_error(e.to_string()))?;
+    let bytes = read_regular_file_bounded(path, MAX_CONFIG_FILE_BYTES)
+        .map_err(|e| read_error(e.to_string()))?;
+    let text = String::from_utf8(bytes).map_err(|_| read_error("not valid UTF-8".into()))?;
     toml::from_str(&text).map_err(|e| syntax_error(path, &text, &e))
 }
 
@@ -1248,8 +1247,10 @@ where
             .into_string()
             .map_err(|_| env_error("value is not valid UTF-8".into()))?;
         let value = if from_file {
-            let text = std::fs::read_to_string(&value)
+            let bytes = read_regular_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
                 .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
             text.trim_end_matches(['\n', '\r']).to_owned()
         } else {
             value

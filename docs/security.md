@@ -117,6 +117,19 @@ Parsing fails before values reach `Secret`, so syntax and schema (type) errors n
 - `ferrum-alloy check` prints these messages unchanged in human and JSON output, and startup returns the same `ConfigError`.
 - Semantic validation errors, reported after parsing, may quote non-secret values, such as an unaccepted algorithm name or a bind address. They never quote `Secret` values.
 
+### Bounded file reads
+
+Files named by configuration are read with one bounded reader (`ferrum_alloy::files::read_regular_file_bounded`), which the `ferrum-alloy` command shares:
+
+| File | Limit |
+|---|---|
+| The configuration file (`FERRUM_ALLOY_CONFIG` or the builder) | 1 MiB |
+| A secret named by `FERRUM_ALLOY_<NAME>_FILE` | 64 KiB |
+| `server.tls.cert_path`, `key_path`, and `client_ca_path` | 1 MiB each |
+| Each file of `server.tls.client_crl_paths` | 16 MiB, because a CRL lists every revoked certificate that has not expired yet, and a large CA's reaches several MiB |
+
+Only regular files are read (symbolic links followed). Devices, FIFOs, sockets, and directories are refused before they are opened, the type is checked again on the opened file, and the read stops one byte past the limit, so a file that reports a length of `0` (such as those in `/proc`) or grows after the check is still refused. A refusal names the file, or for a secret file the variable, and never quotes the contents. At startup a refused file fails startup; at a TLS reload it fails the reload like an unparsable file, and the previous material keeps serving (see [Reloading certificates and trust material](#reloading-certificates-and-trust-material)). On Unix the open does not wait for a writer, so a path swapped for a FIFO between the type check and the open is refused by the check on the opened file instead of blocking startup or a reload.
+
 ## TLS
 
 rustls with the `ring` provider, passed explicitly. Alloy never installs a process-wide crypto provider. OpenSSL, native-tls, and aws-lc are banned in `deny.toml`. Client-certificate verification uses rustls' WebPKI verifier.
@@ -187,7 +200,7 @@ With the `diagnostics` feature, a service can serve one request's evidence from 
 
 Reports and OTLP files are untrusted input. They are bounded (size, nesting depth, string length, counts, time range) and validated. Mutation tests confirm parsing never panics. Findings derived from a report are bounded too. A degraded (unsampled, dropped, or unexported) observation is cited as degraded evidence in at most one finding. Each finding cites at most 32 of them and one analysis at most 512. A finding that reaches either cap says how many observations it left out. Parent chains are followed for at most 64 hops, so a parent cycle cannot stall analysis.
 
-The CLI reads the files named by `diagnose --input`, `--otlp`, and `--token-file`, by `openapi export --input`, and by the `--manifest` of `edge export` and `openapi export` only from regular files (symbolic links followed). It refuses devices, FIFOs, sockets, and directories before opening them (a path swapped for a FIFO between that check and the open can still block the open, so point these options only at files you control), checks the type again on the opened file, and stops reading one byte past the size limit, so a file that reports a length of `0` (such as those in `/proc`) or grows after the check is still bounded.
+The CLI reads the files named by `diagnose --input`, `--otlp`, and `--token-file`, by `openapi export --input`, by the `--manifest` of `edge export` and `openapi export`, and the existing `--output` that `openapi export --check` compares against (at most 16 MiB, or the size of the newly rendered document when that is larger; any refusal is drift, exit 4), only from regular files (symbolic links followed), with the reader of [bounded file reads](#bounded-file-reads). It refuses devices, FIFOs, sockets, and directories before opening them (on Unix the open does not wait for a writer, so a path swapped for a FIFO in between never blocks it), checks the type again on the opened file, and stops reading one byte past the size limit, so a file that reports a length of `0` (such as those in `/proc`) or grows after the check is still bounded.
 
 A `verified` claim in a file is downgraded to `unverified` and reported, so file input can never produce `confirmed` findings.
 
@@ -233,6 +246,7 @@ The generated CI pins `actions/checkout` by commit, and the `postgres` starter's
 | Diagnostic retrieval floods, caching, or unbounded retention | Management rate limit before the authorizer, required at startup, with no exempt networks on the retrieval route; `no-store`; count and byte bounds with counted evictions | `retrieval_is_rate_limited_before_the_authorizer_runs`, `exempt_networks_never_bypass_the_retrieval_rate_limit`, `startup_requires_the_management_listener_and_its_rate_limit`, `a_tenant_retrieves_its_own_request_as_a_no_store_report`, `evicted_and_untagged_requests_are_not_found_and_counted`, `the_ring_is_bounded_by_count`, `the_ring_is_bounded_by_bytes` |
 | Live reports leak request details | Evidence built from labels and timings only | `a_tenant_retrieves_its_own_request_as_a_no_store_report`, `every_finalized_request_is_handed_over_once_with_its_tenant`, `reports_round_trip_through_the_offline_parser` |
 | The retrieval credential leaks through argv, the URL, or plain HTTP, or a report drives or reorders the terminal | Credential from the environment or a file only; URL credentials refused; plain `http` only to loopback; control and format characters, bidirectional controls included, replaced | `diagnose_url_never_takes_a_credential_from_arguments`, `diagnose_url_sends_credentials_over_plain_http_only_to_loopback`, `diagnose_url_reads_a_token_file_and_keeps_escapes_off_the_terminal`, `printable_text_replaces_control_and_format_characters`, `live::tests` |
+| A configuration, secret, certificate, key, or CRL path names a device, FIFO, or oversized file, hanging startup or a TLS reload or exhausting memory | Regular files only, refused before opening; per-file limits enforced on the read itself; a refused reload keeps the previous material | `oversized_configuration_files_are_refused`, `special_configuration_files_are_refused`, `oversized_secret_files_are_refused_without_quoting_them`, `special_secret_files_are_refused`, `oversized_pem_files_fail_startup`, `special_pem_files_fail_startup`, `a_reload_refuses_oversized_and_special_files_and_keeps_serving`, `invalid_replacements_keep_the_previous_material_serving_and_are_counted`, `files::tests` |
 | Secrets in logs or output | `Secret` redaction; sanitized errors; configuration errors without source excerpts or values | `secrets_are_never_printed`, `check_never_prints_secrets`, `invalid_urls_fail_without_revealing_the_secret`, `syntax_errors_report_the_location_without_the_source_line`, `schema_errors_name_keys_but_never_values`, `check_never_prints_secrets_from_malformed_files` |
 
 ## Known gaps
@@ -243,5 +257,6 @@ The generated CI pins `actions/checkout` by commit, and the `postgres` starter's
 - Neither `idle_timeout_ms` nor `write_stall_timeout_ms` is a minimum transfer rate. A trickle reader that takes a little response data at a time, such as one byte of HTTP/2 window or one TCP segment every half period, keeps its connection open for as long as the response lasts, as with nginx `send_timeout`. `max_connections` bounds how many such connections one can hold.
 - Client certificate revocation uses only CRLs read from `client_crl_paths`, at startup and at each reload. There is no OCSP and no CRL fetching from distribution points. A revocation reaches connections established before it only when they close.
 - Network-boundary trust depends on deployment isolation that Alloy cannot verify.
+- Files that dependencies read are not bounded by Alloy: the `sslrootcert`, `sslcert`, and `sslkey` files named in `FERRUM_ALLOY_DATABASE_URL`, which sqlx reads, and the platform trust store, which `rustls-platform-verifier` reads.
 - The [route-conflict check](configuration.md#route-conflicts-on-the-application-listener) does not report a root catch-all route (`/{*path}`) or fallbacks, including nested routers' fallbacks: Alloy's paths on the application listener take precedence over them without an error.
 - The Edge v0.9.8 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.

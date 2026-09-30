@@ -56,7 +56,7 @@ pub(crate) fn read_manifest(path: &Path) -> Result<ServiceManifest, CliError> {
         Err(ReadError::Io(e)) => {
             return Err(CliError::Invalid(format!("{}: {e}", path.display())));
         }
-        Err(ReadError::NotRegular | ReadError::TooLarge) => {
+        Err(_) => {
             return Err(CliError::Invalid(format!(
                 "{} must be a regular file of at most {MAX_MANIFEST_BYTES} bytes",
                 path.display()

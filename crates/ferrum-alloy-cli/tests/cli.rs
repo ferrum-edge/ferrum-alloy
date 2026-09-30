@@ -653,6 +653,59 @@ fn openapi_export_sets_the_gateway_path_and_detects_drift() {
     );
 }
 
+/// `openapi export --check` reads the existing output only up to the
+/// document limit; a larger file is drift.
+#[test]
+fn openapi_check_refuses_oversized_outputs_with_exit_4() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(
+        dir.path(),
+        "raw.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    let oversized = dir.path().join("openapi.json");
+    std::fs::write(&oversized, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
+    let output = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--output",
+        oversized.to_str().unwrap(),
+        "--check",
+    ]);
+    assert_eq!(code(&output), 4, "{}", stderr(&output));
+    assert!(stderr(&output).contains("is larger than 16777216 bytes"));
+}
+
+/// Devices and FIFOs report a length of `0`; reading one would never end.
+#[cfg(unix)]
+#[test]
+fn openapi_check_refuses_special_outputs_with_exit_4() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(
+        dir.path(),
+        "raw.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    let fifo = dir.path().join("openapi.fifo");
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success());
+    for output_path in [PathBuf::from("/dev/zero"), fifo] {
+        let output = run(&[
+            "openapi",
+            "export",
+            "--input",
+            &input,
+            "--output",
+            output_path.to_str().unwrap(),
+            "--check",
+        ]);
+        assert_eq!(code(&output), 4, "{}", stderr(&output));
+        assert!(stderr(&output).contains("is not a regular file"));
+    }
+}
+
 #[test]
 fn new_rejects_unsafe_names_and_targets() {
     for name in [
