@@ -263,8 +263,8 @@ fn ferrum_contracts_pin_and_local_adoption_match() {
             .collect();
     for (token, meaning) in ferrum_alloy_diagnostics::catalog::EDGE_GATEWAY_ERROR_TOKENS {
         assert_eq!(
-            canonical_meanings.get(token),
-            Some(meaning),
+            canonical_meanings.get(token).copied(),
+            Some(*meaning),
             "meaning differs for gateway error token {token}"
         );
     }
