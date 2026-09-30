@@ -123,8 +123,8 @@ fn builtin_paths_served_twice_on_one_listener_are_configuration_errors() {
                 c.openapi.path = "/livez".into();
             },
             &[
-                "openapi.path /livez is also served by health.liveness_path on the application listener",
-                "openapi.path /livez is also served by a built-in management route on the management listener",
+                "openapi.path /livez is also served by health.liveness_path on the application listener; give each a path of its own",
+                "openapi.path /livez is also served by a built-in management route on the management listener; give each a path of its own",
             ],
         ),
         (
@@ -135,21 +135,21 @@ fn builtin_paths_served_twice_on_one_listener_are_configuration_errors() {
                 c.management.enabled = false;
             },
             &[
-                "openapi.path /readyz is also served by health.readiness_path on the application listener",
+                "openapi.path /readyz is also served by health.readiness_path on the application listener; give each a path of its own",
             ],
         ),
         (
             "the document at the management metrics path",
             |c| c.openapi.path = "/metrics".into(),
             &[
-                "openapi.path /metrics is also served by a built-in management route on the management listener",
+                "openapi.path /metrics is also served by a built-in management route on the management listener; give each a path of its own",
             ],
         ),
         (
             "the document at the management health path",
             |c| c.openapi.path = "/health".into(),
             &[
-                "openapi.path /health is also served by a built-in management route on the management listener",
+                "openapi.path /health is also served by a built-in management route on the management listener; give each a path of its own",
             ],
         ),
         (
@@ -159,7 +159,7 @@ fn builtin_paths_served_twice_on_one_listener_are_configuration_errors() {
                 c.openapi.path = "/livez".into();
             },
             &[
-                "openapi.path /livez is also served by a built-in management route on the management listener",
+                "openapi.path /livez is also served by a built-in management route on the management listener; give each a path of its own",
             ],
         ),
     ];
