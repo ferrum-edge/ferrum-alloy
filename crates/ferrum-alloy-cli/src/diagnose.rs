@@ -53,7 +53,8 @@ pub(crate) struct DiagnoseArgs {
     /// Whole-request timeout for `--url`, in milliseconds (1 to 120000).
     #[arg(long, default_value_t = 10_000)]
     timeout_ms: u64,
-    /// Write the assembled report (with findings) to this file.
+    /// Write the assembled report (with findings) to this file. Nothing is
+    /// written when `--input` could not read the report back.
     #[arg(long)]
     write_report: Option<PathBuf>,
     /// Output format.
@@ -171,7 +172,16 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     if let Some(path) = &args.write_report {
         let json =
             serde_json::to_string_pretty(&report).map_err(|e| CliError::Io(e.to_string()))?;
-        std::fs::write(path, format!("{json}\n"))
+        let json = format!("{json}\n");
+        // Findings and pretty printing add bytes after the import checked
+        // its report: never write a file that `--input` would refuse.
+        if let Err(e) = parse_offline(json.as_bytes(), &limits) {
+            return Err(CliError::Invalid(format!(
+                "not writing {}: the report would be rejected by --input: {e}",
+                path.display()
+            )));
+        }
+        std::fs::write(path, json)
             .map_err(|e| CliError::Io(format!("write {}: {e}", path.display())))?;
     }
     match args.format {

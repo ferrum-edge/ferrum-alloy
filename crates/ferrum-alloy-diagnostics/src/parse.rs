@@ -174,6 +174,48 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
     })
 }
 
+/// Checks that `report`, serialized as compact JSON, is accepted by
+/// [`parse_offline`] under `limits`.
+///
+/// Anything that produces report files uses this so that what it writes can
+/// be read back. Serialization stops once the output exceeds
+/// `limits.max_bytes`, so an oversized report is never buffered in full.
+pub fn check_report(report: &DiagnosticReport, limits: &Limits) -> Result<(), ReportError> {
+    let mut out = BoundedWriter {
+        bytes: Vec::new(),
+        max: limits.max_bytes,
+    };
+    if let Err(e) = serde_json::to_writer(&mut out, report) {
+        let error = if e.is_io() {
+            ReportError::TooLarge(format!("more than {} bytes serialized", limits.max_bytes))
+        } else {
+            ReportError::InvalidStructure(e.to_string())
+        };
+        return Err(error);
+    }
+    parse_offline(&out.bytes, limits).map(|_| ())
+}
+
+/// A buffer that refuses to grow past `max` bytes.
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    max: usize,
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.max {
+            return Err(std::io::Error::other("byte limit reached"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn check_header(value: &Value, warnings: &mut Vec<Issue>) -> Result<(), ReportError> {
     let schema = value.get("schema").and_then(Value::as_str);
     if schema != Some(SCHEMA_NAME) {

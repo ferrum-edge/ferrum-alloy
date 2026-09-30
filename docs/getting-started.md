@@ -201,6 +201,8 @@ ferrum-alloy diagnose --input report.json --format json
 
 Diagnosis is deterministic. It explains only the supplied evidence, and input is never treated as authenticated. See [measurement-semantics.md](measurement-semantics.md) for what each timing means.
 
+An OTLP import takes each span's service from its resource `service.name`, as Alloy's own export sets it. For a Ferrum Edge span, that name is the gateway's. The report names a service only when the trace has exactly one; a trace across several services keeps the name on each observation. The report an import builds must fit the limits `--input` reads with (5,000 observations and 4 MiB by default). A trace that would exceed them, or that `--input` would otherwise refuse, for example because of duplicated spans, fails with exit code 3; evidence is never dropped to make it fit. `--write-report` writes nothing when `--input` could not read the report back.
+
 ### From a running service (feature `diagnostics`)
 
 A service can keep recent evidence in memory and serve one request's report to an authorized caller ([ADR 0008](adr/0008-tenant-scoped-diagnostic-retrieval.md)). The application attributes each request to a tenant and supplies the authorizer that decides which tenant a caller may read:

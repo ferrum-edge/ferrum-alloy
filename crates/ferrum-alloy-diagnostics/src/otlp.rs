@@ -10,6 +10,16 @@
 //! latency value is its "unknown" sentinel and becomes `unavailable`, never
 //! zero. Spans are linked only through explicit parent span ids; wall-clock
 //! timestamps from different producers are never subtracted.
+//!
+//! The resource `service.name` names the service that emitted an Alloy span,
+//! or the gateway that emitted a Ferrum Edge span. It is never confused with
+//! the producer, which names the telemetry library.
+//!
+//! A successful import is always a report that
+//! [`parse_offline`](crate::parse::parse_offline) accepts under
+//! [`ImportLimits::report`]. A trace whose report would exceed those limits
+//! fails with [`ImportError::ReportRejected`]; evidence is never dropped to
+//! make it fit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,6 +31,7 @@ use crate::model::{
     Interval, Leg, Observation, ObservationKind, Producer, ProducerKind, Scope, SpanRef, Trust,
     Unit, Verification,
 };
+use crate::parse::{self, Limits, ReportError};
 
 /// Import bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +42,11 @@ pub struct ImportLimits {
     pub max_spans: usize,
     /// Maximum JSON nesting depth per line.
     pub max_depth: usize,
+    /// Limits the imported report must meet, as
+    /// [`parse_offline`](crate::parse::parse_offline) applies them when the
+    /// report is read back. Input bounds alone do not bound the report: one
+    /// span can yield several observations.
+    pub report: Limits,
 }
 
 impl Default for ImportLimits {
@@ -39,6 +55,7 @@ impl Default for ImportLimits {
             max_bytes: 16 * 1024 * 1024,
             max_spans: 20_000,
             max_depth: 64,
+            report: Limits::default(),
         }
     }
 }
@@ -66,6 +83,10 @@ pub enum ImportError {
     /// The requested trace id is malformed.
     #[error("trace id must be 32 lowercase hex characters")]
     InvalidTraceId,
+    /// The imported report exceeds [`ImportLimits::report`] or otherwise
+    /// fails report validation, so it could not be read back.
+    #[error("imported report would be rejected by the report parser: {0}")]
+    ReportRejected(String),
 }
 
 /// A span read from OTLP/JSON.
@@ -80,6 +101,9 @@ struct RawSpan {
     end: u64,
     attributes: BTreeMap<String, AttrValue>,
     producer: Producer,
+    /// Resource `service.name`, or the span attribute when the resource
+    /// has none.
+    service: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +199,13 @@ pub fn import(
             ProducerKind::Alloy => alloy_observations(span, &mut report),
             _ => {}
         }
+        // Checked per span so an oversized trace stops early.
+        if report.observations.len() > limits.report.max_observations {
+            return Err(ImportError::ReportRejected(format!(
+                "the trace yields more than {} observations",
+                limits.report.max_observations
+            )));
+        }
         if report.subject.request_id.is_none()
             && let Some(id) = span.attributes.get("alloy.request_id")
         {
@@ -187,7 +218,38 @@ pub fn import(
             report.subject.route = Some(route.as_string());
         }
     }
+    report.subject.service = single_service(&report.observations);
+    parse::check_report(&report, &limits.report).map_err(rejection)?;
     Ok(report)
+}
+
+/// The service every service-scoped observation names, when there is
+/// exactly one. A trace across several services keeps its names on each
+/// observation only; gateway names never count.
+fn single_service(observations: &[Observation]) -> Option<String> {
+    let mut names: BTreeSet<&str> = observations
+        .iter()
+        .filter_map(|o| o.scope.service.as_deref())
+        .collect();
+    if names.len() == 1 {
+        names.pop_first().map(str::to_owned)
+    } else {
+        None
+    }
+}
+
+/// Why the imported report would not be read back, on one line.
+fn rejection(error: ReportError) -> ImportError {
+    let message = match error {
+        ReportError::Invalid(issues) => issues
+            .iter()
+            .take(3)
+            .map(|issue| format!("{}: {}", issue.path, issue.message))
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => other.to_string(),
+    };
+    ImportError::ReportRejected(message)
 }
 
 fn read_spans(input: &str, limits: &ImportLimits) -> Result<Vec<RawSpan>, ImportError> {
@@ -318,6 +380,10 @@ fn parse_span(
     };
     let attributes = attributes(item.get("attributes"));
     let producer = producer_for(resource, scope, &attributes);
+    let service = resource
+        .get("service.name")
+        .or_else(|| attributes.get("service.name"))
+        .map(AttrValue::as_string);
     Some(RawSpan {
         trace_id,
         span_id,
@@ -328,6 +394,7 @@ fn parse_span(
         end: nanos(item.get("endTimeUnixNano")),
         attributes,
         producer,
+        service,
     })
 }
 
@@ -487,18 +554,8 @@ fn base(draft: Draft<'_>, kind: ObservationKind) -> Observation {
     let span = draft.span;
     let entry = catalog::entry(draft.name);
     let (service, gateway) = match span.producer.kind {
-        ProducerKind::Edge => (
-            None,
-            span.attributes
-                .get("service.name")
-                .map(AttrValue::as_string),
-        ),
-        _ => (
-            span.attributes
-                .get("service.name")
-                .map(AttrValue::as_string),
-            None,
-        ),
+        ProducerKind::Edge => (None, span.service.clone()),
+        _ => (span.service.clone(), None),
     };
     Observation {
         id: format!(
