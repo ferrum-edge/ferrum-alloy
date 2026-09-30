@@ -217,19 +217,11 @@ impl<'a> Index<'a> {
     }
 
     /// Service requests whose parent is the given gateway span, in its trace.
-    fn service_keys_under(
-        &self,
-        edge_span: &SpanRef,
-    ) -> impl Iterator<Item = SpanKey<'a>> + '_ {
+    fn services_under(&self, edge_span: &SpanRef) -> Vec<&RequestView<'a>> {
         self.services_by_parent
             .get(&(edge_span.trace_id.as_str(), edge_span.span_id.as_str()))
             .into_iter()
             .flatten()
-            .copied()
-    }
-
-    fn services_under(&self, edge_span: &SpanRef) -> Vec<&RequestView<'a>> {
-        self.service_keys_under(edge_span)
             .filter_map(|key| self.service.get(key))
             .collect()
     }
@@ -1653,7 +1645,10 @@ mod tests {
             .filter_map(|view| view.span)
             .map(|span| {
                 index
-                    .service_keys_under(span)
+                    .services_by_parent
+                    .get(&(span.trace_id.as_str(), span.span_id.as_str()))
+                    .into_iter()
+                    .flatten()
                     .inspect(|_| parent_lookups += 1)
                     .filter_map(|key| index.service.get(key))
                     .count()
