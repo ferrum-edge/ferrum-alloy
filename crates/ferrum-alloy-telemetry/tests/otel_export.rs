@@ -10,6 +10,7 @@
 )]
 
 use std::net::SocketAddr;
+use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -690,20 +691,25 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
     assert!(!debug.contains("sentinel-user"));
     assert!(!debug.contains("sentinel-password"));
 
-    let init_error = ferrum_alloy_telemetry::init::init_logging_and_otel(
-        &ferrum_alloy_telemetry::init::LoggingConfig::default(),
-        &resource(),
-        &config,
-        Arc::clone(&metrics),
-    )
-    .unwrap_err();
-    let display = init_error.to_string();
-    let debug = format!("{init_error:?}");
-    assert!(display.contains("without credentials"));
-    assert!(!display.contains("sentinel-user"));
-    assert!(!display.contains("sentinel-password"));
-    assert!(!debug.contains("sentinel-user"));
-    assert!(!debug.contains("sentinel-password"));
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "rejected_otlp_endpoint_init_error_is_the_credential_rejection",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(!stdout.contains("sentinel-user"), "{stdout}");
+    assert!(!stdout.contains("sentinel-password"), "{stdout}");
+    assert!(!stderr.contains("sentinel-user"), "{stderr}");
+    assert!(!stderr.contains("sentinel-password"), "{stderr}");
 
     for endpoint in ["ftp://collector/v1/traces", "http://[::1"] {
         config.endpoint = Some(endpoint.to_owned());
@@ -728,6 +734,33 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
     config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_032)));
     let error = config.validate().unwrap_err();
     assert!(error.to_string().contains("2048 bytes"));
+}
+
+#[test]
+#[ignore = "runs in an isolated process to verify OTLP initialization errors"]
+fn rejected_otlp_endpoint_init_error_is_the_credential_rejection() {
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.endpoint = Some(
+        "http://sentinel-user:sentinel-password@collector:4318/v1/traces".to_owned(),
+    );
+    let init_error = ferrum_alloy_telemetry::init::init_logging_and_otel(
+        &ferrum_alloy_telemetry::init::LoggingConfig::default(),
+        &resource(),
+        &config,
+        Arc::new(Metrics::default()),
+    )
+    .unwrap_err();
+    let display = init_error.to_string();
+    let debug = format!("{init_error:?}");
+    assert!(
+        display.contains("endpoint must be a valid http(s) URL without credentials"),
+        "{display}"
+    );
+    assert!(!display.contains("sentinel-user"));
+    assert!(!display.contains("sentinel-password"));
+    assert!(!debug.contains("sentinel-user"));
+    assert!(!debug.contains("sentinel-password"));
 }
 
 #[test]
