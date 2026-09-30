@@ -468,11 +468,13 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
                 if !(7..=40).contains(&rev.len())
                     || !rev.bytes().all(|byte| byte.is_ascii_hexdigit())
                 {
-                    return Err(CliError::Invalid(concat!(
-                        "--alloy-rev must be a 7–40 character hexadecimal commit ID; ",
-                        "use --alloy-branch or --alloy-tag for named refs"
-                    )
-                    .into()));
+                    return Err(CliError::Invalid(
+                        concat!(
+                            "--alloy-rev must be a 7–40 character hexadecimal commit ID; ",
+                            "use --alloy-branch or --alloy-tag for named refs"
+                        )
+                        .into(),
+                    ));
                 }
                 ("rev", rev.as_str())
             } else {

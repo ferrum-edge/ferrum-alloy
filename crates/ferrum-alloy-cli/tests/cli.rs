@@ -854,7 +854,10 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
             .lines()
             .find(|line| line.starts_with("ferrum-alloy = "))
             .unwrap();
-        assert!(dependency.contains(&format!("{selector} = ")), "{dependency}");
+        assert!(
+            dependency.contains(&format!("{selector} = ")),
+            "{dependency}"
+        );
         assert_eq!(
             ["branch", "tag", "rev"]
                 .iter()
