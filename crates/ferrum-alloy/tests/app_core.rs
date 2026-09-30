@@ -21,9 +21,11 @@ use ferrum_alloy::extract::{Json, ValidJson, Validate, ValidationErrors};
 use ferrum_alloy::health::CheckError;
 use ferrum_alloy::telemetry::RequestContext;
 use http::Request;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use serde::Deserialize;
 use support::{TOKEN, config, fetch, fetch_with, raw, send, start};
+use tokio::sync::Notify;
+use tower::ServiceExt;
 
 #[derive(Deserialize)]
 struct NewOrder {
@@ -506,9 +508,71 @@ async fn admission_limits_reject_excess_concurrency() {
             .ends_with("overloaded")
     );
     assert_eq!(first.await.unwrap(), 200);
-    // Health endpoints are subject to admission too, but a free slot serves them.
-    assert_eq!(fetch(&server.url("/livez")).await.status, 200);
+    assert_eq!(fetch(&server.url("/slow")).await.status, 200);
     server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn liveness_takes_no_admission_permit() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let held = {
+        let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+        move || async move {
+            entered.notify_one();
+            release.notified().await;
+            "released"
+        }
+    };
+    let router = Router::new()
+        .route("/held", get(held))
+        .route("/hello", get(|| async { "hello" }));
+    let mut cfg = config();
+    cfg.server.max_in_flight_requests = 1;
+    cfg.server.admission_wait_timeout_ms = 0;
+    let parts = AlloyApp::new("core-test")
+        .router(router)
+        .config(cfg)
+        .telemetry(ferrum_alloy::TelemetryInit::ApplicationOwned)
+        .into_parts()
+        .unwrap();
+    let call = |method: &str, path: &str| {
+        let request = Request::builder().method(method).uri(path);
+        let request = request.body(Body::empty()).unwrap();
+        parts.router.clone().oneshot(request)
+    };
+    assert_eq!(call("GET", "/livez").await.unwrap().status(), 200);
+
+    // The only permit is held until `release`.
+    let slow = tokio::spawn(call("GET", "/held"));
+    entered.notified().await;
+
+    let live = call("GET", "/livez").await.unwrap();
+    assert_eq!(live.status(), StatusCode::OK, "liveness is not refused");
+    assert_eq!(live.headers()["cache-control"], "no-store");
+    // Other methods are still refused by the liveness route itself.
+    let post = call("POST", "/livez").await.unwrap();
+    assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(post.headers().contains_key("allow"));
+    // Business requests and readiness still get the overload response.
+    for path in ["/hello", "/readyz"] {
+        let overloaded = call("GET", path).await.unwrap();
+        assert_eq!(
+            overloaded.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path}"
+        );
+        let body = overloaded.into_body().collect().await.unwrap().to_bytes();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let kind = problem["type"].as_str().unwrap();
+        assert!(kind.ends_with("overloaded"), "{path}: {problem}");
+    }
+
+    release.notify_one();
+    let slow = slow.await.unwrap().unwrap();
+    assert_eq!(slow.status(), StatusCode::OK);
+    assert_eq!(call("GET", "/hello").await.unwrap().status(), 200);
+    drop(parts);
 }
 
 #[tokio::test]

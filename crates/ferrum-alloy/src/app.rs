@@ -15,7 +15,7 @@ use futures_util::future::BoxFuture;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
 
-use crate::config::{AlloyConfig, ConfigIssue, EdgeMode, Overrides};
+use crate::config::{AlloyConfig, ConfigError, ConfigIssue, EdgeMode, Overrides};
 #[cfg(feature = "diagnostics")]
 use crate::diagnostics::{EvidenceStore, Retrieval};
 use crate::error::AlloyError;
@@ -297,36 +297,6 @@ impl AlloyApp {
             Duration::from_millis(config.health.check_timeout_ms),
         ));
 
-        let mut app = Router::new();
-        // Alloy's paths on the application listener, with the setting that
-        // places each there. They take precedence over the application's
-        // router, so none may match one of its routes.
-        let mut served: Vec<(&'static str, String)> = Vec::new();
-        // Paths that skip `gateway_required`. The health paths qualify only
-        // here, where Alloy's status-only handlers own them for every method;
-        // otherwise a request to them would reach the application's router.
-        #[cfg(feature = "edge")]
-        let mut exempt_paths: Vec<String> = Vec::new();
-        if config.health.app_endpoints {
-            let health = &config.health;
-            served.push(("health.liveness_path", health.liveness_path.clone()));
-            served.push(("health.readiness_path", health.readiness_path.clone()));
-            #[cfg(feature = "edge")]
-            exempt_paths.extend([health.liveness_path.clone(), health.readiness_path.clone()]);
-            let (r, l) = (Arc::clone(&readiness), lifecycle.clone());
-            app = app
-                .route(
-                    &config.health.liveness_path,
-                    get(|| async { health::liveness() }),
-                )
-                .route(
-                    &config.health.readiness_path,
-                    get(move || {
-                        let (r, l) = (Arc::clone(&r), l.clone());
-                        async move { health::readiness(&r, &l).await }
-                    }),
-                );
-        }
         // The documentation UI goes wherever the document is served.
         #[cfg(feature = "openapi-ui")]
         let openapi_ui = {
@@ -334,11 +304,78 @@ impl AlloyApp {
             let served = openapi.ui && openapi.serve && self.openapi.is_some();
             served.then(|| DocsUi::new(&openapi.ui_path, &openapi.path))
         };
-        if config.openapi.public
-            && config.openapi.serve
-            && let Some(document) = &self.openapi
-        {
+        let public_document = self
+            .openapi
+            .as_ref()
+            .filter(|_| config.openapi.public && config.openapi.serve);
+
+        // Alloy's paths on the application listener, with the setting that
+        // places each there. They take precedence over the application's
+        // router, so none may match one of its routes.
+        let mut served: Vec<(&'static str, String)> = Vec::new();
+        if config.health.app_endpoints {
+            let health = &config.health;
+            served.push(("health.liveness_path", health.liveness_path.clone()));
+            served.push(("health.readiness_path", health.readiness_path.clone()));
+        }
+        if public_document.is_some() {
             served.push(("openapi.path", config.openapi.path.clone()));
+            #[cfg(feature = "openapi-ui")]
+            if let Some(ui) = &openapi_ui {
+                served.extend(ui.paths().map(|path| ("openapi.ui_path", path)));
+            }
+        }
+        // Checked before any route is added: axum panics on a path served
+        // twice, and the builder must return an error instead.
+        let mut duplicates = duplicate_paths("application", &served);
+        if config.management.enabled {
+            let mut paths: Vec<(&'static str, String)> = management::FIXED_PATHS
+                .into_iter()
+                .map(|path| ("a built-in management route", path.to_owned()))
+                .collect();
+            if self.openapi.is_some() && config.openapi.serve {
+                paths.push(("openapi.path", config.openapi.path.clone()));
+            }
+            #[cfg(feature = "openapi-ui")]
+            if let Some(ui) = &openapi_ui {
+                paths.extend(ui.paths().map(|path| ("openapi.ui_path", path)));
+            }
+            #[cfg(feature = "diagnostics")]
+            if evidence.is_some() {
+                let route = crate::diagnostics::ROUTE.to_owned();
+                paths.push(("diagnostic retrieval", route));
+            }
+            duplicates.extend(duplicate_paths("management", &paths));
+        }
+        if !duplicates.is_empty() {
+            return Err(ConfigError::Invalid(duplicates).into());
+        }
+
+        let mut app = Router::new();
+        // Liveness is routed apart from everything else, so that it takes no
+        // admission permit (see below).
+        let mut liveness: Option<Router> = None;
+        // Paths that skip `gateway_required`. The health paths qualify only
+        // here, where Alloy's status-only handlers own them for every method;
+        // otherwise a request to them would reach the application's router.
+        #[cfg(feature = "edge")]
+        let mut exempt_paths: Vec<String> = Vec::new();
+        if config.health.app_endpoints {
+            let health = &config.health;
+            #[cfg(feature = "edge")]
+            exempt_paths.extend([health.liveness_path.clone(), health.readiness_path.clone()]);
+            let live = get(|| async { health::liveness() });
+            liveness = Some(Router::new().route(&health.liveness_path, live));
+            let (r, l) = (Arc::clone(&readiness), lifecycle.clone());
+            app = app.route(
+                &health.readiness_path,
+                get(move || {
+                    let (r, l) = (Arc::clone(&r), l.clone());
+                    async move { health::readiness(&r, &l).await }
+                }),
+            );
+        }
+        if let Some(document) = public_document {
             let document = Arc::clone(document);
             app = app.route(
                 &config.openapi.path,
@@ -349,23 +386,30 @@ impl AlloyApp {
             );
             #[cfg(feature = "openapi-ui")]
             if let Some(ui) = &openapi_ui {
-                served.extend(ui.paths().map(|path| ("openapi.ui_path", path)));
                 app = app.merge(ui.routes::<()>());
             }
         }
         crate::shadow::check(&user_router, &served)?;
         let limit = config.server.request_body_limit_bytes;
-        #[allow(unused_mut, reason = "optional layers are feature-gated")]
+        let timeout = Duration::from_millis(config.server.request_timeout_ms);
+        let deadline = HeadersDeadlineLayer::new(timeout);
         let mut app = app
             .fallback_service(user_router.layer(RecordRouteLayer))
             .layer(NormalizeLayer)
-            .layer(HeadersDeadlineLayer::new(Duration::from_millis(
-                config.server.request_timeout_ms,
-            )))
+            .layer(deadline)
             .layer(AdmissionLayer::new(
                 config.server.max_in_flight_requests,
                 Duration::from_millis(config.server.admission_wait_timeout_ms),
-            ))
+            ));
+        // The admission limit bounds the handlers doing work. Liveness does
+        // none, and a full budget means the process is busy, not that it
+        // needs a restart, so the liveness probe bypasses the limit. It gets
+        // every other layer. Readiness stays behind the limit.
+        if let Some(liveness) = liveness {
+            app = app.merge(liveness.layer(NormalizeLayer).layer(deadline));
+        }
+        #[allow(unused_mut, reason = "optional layers are feature-gated")]
+        let mut app = app
             .layer(DefaultBodyLimit::max(
                 usize::try_from(limit).unwrap_or(usize::MAX),
             ))
@@ -397,6 +441,9 @@ impl AlloyApp {
         let app = app.layer(telemetry_layer);
 
         let app_stats = Arc::new(ServerStats::default());
+        let management_token = config.management.token.is_some();
+        #[cfg(feature = "diagnostics")]
+        let diagnostics_retrieval = evidence.is_some();
         let service_name = config
             .service
             .name
@@ -449,6 +496,9 @@ impl AlloyApp {
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
             app_stats,
+            management_token,
+            #[cfg(feature = "diagnostics")]
+            diagnostics_retrieval,
             #[cfg(feature = "tls")]
             tls,
         })
@@ -460,6 +510,23 @@ impl AlloyApp {
     }
 }
 
+/// Describes each of Alloy's own paths on one listener that an earlier one
+/// already takes, with the settings that place them there. axum refuses a
+/// path routed twice by panicking, so these are found before any route is
+/// added.
+fn duplicate_paths(listener: &str, served: &[(&'static str, String)]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (index, (setting, path)) in served.iter().enumerate() {
+        let mut earlier = served.iter().take(index);
+        if let Some((other, _)) = earlier.find(|(_, seen)| seen == path) {
+            errors.push(format!(
+                "{setting} {path} is also served by {other} on the {listener} listener; give each a path of its own"
+            ));
+        }
+    }
+    errors
+}
+
 /// Everything [`AlloyApp`] composed. Serve [`AlloyParts::router`] yourself,
 /// or call [`AlloyParts::serve`].
 #[must_use = "dropping the parts shuts down telemetry export"]
@@ -469,7 +536,13 @@ pub struct AlloyParts {
     /// `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`) so peer
     /// trust can be evaluated.
     pub router: Router,
-    /// The management router, when enabled. Serve it with a listener that
+    /// The management router, when enabled. [`AlloyParts::serve`] and
+    /// [`AlloyParts::serve_on`] refuse to serve it on a listener that
+    /// [`AlloyParts::check_management_listener`] refuses. Without a
+    /// management token its handlers admit every request, so when you serve
+    /// it yourself, call [`AlloyParts::check_management_listener`] on your
+    /// listener first and do not serve it if that fails; nothing else checks
+    /// where it is served. Serve it with a listener that
     /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):
     /// its rate limits key clients by that transport address, and requests
     /// without either all share one budget. Behind a proxy or sidecar, every
@@ -488,6 +561,11 @@ pub struct AlloyParts {
     service_name: String,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     app_stats: Arc<ServerStats>,
+    /// Whether the management router was built with a token.
+    management_token: bool,
+    /// Whether the management router serves diagnostic retrieval.
+    #[cfg(feature = "diagnostics")]
+    diagnostics_retrieval: bool,
     #[cfg(feature = "tls")]
     tls: Option<crate::tls::TlsServer>,
 }
@@ -507,6 +585,39 @@ impl AlloyParts {
     /// returns.
     pub fn app_stats(&self) -> Arc<ServerStats> {
         Arc::clone(&self.app_stats)
+    }
+
+    /// Checks that [`AlloyParts::management_router`] may be served on
+    /// `listener`, by the address it is actually bound to: any loopback
+    /// address is accepted, and another address only with a management
+    /// token. With diagnostic retrieval installed (feature `diagnostics`),
+    /// only a loopback address is accepted, token or not. An address that
+    /// cannot be read is refused.
+    ///
+    /// [`AlloyParts::serve_on`] calls this before serving. Call it yourself
+    /// before serving the management router on your own listener.
+    ///
+    /// # Errors
+    ///
+    /// [`AlloyError::Config`] when the policy refuses the address, and
+    /// [`AlloyError::Serve`] when the address cannot be read.
+    pub fn check_management_listener(&self, listener: &TcpListener) -> Result<(), AlloyError> {
+        let addr = listener.local_addr().map_err(AlloyError::Serve)?;
+        let mut errors = Vec::new();
+        if let Err(message) = management::check_listener(addr, self.management_token) {
+            errors.push(message);
+        }
+        #[cfg(feature = "diagnostics")]
+        if self.diagnostics_retrieval
+            && let Err(message) = crate::diagnostics::check_listener(addr)
+        {
+            errors.push(message);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Invalid(errors).into())
+        }
     }
 
     /// Binds the configured addresses and serves until shutdown.
@@ -536,6 +647,13 @@ impl AlloyParts {
     /// Serves on already-bound listeners (useful for tests and socket
     /// activation).
     ///
+    /// The management listener may be bound to another address than
+    /// `management.bind`, but it gets the same access policy, checked against
+    /// the address it is actually bound to before either listener serves:
+    /// off loopback, a management token is required, and diagnostic
+    /// retrieval (feature `diagnostics`) is refused. It fails with
+    /// [`AlloyError::Config`] otherwise.
+    ///
     /// After shutdown it returns only once every connection socket on both
     /// listeners is closed and no HTTP/2 stream handler is still running:
     /// connections still open when `shutdown.drain_timeout_ms` runs out are
@@ -547,6 +665,14 @@ impl AlloyParts {
         app_listener: TcpListener,
         management_listener: Option<TcpListener>,
     ) -> Result<(), AlloyError> {
+        // Validation checked `management.bind`, but a listener passed here
+        // can be bound anywhere, so the policy is applied again to the
+        // address that is actually served, before anything is.
+        if self.management_router.is_some()
+            && let Some(listener) = &management_listener
+        {
+            self.check_management_listener(listener)?;
+        }
         let config = &self.config;
         let options = ServeOptions {
             name: "application",
