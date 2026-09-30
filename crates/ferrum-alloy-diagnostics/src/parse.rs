@@ -512,7 +512,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
         error(
             "/observations".into(),
             format!(
-                "intervals run from {earliest} to {latest} (Unix nanoseconds), {:.1} h apart; the limit is {} h",
+                "time range too wide: intervals run from {earliest} to {latest} (Unix nanoseconds), {:.1} h apart; the limit is {} h",
                 hours(latest.saturating_sub(earliest)),
                 hours(limits.max_time_range_nanos)
             ),

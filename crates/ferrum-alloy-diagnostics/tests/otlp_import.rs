@@ -625,6 +625,7 @@ fn spans_too_far_apart_are_rejected_with_their_times() {
     let ImportError::ReportRejected(message) = &error else {
         panic!("{error:?}");
     };
+    assert!(message.contains("time range too wide"), "{message}");
     assert!(message.contains(&format!("from {T0} to ")), "{message}");
     let range = "25.0 h apart; the limit is 24 h";
     assert!(message.contains(range), "{message}");
