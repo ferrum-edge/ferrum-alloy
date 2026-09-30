@@ -104,7 +104,7 @@ The `openapi-ui` feature and `openapi.ui = true` serve Swagger UI at `openapi.ui
 - Framework errors are RFC 9457 problems with stable `tag:` type URIs. `detail` is fixed text or parser output from the client's own input (control characters replaced with spaces, truncated to 256 bytes).
 - Panics become `500 internal`; the panic message goes to server logs only.
 - Database and JWKS errors are never returned to clients.
-- Application response bodies are never rewritten. Only axum's empty 404 (router fallback) and 405 (`Allow` present) become problems.
+- Application response bodies are never rewritten. Empty axum 404 responses and method-not-allowed responses from user and built-in routes become Problem Details; 405 responses retain Axum's `Allow` header.
 
 ## Configuration and secrets
 
