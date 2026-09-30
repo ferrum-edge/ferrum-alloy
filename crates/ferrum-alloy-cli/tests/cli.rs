@@ -150,6 +150,102 @@ fn diagnose_reads_otlp_exports() {
     assert_eq!(code(&again), 0, "{}", stderr(&again));
 }
 
+#[test]
+fn diagnose_writes_reports_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture("otlp/edge-alloy-trace.jsonl");
+    let target = dir.path().join("report.json");
+    let args = [
+        "diagnose",
+        "--otlp",
+        &path,
+        "--trace-id",
+        "4bf92f3577b34da6a3ce929d0e0e4736",
+        "--write-report",
+        target.to_str().unwrap(),
+    ];
+    let entries = || -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    // A directory cannot be replaced by the report: the rename fails and
+    // the temporary file is removed.
+    std::fs::create_dir(&target).unwrap();
+    let output = run(&args);
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(target.is_dir());
+    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+
+    std::fs::remove_dir(&target).unwrap();
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(target.is_file());
+    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+}
+
+/// One trace of `count` Alloy SERVER spans, five observations each.
+fn many_server_spans(count: u64) -> String {
+    let attributes: Vec<serde_json::Value> = [
+        ("alloy.server.time_to_headers_ms", 100.0),
+        ("alloy.server.body_duration_ms", 100.0),
+        ("alloy.server.duration_ms", 200.0),
+        ("alloy.admission.wait_ms", 0.0),
+    ]
+    .iter()
+    .map(|(key, value)| serde_json::json!({ "key": key, "value": { "doubleValue": value } }))
+    .collect();
+    let spans: Vec<serde_json::Value> = (1..=count)
+        .map(|i| {
+            let start = 1_790_000_000_000_000_000u64 + i * 1_000_000;
+            serde_json::json!({
+                "traceId": "3c4d5e6f708192a3b4c5d6e7f8091a2b",
+                "spanId": format!("{i:016x}"),
+                "kind": 2,
+                "startTimeUnixNano": start.to_string(),
+                "endTimeUnixNano": (start + 200_000_000).to_string(),
+                "attributes": attributes,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [{
+                    "key": "service.name",
+                    "value": { "stringValue": "orders-api" },
+                }],
+            },
+            "scopeSpans": [{ "scope": { "name": "ferrum-alloy-telemetry" }, "spans": spans }],
+        }],
+    })
+    .to_string()
+}
+
+#[test]
+fn diagnose_refuses_otlp_reports_that_input_could_not_read_back() {
+    // Within the OTLP input bounds, but 5,005 observations are more than a
+    // report may hold.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "traces.jsonl", &many_server_spans(1_001));
+    let written = dir.path().join("report.json");
+    let output = run(&[
+        "diagnose",
+        "--otlp",
+        &path,
+        "--write-report",
+        written.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("more than 5000 observations"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!written.exists(), "no report is written");
+}
+
 /// Devices and FIFOs report a length of `0`; reading one would never end.
 #[cfg(unix)]
 #[test]

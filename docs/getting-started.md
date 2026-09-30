@@ -206,6 +206,10 @@ ferrum-alloy diagnose --input report.json --format json
 
 Diagnosis is deterministic. It explains only the supplied evidence, and input is never treated as authenticated. See [measurement-semantics.md](measurement-semantics.md) for what each timing means.
 
+An OTLP import takes each span's service from its resource `service.name`, as Alloy's own export sets it; an empty name counts as none, and the span's own `service.name` attribute is used instead. For a Ferrum Edge span, that name is the gateway's. The report names a service only when the trace has exactly one; a trace across several services keeps the name on each observation. A span record that repeats an earlier one exactly, as a collector retry can write, is ignored and counted in a collection note; span ids must be unique within a trace, so two different records with the same span id fail the import (`ConflictingSpans`), even when one comes from Ferrum Edge and the other from Alloy.
+
+The report an import builds must pass the same checks as `diagnose --input` (by default at most 5,000 observations, 4 MiB, and intervals within 24 hours). This applies with or without `--write-report`, on purpose: rules only run on reports the parser accepts. A trace that fails these checks exits with code 3 and a message saying which limit it exceeded; evidence is never dropped to make it fit. `--write-report` writes pretty-printed JSON, or compact JSON when only the compact form fits the size limit. It writes nothing when `diagnose --input` would reject the report, and it replaces the file atomically through a temporary file in the same directory. A symbolic link at the target path is replaced by the new file rather than written through, and the new file gets default permissions rather than those of the file it replaces.
+
 ### From a running service (feature `diagnostics`)
 
 A service can keep recent evidence in memory and serve one request's report to an authorized caller ([ADR 0008](adr/0008-tenant-scoped-diagnostic-retrieval.md)). The application attributes each request to a tenant and supplies the authorizer that decides which tenant a caller may read:
