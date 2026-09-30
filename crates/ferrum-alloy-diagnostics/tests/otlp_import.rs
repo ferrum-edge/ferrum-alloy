@@ -170,10 +170,8 @@ fn malformed_ids_and_selection_are_rejected() {
 
 #[test]
 fn span_limit_is_enforced() {
-    let limits = ImportLimits {
-        max_spans: 2,
-        ..ImportLimits::default()
-    };
+    let mut limits = ImportLimits::default();
+    limits.max_spans = 2;
     assert!(matches!(
         import(&input(), Some(OK_TRACE), collector(), &limits).unwrap_err(),
         ImportError::TooLarge(_)
@@ -575,13 +573,8 @@ fn trace_beyond_the_observation_limit_is_rejected_not_truncated() {
 
 #[test]
 fn report_beyond_the_byte_limit_is_rejected() {
-    let limits = ImportLimits {
-        report: Limits {
-            max_bytes: 2_000,
-            ..Limits::default()
-        },
-        ..ImportLimits::default()
-    };
+    let mut limits = ImportLimits::default();
+    limits.report.max_bytes = 2_000;
     let error = import(&many_server_spans(10), None, collector(), &limits).unwrap_err();
     assert!(
         matches!(&error, ImportError::ReportRejected(m) if m.contains("2000 bytes")),
@@ -590,15 +583,75 @@ fn report_beyond_the_byte_limit_is_rejected() {
 }
 
 #[test]
-fn duplicated_spans_are_rejected_rather_than_written_unreadable() {
+fn exact_duplicate_spans_are_ignored_with_a_note() {
+    // A collector retry can write the same span record twice.
     let span = server_span(ORDERS_SPAN, None, 0);
-    let spans = vec![span.clone(), span];
+    let spans = vec![span.clone(), span.clone(), span];
+    let input = otlp(vec![alloy_resource("orders-api", spans)]);
+    let imported = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+    for report in [round_trip(&imported), imported] {
+        assert_eq!(report.observations.len(), 5);
+        let notes = &report.collection.notes;
+        let note = "2 duplicate span record(s) ignored";
+        assert!(notes.iter().any(|n| n == note), "{notes:?}");
+    }
+}
+
+#[test]
+fn conflicting_records_of_one_span_are_rejected() {
+    let spans = vec![
+        server_span(ORDERS_SPAN, None, 0),
+        server_span(ORDERS_SPAN, None, 5),
+    ];
     let input = otlp(vec![alloy_resource("orders-api", spans)]);
     let error = import(&input, None, collector(), &ImportLimits::default()).unwrap_err();
-    assert!(
-        matches!(&error, ImportError::ReportRejected(m) if m.contains("duplicate id")),
-        "{error}"
+    let expected = ImportError::ConflictingSpans(ORDERS_SPAN.to_owned());
+    assert_eq!(error, expected);
+    assert_eq!(
+        error.to_string(),
+        format!("span {ORDERS_SPAN} appears twice with different content")
     );
+}
+
+#[test]
+fn spans_too_far_apart_are_rejected_with_their_times() {
+    let later_ms = 25 * 60 * 60 * 1_000;
+    let spans = vec![
+        server_span(ORDERS_SPAN, None, 0),
+        server_span(BILLING_SPAN, None, later_ms),
+    ];
+    let input = otlp(vec![alloy_resource("orders-api", spans)]);
+    let error = import(&input, None, collector(), &ImportLimits::default()).unwrap_err();
+    let ImportError::ReportRejected(message) = &error else {
+        panic!("{error:?}");
+    };
+    assert!(message.contains(&format!("from {T0} to ")), "{message}");
+    let range = "25.0 h apart; the limit is 24 h";
+    assert!(message.contains(range), "{message}");
+    assert!(!message.contains("/observations"), "{message}");
+}
+
+#[test]
+fn empty_resource_service_name_names_nothing() {
+    let mut named = server_span(ORDERS_SPAN, None, 0);
+    named["attributes"]
+        .as_array_mut()
+        .unwrap()
+        .push(str_attr("service.name", "orders-api"));
+    let cases = [
+        (named, Some("orders-api")),
+        (server_span(ORDERS_SPAN, None, 0), None),
+    ];
+    for (span, expected) in cases {
+        // The empty resource name neither hides the span attribute nor
+        // becomes the subject's service.
+        let input = otlp(vec![alloy_resource("", vec![span])]);
+        let report = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+        assert_eq!(report.subject.service.as_deref(), expected);
+        for observation in &report.observations {
+            assert_eq!(observation.scope.service.as_deref(), expected);
+        }
+    }
 }
 
 const SERVICES: &[&str] = &["orders-api", "billing-api", "search-api"];
@@ -616,46 +669,48 @@ const ALLOY_KEYS: [&str; 2] = [
 /// id that may repeat, and whether its clock is far from the others.
 type GeneratedSpan = (bool, usize, Option<f64>, Option<f64>, u64, u64, u64, bool);
 
-fn generated_otlp(spans: &[GeneratedSpan]) -> String {
-    let resources = spans
-        .iter()
-        .map(
-            |&(edge, service, first, second, start_ms, len_ms, id, skewed)| {
-                let start = if skewed { 1_000 } else { T0 + start_ms * MS };
-                let (scope, name, keys) = if edge {
-                    ("ferrum-edge", "edge-public", EDGE_KEYS)
-                } else {
-                    ("ferrum-alloy-telemetry", SERVICES[service], ALLOY_KEYS)
-                };
-                let attributes: Vec<Value> = keys
-                    .iter()
-                    .zip([first, second])
-                    .filter_map(|(key, value)| value.map(|v| f64_attr(key, v)))
-                    .collect();
-                json!({
-                    "resource": { "attributes": [str_attr("service.name", name)] },
-                    "scopeSpans": [{
-                        "scope": { "name": scope },
-                        "spans": [{
-                            "traceId": PHASE_TRACE,
-                            "spanId": format!("{id:016x}"),
-                            "kind": 2,
-                            "startTimeUnixNano": start.to_string(),
-                            "endTimeUnixNano": (start + len_ms * MS).to_string(),
-                            "attributes": attributes,
-                        }],
-                    }],
-                })
-            },
-        )
-        .collect();
+/// An OTLP export of `spans`. A `clean` export gives every span its own id
+/// and puts every span on one clock.
+fn generated_otlp(spans: &[GeneratedSpan], clean: bool) -> String {
+    let mut resources = Vec::new();
+    for (index, span) in spans.iter().enumerate() {
+        let &(edge, service, first, second, start_ms, len_ms, id, skewed) = span;
+        let id = if clean { index as u64 + 1 } else { id };
+        let skewed = skewed && !clean;
+        let start = if skewed { 1_000 } else { T0 + start_ms * MS };
+        let (scope, name, keys) = if edge {
+            ("ferrum-edge", "edge-public", EDGE_KEYS)
+        } else {
+            ("ferrum-alloy-telemetry", SERVICES[service], ALLOY_KEYS)
+        };
+        let attributes: Vec<Value> = keys
+            .iter()
+            .zip([first, second])
+            .filter_map(|(key, value)| value.map(|v| f64_attr(key, v)))
+            .collect();
+        resources.push(json!({
+            "resource": { "attributes": [str_attr("service.name", name)] },
+            "scopeSpans": [{
+                "scope": { "name": scope },
+                "spans": [{
+                    "traceId": PHASE_TRACE,
+                    "spanId": format!("{id:016x}"),
+                    "kind": 2,
+                    "startTimeUnixNano": start.to_string(),
+                    "endTimeUnixNano": (start + len_ms * MS).to_string(),
+                    "attributes": attributes,
+                }],
+            }],
+        }));
+    }
     otlp(resources)
 }
 
 proptest! {
     /// Whatever an import accepts reads back with `parse_offline` under the
     /// same report limits, and the subject names a service only when every
-    /// service-scoped observation names the same one.
+    /// service-scoped observation names the same one. Conversely, a clean
+    /// export well inside the default limits always imports.
     #[test]
     fn successful_imports_read_back_under_the_report_limits(
         spans in prop::collection::vec(
@@ -674,15 +729,17 @@ proptest! {
         max_observations in 1usize..120,
         max_bytes in 500usize..60_000,
     ) {
-        let input = generated_otlp(&spans);
-        let tight = ImportLimits {
-            report: Limits { max_observations, max_bytes, ..Limits::default() },
-            ..ImportLimits::default()
-        };
+        let input = generated_otlp(&spans, false);
+        let mut tight = ImportLimits::default();
+        tight.report.max_observations = max_observations;
+        tight.report.max_bytes = max_bytes;
         for limits in [ImportLimits::default(), tight] {
             let result = import(&input, None, collector(), &limits);
             prop_assert!(
-                matches!(&result, Ok(_) | Err(ImportError::ReportRejected(_))),
+                matches!(
+                    &result,
+                    Ok(_) | Err(ImportError::ReportRejected(_) | ImportError::ConflictingSpans(_))
+                ),
                 "{:?}",
                 result.as_ref().err()
             );
@@ -700,5 +757,11 @@ proptest! {
             let single = if services.len() == 1 { services.first().copied() } else { None };
             prop_assert_eq!(report.subject.service.as_deref(), single);
         }
+
+        // At most 39 spans of at most five observations each, within one
+        // minute: far inside 5,000 observations, 4 MiB, and 24 hours.
+        let clean = generated_otlp(&spans, true);
+        let result = import(&clean, None, collector(), &ImportLimits::default());
+        prop_assert!(result.is_ok(), "{:?}", result.err());
     }
 }

@@ -150,6 +150,41 @@ fn diagnose_reads_otlp_exports() {
     assert_eq!(code(&again), 0, "{}", stderr(&again));
 }
 
+#[test]
+fn diagnose_writes_reports_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture("otlp/edge-alloy-trace.jsonl");
+    let target = dir.path().join("report.json");
+    let args = [
+        "diagnose",
+        "--otlp",
+        &path,
+        "--trace-id",
+        "4bf92f3577b34da6a3ce929d0e0e4736",
+        "--write-report",
+        target.to_str().unwrap(),
+    ];
+    let entries = || -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    };
+    // A directory cannot be replaced by the report: the rename fails and
+    // the temporary file is removed.
+    std::fs::create_dir(&target).unwrap();
+    let output = run(&args);
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(target.is_dir());
+    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+
+    std::fs::remove_dir(&target).unwrap();
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert!(target.is_file());
+    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+}
+
 /// One trace of `count` Alloy SERVER spans, five observations each.
 fn many_server_spans(count: u64) -> String {
     let attributes: Vec<serde_json::Value> = [

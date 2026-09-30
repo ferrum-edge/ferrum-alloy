@@ -317,6 +317,10 @@ fn check_string_lengths(value: &Value, path: &str, max: usize) -> Result<(), Rep
     }
 }
 
+fn hours(nanos: u64) -> f64 {
+    nanos as f64 / 3_600_000_000_000.0
+}
+
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -507,7 +511,11 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
     if earliest != u64::MAX && latest.saturating_sub(earliest) > limits.max_time_range_nanos {
         error(
             "/observations".into(),
-            "intervals span more than the permitted time range".into(),
+            format!(
+                "intervals run from {earliest} to {latest} (Unix nanoseconds), {:.1} h apart; the limit is {} h",
+                hours(latest.saturating_sub(earliest)),
+                hours(limits.max_time_range_nanos)
+            ),
         );
     }
     if !report.unrecognized.is_empty() {

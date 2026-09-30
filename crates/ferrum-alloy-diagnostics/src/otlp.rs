@@ -15,11 +15,16 @@
 //! or the gateway that emitted a Ferrum Edge span. It is never confused with
 //! the producer, which names the telemetry library.
 //!
+//! A span record that repeats an earlier one exactly, as a collector retry
+//! can write, is ignored and counted in a collection note. The same span id
+//! with different content fails with [`ImportError::ConflictingSpans`].
+//!
 //! A successful import is always a report that
 //! [`parse_offline`](crate::parse::parse_offline) accepts under
-//! [`ImportLimits::report`]. A trace whose report would exceed those limits
-//! fails with [`ImportError::ReportRejected`]; evidence is never dropped to
-//! make it fit.
+//! [`ImportLimits::report`], whether or not the caller writes it out: rules
+//! only ever run on reports the parser accepts. A trace whose report would
+//! exceed those limits fails with [`ImportError::ReportRejected`]; evidence
+//! is never dropped to make it fit.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,8 +38,9 @@ use crate::model::{
 };
 use crate::parse::{self, Limits, ReportError};
 
-/// Import bounds.
+/// Import bounds. Start from [`ImportLimits::default`] and change fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportLimits {
     /// Maximum input size in bytes.
     pub max_bytes: usize,
@@ -62,6 +68,7 @@ impl Default for ImportLimits {
 
 /// Why an import failed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ImportError {
     /// Input exceeds a bound.
     #[error("OTLP input exceeds limit: {0}")]
@@ -87,10 +94,13 @@ pub enum ImportError {
     /// fails report validation, so it could not be read back.
     #[error("imported report would be rejected by the report parser: {0}")]
     ReportRejected(String),
+    /// Two records of the selected trace share a span id but differ.
+    #[error("span {0} appears twice with different content")]
+    ConflictingSpans(String),
 }
 
 /// A span read from OTLP/JSON.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct RawSpan {
     trace_id: String,
     span_id: String,
@@ -106,12 +116,26 @@ struct RawSpan {
     service: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum AttrValue {
     Str(String),
     Int(i64),
     Double(f64),
     Bool(bool),
+}
+
+/// Identical parsed content: doubles compare by bit pattern, so a repeated
+/// `NaN` is still a repeat.
+impl PartialEq for AttrValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Str(a), Self::Str(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Double(a), Self::Double(b)) => a.to_bits() == b.to_bits(),
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl AttrValue {
@@ -181,6 +205,7 @@ pub fn import(
             .cmp(&b.start)
             .then_with(|| a.span_id.cmp(&b.span_id))
     });
+    let (spans, duplicates) = drop_exact_duplicates(spans)?;
 
     let mut report = DiagnosticReport::new(Collection {
         collector,
@@ -191,6 +216,10 @@ pub fn import(
         ],
     });
     report.subject.trace_id = Some(selected);
+    if duplicates > 0 {
+        let note = format!("{duplicates} duplicate span record(s) ignored");
+        report.collection.notes.push(note);
+    }
     for span in &spans {
         match span.producer.kind {
             ProducerKind::Edge if span.kind == SPAN_KIND_SERVER => {
@@ -238,13 +267,34 @@ fn single_service(observations: &[Observation]) -> Option<String> {
     }
 }
 
-/// Why the imported report would not be read back, on one line.
+/// Drops span records that repeat an earlier record exactly and returns how
+/// many were dropped. The same span id with different content is a conflict
+/// that is never resolved by picking one record.
+fn drop_exact_duplicates(spans: Vec<RawSpan>) -> Result<(Vec<RawSpan>, usize), ImportError> {
+    let mut first: BTreeMap<String, usize> = BTreeMap::new();
+    let mut kept: Vec<RawSpan> = Vec::with_capacity(spans.len());
+    let mut dropped = 0usize;
+    for span in spans {
+        match first.get(&span.span_id) {
+            Some(&index) if kept.get(index) == Some(&span) => dropped += 1,
+            Some(_) => return Err(ImportError::ConflictingSpans(span.span_id)),
+            None => {
+                first.insert(span.span_id.clone(), kept.len());
+                kept.push(span);
+            }
+        }
+    }
+    Ok((kept, dropped))
+}
+
+/// Why the imported report would not be read back, on one line. Report
+/// paths are left out: they name the generated report, not the input.
 fn rejection(error: ReportError) -> ImportError {
     let message = match error {
         ReportError::Invalid(issues) => issues
             .iter()
             .take(3)
-            .map(|issue| format!("{}: {}", issue.path, issue.message))
+            .map(|issue| issue.message.as_str())
             .collect::<Vec<_>>()
             .join("; "),
         other => other.to_string(),
@@ -380,10 +430,14 @@ fn parse_span(
     };
     let attributes = attributes(item.get("attributes"));
     let producer = producer_for(resource, scope, &attributes);
-    let service = resource
-        .get("service.name")
-        .or_else(|| attributes.get("service.name"))
-        .map(AttrValue::as_string);
+    // An empty name names nothing and never hides the span attribute.
+    let named = |attrs: &BTreeMap<String, AttrValue>| {
+        attrs
+            .get("service.name")
+            .map(AttrValue::as_string)
+            .filter(|name| !name.trim().is_empty())
+    };
+    let service = named(resource).or_else(|| named(&attributes));
     Some(RawSpan {
         trace_id,
         span_id,

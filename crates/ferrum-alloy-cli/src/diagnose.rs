@@ -4,14 +4,21 @@
 //! access is `--url`, which fetches one live report from a running service
 //! (see [`crate::live`]). Every input, live reports included, is read with
 //! `parse_offline` and never treated as authenticated.
+//!
+//! An OTLP export is held to the same report limits, with or without
+//! `--write-report`: rules only ever run on reports the parser accepts, so
+//! a trace the parser would refuse fails instead of being analyzed.
 
+use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Args;
-use ferrum_alloy_diagnostics::model::{Producer, ProducerKind};
+use ferrum_alloy_diagnostics::model::{DiagnosticReport, Producer, ProducerKind};
 use ferrum_alloy_diagnostics::otlp::{self, ImportLimits};
 use ferrum_alloy_diagnostics::parse::{Limits, parse_offline};
 use ferrum_alloy_diagnostics::render::render_text;
@@ -53,8 +60,9 @@ pub(crate) struct DiagnoseArgs {
     /// Whole-request timeout for `--url`, in milliseconds (1 to 120000).
     #[arg(long, default_value_t = 10_000)]
     timeout_ms: u64,
-    /// Write the assembled report (with findings) to this file. Nothing is
-    /// written when `--input` could not read the report back.
+    /// Write the assembled report (with findings) to this file, pretty-printed,
+    /// or compact when only compact JSON fits the report size limit. Nothing
+    /// is written when `diagnose --input` would reject it.
     #[arg(long)]
     write_report: Option<PathBuf>,
     /// Output format.
@@ -107,6 +115,46 @@ fn printable(text: &str) -> String {
         .collect()
 }
 
+/// The bytes `--write-report` writes: pretty-printed JSON, or compact JSON
+/// when the pretty form would not fit within `limits.max_bytes`.
+fn report_bytes(report: &DiagnosticReport, limits: &Limits) -> Result<Vec<u8>, CliError> {
+    let encode = |e: serde_json::Error| CliError::Io(e.to_string());
+    let mut json = serde_json::to_vec_pretty(report).map_err(encode)?;
+    if json.len() >= limits.max_bytes {
+        json = serde_json::to_vec(report).map_err(encode)?;
+    }
+    json.push(b'\n');
+    Ok(json)
+}
+
+/// Writes `bytes` to `path` through a new temporary file in the same
+/// directory and a rename, so `path` never holds a partial report. The
+/// temporary file is removed when a later step fails.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    let failed = |e: std::io::Error| CliError::Io(format!("write {}: {e}", path.display()));
+    let Some(name) = path.file_name() else {
+        let message = format!("{} names no file", path.display());
+        return Err(CliError::Invalid(message));
+    };
+    let mut temp_name = OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(".{}.tmp", std::process::id()));
+    let temp = path.with_file_name(temp_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(failed)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    // Closed before the rename, which Windows requires.
+    drop(file);
+    if let Err(e) = written.and_then(|()| std::fs::rename(&temp, path)) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(failed(e));
+    }
+    Ok(())
+}
+
 /// Runs `diagnose`.
 pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     let limits = Limits::default();
@@ -140,6 +188,7 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
             version: Some(env!("CARGO_PKG_VERSION").into()),
             instance: None,
         };
+        // Strict even without --write-report; see the module documentation.
         let report = otlp::import(&text, args.trace_id.as_deref(), collector, &import_limits)
             .map_err(|e| CliError::Invalid(e.to_string()))?;
         (report, Vec::new(), None)
@@ -170,19 +219,16 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     let findings = analyze(&report, &Thresholds::default());
     report.findings.clone_from(&findings);
     if let Some(path) = &args.write_report {
-        let json =
-            serde_json::to_string_pretty(&report).map_err(|e| CliError::Io(e.to_string()))?;
-        let json = format!("{json}\n");
-        // Findings and pretty printing add bytes after the import checked
-        // its report: never write a file that `--input` would refuse.
-        if let Err(e) = parse_offline(json.as_bytes(), &limits) {
+        let json = report_bytes(&report, &limits)?;
+        // Findings and pretty printing add bytes after the report was
+        // checked: never write a file that `diagnose --input` would reject.
+        if let Err(e) = parse_offline(&json, &limits) {
             return Err(CliError::Invalid(format!(
-                "not writing {}: the report would be rejected by --input: {e}",
+                "not writing {}: `diagnose --input` would reject the report: {e}",
                 path.display()
             )));
         }
-        std::fs::write(path, json)
-            .map_err(|e| CliError::Io(format!("write {}: {e}", path.display())))?;
+        write_atomically(path, &json)?;
     }
     match args.format {
         Format::Human => {
@@ -202,8 +248,39 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
+    use ferrum_alloy_diagnostics::model::{Collection, CollectionMethod, Verification};
+
     use super::*;
+
+    #[test]
+    fn written_reports_fall_back_to_compact_json_to_fit_the_limit() {
+        let report = DiagnosticReport::new(Collection {
+            collector: Producer {
+                kind: ProducerKind::Collector,
+                name: "ferrum-alloy-cli".into(),
+                version: None,
+                instance: None,
+            },
+            method: CollectionMethod::OtlpFileImport,
+            verification: Verification::Unverified,
+            notes: vec!["compact when pretty does not fit".into()],
+        });
+        let pretty = serde_json::to_vec_pretty(&report).unwrap();
+        let compact = serde_json::to_vec(&report).unwrap();
+        assert!(compact.len() < pretty.len());
+        // The pretty form plus its newline fits exactly, then by one byte less.
+        for (max_bytes, form) in [(pretty.len() + 1, &pretty), (pretty.len(), &compact)] {
+            let limits = Limits {
+                max_bytes,
+                ..Limits::default()
+            };
+            let mut expected = form.clone();
+            expected.push(b'\n');
+            assert_eq!(report_bytes(&report, &limits).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn printable_text_replaces_control_and_format_characters() {
