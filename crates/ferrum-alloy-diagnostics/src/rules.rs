@@ -232,6 +232,9 @@ impl<'a> Index<'a> {
             let Some(parent) = self.alloy_parents.get(&(trace, current)).copied().flatten() else {
                 break;
             };
+            if visited.contains(parent) {
+                break;
+            }
             let key = (trace, parent);
             if self.service.contains_key(&key) {
                 ancestors.push(key);
@@ -1440,7 +1443,7 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use super::{Index, SpanKey};
+    use super::{Index, SpanKey, Thresholds, analyze};
     use crate::model::DiagnosticReport;
 
     fn report_with_spans(service_count: usize, operation_count: usize) -> DiagnosticReport {
@@ -1504,5 +1507,152 @@ mod tests {
         let service_key: SpanKey<'_> = (&trace_id, &service_span);
 
         assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn operation_ancestry_stops_before_repeating_a_two_node_cycle() {
+        let mut report = report_with_spans(1, 1);
+        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
+        let cycle_a = "cycle-a";
+        let cycle_b = "cycle-b";
+        report.observations[0]
+            .span
+            .as_mut()
+            .unwrap()
+            .span_id = cycle_b.to_owned();
+        report.observations[0]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(cycle_a.to_owned());
+        report.observations[1]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(cycle_a.to_owned());
+        let mut intermediate = report.observations[1].clone();
+        intermediate.id = "cycle-a-link".into();
+        intermediate.name = "unrelated.alloy.span".into();
+        let intermediate_span = intermediate.span.as_mut().unwrap();
+        intermediate_span.span_id = cycle_a.to_owned();
+        intermediate_span.parent_span_id = Some(cycle_b.to_owned());
+        report.observations.push(intermediate);
+
+        let index = Index::build(&report);
+        let mut parent_lookups = 0;
+        let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
+        let service_key: SpanKey<'_> = (&trace_id, cycle_b);
+
+        assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
+        assert_eq!(parent_lookups, 3);
+    }
+
+    #[test]
+    fn self_parented_service_is_returned_once() {
+        let mut report = report_with_spans(1, 1);
+        let service_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
+        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
+        report.observations[0]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(service_span.clone());
+        report.observations[1]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(service_span.clone());
+
+        let index = Index::build(&report);
+        let candidates = index.operations_by_service_ancestor(|| {});
+        let service_key: SpanKey<'_> = (&trace_id, &service_span);
+
+        assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn operation_ancestry_follows_a_multi_hop_alloy_descendant() {
+        let mut report = report_with_spans(1, 1);
+        let service_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
+        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
+        let intermediate_id = "intermediate-alloy-span";
+        let operation_span = report.observations[1].span.as_mut().unwrap();
+        operation_span.parent_span_id = Some(intermediate_id.to_owned());
+        let mut intermediate = report.observations[1].clone();
+        intermediate.id = "intermediate-observation".into();
+        intermediate.name = "unrelated.alloy.span".into();
+        let intermediate_span = intermediate.span.as_mut().unwrap();
+        intermediate_span.span_id = intermediate_id.to_owned();
+        intermediate_span.parent_span_id = Some(service_span.clone());
+        report.observations.push(intermediate);
+
+        let index = Index::build(&report);
+        let candidates = index.operations_by_service_ancestor(|| {});
+        let service_key: SpanKey<'_> = (&trace_id, &service_span);
+
+        assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn operation_under_nested_services_is_indexed_for_each_service() {
+        let mut report = report_with_spans(2, 1);
+        let outer_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
+        let inner_span = report.observations[1].span.as_mut().unwrap().span_id.clone();
+        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
+        report.observations[1]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(outer_span.clone());
+        report.observations[2]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(inner_span.clone());
+
+        let index = Index::build(&report);
+        let candidates = index.operations_by_service_ancestor(|| {});
+        let outer_key: SpanKey<'_> = (&trace_id, &outer_span);
+        let inner_key: SpanKey<'_> = (&trace_id, &inner_span);
+
+        assert_eq!(candidates.get(&outer_key).map(Vec::len), Some(1));
+        assert_eq!(candidates.get(&inner_key).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn multi_hop_ancestry_keeps_r002_analysis_findings_unchanged() {
+        let mut direct = report_with_spans(1, 1);
+        let mut indirect = direct.clone();
+        let service_span = direct.observations[0].span.as_ref().unwrap().span_id.clone();
+        let intermediate_id = "intermediate-alloy-span";
+        indirect.observations[1]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(intermediate_id.to_owned());
+        let mut intermediate = indirect.observations[1].clone();
+        intermediate.id = "intermediate-observation".into();
+        intermediate.name = "unrelated.alloy.span".into();
+        let intermediate_span = intermediate.span.as_mut().unwrap();
+        intermediate_span.span_id = intermediate_id.to_owned();
+        intermediate_span.parent_span_id = Some(service_span);
+        indirect.observations.push(intermediate);
+
+        let r002 = |report: &DiagnosticReport| {
+            analyze(report, &Thresholds::default())
+                .into_iter()
+                .filter(|finding| finding.rule_id == "alloy.r002")
+                .map(|finding| {
+                    (
+                        finding.code,
+                        finding.supporting_observations,
+                        finding.confidence,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(r002(&direct), r002(&indirect));
+        assert_eq!(r002(&direct).len(), 1);
     }
 }

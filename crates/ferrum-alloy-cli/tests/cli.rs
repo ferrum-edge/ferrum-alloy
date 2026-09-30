@@ -725,7 +725,9 @@ fn manifest_errors_are_terminal_safe_for_both_manifest_consumers() {
 
     for result in [edge, openapi] {
         assert_eq!(code(&result), 3);
-        assert!(!stderr(&result).contains('\u{1b}'));
+        let output = stderr(&result);
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.contains("?[2J"));
     }
 }
 

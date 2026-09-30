@@ -560,6 +560,41 @@ fn trace_at_the_observation_limit_reads_back() {
 }
 
 #[test]
+fn analysis_handles_maximum_cardinality_otlp_with_bounded_ancestry() {
+    let server_count = 999;
+    let mut spans: Vec<Value> = (1..=server_count)
+        .map(|number| {
+            let span_id = format!("{number:016x}");
+            let parent = (number > 1).then(|| format!("{:016x}", number - 1));
+            server_span(&span_id, parent.as_deref(), number)
+        })
+        .collect();
+    let deepest_server = format!("{server_count:016x}");
+    for number in 1..=5 {
+        spans.push(json!({
+            "traceId": PHASE_TRACE,
+            "spanId": format!("{:016x}", server_count + number),
+            "parentSpanId": deepest_server,
+            "name": "orders.rows",
+            "kind": 3,
+            "startTimeUnixNano": T0.to_string(),
+            "endTimeUnixNano": (T0 + MS).to_string(),
+            "attributes": [f64_attr("alloy.operation.duration_ms", 1.0)],
+        }));
+    }
+    let report = import(
+        &otlp(vec![alloy_resource("orders-api", spans)]),
+        None,
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.observations.len(), 5_000);
+    let _findings = analyze(&report, &Thresholds::default());
+}
+
+#[test]
 fn trace_beyond_the_observation_limit_is_rejected_not_truncated() {
     // Well within the input bounds, but 5,005 observations are more than
     // `parse_offline` accepts by default.
