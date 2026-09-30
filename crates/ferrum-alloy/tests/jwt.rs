@@ -17,7 +17,7 @@ use ferrum_alloy::jwt::{JwtVerifier, Principal};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use rcgen::KeyPair;
+use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -41,27 +41,59 @@ fn b64url(bytes: &[u8]) -> String {
 struct SigningKey {
     kid: String,
     pair: KeyPair,
+    /// `ES256` (P-256) or `ES384` (P-384).
+    alg: Algorithm,
 }
 
 impl SigningKey {
+    /// A P-256 key for `ES256`.
     fn new(kid: &str) -> Self {
         Self {
             kid: kid.into(),
-            pair: KeyPair::generate().unwrap(),
+            pair: KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap(),
+            alg: Algorithm::ES256,
+        }
+    }
+
+    /// A P-384 key for `ES384`.
+    fn p384(kid: &str) -> Self {
+        Self {
+            kid: kid.into(),
+            pair: KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap(),
+            alg: Algorithm::ES384,
         }
     }
 
     fn jwk(&self) -> Value {
+        let (crv, alg, len) = match self.alg {
+            Algorithm::ES384 => ("P-384", "ES384", 48),
+            _ => ("P-256", "ES256", 32),
+        };
         let raw = self.pair.public_key_raw();
-        assert_eq!(raw[0], 4, "uncompressed P-256 point");
+        assert_eq!(raw.len(), 1 + 2 * len, "{crv} point");
+        assert_eq!(raw[0], 4, "uncompressed {crv} point");
         json!({
-            "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": self.kid,
-            "x": b64url(&raw[1..33]), "y": b64url(&raw[33..65]),
+            "kty": "EC", "crv": crv, "use": "sig", "alg": alg, "kid": self.kid,
+            "x": b64url(&raw[1..=len]), "y": b64url(&raw[len + 1..]),
         })
     }
 
+    /// The key's JWK with `fields` merged in; a `null` field is removed.
+    fn jwk_with(&self, fields: &Value) -> Value {
+        let mut jwk = self.jwk();
+        let object = jwk.as_object_mut().unwrap();
+        for (name, value) in fields.as_object().unwrap() {
+            if value.is_null() {
+                object.remove(name);
+            } else {
+                object.insert(name.clone(), value.clone());
+            }
+        }
+        jwk
+    }
+
     fn sign(&self, claims: &Value, kid: Option<&str>) -> String {
-        let mut header = Header::new(Algorithm::ES256);
+        let mut header = Header::new(self.alg);
         header.kid = kid.map(str::to_owned);
         encode(
             &header,
@@ -71,6 +103,9 @@ impl SigningKey {
         .unwrap()
     }
 }
+
+/// The challenge sent with a rejected token.
+const INVALID_TOKEN: &str = "Bearer error=\"invalid_token\"";
 
 fn now() -> u64 {
     SystemTime::now()
@@ -98,6 +133,16 @@ struct Jwks {
 impl Jwks {
     fn serve(&self, keys: &[&SigningKey]) {
         *self.body.lock().unwrap() = key_set(keys);
+    }
+
+    /// Serves `jwks` as given, for JWK metadata tests.
+    fn serve_jwks(&self, jwks: &[Value]) {
+        *self.body.lock().unwrap() = json!({ "keys": jwks }).to_string();
+    }
+
+    /// Serves `body` in place of a key set.
+    fn serve_body(&self, body: &str) {
+        *self.body.lock().unwrap() = body.to_owned();
     }
 
     fn fetches(&self) -> usize {
@@ -610,6 +655,158 @@ async fn jwks_outages_are_503_not_401() {
         503,
         "oversized JWKS rejected"
     );
+}
+
+/// A verifier whose JWKS holds `key`'s JWK with `fields` merged in, and a
+/// usable key under another kid. That key keeps the set from being empty,
+/// so a rejected key yields 401 instead of the 503 of a set with no usable
+/// key.
+async fn with_decoy(key: &SigningKey, fields: &Value) -> Router {
+    let jwks = jwks_server(&[]).await;
+    jwks.serve_jwks(&[key.jwk_with(fields), SigningKey::new("decoy").jwk()]);
+    protected(&JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap())
+}
+
+#[tokio::test]
+async fn jwk_alg_use_and_key_ops_restrict_what_a_key_verifies() {
+    let key = SigningKey::new("k1");
+    let token = key.sign(&claims(), Some("k1"));
+    let kidless = key.sign(&claims(), None);
+    let accepted = [
+        json!({ "use": null, "key_ops": ["verify"] }),
+        json!({ "key_ops": ["verify"] }),
+        json!({ "use": null, "alg": null }),
+    ];
+    for fields in &accepted {
+        let (status, body, _) = call(&with_decoy(&key, fields).await, Some(&token)).await;
+        assert_eq!(status, 200, "{fields}: {body}");
+    }
+
+    let rejected = [
+        json!({ "alg": "ES384" }),
+        json!({ "alg": "RS256" }),
+        json!({ "alg": "HS256" }),
+        json!({ "alg": "XS999" }),
+        json!({ "use": null, "key_ops": ["encrypt"] }),
+        json!({ "use": null, "key_ops": ["sign"] }),
+        json!({ "use": null, "key_ops": [] }),
+        json!({ "key_ops": ["encrypt"] }),
+        json!({ "use": "enc" }),
+    ];
+    for fields in &rejected {
+        let router = with_decoy(&key, fields).await;
+        let (status, body, headers) = call(&router, Some(&token)).await;
+        assert_eq!(status, 401, "{fields}: {body}");
+        assert_eq!(headers["www-authenticate"], INVALID_TOKEN, "{fields}");
+        // Without `kid`, the restricted key is no candidate either: only the
+        // other key is, and it did not sign the token.
+        let (status, body, _) = call(&router, Some(&kidless)).await;
+        assert_eq!(status, 401, "{fields} without kid: {body}");
+    }
+
+    // A set whose only key may verify nothing has no usable key: 503.
+    for fields in [
+        json!({ "alg": "ES384" }),
+        json!({ "use": null, "key_ops": ["encrypt"] }),
+    ] {
+        let jwks = jwks_server(&[]).await;
+        jwks.serve_jwks(&[key.jwk_with(&fields)]);
+        let router = protected(&JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap());
+        let (status, body, _) = call(&router, Some(&token)).await;
+        assert_eq!(status, 503, "{fields}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn keys_sharing_a_kid_are_told_apart_by_algorithm() {
+    let es256 = SigningKey::new("shared");
+    let es384 = SigningKey::p384("shared");
+    let verifier = |jwks: &Jwks| {
+        let mut config = settings(jwks.addr, 60_000);
+        config.algorithms = vec!["ES256".into(), "ES384".into()];
+        JwtVerifier::new(&config).unwrap()
+    };
+    // In either order, each token verifies against the key bound to its
+    // algorithm, not the first key with its kid.
+    for order in [[&es384, &es256], [&es256, &es384]] {
+        let jwks = jwks_server(&order).await;
+        let router = protected(&verifier(&jwks));
+        for key in [&es256, &es384] {
+            for kid in [Some("shared"), None] {
+                let (status, body, _) = call(&router, Some(&key.sign(&claims(), kid))).await;
+                assert_eq!(status, 200, "{:?} with kid {kid:?}: {body}", key.alg);
+            }
+        }
+        assert_eq!(jwks.fetches(), 1);
+    }
+
+    // Two keys under one kid that may both verify the token's algorithm are
+    // ambiguous: neither is tried, not even the one that signed it.
+    let twin = SigningKey::new("shared");
+    let jwks = jwks_server(&[&twin, &es256]).await;
+    let router = protected(&verifier(&jwks));
+    let (status, body, _) = call(&router, Some(&es256.sign(&claims(), Some("shared")))).await;
+    assert_eq!(status, 401, "{body}");
+}
+
+#[tokio::test]
+async fn a_failed_refresh_reports_an_unknown_kid_as_unavailable() {
+    let old = SigningKey::new("old");
+    let rotated = SigningKey::new("new");
+    let jwks = jwks_server(&[&old]).await;
+    // The key set stays fresh for five minutes; refreshes may run every
+    // 300 ms.
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 300)).unwrap();
+    let known = || old.sign(&claims(), Some("old"));
+    let unknown = || rotated.sign(&claims(), Some("new"));
+    assert_eq!(status_of(&verifier, &known()).await, 200);
+
+    // The JWKS breaks while the issuer starts signing with a rotated key.
+    jwks.serve_body("upstream temporarily unavailable");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (status, body, _) = call(&protected(&verifier), Some(&unknown())).await;
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("auth-unavailable"), "{body}");
+    assert_eq!(jwks.fetches(), 2, "the refresh was attempted");
+
+    // Within the refresh interval, the failed refresh still decides.
+    assert_eq!(status_of(&verifier, &unknown()).await, 503);
+    assert_eq!(jwks.fetches(), 2, "rate limited");
+
+    // A kid the cached set holds keeps verifying.
+    assert_eq!(status_of(&verifier, &known()).await, 200);
+    assert_eq!(jwks.fetches(), 2);
+
+    // The JWKS recovers without the kid: that answer is authoritative.
+    jwks.serve(&[&old]);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (status, _, headers) = call(&protected(&verifier), Some(&unknown())).await;
+    assert_eq!(status, 401);
+    assert_eq!(headers["www-authenticate"], INVALID_TOKEN);
+    assert_eq!(jwks.fetches(), 3);
+    assert_eq!(status_of(&verifier, &unknown()).await, 401, "rate limited");
+    assert_eq!(jwks.fetches(), 3);
+
+    // Once the JWKS publishes the rotated key, it verifies.
+    jwks.serve(&[&old, &rotated]);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(status_of(&verifier, &unknown()).await, 200);
+    assert_eq!(jwks.fetches(), 4);
+}
+
+#[tokio::test]
+async fn an_invalid_jwks_on_a_cold_cache_returns_503() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[]).await;
+    jwks.serve_body("upstream temporarily unavailable");
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let token = key.sign(&claims(), Some("k1"));
+    for attempt in 0..2 {
+        let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
+        assert_eq!(status, 503, "attempt {attempt}: {body}");
+        assert!(body.contains("auth-unavailable"), "{body}");
+    }
+    assert_eq!(jwks.fetches(), 1, "rate limited");
 }
 
 #[tokio::test]
