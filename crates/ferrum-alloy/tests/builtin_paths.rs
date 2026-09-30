@@ -40,8 +40,12 @@ fn config_errors(result: Result<AlloyParts, AlloyError>) -> Vec<String> {
 fn paths_axum_cannot_route_literally_fail_validation_and_composition() {
     type Set = fn(&mut AlloyConfig, &str);
     let settings: [(&str, Set); 3] = [
-        ("health.liveness_path", |c, p| c.health.liveness_path = p.into()),
-        ("health.readiness_path", |c, p| c.health.readiness_path = p.into()),
+        ("health.liveness_path", |c, p| {
+            c.health.liveness_path = p.into()
+        }),
+        ("health.readiness_path", |c, p| {
+            c.health.readiness_path = p.into()
+        }),
         ("openapi.path", |c, p| c.openapi.path = p.into()),
     ];
     for path in [
@@ -109,7 +113,9 @@ fn document() -> ferrum_alloy::utoipa::openapi::OpenApi {
 #[test]
 fn builtin_paths_served_twice_on_one_listener_are_configuration_errors() {
     let app = || AlloyApp::new("paths").openapi(&document());
-    let cases: [(&str, fn(&mut AlloyConfig), &[&str]); 5] = [
+    /// What the case is, how it changes the configuration, and the errors.
+    type Case = (&'static str, fn(&mut AlloyConfig), &'static [&'static str]);
+    let cases: [Case; 5] = [
         (
             "a public document at the liveness path",
             |c| {

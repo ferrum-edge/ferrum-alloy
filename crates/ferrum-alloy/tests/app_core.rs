@@ -557,7 +557,11 @@ async fn liveness_takes_no_admission_permit() {
     // Business requests and readiness still get the overload response.
     for path in ["/hello", "/readyz"] {
         let overloaded = call("GET", path).await.unwrap();
-        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        assert_eq!(
+            overloaded.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path}"
+        );
         let body = overloaded.into_body().collect().await.unwrap().to_bytes();
         let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let kind = problem["type"].as_str().unwrap();
