@@ -10,6 +10,7 @@
 )]
 
 use std::net::SocketAddr;
+use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -661,8 +662,7 @@ fn invalid_configuration_fails_at_startup() {
             OtelPipeline::with_exporter(&resource(), &bad, Arc::clone(&metrics), || Ok(
                 InMemorySpanExporter::default()
             ))
-            .is_err(),
-            "{bad:?}"
+            .is_err()
         );
     }
     let error = OtelPipeline::with_exporter(&resource(), &OtlpConfig::default(), metrics, || {
@@ -670,6 +670,97 @@ fn invalid_configuration_fails_at_startup() {
     })
     .unwrap_err();
     assert!(error.to_string().contains("cannot build"));
+}
+
+#[test]
+fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
+    let credential_endpoint = "http://sentinel-user:sentinel-password@collector:4318/v1/traces";
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.endpoint = Some(credential_endpoint.to_owned());
+    let config_debug = format!("{config:?}");
+    assert!(!config_debug.contains("sentinel-user"));
+    assert!(!config_debug.contains("sentinel-password"));
+    let metrics = Arc::new(Metrics::default());
+    let error = OtelPipeline::otlp(&resource(), &config, Arc::clone(&metrics)).unwrap_err();
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    assert!(display.contains("without credentials"));
+    assert!(!display.contains("sentinel-user"));
+    assert!(!display.contains("sentinel-password"));
+    assert!(!debug.contains("sentinel-user"));
+    assert!(!debug.contains("sentinel-password"));
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "rejected_otlp_endpoint_init_error_is_the_credential_rejection",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "child test failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    assert!(!stdout.contains("sentinel-user"), "{stdout}");
+    assert!(!stdout.contains("sentinel-password"), "{stdout}");
+    assert!(!stderr.contains("sentinel-user"), "{stderr}");
+    assert!(!stderr.contains("sentinel-password"), "{stderr}");
+
+    for endpoint in ["ftp://collector/v1/traces", "http://[::1"] {
+        config.endpoint = Some(endpoint.to_owned());
+        let error = OtelPipeline::otlp(&resource(), &config, Arc::clone(&metrics)).unwrap_err();
+        let display = error.to_string();
+        assert!(display.contains("valid http(s) URL"));
+        assert!(!display.contains(endpoint));
+    }
+
+    for endpoint in [
+        "http://collector:4318/v1/traces",
+        "https://collector.example/v1/traces",
+        "http://collector:4318/v1/traces?x=a@b",
+    ] {
+        config.endpoint = Some(endpoint.to_owned());
+        assert!(config.validate().is_ok());
+    }
+
+    config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_031)));
+    assert_eq!(config.endpoint.as_ref().unwrap().len(), 2_048);
+    assert!(config.validate().is_ok());
+    config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_032)));
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("2048 bytes"));
+}
+
+#[test]
+#[ignore = "runs in an isolated process to verify OTLP initialization errors"]
+fn rejected_otlp_endpoint_init_error_is_the_credential_rejection() {
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.endpoint =
+        Some("http://sentinel-user:sentinel-password@collector:4318/v1/traces".to_owned());
+    let init_error = ferrum_alloy_telemetry::init::init_logging_and_otel(
+        &ferrum_alloy_telemetry::init::LoggingConfig::default(),
+        &resource(),
+        &config,
+        Arc::new(Metrics::default()),
+    )
+    .unwrap_err();
+    let display = init_error.to_string();
+    let debug = format!("{init_error:?}");
+    assert!(
+        display.contains("endpoint must be a valid http(s) URL without credentials"),
+        "{display}"
+    );
+    assert!(!display.contains("sentinel-user"));
+    assert!(!display.contains("sentinel-password"));
+    assert!(!debug.contains("sentinel-user"));
+    assert!(!debug.contains("sentinel-password"));
 }
 
 #[test]
