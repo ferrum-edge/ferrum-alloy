@@ -1,9 +1,10 @@
 //! Instrumented outbound HTTP client (feature `http-client`).
 //!
 //! * Explicit connect and whole-request timeouts.
-//! * `traceparent` is sent only to hosts listed in
-//!   `http_client.propagate_trace_context_to`. Credentials, cookies,
-//!   `baggage`, and gateway identity are never added automatically.
+//! * `traceparent` and the accepted `tracestate` are sent only to hosts listed
+//!   in `http_client.propagate_trace_context_to`. Caller-supplied trace headers
+//!   are replaced, never forwarded. Credentials, cookies, `baggage`, and
+//!   gateway identity are never added automatically.
 //! * Redirects are off by default. When enabled, only same-origin redirects
 //!   are followed; a cross-origin redirect is returned to the caller.
 //! * No automatic retries: a retry needs an explicit policy, a replayable
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use ferrum_alloy_telemetry::RequestContext;
 use ferrum_alloy_telemetry::metrics::method_label;
-use ferrum_alloy_telemetry::trace_context::{SpanId, TRACEPARENT};
+use ferrum_alloy_telemetry::trace_context::{SpanId, TRACEPARENT, TRACESTATE};
 use reqwest::redirect;
 use tracing::Instrument;
 use tracing::field::Empty;
@@ -199,6 +200,12 @@ impl AlloyClient {
                 alloy.trace.propagated = false,
             ),
         };
+        // Never forward caller-supplied trace context or baggage. The outbound
+        // context is rebuilt below from the accepted context and the
+        // destination policy, so a stale header cannot ride along unseen.
+        request.headers_mut().remove(TRACEPARENT);
+        request.headers_mut().remove(TRACESTATE);
+        request.headers_mut().remove("baggage");
         if propagate && let Some(context) = context {
             let span_id = ferrum_alloy_telemetry::exported_ids(&span)
                 .map_or_else(SpanId::random, |(_, span_id, _)| span_id);
@@ -211,14 +218,9 @@ impl AlloyClient {
                 .as_ref()
                 .and_then(|s| s.to_header_value())
             {
-                request.headers_mut().insert("tracestate", state);
+                request.headers_mut().insert(TRACESTATE, state);
             }
-        } else {
-            // Never forward caller-supplied context to hosts outside the list.
-            request.headers_mut().remove(TRACEPARENT);
-            request.headers_mut().remove("tracestate");
         }
-        request.headers_mut().remove("baggage");
 
         let started = Instant::now();
         let result = self.client.execute(request).instrument(span.clone()).await;
