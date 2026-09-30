@@ -38,8 +38,10 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::metrics::Metrics;
 
+const MAX_OTLP_ENDPOINT_LENGTH: usize = 2_048;
+
 /// OTLP trace export configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct OtlpConfig {
@@ -67,6 +69,23 @@ pub struct OtlpConfig {
     pub max_request_bytes: usize,
     /// Delay between scheduled exports, in milliseconds.
     pub scheduled_delay_ms: u64,
+}
+
+impl fmt::Debug for OtlpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtlpConfig")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint.as_ref().map(|_| "<configured>"))
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_export_retries", &self.max_export_retries)
+            .field("sampling_ratio", &self.sampling_ratio)
+            .field("max_queue_spans", &self.max_queue_spans)
+            .field("max_queue_bytes", &self.max_queue_bytes)
+            .field("max_export_batch", &self.max_export_batch)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("scheduled_delay_ms", &self.scheduled_delay_ms)
+            .finish()
+    }
 }
 
 impl Default for OtlpConfig {
@@ -142,16 +161,7 @@ impl OtlpConfig {
             ));
         }
         if let Some(endpoint) = &self.endpoint {
-            let scheme_ok = endpoint.starts_with("http://") || endpoint.starts_with("https://");
-            let has_userinfo = endpoint
-                .split_once("://")
-                .map(|(_, rest)| rest.split('/').next().unwrap_or_default().contains('@'))
-                .unwrap_or(false);
-            if !scheme_ok || has_userinfo || endpoint.parse::<http::Uri>().is_err() {
-                return Err(OtelError::Config(format!(
-                    "endpoint must be an http(s) URL without credentials, got {endpoint:?}"
-                )));
-            }
+            validate_endpoint(endpoint)?;
         }
         Ok(())
     }
@@ -189,6 +199,9 @@ impl OtelPipeline {
             .as_deref()
             .is_some_and(|e| e.starts_with("https://"));
         let factory = move || {
+            if endpoint.is_none() {
+                validate_environment_endpoint()?;
+            }
             // Build the HTTP client explicitly (on the export thread): the
             // exporter's implicit client depends on how reqwest's TLS
             // features unify across the application and can panic.
@@ -209,7 +222,11 @@ impl OtelPipeline {
             if let Some(endpoint) = endpoint {
                 builder = builder.with_endpoint(endpoint);
             }
-            builder.build().map_err(|e| e.to_string())
+            builder.build().map_err(|_| {
+                "the OTLP exporter could not be built from its endpoint configuration \
+                 (otlp.endpoint or the OTEL_EXPORTER_OTLP_*ENDPOINT variables)"
+                    .to_owned()
+            })
         };
         Self::with_exporter(resource, config, metrics, factory)
     }
@@ -292,6 +309,48 @@ impl OtelPipeline {
             .shutdown_with_timeout(timeout)
             .map_err(|e| OtelError::Exporter(e.to_string()))
     }
+}
+
+fn validate_environment_endpoint() -> Result<(), String> {
+    for name in [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ] {
+        let value = std::env::var_os(name);
+        if let Some(value) = value {
+            let Some(value) = value.to_str() else {
+                return Err("endpoint must be a valid http(s) URL without credentials".into());
+            };
+            if value.is_empty() {
+                continue;
+            }
+            validate_endpoint(value).map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn validate_endpoint(endpoint: &str) -> Result<(), OtelError> {
+    if endpoint.len() > MAX_OTLP_ENDPOINT_LENGTH {
+        return Err(OtelError::Config(
+            "endpoint must not exceed 2048 bytes".into(),
+        ));
+    }
+    let scheme_ok = endpoint.starts_with("http://") || endpoint.starts_with("https://");
+    let has_userinfo = endpoint
+        .split_once("://")
+        .map(|(_, rest)| {
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            rest[..authority_end].contains('@')
+        })
+        .unwrap_or(false);
+    if !scheme_ok || has_userinfo || endpoint.parse::<http::Uri>().is_err() {
+        return Err(OtelError::Config(
+            "endpoint must be a valid http(s) URL without credentials".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// TLS for the OTLP client: the platform trust store. A configured

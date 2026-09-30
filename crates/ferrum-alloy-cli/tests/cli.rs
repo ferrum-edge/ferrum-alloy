@@ -550,16 +550,21 @@ fn check_never_prints_secrets() {
     let path = write(
         dir.path(),
         "secret.toml",
-        "[management]\ntoken = \"0123456789abcdef0123456789abcdef-secret\"\n[database]\nurl = \"postgres://u:hunter2@db/x\"\n",
+        "[management]\ntoken = \"0123456789abcdef0123456789abcdef-secret\"\n[database]\nurl = \"postgres://u:hunter2@db/x\"\n[otlp]\nendpoint = \"https://sentinel-user:sentinel-password@collector:4318/v1/traces?api_key=sentinel-query\"\n",
     );
     let output = run(&["check", "--config", &path, "--show-effective"]);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     let text = stdout(&output);
     assert!(
-        !text.contains("hunter2") && !text.contains("-secret"),
+        !text.contains("hunter2")
+            && !text.contains("-secret")
+            && !text.contains("sentinel-user")
+            && !text.contains("sentinel-password")
+            && !text.contains("sentinel-query"),
         "{text}"
     );
     assert!(text.contains("<redacted>"));
+    assert!(text.contains("collector:4318/v1/traces?<redacted>"));
     let output = run(&[
         "check",
         "--config",
@@ -568,7 +573,12 @@ fn check_never_prints_secrets() {
         "--format",
         "json",
     ]);
-    assert!(!stdout(&output).contains("hunter2"));
+    let text = stdout(&output);
+    assert!(!text.contains("hunter2"));
+    assert!(!text.contains("sentinel-user"));
+    assert!(!text.contains("sentinel-password"));
+    assert!(!text.contains("sentinel-query"));
+    assert!(text.contains("collector:4318/v1/traces?<redacted>"));
 }
 
 #[test]
