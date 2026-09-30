@@ -125,6 +125,25 @@ fn diagnose_rejects_invalid_reports_with_exit_3() {
 }
 
 #[test]
+fn diagnose_sanitizes_errors_from_hostile_report_keys_in_both_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = "\\u001b[2J";
+    let report = format!(
+        "{{\"schema\":\"ferrum.diagnostic_report\",\"schema_version\":\"1.0\",\"{key}\":\"{}\"}}",
+        "x".repeat(2_049)
+    );
+    let path = write(dir.path(), "hostile-report.json", &report);
+
+    for format in ["human", "json"] {
+        let output = run(&["diagnose", "--input", &path, "--format", format]);
+        assert_eq!(code(&output), 3);
+        let error = stderr(&output);
+        assert!(!error.contains('\u{1b}'));
+        assert!(error.contains("?[2J"));
+    }
+}
+
+#[test]
 fn diagnose_reads_otlp_exports() {
     let path = fixture("otlp/edge-alloy-trace.jsonl");
     let list = run(&["diagnose", "--otlp", &path, "--list-traces"]);
@@ -678,6 +697,38 @@ fn edge_export_writes_reviewable_artifacts_without_overwriting() {
         "schema = \"ferrum.service_manifest\"\n",
     );
     assert_eq!(code(&run(&["edge", "export", "--manifest", &bad])), 3);
+}
+
+#[test]
+fn manifest_errors_are_terminal_safe_for_both_manifest_consumers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manifest = std::fs::read_to_string(fixture("manifests/orders-api.toml")).unwrap();
+    manifest.push_str("\n\"\\u001b[2J\" = \"value\"\n");
+    let manifest_path = write(dir.path(), "hostile-manifest.toml", &manifest);
+    let edge = run(&["edge", "export", "--manifest", &manifest_path]);
+    let openapi_input = write(
+        dir.path(),
+        "openapi.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    let output_path = dir.path().join("out.json");
+    let openapi = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &openapi_input,
+        "--manifest",
+        &manifest_path,
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+
+    for result in [edge, openapi] {
+        assert_eq!(code(&result), 3);
+        let output = stderr(&result);
+        assert!(!output.contains('\u{1b}'));
+        assert!(output.contains("?[2J"));
+    }
 }
 
 #[test]
