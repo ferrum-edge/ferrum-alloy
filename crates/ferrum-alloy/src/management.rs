@@ -214,6 +214,7 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
     }
     let limiter = state.rate_limiter.clone();
     let router = router
+        .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
         .fallback(|| async { Problem::new(ProblemKind::RouteNotFound).into_response() })
         .with_state(state);
     let Some(limiter) = limiter else {

@@ -554,6 +554,15 @@ async fn liveness_takes_no_admission_permit() {
     let post = call("POST", "/livez").await.unwrap();
     assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert!(post.headers().contains_key("allow"));
+    assert_eq!(post.headers()["content-type"], "application/problem+json");
+    let body = post.into_body().collect().await.unwrap().to_bytes();
+    let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem["status"], 405);
+    assert_eq!(
+        problem["type"],
+        "tag:ferrumedge.com,2026:alloy/problem/method-not-allowed"
+    );
+    assert_eq!(problem["detail"], "The route does not support this method.");
     // Business requests and readiness still get the overload response.
     for path in ["/hello", "/readyz"] {
         let overloaded = call("GET", path).await.unwrap();
