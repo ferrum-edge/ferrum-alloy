@@ -217,16 +217,19 @@ impl<'a> Index<'a> {
     }
 
     /// Service requests whose parent is the given gateway span, in its trace.
-    fn services_under(
+    fn service_keys_under(
         &self,
         edge_span: &SpanRef,
-        mut parent_lookup: impl FnMut(),
-    ) -> Vec<&RequestView<'a>> {
-        parent_lookup();
+    ) -> impl Iterator<Item = SpanKey<'a>> + '_ {
         self.services_by_parent
             .get(&(edge_span.trace_id.as_str(), edge_span.span_id.as_str()))
             .into_iter()
             .flatten()
+            .copied()
+    }
+
+    fn services_under(&self, edge_span: &SpanRef) -> Vec<&RequestView<'a>> {
+        self.service_keys_under(edge_span)
             .filter_map(|key| self.service.get(key))
             .collect()
     }
@@ -473,7 +476,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     for view in index.edge.values() {
         let services = view
             .span
-            .map(|span| index.services_under(span, || {}))
+            .map(|span| index.services_under(span))
             .unwrap_or_default();
         if let Some(rejected) = view.named(catalog::EDGE_REQUEST_REJECTED) {
             let phase = rejected.attr("phase");
@@ -915,7 +918,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         let Some(edge_ms) = ttfb.duration_ms() else {
             continue;
         };
-        let services = index.services_under(edge_span, || {});
+        let services = index.services_under(edge_span);
         if services.is_empty() {
             continue;
         }
@@ -1283,23 +1286,15 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         .collect();
     let mut budget = MAX_DEGRADED_CITATIONS_PER_RUN;
 
-    // Gateway spans that some service request names as its parent, in the
-    // service request's own trace.
-    let served: BTreeSet<SpanKey<'_>> = index
-        .service
-        .values()
-        .filter_map(|view| {
-            let span = view.span?;
-            Some((span.trace_id.as_str(), span.parent_span_id.as_deref()?))
-        })
-        .collect();
     // Gateway requests with a measured backend exchange and no service child,
     // each with its time-to-headers and the degraded observations linked to it.
     let mut missing: BTreeMap<SpanKey<'_>, (&Observation, Vec<&Observation>)> = index
         .edge
         .values()
         .filter_map(|view| {
-            let edge_span = view.key().filter(|key| !served.contains(key))?;
+            let edge_span = view
+                .key()
+                .filter(|key| !index.services_by_parent.contains_key(key))?;
             let ttfb = view
                 .named(catalog::EDGE_BACKEND_TIME_TO_HEADERS)
                 .filter(|ttfb| ttfb.duration_ms().is_some())?;
@@ -1519,7 +1514,7 @@ mod tests {
                     continue;
                 };
                 let indexed = index
-                    .services_under(edge_span, || {})
+                    .services_under(edge_span)
                     .into_iter()
                     .map(|view| view.observations[0].id.as_str())
                     .collect::<Vec<_>>();
@@ -1538,6 +1533,74 @@ mod tests {
 
                 assert_eq!(indexed, previous_scan, "fixture {fixture}");
             }
+        }
+    }
+
+    #[test]
+    fn indexed_services_match_the_previous_scan_on_synthetic_span_graphs() {
+        let mut report = report_with_spans(4, 0);
+        let service_spans = [
+            ("trace-one", "repeated-service", "shared-edge"),
+            ("trace-two", "repeated-service", "shared-edge"),
+            ("trace-one", "self-service", "self-service"),
+            ("trace-three", "cross-trace-child", "shared-edge"),
+        ];
+        for (observation, (trace_id, span_id, parent_span_id)) in
+            report.observations.iter_mut().zip(service_spans)
+        {
+            let span = observation.span.as_mut().unwrap();
+            span.trace_id = trace_id.to_owned();
+            span.span_id = span_id.to_owned();
+            span.parent_span_id = Some(parent_span_id.to_owned());
+        }
+
+        let mut edge_report: DiagnosticReport = serde_json::from_str(include_str!(
+            "../../../contracts/fixtures/reports/edge-rejected-before-upstream.json"
+        ))
+        .unwrap();
+        let edge_template = edge_report.observations.remove(0);
+        for (number, (trace_id, span_id)) in [
+            ("trace-one", "shared-edge"),
+            ("trace-two", "shared-edge"),
+            ("trace-one", "self-service"),
+            ("trace-three", "unrelated-edge"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut edge = edge_template.clone();
+            edge.id = format!("edge-{number}");
+            let span = edge.span.as_mut().unwrap();
+            span.trace_id = trace_id.to_owned();
+            span.span_id = span_id.to_owned();
+            span.parent_span_id = None;
+            report.observations.push(edge);
+        }
+
+        let index = Index::build(&report);
+        for edge in index.edge.values() {
+            let Some(edge_span) = edge.span else {
+                continue;
+            };
+            let indexed = index
+                .services_under(edge_span)
+                .into_iter()
+                .map(|view| view.observations[0].id.as_str())
+                .collect::<Vec<_>>();
+            let previous_scan = index
+                .service
+                .values()
+                .filter(|view| {
+                    view.span.is_some_and(|service_span| {
+                        service_span.trace_id == edge_span.trace_id
+                            && service_span.parent_span_id.as_deref()
+                                == Some(edge_span.span_id.as_str())
+                    })
+                })
+                .map(|view| view.observations[0].id.as_str())
+                .collect::<Vec<_>>();
+
+            assert_eq!(indexed, previous_scan);
         }
     }
 
@@ -1588,13 +1651,70 @@ mod tests {
             .edge
             .values()
             .filter_map(|view| view.span)
-            .map(|span| index.services_under(span, || parent_lookups += 1).len())
+            .map(|span| {
+                index
+                    .service_keys_under(span)
+                    .inspect(|_| parent_lookups += 1)
+                    .filter_map(|key| index.service.get(key))
+                    .count()
+            })
             .sum::<usize>();
 
         assert_eq!(report.observations.len(), limits.max_observations);
         assert_eq!(linked_services, EDGE_COUNT);
         assert_eq!(parent_lookups, EDGE_COUNT);
-        assert!(parent_lookups <= EDGE_COUNT);
+    }
+
+    #[test]
+    fn multiple_service_attempts_cite_every_observation_at_raised_limit() {
+        use crate::parse::{Limits, check_report};
+
+        const MAX_OBSERVATIONS: usize = 10_000;
+        const SERVICE_COUNT: usize = MAX_OBSERVATIONS - 1;
+
+        let mut report = report_with_spans(SERVICE_COUNT, 0);
+        let edge_span_id = "ffffffffffffffff";
+        for service in &mut report.observations {
+            service.span.as_mut().unwrap().parent_span_id = Some(edge_span_id.to_owned());
+        }
+        let service_trace_id = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .trace_id
+            .clone();
+
+        let mut edge_report: DiagnosticReport = serde_json::from_str(include_str!(
+            "../../../contracts/fixtures/reports/unattributed-interval.json"
+        ))
+        .unwrap();
+        let mut edge = edge_report.observations.remove(0);
+        let edge_span = edge.span.as_mut().unwrap();
+        edge_span.trace_id = service_trace_id;
+        edge_span.span_id = edge_span_id.to_owned();
+        let edge_id = edge.id.clone();
+        report.observations.push(edge);
+
+        let limits = Limits {
+            max_bytes: 16 * 1024 * 1024,
+            max_observations: MAX_OBSERVATIONS,
+            ..Limits::default()
+        };
+        check_report(&report, &limits).unwrap();
+
+        let findings = analyze(&report, &Thresholds::default())
+            .into_iter()
+            .filter(|finding| {
+                finding.rule_id == "alloy.r003"
+                    && finding.code == "alloy.gateway.multiple_service_attempts"
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(findings.len(), 1);
+        let citations = &findings[0].supporting_observations;
+        assert_eq!(citations.len(), SERVICE_COUNT + 1);
+        assert!(citations.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(citations.contains(&edge_id));
     }
 
     #[test]
@@ -1617,17 +1737,29 @@ mod tests {
     fn operation_ancestry_stops_after_64_parent_hops() {
         let mut report = report_with_spans(66, 1);
         for number in 1..66 {
+            let parent_id = report.observations[number - 1]
+                .span
+                .as_ref()
+                .unwrap()
+                .span_id
+                .clone();
             report.observations[number]
                 .span
                 .as_mut()
                 .unwrap()
-                .parent_span_id = Some(format!("{:016x}", number - 1));
+                .parent_span_id = Some(parent_id);
         }
+        let last_service_id = report.observations[65]
+            .span
+            .as_ref()
+            .unwrap()
+            .span_id
+            .clone();
         report.observations[66]
             .span
             .as_mut()
             .unwrap()
-            .parent_span_id = Some(format!("{:016x}", 65));
+            .parent_span_id = Some(last_service_id);
 
         let index = Index::build(&report);
         let mut parent_lookups = 0;
