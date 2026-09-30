@@ -16,8 +16,10 @@
 //! the producer, which names the telemetry library.
 //!
 //! A span record that repeats an earlier one exactly, as a collector retry
-//! can write, is ignored and counted in a collection note. The same span id
-//! with different content fails with [`ImportError::ConflictingSpans`].
+//! can write, is ignored and counted in a collection note. Span ids must be
+//! unique within a trace: the same span id with different content fails
+//! with [`ImportError::ConflictingSpans`], even across Edge and Alloy
+//! producers.
 //!
 //! A successful import is always a report that
 //! [`parse_offline`](crate::parse::parse_offline) accepts under

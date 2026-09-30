@@ -9,9 +9,11 @@
 //! `--write-report`: rules only ever run on reports the parser accepts, so
 //! a trace the parser would refuse fails instead of being analyzed.
 
+use std::collections::hash_map::RandomState;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::hash::{BuildHasher, Hasher};
+use std::io::{ErrorKind, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -127,24 +129,43 @@ fn report_bytes(report: &DiagnosticReport, limits: &Limits) -> Result<Vec<u8>, C
     Ok(json)
 }
 
+/// How many temporary names `write_atomically` tries before giving up.
+const TEMP_ATTEMPTS: u32 = 5;
+
+/// A temporary-file suffix with the process id and a random part, so a
+/// stale file from an earlier run, even one with the same process id, or
+/// a name created in advance does not block the write.
+fn temp_suffix() -> String {
+    let random = RandomState::new().build_hasher().finish();
+    format!(".{}.{random:016x}.tmp", std::process::id())
+}
+
 /// Writes `bytes` to `path` through a new temporary file in the same
 /// directory and a rename, so `path` never holds a partial report. The
-/// temporary file is removed when a later step fails.
+/// temporary file is removed when a later step fails. A symbolic link at
+/// `path` is replaced, not written through.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let failed = |e: std::io::Error| CliError::Io(format!("write {}: {e}", path.display()));
     let Some(name) = path.file_name() else {
         let message = format!("{} names no file", path.display());
         return Err(CliError::Invalid(message));
     };
-    let mut temp_name = OsString::from(".");
-    temp_name.push(name);
-    temp_name.push(format!(".{}.tmp", std::process::id()));
-    let temp = path.with_file_name(temp_name);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(failed)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut attempts = 1;
+    let (temp, mut file) = loop {
+        let mut temp_name = OsString::from(".");
+        temp_name.push(name);
+        temp_name.push(temp_suffix());
+        let temp = path.with_file_name(temp_name);
+        match options.open(&temp) {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS => {
+                attempts += 1;
+            }
+            Err(e) => return Err(failed(e)),
+        }
+    };
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     // Closed before the rename, which Windows requires.
     drop(file);
@@ -253,6 +274,13 @@ mod tests {
     use ferrum_alloy_diagnostics::model::{Collection, CollectionMethod, Verification};
 
     use super::*;
+
+    #[test]
+    fn temporary_names_differ_between_attempts() {
+        let (first, second) = (temp_suffix(), temp_suffix());
+        assert_ne!(first, second);
+        assert!(first.ends_with(".tmp"), "{first}");
+    }
 
     #[test]
     fn written_reports_fall_back_to_compact_json_to_fit_the_limit() {
