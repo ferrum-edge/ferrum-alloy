@@ -699,6 +699,7 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
     .unwrap_err();
     let display = init_error.to_string();
     let debug = format!("{init_error:?}");
+    assert!(display.contains("without credentials"));
     assert!(!display.contains("sentinel-user"));
     assert!(!display.contains("sentinel-password"));
     assert!(!debug.contains("sentinel-user"));
@@ -715,12 +716,16 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
     for endpoint in [
         "http://collector:4318/v1/traces",
         "https://collector.example/v1/traces",
+        "http://collector:4318/v1/traces?x=a@b",
     ] {
         config.endpoint = Some(endpoint.to_owned());
         assert!(config.validate().is_ok());
     }
 
-    config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_048)));
+    config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_031)));
+    assert_eq!(config.endpoint.as_ref().unwrap().len(), 2_048);
+    assert!(config.validate().is_ok());
+    config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_032)));
     let error = config.validate().unwrap_err();
     assert!(error.to_string().contains("2048 bytes"));
 }

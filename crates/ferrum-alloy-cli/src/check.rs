@@ -157,7 +157,8 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
             {
                 map.insert(
                     "effective".into(),
-                    serde_json::to_value(&config).map_err(|e| CliError::Io(e.to_string()))?,
+                    serde_json::to_value(config.redacted())
+                        .map_err(|e| CliError::Io(e.to_string()))?,
                 );
             }
             crate::print(&format!("{value:#}\n"))?;

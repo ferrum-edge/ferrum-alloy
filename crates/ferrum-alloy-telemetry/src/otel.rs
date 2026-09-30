@@ -161,21 +161,7 @@ impl OtlpConfig {
             ));
         }
         if let Some(endpoint) = &self.endpoint {
-            if endpoint.len() > MAX_OTLP_ENDPOINT_LENGTH {
-                return Err(OtelError::Config(
-                    "endpoint must not exceed 2048 bytes".into(),
-                ));
-            }
-            let scheme_ok = endpoint.starts_with("http://") || endpoint.starts_with("https://");
-            let has_userinfo = endpoint
-                .split_once("://")
-                .map(|(_, rest)| rest.split('/').next().unwrap_or_default().contains('@'))
-                .unwrap_or(false);
-            if !scheme_ok || has_userinfo || endpoint.parse::<http::Uri>().is_err() {
-                return Err(OtelError::Config(
-                    "endpoint must be a valid http(s) URL without credentials".into(),
-                ));
-            }
+            validate_endpoint(endpoint)?;
         }
         Ok(())
     }
@@ -213,6 +199,9 @@ impl OtelPipeline {
             .as_deref()
             .is_some_and(|e| e.starts_with("https://"));
         let factory = move || {
+            if endpoint.is_none() {
+                validate_environment_endpoint()?;
+            }
             // Build the HTTP client explicitly (on the export thread): the
             // exporter's implicit client depends on how reqwest's TLS
             // features unify across the application and can panic.
@@ -233,7 +222,14 @@ impl OtelPipeline {
             if let Some(endpoint) = endpoint {
                 builder = builder.with_endpoint(endpoint);
             }
-            builder.build().map_err(|e| e.to_string())
+            builder.build().map_err(|_| {
+                concat!(
+                    "could not build OTLP exporter; check ",
+                    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or ",
+                    "OTEL_EXPORTER_OTLP_ENDPOINT",
+                )
+                .to_owned()
+            })
         };
         Self::with_exporter(resource, config, metrics, factory)
     }
@@ -316,6 +312,45 @@ impl OtelPipeline {
             .shutdown_with_timeout(timeout)
             .map_err(|e| OtelError::Exporter(e.to_string()))
     }
+}
+
+fn validate_environment_endpoint() -> Result<(), String> {
+    for name in [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ] {
+        let value = std::env::var_os(name);
+        if let Some(value) = value {
+            let Some(value) = value.to_str() else {
+                return Err("endpoint must be a valid http(s) URL without credentials".into());
+            };
+            validate_endpoint(value).map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn validate_endpoint(endpoint: &str) -> Result<(), OtelError> {
+    if endpoint.len() > MAX_OTLP_ENDPOINT_LENGTH {
+        return Err(OtelError::Config(
+            "endpoint must not exceed 2048 bytes".into(),
+        ));
+    }
+    let scheme_ok = endpoint.starts_with("http://") || endpoint.starts_with("https://");
+    let has_userinfo = endpoint
+        .split_once("://")
+        .map(|(_, rest)| {
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            rest[..authority_end].contains('@')
+        })
+        .unwrap_or(false);
+    if !scheme_ok || has_userinfo || endpoint.parse::<http::Uri>().is_err() {
+        return Err(OtelError::Config(
+            "endpoint must be a valid http(s) URL without credentials".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// TLS for the OTLP client: the platform trust store. A configured

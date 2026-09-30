@@ -1377,8 +1377,18 @@ impl AlloyConfig {
 
     /// The effective configuration as TOML, with secrets redacted.
     pub fn redacted_toml(&self) -> String {
-        toml::to_string_pretty(self)
+        toml::to_string_pretty(&self.redacted())
             .unwrap_or_else(|e| format!("# cannot render configuration: {e}\n"))
+    }
+
+    /// Returns a copy suitable for display, with endpoint userinfo and
+    /// query parameters redacted.
+    pub fn redacted(&self) -> Self {
+        let mut config = self.clone();
+        if let Some(endpoint) = &mut config.otlp.endpoint {
+            *endpoint = redact_endpoint(endpoint);
+        }
+        config
     }
 
     /// Semantic validation. `features` names the Cargo features compiled
@@ -1727,6 +1737,33 @@ impl AlloyConfig {
             Err(ConfigError::Invalid(errors))
         }
     }
+}
+
+fn redact_endpoint(endpoint: &str) -> String {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return "<redacted>".to_owned();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let authority = authority
+        .rfind('@')
+        .map_or_else(
+            || authority.to_owned(),
+            |at| format!("<redacted>@{}", &authority[at + 1..]),
+        );
+    let suffix = &rest[authority_end..];
+    let query_start = suffix.find('?');
+    let fragment_start = suffix.find('#');
+    let safe_suffix_end = query_start
+        .into_iter()
+        .chain(fragment_start)
+        .min()
+        .unwrap_or(suffix.len());
+    let mut redacted = format!("{scheme}://{authority}{}", &suffix[..safe_suffix_end]);
+    if query_start.is_some() {
+        redacted.push_str("?<redacted>");
+    }
+    redacted
 }
 
 /// Checks `openapi.ui_path`, which the documentation page embeds in its
