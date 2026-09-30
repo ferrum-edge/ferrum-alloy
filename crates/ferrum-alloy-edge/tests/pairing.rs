@@ -192,8 +192,8 @@ fn gateway_error_tokens_match_the_diagnostics_catalog() {
 #[test]
 fn ferrum_contracts_pin_and_local_adoption_match() {
     let root = repo_root();
-    let pin: serde_json::Value = serde_json::from_str(&repo("contracts/ferrum-contracts/PIN"))
-        .unwrap();
+    let pin: serde_json::Value =
+        serde_json::from_str(&repo("contracts/ferrum-contracts/PIN")).unwrap();
     assert_eq!(pin["tag"], "contracts-edge-0.9.8");
     assert_eq!(pin["commit"], "89ef3917ce6bba142dce50b84f2033d81eb429dd");
 
@@ -213,19 +213,30 @@ fn ferrum_contracts_pin_and_local_adoption_match() {
             actual_hash,
             "pinned contract file changed: {path}"
         );
-        pinned_files.insert(path.clone());
+        pinned_files.insert(
+            path.strip_prefix("contracts/ferrum-contracts/")
+                .unwrap()
+                .to_owned(),
+        );
     }
     let vendored_root = root.join("contracts/ferrum-contracts");
     let mut vendored_files = BTreeSet::new();
     collect_files(&vendored_root, &vendored_root, &mut vendored_files);
     vendored_files.remove("PIN");
     let (missing, extra) = differences(&pinned_files, &vendored_files);
-    assert!(missing.is_empty(), "vendored files missing from PIN: {missing:?}");
-    assert!(extra.is_empty(), "vendored files absent from PIN: {extra:?}");
+    assert!(
+        missing.is_empty(),
+        "vendored files missing from PIN: {missing:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "vendored files absent from PIN: {extra:?}"
+    );
 
-    let errors: serde_json::Value =
-        serde_json::from_str(&repo("contracts/ferrum-contracts/vocabularies/gateway-errors.json"))
-            .unwrap();
+    let errors: serde_json::Value = serde_json::from_str(&repo(
+        "contracts/ferrum-contracts/vocabularies/gateway-errors.json",
+    ))
+    .unwrap();
     let canonical_tokens: Vec<String> = errors["x_gateway_error_tokens"]
         .as_array()
         .unwrap()
@@ -243,11 +254,20 @@ fn ferrum_contracts_pin_and_local_adoption_match() {
             .collect();
     let canonical_token_set: BTreeSet<String> = canonical_tokens.into_iter().collect();
     let (missing, extra) = differences(&canonical_token_set, &edge_tokens);
-    assert!(missing.is_empty(), "Edge contract tokens missing: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "Edge contract tokens missing: {missing:?}"
+    );
     assert!(extra.is_empty(), "Edge contract tokens extra: {extra:?}");
     let (missing, extra) = differences(&canonical_token_set, &catalog_tokens);
-    assert!(missing.is_empty(), "diagnostics catalog tokens missing: {missing:?}");
-    assert!(extra.is_empty(), "diagnostics catalog tokens extra: {extra:?}");
+    assert!(
+        missing.is_empty(),
+        "diagnostics catalog tokens missing: {missing:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "diagnostics catalog tokens extra: {extra:?}"
+    );
 
     let canonical_meanings: std::collections::BTreeMap<&str, &str> =
         errors["x_gateway_error_tokens"]
@@ -322,12 +342,13 @@ fn ferrum_contracts_pin_and_local_adoption_match() {
             path.starts_with("contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/")
         })
         .collect();
-    assert!(!fixtures.is_empty(), "PIN has no valid diagnostic-finding fixtures");
+    assert!(
+        !fixtures.is_empty(),
+        "PIN has no valid diagnostic-finding fixtures"
+    );
     for fixture in fixtures {
-        let value: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join(fixture.as_str())).unwrap(),
-        )
-        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join(fixture.as_str())).unwrap()).unwrap();
         assert_finding_matches_schema(&value, finding_schema, &local_schema, fixture.as_str());
     }
 }
@@ -351,9 +372,9 @@ fn assert_finding_matches_schema(
             .as_str()
             .map(|value| vec![value])
             .or_else(|| {
-                expected_types.as_array().map(|values| {
-                    values.iter().map(|value| value.as_str().unwrap()).collect()
-                })
+                expected_types
+                    .as_array()
+                    .map(|values| values.iter().map(|value| value.as_str().unwrap()).collect())
             })
             .unwrap();
         assert!(
@@ -374,7 +395,7 @@ fn assert_finding_matches_schema(
         assert!(
             variants
                 .iter()
-                .any(|variant| schema_matches(value, variant, root_schema, path)),
+                .any(|variant| schema_matches(value, variant, root_schema)),
             "{path} does not match any schema alternative"
         );
     }
@@ -432,12 +453,11 @@ fn schema_matches(
     value: &serde_json::Value,
     schema: &serde_json::Value,
     root_schema: &serde_json::Value,
-    path: &str,
 ) -> bool {
     if let Some(variants) = schema["anyOf"].as_array() {
         return variants
             .iter()
-            .any(|variant| schema_matches(value, variant, root_schema, path));
+            .any(|variant| schema_matches(value, variant, root_schema));
     }
     if let Some(reference) = schema["$ref"].as_str() {
         let Some(pointer) = reference.strip_prefix("#/") else {
@@ -446,7 +466,7 @@ fn schema_matches(
         let target = pointer
             .split('/')
             .fold(root_schema, |current, key| &current[key]);
-        return schema_matches(value, target, root_schema, path);
+        return schema_matches(value, target, root_schema);
     }
     if let Some(allowed) = schema["enum"].as_array() {
         return allowed.contains(value);
@@ -456,9 +476,9 @@ fn schema_matches(
             .as_str()
             .map(|value| vec![value])
             .or_else(|| {
-                expected_types.as_array().map(|values| {
-                    values.iter().map(|value| value.as_str().unwrap()).collect()
-                })
+                expected_types
+                    .as_array()
+                    .map(|values| values.iter().map(|value| value.as_str().unwrap()).collect())
             })
             .unwrap();
         return types.iter().any(|expected_type| match *expected_type {

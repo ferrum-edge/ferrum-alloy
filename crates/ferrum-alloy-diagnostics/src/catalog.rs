@@ -177,10 +177,7 @@ pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
         "overload",
         "Gateway resource refusal: overload or drain reject_new_requests (503), or response-transformer output above the configured response ceiling (502).",
     ),
-    (
-        "config_stale",
-        "Data-plane stale-config fence.",
-    ),
+    ("config_stale", "Data-plane stale-config fence."),
     (
         "concurrency_limit",
         "adaptive_concurrency admission refused the request.",
