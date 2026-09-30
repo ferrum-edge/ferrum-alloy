@@ -661,8 +661,7 @@ fn invalid_configuration_fails_at_startup() {
             OtelPipeline::with_exporter(&resource(), &bad, Arc::clone(&metrics), || Ok(
                 InMemorySpanExporter::default()
             ))
-            .is_err(),
-            "{bad:?}"
+            .is_err()
         );
     }
     let error = OtelPipeline::with_exporter(&resource(), &OtlpConfig::default(), metrics, || {
@@ -670,6 +669,62 @@ fn invalid_configuration_fails_at_startup() {
     })
     .unwrap_err();
     assert!(error.to_string().contains("cannot build"));
+}
+
+#[test]
+fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
+    let credential_endpoint = "http://sentinel-user:sentinel-password@collector:4318/v1/traces";
+    let mut config = OtlpConfig {
+        enabled: true,
+        endpoint: Some(credential_endpoint.to_owned()),
+        ..OtlpConfig::default()
+    };
+    let config_debug = format!("{config:?}");
+    assert!(!config_debug.contains("sentinel-user"));
+    assert!(!config_debug.contains("sentinel-password"));
+    let metrics = Arc::new(Metrics::default());
+    let error = OtelPipeline::otlp(&resource(), &config, Arc::clone(&metrics)).unwrap_err();
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    assert!(display.contains("without credentials"));
+    assert!(!display.contains("sentinel-user"));
+    assert!(!display.contains("sentinel-password"));
+    assert!(!debug.contains("sentinel-user"));
+    assert!(!debug.contains("sentinel-password"));
+
+    let init_error = ferrum_alloy_telemetry::init::init_logging_and_otel(
+        &ferrum_alloy_telemetry::init::LoggingConfig::default(),
+        &resource(),
+        &config,
+        Arc::clone(&metrics),
+    )
+    .unwrap_err();
+    let display = init_error.to_string();
+    let debug = format!("{init_error:?}");
+    assert!(!display.contains("sentinel-user"));
+    assert!(!display.contains("sentinel-password"));
+    assert!(!debug.contains("sentinel-user"));
+    assert!(!debug.contains("sentinel-password"));
+
+    for endpoint in ["ftp://collector/v1/traces", "http://[::1"] {
+        config.endpoint = Some(endpoint.to_owned());
+        let error = OtelPipeline::otlp(&resource(), &config, Arc::clone(&metrics)).unwrap_err();
+        let display = error.to_string();
+        assert!(display.contains("valid http(s) URL"));
+        assert!(!display.contains(endpoint));
+    }
+
+    for endpoint in [
+        "http://collector:4318/v1/traces",
+        "https://collector.example/v1/traces",
+    ] {
+        config.endpoint = Some(endpoint.to_owned());
+        assert!(config.validate().is_ok());
+    }
+
+    config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_048)));
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("2048 bytes"));
 }
 
 #[test]

@@ -490,7 +490,7 @@ impl Default for HealthConfig {
 }
 
 /// OpenTelemetry OTLP/HTTP export settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct OtlpSettings {
@@ -514,6 +514,23 @@ pub struct OtlpSettings {
     pub max_request_bytes: usize,
     /// Delay between scheduled exports.
     pub scheduled_delay_ms: u64,
+}
+
+impl fmt::Debug for OtlpSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtlpSettings")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint.as_ref().map(|_| "<configured>"))
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_export_retries", &self.max_export_retries)
+            .field("sampling_ratio", &self.sampling_ratio)
+            .field("max_queue_spans", &self.max_queue_spans)
+            .field("max_queue_bytes", &self.max_queue_bytes)
+            .field("max_export_batch", &self.max_export_batch)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("scheduled_delay_ms", &self.scheduled_delay_ms)
+            .finish()
+    }
 }
 
 impl Default for OtlpSettings {
