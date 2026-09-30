@@ -213,22 +213,59 @@ impl<'a> Index<'a> {
             .collect()
     }
 
-    /// Returns `true` when `span` descends from `ancestor` through Alloy spans
-    /// of the same trace. Spans of different traces are never related.
-    fn descends_from(&self, span: &SpanRef, ancestor: &SpanRef) -> bool {
-        if span.trace_id != ancestor.trace_id {
-            return false;
-        }
+    /// Returns the measured service ancestors of `span`, following each
+    /// parent at most once and stopping immediately when a cycle is found.
+    fn service_ancestors(
+        &self,
+        span: &'a SpanRef,
+        mut parent_lookup: impl FnMut(),
+    ) -> Vec<SpanKey<'a>> {
         let trace = span.trace_id.as_str();
         let mut current = span.span_id.as_str();
+        let mut visited = BTreeSet::new();
+        let mut ancestors = Vec::new();
         for _ in 0..MAX_ANCESTOR_HOPS {
-            match self.alloy_parents.get(&(trace, current)).copied().flatten() {
-                Some(parent) if parent == ancestor.span_id => return true,
-                Some(parent) => current = parent,
-                None => return false,
+            if !visited.insert(current) {
+                break;
+            }
+            parent_lookup();
+            let Some(parent) = self
+                .alloy_parents
+                .get(&(trace, current))
+                .copied()
+                .flatten()
+            else {
+                break;
+            };
+            let key = (trace, parent);
+            if self.service.contains_key(&key) {
+                ancestors.push(key);
+            }
+            current = parent;
+        }
+        ancestors
+    }
+
+    /// Indexes operations under every measured service in their bounded
+    /// ancestry. Each operation's ancestry is traversed once, independent of
+    /// the number of services in the report.
+    fn operations_by_service_ancestor(
+        &self,
+        mut parent_lookup: impl FnMut(),
+    ) -> BTreeMap<SpanKey<'a>, Vec<&'a Observation>> {
+        let mut operations_by_service = BTreeMap::new();
+        for operation in &self.operations {
+            let Some(span) = operation.span.as_ref() else {
+                continue;
+            };
+            for ancestor in self.service_ancestors(span, &mut parent_lookup) {
+                operations_by_service
+                    .entry(ancestor)
+                    .or_insert_with(Vec::new)
+                    .push(*operation);
             }
         }
-        false
+        operations_by_service
     }
 
     /// Returns the nearest span id in `span`'s lineage that `accept` matches:
@@ -691,6 +728,7 @@ fn placement(operation: &Observation, server: &Observation, slack_nanos: u64) ->
 fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r002";
     const VERSION: u32 = 3;
+    let operations_by_service = index.operations_by_service_ancestor(|| {});
     for view in index.service.values() {
         let Some(server) = view.named(catalog::ALLOY_TIME_TO_HEADERS) else {
             continue;
@@ -708,16 +746,14 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
         // placed inside the header phase outranks one whose placement is
         // unknown; otherwise the longest wins.
         let mut best: Option<(&Observation, f64, bool)> = None;
-        for operation in &index.operations {
+        for operation in operations_by_service
+            .get(&span_key(server_span))
+            .into_iter()
+            .flatten()
+        {
             let Some(op_ms) = operation.duration_ms() else {
                 continue;
             };
-            let Some(op_span) = operation.span.as_ref() else {
-                continue;
-            };
-            if !index.descends_from(op_span, server_span) {
-                continue;
-            }
             let nested = match placement(operation, server, thresholds.nesting_slack_nanos) {
                 Placement::Inside => true,
                 Placement::Unknown => false,
@@ -836,6 +872,70 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
                 ]);
         }
         out.push(builder.build());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::{Index, SpanKey};
+    use crate::model::DiagnosticReport;
+
+    fn report_with_spans(service_count: usize, operation_count: usize) -> DiagnosticReport {
+        let mut report: DiagnosticReport = serde_json::from_str(include_str!(
+            "../../../contracts/fixtures/reports/db-operation-dominates.json"
+        ))
+        .unwrap();
+        let service = report.observations[0].clone();
+        let operation = report.observations[1].clone();
+        report.observations.clear();
+
+        for number in 0..service_count {
+            let mut observation = service.clone();
+            observation.id = format!("service-{number}");
+            let span = observation.span.as_mut().unwrap();
+            span.span_id = format!("{number:016x}");
+            span.parent_span_id = None;
+            report.observations.push(observation);
+        }
+        for number in 0..operation_count {
+            let mut observation = operation.clone();
+            observation.id = format!("operation-{number}");
+            let span = observation.span.as_mut().unwrap();
+            span.span_id = format!("{:016x}", number + service_count + 1);
+            span.parent_span_id = Some(span.span_id.clone());
+            report.observations.push(observation);
+        }
+        report
+    }
+
+    #[test]
+    fn operation_ancestry_work_is_linear_for_unrelated_self_parented_spans() {
+        let index = Index::build(&report_with_spans(1_000, 1_000));
+        let mut parent_lookups = 0;
+        let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
+
+        assert!(candidates.is_empty());
+        assert_eq!(parent_lookups, 1_000);
+    }
+
+    #[test]
+    fn operation_ancestry_preserves_valid_service_descendants() {
+        let mut report = report_with_spans(1, 1);
+        let service_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
+        let trace_id = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .trace_id
+            .clone();
+        let operation_span = report.observations[1].span.as_mut().unwrap();
+        operation_span.parent_span_id = Some(service_span.clone());
+        let index = Index::build(&report);
+        let candidates = index.operations_by_service_ancestor(|| {});
+        let service_key: SpanKey<'_> = (&trace_id, &service_span);
+
+        assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
     }
 }
 

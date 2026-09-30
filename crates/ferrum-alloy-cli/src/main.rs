@@ -19,6 +19,7 @@ mod input;
 mod live;
 mod new;
 mod openapi;
+mod output;
 
 use error::CliError;
 
@@ -75,7 +76,9 @@ pub(crate) fn print(text: &str) -> Result<(), CliError> {
 }
 
 pub(crate) fn eprint(text: &str) {
-    let _ = std::io::stderr().lock().write_all(text.as_bytes());
+    // Errors may include paths or parser diagnostics derived from user input.
+    let safe = output::printable(text);
+    let _ = std::io::stderr().lock().write_all(safe.as_bytes());
 }
 
 fn version(format: Format) -> Result<(), CliError> {
