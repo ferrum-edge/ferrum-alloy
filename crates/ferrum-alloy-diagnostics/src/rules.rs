@@ -870,76 +870,6 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used)]
-mod tests {
-    use super::{Index, SpanKey};
-    use crate::model::DiagnosticReport;
-
-    fn report_with_spans(service_count: usize, operation_count: usize) -> DiagnosticReport {
-        let mut report: DiagnosticReport = serde_json::from_str(include_str!(
-            "../../../contracts/fixtures/reports/db-operation-dominates.json"
-        ))
-        .unwrap();
-        let service = report.observations[0].clone();
-        let operation = report.observations[1].clone();
-        report.observations.clear();
-
-        for number in 0..service_count {
-            let mut observation = service.clone();
-            observation.id = format!("service-{number}");
-            let span = observation.span.as_mut().unwrap();
-            span.span_id = format!("{number:016x}");
-            span.parent_span_id = None;
-            report.observations.push(observation);
-        }
-        for number in 0..operation_count {
-            let mut observation = operation.clone();
-            observation.id = format!("operation-{number}");
-            let span = observation.span.as_mut().unwrap();
-            span.span_id = format!("{:016x}", number + service_count + 1);
-            span.parent_span_id = Some(span.span_id.clone());
-            report.observations.push(observation);
-        }
-        report
-    }
-
-    #[test]
-    fn operation_ancestry_work_is_linear_for_unrelated_self_parented_spans() {
-        let report = report_with_spans(1_000, 1_000);
-        let index = Index::build(&report);
-        let mut parent_lookups = 0;
-        let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
-
-        assert!(candidates.is_empty());
-        assert_eq!(parent_lookups, 1_000);
-    }
-
-    #[test]
-    fn operation_ancestry_preserves_valid_service_descendants() {
-        let mut report = report_with_spans(1, 1);
-        let service_span = report.observations[0]
-            .span
-            .as_ref()
-            .unwrap()
-            .span_id
-            .clone();
-        let trace_id = report.observations[0]
-            .span
-            .as_ref()
-            .unwrap()
-            .trace_id
-            .clone();
-        let operation_span = report.observations[1].span.as_mut().unwrap();
-        operation_span.parent_span_id = Some(service_span.clone());
-        let index = Index::build(&report);
-        let candidates = index.operations_by_service_ancestor(|| {});
-        let service_key: SpanKey<'_> = (&trace_id, &service_span);
-
-        assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
-    }
-}
-
 fn same_instance(a: &Observation, b: &Observation) -> bool {
     match (&a.producer.instance, &b.producer.instance) {
         (Some(x), Some(y)) => x == y,
@@ -1504,5 +1434,75 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
             )
             .build(),
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::{Index, SpanKey};
+    use crate::model::DiagnosticReport;
+
+    fn report_with_spans(service_count: usize, operation_count: usize) -> DiagnosticReport {
+        let mut report: DiagnosticReport = serde_json::from_str(include_str!(
+            "../../../contracts/fixtures/reports/db-operation-dominates.json"
+        ))
+        .unwrap();
+        let service = report.observations[0].clone();
+        let operation = report.observations[1].clone();
+        report.observations.clear();
+
+        for number in 0..service_count {
+            let mut observation = service.clone();
+            observation.id = format!("service-{number}");
+            let span = observation.span.as_mut().unwrap();
+            span.span_id = format!("{number:016x}");
+            span.parent_span_id = None;
+            report.observations.push(observation);
+        }
+        for number in 0..operation_count {
+            let mut observation = operation.clone();
+            observation.id = format!("operation-{number}");
+            let span = observation.span.as_mut().unwrap();
+            span.span_id = format!("{:016x}", number + service_count + 1);
+            span.parent_span_id = Some(span.span_id.clone());
+            report.observations.push(observation);
+        }
+        report
+    }
+
+    #[test]
+    fn operation_ancestry_work_is_linear_for_unrelated_self_parented_spans() {
+        let report = report_with_spans(1_000, 1_000);
+        let index = Index::build(&report);
+        let mut parent_lookups = 0;
+        let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
+
+        assert!(candidates.is_empty());
+        assert_eq!(parent_lookups, 1_000);
+    }
+
+    #[test]
+    fn operation_ancestry_preserves_valid_service_descendants() {
+        let mut report = report_with_spans(1, 1);
+        let service_span = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .span_id
+            .clone();
+        let trace_id = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .trace_id
+            .clone();
+        let operation_span = report.observations[1].span.as_mut().unwrap();
+        operation_span.parent_span_id = Some(service_span.clone());
+        let index = Index::build(&report);
+        let candidates = index.operations_by_service_ancestor(|| {});
+        let service_key: SpanKey<'_> = (&trace_id, &service_span);
+
+        assert_eq!(candidates.get(&service_key).map(Vec::len), Some(1));
     }
 }
