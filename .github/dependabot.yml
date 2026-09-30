@@ -1,0 +1,78 @@
+version: 2
+updates:
+  # Fuzzing is a separate Cargo workspace with its own lockfile.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    groups:
+      cargo-minor-and-patch:
+        # Keep updates to a shared dependency together across both Cargo lockfiles.
+        group-by: dependency-name
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /ci/browser-smoke
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+    groups:
+      github-actions-minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directory: /examples/edge-observability
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+    ignore:
+      # The signed Edge release workflow updates the compatibility contract.
+      - dependency-name: ferrumedge/ferrum-edge
+      # These pins are coordinated with the compatibility contract/toolchain.
+      - dependency-name: otel/opentelemetry-collector-contrib
+      - dependency-name: rust
+      - dependency-name: debian

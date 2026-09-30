@@ -86,6 +86,8 @@ Not covered: an upstream reset after a connection is established, and per-attemp
 | PostgreSQL | 17 (`postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24`) | CI service container and local run |
 | Demo base images | `rust:1.98.1-bookworm@sha256:93ce27a8…971e`, `debian:bookworm-slim@sha256:3783cc01…6251` | e2e images |
 
+Dependabot ignores the Collector, `rust` and `debian` images in `examples/edge-observability/Dockerfile`, including digest-only refreshes, because they move together with `docs/compatibility.json`, `rust-toolchain.toml` and this table. Refresh them by hand, security digests included, and update every pinned location in the same pull request.
+
 ## Semantic conventions
 
 - HTTP span and metric attribute names follow the **stable** OpenTelemetry HTTP conventions: `http.request.method`, `http.route`, `http.response.status_code`, `url.scheme`, `network.protocol.version`, `error.type`, `server.address`, `server.port`, and the optional `url.path`, `client.address`, `user_agent.original`.
