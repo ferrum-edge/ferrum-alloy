@@ -1,7 +1,7 @@
 //! OTLP endpoint environment variables are validated without exposing values.
 
 #![cfg(all(feature = "otel", feature = "axum"))]
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::print_stdout)]
 
 use std::process::Command;
 use std::sync::Arc;
