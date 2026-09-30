@@ -706,6 +706,7 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
         output.status.success(),
         "child test failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    assert!(stdout.contains("1 passed"), "{stdout}");
     assert!(!stdout.contains("sentinel-user"), "{stdout}");
     assert!(!stdout.contains("sentinel-password"), "{stdout}");
     assert!(!stderr.contains("sentinel-user"), "{stderr}");

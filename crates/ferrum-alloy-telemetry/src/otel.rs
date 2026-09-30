@@ -223,12 +223,9 @@ impl OtelPipeline {
                 builder = builder.with_endpoint(endpoint);
             }
             builder.build().map_err(|_| {
-                concat!(
-                    "could not build OTLP exporter; check ",
-                    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or ",
-                    "OTEL_EXPORTER_OTLP_ENDPOINT",
-                )
-                .to_owned()
+                "the OTLP exporter could not be built from its endpoint configuration \
+                 (otlp.endpoint or the OTEL_EXPORTER_OTLP_*ENDPOINT variables)"
+                    .to_owned()
             })
         };
         Self::with_exporter(resource, config, metrics, factory)
@@ -324,6 +321,9 @@ fn validate_environment_endpoint() -> Result<(), String> {
             let Some(value) = value.to_str() else {
                 return Err("endpoint must be a valid http(s) URL without credentials".into());
             };
+            if value.is_empty() {
+                continue;
+            }
             validate_endpoint(value).map_err(|error| error.to_string())?;
             return Ok(());
         }
