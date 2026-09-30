@@ -152,38 +152,47 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
 ];
 
 /// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.8
-/// (`src/retry.rs`), with the only meaning each token supports. v0.9.8 added
-/// `request_timeout`. A header carries no Edge version. Edge v0.9.7 also used
-/// `backend_timeout` for route deadlines that expired before a backend held
-/// the request, so readers keep that older meaning in mind.
+/// (`src/retry.rs`), each token with Alloy's user-facing explanation, which
+/// rule `alloy.r007` renders into findings. v0.9.8 added `request_timeout`.
+///
+/// A header names no Edge version, so each explanation holds for every
+/// supported release and is never narrower than an earlier release's meaning:
+/// in v0.9.7, `backend_timeout` also covered route deadlines that expired
+/// before any backend held the request. The release-specific meanings in the
+/// pinned `contracts/ferrum-contracts/vocabularies/gateway-errors.json` are
+/// narrower and use Edge-internal terms, so they are never rendered. The
+/// pairing tests in `ferrum-alloy-edge` check that both token sets agree.
 pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     (
         "connection_failure",
-        "Pre-wire connect, DNS or TLS failure: the gateway could not set up a connection to the backend. Also the token for every ErrorClass whose request_reached_wire is false.",
+        "The gateway could not set up a connection to the configured backend (DNS, TCP, TLS, or pool).",
     ),
     (
         "backend_timeout",
-        "A backend held the request (it accepted the connection and was sent the request) but did not answer in time. Never used for a timeout no backend held.",
+        "A gateway backend or route deadline elapsed.",
     ),
     (
         "backend_error",
-        "The backend returned a 5xx, or a post-wire 5xx had no more specific token. Also the metric label for an unclassified backend 5xx. Never used for a response that did not reach a backend.",
+        "The backend exchange failed, or the gateway refused locally after dispatch was considered.",
     ),
     (
         "circuit_breaker_open",
-        "The circuit breaker for the backend was open; the request never reached a backend.",
+        "The gateway's circuit breaker for this backend was open.",
     ),
     (
         "overload",
-        "Gateway resource refusal: overload or drain reject_new_requests (503), or response-transformer output above the configured response ceiling (502).",
+        "The gateway shed load, was draining, or hit an output ceiling.",
     ),
-    ("config_stale", "Data-plane stale-config fence."),
+    (
+        "config_stale",
+        "The gateway data plane's configuration fence was stale.",
+    ),
     (
         "concurrency_limit",
-        "adaptive_concurrency admission refused the request.",
+        "An adaptive or static gateway concurrency limit rejected the request.",
     ),
     (
         "request_timeout",
-        "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before any backend held the request: during the client upload, a gateway-local phase, admission, or retry backoff. New in v0.9.8 (#5762).",
+        "A gateway route's total request deadline expired before any backend held the request.",
     ),
 ];

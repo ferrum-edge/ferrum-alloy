@@ -611,22 +611,15 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
             "gateway span attribute gateway.error.class",
         ]);
         builder = match known {
-            Some((_, meaning)) => {
+            Some((_, meaning)) => builder
                 // Ferrum Edge v0.9.8 strips a backend-supplied X-Gateway-Error,
                 // but v0.9.5/v0.9.7 do not on every path, and the header names no
                 // Edge version or authenticated sender, so it caps at likely.
-                let older_timeout_meaning = if token == "backend_timeout" {
-                    " Edge v0.9.7 also used this token for route deadlines before a backend held the request."
-                } else {
-                    ""
-                };
-                builder
-                    .confidence(Confidence::Likely)
-                    .explanation(format!(
-                        "X-Gateway-Error: {token}. {meaning}{older_timeout_meaning} Ferrum Edge before v0.9.8 lets a backend inject the header on some paths, and the header names no gateway version, so it is not authenticated gateway evidence."
-                    ))
-                    .missing(&["authenticated gateway diagnostic record"])
-            }
+                .confidence(Confidence::Likely)
+                .explanation(format!(
+                    "X-Gateway-Error: {token}. {meaning} Ferrum Edge before v0.9.8 lets a backend inject the header on some paths, and the header names no gateway version, so it is not authenticated gateway evidence."
+                ))
+                .missing(&["authenticated gateway diagnostic record"]),
             None => builder.confidence(Confidence::Unknown).explanation(format!(
                 "X-Gateway-Error carried an unrecognized token {token:?}; no meaning is inferred."
             )),
