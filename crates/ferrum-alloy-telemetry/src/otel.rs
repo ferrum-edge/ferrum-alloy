@@ -8,7 +8,8 @@
 //! * The OTLP exporter is built on that thread, which keeps its blocking HTTP
 //!   client out of the async runtime.
 //! * Spans, resource updates, flushes, and shutdowns are handled in queue
-//!   order; a flush or shutdown never discards the messages queued behind it.
+//!   order; a flush or shutdown never discards the messages queued behind it,
+//!   though a shutdown handles at most one further queue's worth of them.
 //! * Configuration errors (bad endpoint, invalid ratio) fail at startup.
 //!
 //! Component versions: `opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp`
@@ -345,6 +346,7 @@ pub struct BoundedSpanProcessor {
     max_queue_bytes: usize,
     metrics: Arc<Metrics>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
+    controls_queued: AtomicUsize,
 }
 
 impl fmt::Debug for BoundedSpanProcessor {
@@ -456,7 +458,15 @@ impl BoundedSpanProcessor {
             max_queue_bytes: config.max_queue_bytes,
             metrics,
             worker: Mutex::new(Some(handle)),
+            controls_queued: AtomicUsize::new(0),
         })
+    }
+
+    /// Flush and shutdown requests accepted into the queue so far. A test
+    /// observable, not a stable API.
+    #[doc(hidden)]
+    pub fn controls_queued(&self) -> usize {
+        self.controls_queued.load(Ordering::SeqCst)
     }
 
     /// Queues `message`, waiting for queue space until `deadline`.
@@ -481,6 +491,7 @@ impl BoundedSpanProcessor {
         let deadline = Instant::now() + timeout;
         // Control messages wait for queue space, bounded by the timeout.
         self.enqueue(make(ack_tx), deadline, timeout)?;
+        self.controls_queued.fetch_add(1, Ordering::SeqCst);
         let remaining = deadline.saturating_duration_since(Instant::now());
         match ack_rx.recv_timeout(remaining) {
             Ok(()) => Ok(()),
@@ -665,6 +676,9 @@ impl Worker {
             let take = batch.spans.len().min(self.max_batch);
             let chunk: Vec<SpanData> = batch.spans.drain(..take).collect();
             let count = chunk.len();
+            // An exporter panic unwinds and ends this thread: waiting
+            // callers then get `AlreadyShutdown`, later spans are counted as
+            // `shutdown` losses, and `exporter.shutdown()` is not called.
             let result = block_on(exporter.export(chunk));
             // Saturating: a timed-out shutdown may already have counted these.
             let _ = self

@@ -536,9 +536,13 @@ fn a_flush_and_a_shutdown_queued_behind_a_blocked_export_both_complete() {
     let (flush, shutdown) = std::thread::scope(|scope| {
         let flush = scope.spawn(|| processor.force_flush());
         let shutdown = scope.spawn(|| processor.shutdown_with_timeout(timeout));
-        // Let both controls reach the queue before the export is released.
+        // Release the export only once both controls are queued behind it.
         // Whichever is handled first must not swallow the other.
-        std::thread::sleep(Duration::from_millis(200));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while processor.controls_queued() < 2 {
+            assert!(Instant::now() < deadline, "the controls were never queued");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         exporter.open();
         (flush.join().unwrap(), shutdown.join().unwrap())
     });
