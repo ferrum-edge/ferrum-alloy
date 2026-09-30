@@ -269,5 +269,4 @@ mod tests {
             assert_eq!(report_bytes(&report, &limits).unwrap(), expected);
         }
     }
-
 }

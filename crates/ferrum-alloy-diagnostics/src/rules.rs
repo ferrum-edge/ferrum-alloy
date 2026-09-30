@@ -229,12 +229,7 @@ impl<'a> Index<'a> {
                 break;
             }
             parent_lookup();
-            let Some(parent) = self
-                .alloy_parents
-                .get(&(trace, current))
-                .copied()
-                .flatten()
-            else {
+            let Some(parent) = self.alloy_parents.get(&(trace, current)).copied().flatten() else {
                 break;
             };
             let key = (trace, parent);
@@ -911,7 +906,8 @@ mod tests {
 
     #[test]
     fn operation_ancestry_work_is_linear_for_unrelated_self_parented_spans() {
-        let index = Index::build(&report_with_spans(1_000, 1_000));
+        let report = report_with_spans(1_000, 1_000);
+        let index = Index::build(&report);
         let mut parent_lookups = 0;
         let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
 
@@ -922,7 +918,12 @@ mod tests {
     #[test]
     fn operation_ancestry_preserves_valid_service_descendants() {
         let mut report = report_with_spans(1, 1);
-        let service_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
+        let service_span = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .span_id
+            .clone();
         let trace_id = report.observations[0]
             .span
             .as_ref()
