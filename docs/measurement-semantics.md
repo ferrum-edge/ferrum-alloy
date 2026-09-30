@@ -33,13 +33,13 @@ A diagnosis rule uses an observation as a duration only when all of these hold (
 - its kind is `measurement` (not `event` or an unrecognized kind);
 - its availability is `measured`;
 - its unit is `us`, `ms`, or `s`;
-- its value is finite and not negative, both as reported and after conversion to milliseconds.
+- its value is finite and not negative, both as reported and after conversion to milliseconds. A negative zero counts as zero and never renders as `-0.0`.
 
-Any other observation is kept in the report but never enters a subtraction, dominance comparison, or streaming comparison. A negative measured value is reported as `conflicting_evidence` (`alloy.evidence.negative_measurement`) and is never clamped to zero or used to derive another timing.
+Any other observation is kept in the report but never enters a subtraction, dominance comparison, or streaming comparison. A negative value of a measurement in a known unit (a duration, size, or count) is reported as `conflicting_evidence` (`alloy.evidence.negative_measurement`) and is never clamped to zero or used to derive another timing. A value in an unrecognized unit is not interpreted, so its sign is not judged.
 
 ## Span linkage
 
-Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Observations from different traces are never joined, even when their span ids match, and an observation without a span is linked to nothing.
+Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
 
 ## Alloy service measurements
 
@@ -102,7 +102,7 @@ Diagnosis rule `alloy.r003` subtracts a service measurement from a gateway measu
    - Streamed responses: Edge `backend_ttfb` against Alloy `time_to_headers`.
    - Buffered responses: Edge `backend_ttfb` (which includes the body) against Alloy `duration`.
    - Unknown buffering mode: no comparison (`alloy.gateway.timings_not_comparable`).
-4. **Both values are usable durations** (see [Duration evidence](#duration-evidence)).
+4. **Both values are usable durations** (see [Duration evidence](#duration-evidence)). A matching service measurement without a usable duration yields `alloy.gateway.timings_not_comparable` and no difference.
 
 The result is an **unattributed residual**, never "network latency". It can include:
 

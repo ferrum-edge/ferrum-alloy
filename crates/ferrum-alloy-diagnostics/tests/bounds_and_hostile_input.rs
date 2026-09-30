@@ -194,15 +194,28 @@ fn unavailable_values_are_not_treated_as_zero() {
     );
 }
 
-/// The duration one parsed observation yields with `fields` replaced.
-fn parsed_duration(fields: &[(&str, Value)]) -> Option<f64> {
+/// A report holding one observation, `observation("o1")` with `fields` replaced.
+fn parsed_with(fields: &[(&str, Value)]) -> ferrum_alloy_diagnostics::ParsedReport {
     let mut observation = observation("o1");
     for (field, value) in fields {
         observation[*field] = value.clone();
     }
     let mut report = base();
     report["observations"] = json!([observation]);
-    parse(&report).unwrap().report.observations[0].duration_ms()
+    parse(&report).unwrap()
+}
+
+/// The duration that observation yields.
+fn parsed_duration(fields: &[(&str, Value)]) -> Option<f64> {
+    parsed_with(fields).report.observations[0].duration_ms()
+}
+
+/// The negative-measurement findings for that observation.
+fn negative_findings(fields: &[(&str, Value)]) -> Vec<Finding> {
+    analyze(&parsed_with(fields).report, &Thresholds::default())
+        .into_iter()
+        .filter(|finding| finding.code == "alloy.evidence.negative_measurement")
+        .collect()
 }
 
 #[test]
@@ -224,6 +237,25 @@ fn only_valid_duration_measurements_are_timing_evidence() {
         overflow, None,
         "a value that overflows when converted is not a duration"
     );
+    let zero = parsed_duration(&[("value", json!(-0.0))]);
+    assert_eq!(zero, Some(0.0));
+    assert!(zero.is_some_and(f64::is_sign_positive));
+}
+
+#[test]
+fn negative_measurements_are_reported_in_terms_of_their_unit() {
+    let duration = negative_findings(&[("value", json!(-1.0))]);
+    assert_eq!(duration.len(), 1);
+    assert!(duration[0].explanation.contains("duration cannot"));
+    let count = negative_findings(&[("value", json!(-1.0)), ("unit", json!("count"))]);
+    assert_eq!(count.len(), 1);
+    assert!(count[0].explanation.contains("count cannot"));
+    assert!(!count[0].explanation.contains("duration"));
+    for (field, value) in [("kind", json!("event")), ("unit", json!("future-unit"))] {
+        let findings = negative_findings(&[("value", json!(-1.0)), (field, value)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+    assert!(negative_findings(&[("value", json!(-0.0))]).is_empty());
 }
 
 const TRACE: &str = "6c9f0a1b2c3d4e5f60718293a4b5c6d7";

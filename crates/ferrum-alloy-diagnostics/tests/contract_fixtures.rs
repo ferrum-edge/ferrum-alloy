@@ -368,6 +368,8 @@ fn negative_service_duration_is_reported_but_never_used_as_timing_evidence() {
             .all(|finding| !finding.explanation.contains("1020")),
         "no residual may be derived from the negative value: {findings:?}"
     );
+    let not_comparable = by_code(&findings, "alloy.gateway.timings_not_comparable");
+    assert_eq!(not_comparable.confidence, Confidence::Unknown);
 }
 
 #[test]
@@ -385,19 +387,14 @@ fn unrecognized_observation_kind_is_never_used_as_timing_evidence() {
     );
     let findings = analyze(&parsed.report, &Thresholds::default());
 
-    assert!(
-        !codes(&findings).contains(&"alloy.gateway.unattributed_interval"),
-        "{:?}",
-        codes(&findings)
-    );
-    for finding in &findings {
-        assert!(
-            !finding
-                .supporting_observations
-                .contains(&"alloy-ttfh".to_owned()),
-            "an observation of unknown kind is not timing evidence: {finding:?}"
-        );
-    }
+    // The gateway request is reported as not comparable, never silently
+    // dropped, and the observation of unknown kind supports no timing claim.
+    assert_eq!(codes(&findings), ["alloy.gateway.timings_not_comparable"]);
+    let only = &findings[0];
+    assert_eq!(only.rule_version, 2);
+    assert_eq!(only.confidence, Confidence::Unknown);
+    assert_eq!(only.supporting_observations, ["alloy-ttfh", "edge-ttfb"]);
+    assert!(lists_missing(only, "usable service measurement"));
 }
 
 #[test]
@@ -669,6 +666,39 @@ fn rerooted_degraded_evidence_is_cited_once_when_the_request_is_ambiguous() {
             assert_eq!(finding.evidence.len(), 1, "{:?}", finding.evidence);
         }
     }
+}
+
+#[test]
+fn degraded_evidence_from_another_trace_is_not_cited_on_the_only_missing_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut other = observations[1].clone();
+    other["id"] = serde_json::json!("alloy-not-sampled-other-trace");
+    // Its parent span id equals the gateway span id, but in another trace.
+    other["span"] = serde_json::json!({
+        "trace_id": OTHER_TRACE,
+        "span_id": "aaaabbbbccccdddd",
+        "parent_span_id": "1111222233334444"
+    });
+    observations.push(other);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    let missing = by_code(&findings, "alloy.telemetry.service_span_missing");
+    assert_eq!(
+        missing.supporting_observations,
+        ["alloy-not-sampled", "edge-ttfb"],
+        "span-less evidence may describe the only missing request; another trace's may not"
+    );
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+    assert_eq!(
+        unlinked.supporting_observations,
+        ["alloy-not-sampled-other-trace"]
+    );
+    assert!(unlinked.explanation.starts_with("One gateway request"));
 }
 
 /// Adds a gateway request on `gateway_span` whose service span

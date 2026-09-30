@@ -200,7 +200,8 @@ impl Observation {
             Unit::Seconds => value * 1_000.0,
             _ => return None,
         };
-        milliseconds.is_finite().then_some(milliseconds)
+        // Adding zero turns a negative zero into zero.
+        milliseconds.is_finite().then_some(milliseconds + 0.0)
     }
 
     /// Reads a string attribute.

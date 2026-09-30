@@ -23,7 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::catalog::{self, EDGE_GATEWAY_ERROR_TOKENS, EDGE_PRE_UPSTREAM_PHASES};
 use crate::model::{
     Availability, Confidence, DiagnosticReport, Evidence, EvidenceSource, Finding, Observation,
-    Owner, ProducerKind, Remediation, Severity, SourceScope, SpanRef, Trust, Verification,
+    ObservationKind, Owner, ProducerKind, Remediation, Severity, SourceScope, SpanRef, Trust, Unit,
+    Verification,
 };
 
 /// Tunable thresholds. Defaults are documented in `docs/measurement-semantics.md`.
@@ -284,6 +285,8 @@ fn source_for(observation: &Observation) -> EvidenceSource {
 }
 
 fn ms(value: f64) -> String {
+    // Adding zero turns a negative zero into zero, so it never renders as "-0.0".
+    let value = value + 0.0;
     format!("{value:.1} ms")
 }
 
@@ -929,6 +932,29 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             continue;
         };
         let Some(service_ms) = service_obs.duration_ms() else {
+            out.push(
+                FindingBuilder::new(
+                    "alloy.gateway.timings_not_comparable",
+                    RULE,
+                    VERSION,
+                    "Gateway and service timings are not comparable",
+                )
+                .scope(SourceScope::GatewayToUpstream)
+                .severity(Severity::Info)
+                .owner(Owner::Unknown)
+                .confidence(Confidence::Unknown)
+                .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
+                .cite(service_obs, &service_obs.name, "not a usable duration")
+                .explanation(
+                    "The service measurement that matches the gateway's backend measurement boundaries has no usable duration (it is not measured, has an unrecognized kind or unit, or is negative), so no difference is computed.".into(),
+                )
+                .does_not_prove(&[
+                    "whether the gateway or service was fast or slow",
+                    "the size or cause of any gateway-to-service timing difference",
+                ])
+                .missing(&["a usable service measurement with matching boundaries"])
+                .build(),
+            );
             continue;
         };
         let residual = edge_ms - service_ms;
@@ -1141,9 +1167,19 @@ fn rule_body_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R006: negative measured values are inconsistent evidence.
 fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
     for observation in &index.report.observations {
-        if observation.availability != Availability::Measured {
+        if observation.kind != ObservationKind::Measurement
+            || observation.availability != Availability::Measured
+        {
             continue;
         }
+        // Only a known unit says what the value measures, and every known unit
+        // measures a quantity that cannot be negative.
+        let quantity = match observation.unit {
+            Some(Unit::Microseconds | Unit::Milliseconds | Unit::Seconds) => "duration",
+            Some(Unit::Bytes) => "size",
+            Some(Unit::Count) => "count",
+            _ => continue,
+        };
         let Some(value) = observation.value else {
             continue;
         };
@@ -1163,7 +1199,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
             .confidence(Confidence::ConflictingEvidence)
             .cite(observation, &observation.name, format!("{value}"))
             .explanation(format!(
-                "{} reported {value}, which a duration cannot be. The value is not clamped to zero and is excluded from comparisons.",
+                "{} reported {value}, but a measured {quantity} cannot be negative. The value is not clamped to zero and is excluded from comparisons.",
                 observation.name
             ))
             .does_not_prove(&[
@@ -1221,6 +1257,11 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     // lineage within its own trace, which is walked once, so the cost is
     // linear in the report.
     let mut unlinked: Vec<&Observation> = Vec::new();
+    // The trace of the only missing request, when exactly one is missing.
+    let only_trace = match missing.keys().next() {
+        Some(&(trace, _)) if requests == 1 => Some(trace),
+        _ => None,
+    };
     if requests > 0 {
         for observation in &degraded {
             let gateway = observation.span.as_ref().and_then(|span| {
@@ -1230,12 +1271,16 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
                     .nearest_in_lineage(span, is_gateway)
                     .map(|id| (trace, id))
             });
+            // With one missing request, evidence that links to no gateway span
+            // can describe only that request, unless it is in another trace.
+            let own_trace = observation.span.as_ref().map(|s| s.trace_id.as_str());
+            let fits_only_request =
+                only_trace.is_some() && (own_trace.is_none() || own_trace == only_trace);
             let cited = match gateway {
                 // Evidence for a gateway request that has service telemetry
                 // belongs to that request, not to this rule.
                 Some(key) => missing.get_mut(&key).map(|(_, cited)| cited),
-                // With one missing request, unlinked evidence can describe only it.
-                None if requests == 1 => missing.values_mut().next().map(|(_, cited)| cited),
+                None if fits_only_request => missing.values_mut().next().map(|(_, cited)| cited),
                 None => Some(&mut unlinked),
             };
             if let Some(cited) = cited {
@@ -1273,13 +1318,19 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         out.push(builder.cite_degraded(cited, &mut budget).build());
     }
 
-    // With several missing requests, evidence that links to none of them is
-    // cited once here rather than dropped or copied into every request.
+    // Evidence that links to no missing request (several are missing, or it
+    // is in another trace) is cited once here rather than dropped or copied
+    // into every request.
     if !unlinked.is_empty() {
+        let requests_have = if requests == 1 {
+            "One gateway request has".to_owned()
+        } else {
+            format!("{requests} gateway requests have")
+        };
         let explanation = format!(
-            "{requests} gateway requests have no linked service span. The unsampled, dropped, or \
-             unexported observations cited here link to no gateway span, so they cannot be \
-             attributed to one request."
+            "{requests_have} no linked service span. The unsampled, dropped, or unexported \
+             observations cited here link to no gateway span in their trace, so they cannot be \
+             attributed to a request."
         );
         let builder = FindingBuilder::new(
             "alloy.telemetry.degraded_evidence_unlinked",
