@@ -834,10 +834,8 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
             .unwrap();
         assert!(dependency.contains("rev = "), "{dependency}");
         assert!(!dependency.contains("branch = "), "{dependency}");
-        let dependency = dependency.replace(
-            "https://github.com/ferrum-edge/ferrum-alloy",
-            &fixture_url,
-        );
+        let dependency =
+            dependency.replace("https://github.com/ferrum-edge/ferrum-alloy", &fixture_url);
         let manifest = format!(
             "[package]\nname = \"fixture-{index}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{dependency}\n"
         );
