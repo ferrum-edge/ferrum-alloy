@@ -187,12 +187,13 @@ impl Observation {
     /// that overflows when converted. Invalid values stay in the report, where
     /// the contradiction rules still report them.
     pub fn duration_ms(&self) -> Option<f64> {
-        if self.kind != ObservationKind::Measurement
-            || self.availability != Availability::Measured
+        if self.kind != ObservationKind::Measurement || self.availability != Availability::Measured
         {
             return None;
         }
-        let value = self.value.filter(|value| value.is_finite() && *value >= 0.0)?;
+        let value = self
+            .value
+            .filter(|value| value.is_finite() && *value >= 0.0)?;
         let milliseconds = match self.unit.as_ref()? {
             Unit::Microseconds => value / 1_000.0,
             Unit::Milliseconds => value,

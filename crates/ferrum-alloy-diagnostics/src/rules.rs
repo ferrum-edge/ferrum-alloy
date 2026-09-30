@@ -251,7 +251,11 @@ impl<'a> Index<'a> {
             return Some(current);
         }
         for _ in 0..MAX_ANCESTOR_HOPS {
-            let parent = self.alloy_parents.get(&(trace, current)).copied().flatten()?;
+            let parent = self
+                .alloy_parents
+                .get(&(trace, current))
+                .copied()
+                .flatten()?;
             if accept(parent) {
                 return Some(parent);
             }
