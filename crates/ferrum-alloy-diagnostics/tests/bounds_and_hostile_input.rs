@@ -194,6 +194,70 @@ fn unavailable_values_are_not_treated_as_zero() {
     );
 }
 
+/// A report holding one observation, `observation("o1")` with `fields` replaced.
+fn parsed_with(fields: &[(&str, Value)]) -> ferrum_alloy_diagnostics::ParsedReport {
+    let mut observation = observation("o1");
+    for (field, value) in fields {
+        observation[*field] = value.clone();
+    }
+    let mut report = base();
+    report["observations"] = json!([observation]);
+    parse(&report).unwrap()
+}
+
+/// The duration that observation yields.
+fn parsed_duration(fields: &[(&str, Value)]) -> Option<f64> {
+    parsed_with(fields).report.observations[0].duration_ms()
+}
+
+/// The negative-measurement findings for that observation.
+fn negative_findings(fields: &[(&str, Value)]) -> Vec<Finding> {
+    analyze(&parsed_with(fields).report, &Thresholds::default())
+        .into_iter()
+        .filter(|finding| finding.code == "alloy.evidence.negative_measurement")
+        .collect()
+}
+
+#[test]
+fn only_valid_duration_measurements_are_timing_evidence() {
+    assert_eq!(parsed_duration(&[]), Some(1.0));
+    assert_eq!(parsed_duration(&[("unit", json!("s"))]), Some(1_000.0));
+    for (field, value) in [
+        ("kind", json!("event")),
+        ("kind", json!("future-kind")),
+        ("value", json!(-1.0)),
+        ("unit", json!("bytes")),
+        ("unit", json!("future-unit")),
+    ] {
+        let duration = parsed_duration(&[(field, value.clone())]);
+        assert_eq!(duration, None, "{field} = {value}");
+    }
+    let overflow = parsed_duration(&[("value", json!(f64::MAX)), ("unit", json!("s"))]);
+    assert_eq!(
+        overflow, None,
+        "a value that overflows when converted is not a duration"
+    );
+    let zero = parsed_duration(&[("value", json!(-0.0))]);
+    assert_eq!(zero, Some(0.0));
+    assert!(zero.is_some_and(f64::is_sign_positive));
+}
+
+#[test]
+fn negative_measurements_are_reported_in_terms_of_their_unit() {
+    let duration = negative_findings(&[("value", json!(-1.0))]);
+    assert_eq!(duration.len(), 1);
+    assert!(duration[0].explanation.contains("duration cannot"));
+    let count = negative_findings(&[("value", json!(-1.0)), ("unit", json!("count"))]);
+    assert_eq!(count.len(), 1);
+    assert!(count[0].explanation.contains("count cannot"));
+    assert!(!count[0].explanation.contains("duration"));
+    for (field, value) in [("kind", json!("event")), ("unit", json!("future-unit"))] {
+        let findings = negative_findings(&[("value", json!(-1.0)), (field, value)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+    assert!(negative_findings(&[("value", json!(-0.0))]).is_empty());
+}
+
 const TRACE: &str = "6c9f0a1b2c3d4e5f60718293a4b5c6d7";
 
 /// Span id number `index` in the id range `range`, one hex digit.
@@ -380,7 +444,7 @@ fn insufficient_telemetry_cites_degraded_evidence_within_the_cap() {
         .find(|finding| finding.code == "alloy.telemetry.insufficient")
         .unwrap();
 
-    assert_eq!(finding.rule_version, 2);
+    assert_eq!(finding.rule_version, 3);
     assert_eq!(
         degraded_citations(finding),
         MAX_DEGRADED_CITATIONS_PER_FINDING

@@ -11,13 +11,20 @@
 //!
 //! Rules never sum overlapping durations, never clamp negative residuals to
 //! zero, and never convert missing telemetry into a networking diagnosis.
+//!
+//! Timing rules use only durations that [`Observation::duration_ms`] accepts:
+//! measurements of a known kind and time unit with a finite, non-negative
+//! value. Negative or otherwise invalid values are reported as inconsistent
+//! evidence and never used in a comparison. Spans are identified by trace id
+//! and span id together, and a parent link is followed only within its trace.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::{self, EDGE_GATEWAY_ERROR_TOKENS, EDGE_PRE_UPSTREAM_PHASES};
 use crate::model::{
     Availability, Confidence, DiagnosticReport, Evidence, EvidenceSource, Finding, Observation,
-    Owner, ProducerKind, Remediation, Severity, SourceScope, SpanRef, Trust, Verification,
+    ObservationKind, Owner, ProducerKind, Remediation, Severity, SourceScope, SpanRef, Trust, Unit,
+    Verification,
 };
 
 /// Tunable thresholds. Defaults are documented in `docs/measurement-semantics.md`.
@@ -97,6 +104,24 @@ pub fn sort_findings(findings: &mut [Finding]) {
     });
 }
 
+/// A span's identity, `(trace_id, span_id)`. A span id is unique only within
+/// its trace, so every join compares both, and a parent span id names a span
+/// in the child's own trace.
+type SpanKey<'a> = (&'a str, &'a str);
+
+/// The key of observations that carry no span.
+const NO_SPAN: SpanKey<'static> = ("", "");
+
+fn span_key(span: &SpanRef) -> SpanKey<'_> {
+    (span.trace_id.as_str(), span.span_id.as_str())
+}
+
+/// Returns `true` when `child` names `parent` as its parent in the same trace.
+fn is_child_of(child: &SpanRef, parent: &SpanRef) -> bool {
+    child.trace_id == parent.trace_id
+        && child.parent_span_id.as_deref() == Some(parent.span_id.as_str())
+}
+
 /// A gateway or service request reconstructed from observations sharing a span.
 #[derive(Debug, Default)]
 struct RequestView<'a> {
@@ -109,21 +134,22 @@ impl<'a> RequestView<'a> {
         self.observations.iter().copied().find(|o| o.name == name)
     }
 
-    fn span_id(&self) -> Option<&'a str> {
-        self.span.map(|s| s.span_id.as_str())
+    fn key(&self) -> Option<SpanKey<'a>> {
+        self.span.map(span_key)
     }
 }
 
 struct Index<'a> {
     report: &'a DiagnosticReport,
     verified_collection: bool,
-    /// Edge requests keyed by span id (`""` when no span is known).
-    edge: BTreeMap<&'a str, RequestView<'a>>,
-    /// Alloy server requests keyed by span id.
-    service: BTreeMap<&'a str, RequestView<'a>>,
+    /// Edge requests keyed by span identity ([`NO_SPAN`] when no span is known).
+    edge: BTreeMap<SpanKey<'a>, RequestView<'a>>,
+    /// Alloy server requests keyed by span identity.
+    service: BTreeMap<SpanKey<'a>, RequestView<'a>>,
     operations: Vec<&'a Observation>,
-    /// Alloy span id -> parent span id, for every Alloy observation with a span.
-    alloy_parents: BTreeMap<&'a str, Option<&'a str>>,
+    /// Alloy span identity -> parent span id in the same trace, for every Alloy
+    /// observation with a span.
+    alloy_parents: BTreeMap<SpanKey<'a>, Option<&'a str>>,
 }
 
 const SERVICE_NAMES: &[&str] = &[
@@ -136,12 +162,12 @@ const SERVICE_NAMES: &[&str] = &[
 
 impl<'a> Index<'a> {
     fn build(report: &'a DiagnosticReport) -> Self {
-        let mut edge: BTreeMap<&str, RequestView<'_>> = BTreeMap::new();
-        let mut service: BTreeMap<&str, RequestView<'_>> = BTreeMap::new();
+        let mut edge: BTreeMap<SpanKey<'_>, RequestView<'_>> = BTreeMap::new();
+        let mut service: BTreeMap<SpanKey<'_>, RequestView<'_>> = BTreeMap::new();
         let mut operations = Vec::new();
         let mut alloy_parents = BTreeMap::new();
         for observation in &report.observations {
-            let key = observation.span.as_ref().map_or("", |s| s.span_id.as_str());
+            let key = observation.span.as_ref().map_or(NO_SPAN, span_key);
             match observation.producer.kind {
                 ProducerKind::Edge => {
                     let view = edge.entry(key).or_default();
@@ -151,7 +177,7 @@ impl<'a> Index<'a> {
                 ProducerKind::Alloy => {
                     if let Some(span) = &observation.span {
                         alloy_parents
-                            .entry(span.span_id.as_str())
+                            .entry(span_key(span))
                             .or_insert(span.parent_span_id.as_deref());
                     }
                     if observation.name == catalog::ALLOY_OPERATION_DURATION {
@@ -179,24 +205,25 @@ impl<'a> Index<'a> {
         self.verified_collection && observation.trust == Trust::Verified
     }
 
-    /// Service requests whose parent span is the given gateway span.
-    fn services_under(&self, edge_span_id: &str) -> Vec<&RequestView<'a>> {
+    /// Service requests whose parent is the given gateway span, in its trace.
+    fn services_under(&self, edge_span: &SpanRef) -> Vec<&RequestView<'a>> {
         self.service
             .values()
-            .filter(|view| {
-                view.span
-                    .and_then(|s| s.parent_span_id.as_deref())
-                    .is_some_and(|parent| parent == edge_span_id)
-            })
+            .filter(|view| view.span.is_some_and(|span| is_child_of(span, edge_span)))
             .collect()
     }
 
-    /// Returns `true` when `span_id` descends from `ancestor` through Alloy spans.
-    fn descends_from(&self, span_id: &str, ancestor: &str) -> bool {
-        let mut current = span_id;
+    /// Returns `true` when `span` descends from `ancestor` through Alloy spans
+    /// of the same trace. Spans of different traces are never related.
+    fn descends_from(&self, span: &SpanRef, ancestor: &SpanRef) -> bool {
+        if span.trace_id != ancestor.trace_id {
+            return false;
+        }
+        let trace = span.trace_id.as_str();
+        let mut current = span.span_id.as_str();
         for _ in 0..MAX_ANCESTOR_HOPS {
-            match self.alloy_parents.get(current).copied().flatten() {
-                Some(parent) if parent == ancestor => return true,
+            match self.alloy_parents.get(&(trace, current)).copied().flatten() {
+                Some(parent) if parent == ancestor.span_id => return true,
                 Some(parent) => current = parent,
                 None => return false,
             }
@@ -204,11 +231,13 @@ impl<'a> Index<'a> {
         false
     }
 
-    /// Returns the nearest id in `span`'s lineage that `accept` matches: the
-    /// span itself, its own parent, then its parent's Alloy ancestors. The walk
-    /// starts at the span's own parent, so a span that is not an Alloy span
-    /// still reaches the gateway above its Alloy parent. It stops after
-    /// [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle cannot loop.
+    /// Returns the nearest span id in `span`'s lineage that `accept` matches:
+    /// the span itself, its own parent, then its parent's Alloy ancestors. Every
+    /// id is in `span`'s own trace, and the walk never follows a parent into
+    /// another trace. The walk starts at the span's own parent, so a span that
+    /// is not an Alloy span still reaches the gateway above its Alloy parent.
+    /// It stops after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle cannot
+    /// loop.
     fn nearest_in_lineage<'s>(
         &'s self,
         span: &'s SpanRef,
@@ -217,12 +246,17 @@ impl<'a> Index<'a> {
         if accept(span.span_id.as_str()) {
             return Some(span.span_id.as_str());
         }
+        let trace = span.trace_id.as_str();
         let mut current: &'s str = span.parent_span_id.as_deref()?;
         if accept(current) {
             return Some(current);
         }
         for _ in 0..MAX_ANCESTOR_HOPS {
-            let parent = self.alloy_parents.get(current).copied().flatten()?;
+            let parent = self
+                .alloy_parents
+                .get(&(trace, current))
+                .copied()
+                .flatten()?;
             if accept(parent) {
                 return Some(parent);
             }
@@ -251,6 +285,8 @@ fn source_for(observation: &Observation) -> EvidenceSource {
 }
 
 fn ms(value: f64) -> String {
+    // Adding zero turns a negative zero into zero, so it never renders as "-0.0".
+    let value = value + 0.0;
     format!("{value:.1} ms")
 }
 
@@ -377,10 +413,11 @@ impl FindingBuilder {
 /// R001: Edge rejected the request before any upstream attempt.
 fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r001";
+    const VERSION: u32 = 2;
     for view in index.edge.values() {
         let services = view
-            .span_id()
-            .map(|id| index.services_under(id))
+            .span
+            .map(|span| index.services_under(span))
             .unwrap_or_default();
         if let Some(rejected) = view.named(catalog::EDGE_REQUEST_REJECTED) {
             let phase = rejected.attr("phase");
@@ -391,7 +428,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
             let mut builder = FindingBuilder::new(
                 "alloy.edge.rejected_before_upstream",
                 RULE,
-                1,
+                VERSION,
                 "Gateway rejected the request before contacting the service",
             )
             .scope(SourceScope::GatewayAdmission)
@@ -472,7 +509,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
         let mut builder = FindingBuilder::new(
             "alloy.edge.no_backend_response_recorded",
             RULE,
-            1,
+            VERSION,
             "Gateway recorded no backend response for a client error",
         )
         .scope(SourceScope::GatewayAdmission)
@@ -514,6 +551,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R007: gateway error classification (X-Gateway-Error token or Edge error class).
 fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r007";
+    const VERSION: u32 = 2;
     let header_events = index.report.observations.iter().filter(|o| {
         o.name == catalog::CLIENT_RESPONSE_HEADER
             && o.attr("header")
@@ -525,7 +563,7 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         let mut builder = FindingBuilder::new(
             "alloy.edge.gateway_error_token",
             RULE,
-            1,
+            VERSION,
             "Response carried a gateway error token",
         )
         .scope(SourceScope::GatewayToUpstream)
@@ -567,7 +605,7 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         let builder = FindingBuilder::new(
             "alloy.edge.gateway_error_class",
             RULE,
-            1,
+            VERSION,
             "Gateway classified an upstream failure",
         )
         .scope(SourceScope::GatewayToUpstream)
@@ -652,6 +690,7 @@ fn placement(operation: &Observation, server: &Observation, slack_nanos: u64) ->
 /// `unknown` confidence.
 fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r002";
+    const VERSION: u32 = 3;
     for view in index.service.values() {
         let Some(server) = view.named(catalog::ALLOY_TIME_TO_HEADERS) else {
             continue;
@@ -662,7 +701,7 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
         if server_ms < thresholds.dominance_min_ms {
             continue;
         }
-        let Some(server_span) = view.span_id() else {
+        let Some(server_span) = view.span else {
             continue;
         };
         // Candidate operations: descendants of this server span. An operation
@@ -676,7 +715,7 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
             let Some(op_span) = operation.span.as_ref() else {
                 continue;
             };
-            if !index.descends_from(&op_span.span_id, server_span) {
+            if !index.descends_from(op_span, server_span) {
                 continue;
             }
             let nested = match placement(operation, server, thresholds.nesting_slack_nanos) {
@@ -701,7 +740,7 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
                     FindingBuilder::new(
                         "alloy.evidence.operation_exceeds_enclosing",
                         "alloy.r006",
-                        2,
+                        3,
                         "Nested operation is longer than its enclosing measurement",
                     )
                     .scope(SourceScope::UpstreamApplication)
@@ -754,7 +793,7 @@ fn rule_operation_dominates(index: &Index<'_>, thresholds: &Thresholds, out: &mu
         let mut builder = FindingBuilder::new(
             "alloy.service.operation_dominates",
             RULE,
-            2,
+            VERSION,
             "An instrumented operation dominated the service's time to response headers",
         )
         .scope(SourceScope::UpstreamApplication)
@@ -810,11 +849,12 @@ fn same_instance(a: &Observation, b: &Observation) -> bool {
 /// R003: gateway backend time minus service time, when comparable.
 fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r003";
+    const VERSION: u32 = 2;
     for view in index.edge.values() {
-        let (Some(edge_span), Some(ttfb)) = (
-            view.span_id(),
-            view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS),
-        ) else {
+        let Some(edge_span) = view.span else {
+            continue;
+        };
+        let Some(ttfb) = view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS) else {
             continue;
         };
         let Some(edge_ms) = ttfb.duration_ms() else {
@@ -828,7 +868,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             let mut builder = FindingBuilder::new(
                 "alloy.gateway.multiple_service_attempts",
                 RULE,
-                1,
+                VERSION,
                 "Several service requests share one gateway request",
             )
             .scope(SourceScope::GatewayToUpstream)
@@ -869,7 +909,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             let mut builder = FindingBuilder::new(
                 "alloy.gateway.timings_not_comparable",
                 RULE,
-                1,
+                VERSION,
                 "Gateway and service timings are not comparable",
             )
             .scope(SourceScope::GatewayToUpstream)
@@ -892,6 +932,29 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             continue;
         };
         let Some(service_ms) = service_obs.duration_ms() else {
+            out.push(
+                FindingBuilder::new(
+                    "alloy.gateway.timings_not_comparable",
+                    RULE,
+                    VERSION,
+                    "Gateway and service timings are not comparable",
+                )
+                .scope(SourceScope::GatewayToUpstream)
+                .severity(Severity::Info)
+                .owner(Owner::Unknown)
+                .confidence(Confidence::Unknown)
+                .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
+                .cite(service_obs, &service_obs.name, "not a usable duration")
+                .explanation(
+                    "The service measurement that matches the gateway's backend measurement boundaries has no usable duration (it is not measured, has an unrecognized kind or unit, or is negative), so no difference is computed.".into(),
+                )
+                .does_not_prove(&[
+                    "whether the gateway or service was fast or slow",
+                    "the size or cause of any gateway-to-service timing difference",
+                ])
+                .missing(&["a usable service measurement with matching boundaries"])
+                .build(),
+            );
             continue;
         };
         let residual = edge_ms - service_ms;
@@ -900,7 +963,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                 FindingBuilder::new(
                     "alloy.evidence.service_exceeds_gateway",
                     "alloy.r006",
-                    2,
+                    3,
                     "Service measured longer than the gateway's backend measurement",
                 )
                 .scope(SourceScope::GatewayToUpstream)
@@ -932,17 +995,22 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         {
             continue;
         }
-        let verified_attempt = ttfb.scope.attempt.is_some() && index.verified(ttfb);
+        // The residual depends on both measurements, so a confirmed claim needs
+        // verified provenance for each of them plus the gateway's attempt.
+        let attempt_known = ttfb.scope.attempt.is_some();
+        let gateway_verified = index.verified(ttfb);
+        let service_verified = index.verified(service_obs);
+        let confirmed = attempt_known && gateway_verified && service_verified;
         let mut builder = FindingBuilder::new(
             "alloy.gateway.unattributed_interval",
             RULE,
-            1,
+            VERSION,
             "Large unattributed interval between gateway and service",
         )
         .scope(SourceScope::GatewayToUpstream)
         .severity(Severity::Warning)
         .owner(Owner::Unknown)
-        .confidence(if verified_attempt {
+        .confidence(if confirmed {
             Confidence::Confirmed
         } else {
             Confidence::Likely
@@ -976,11 +1044,17 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.7 or v0.9.8)",
             "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
-        if !verified_attempt {
-            builder = builder.missing(&[
-                "gateway attempt identity",
-                "gateway connection setup timing",
-            ]);
+        if !confirmed {
+            if !attempt_known {
+                builder = builder.missing(&["gateway attempt identity"]);
+            }
+            builder = builder.missing(&["gateway connection setup timing"]);
+            if !gateway_verified {
+                builder = builder.missing(&["verified gateway provenance for the backend timing"]);
+            }
+            if !service_verified {
+                builder = builder.missing(&["verified service provenance for the service timing"]);
+            }
         }
         out.push(builder.build());
     }
@@ -989,6 +1063,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
 /// R005: response headers were fast but the body kept streaming.
 fn rule_streaming(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r005";
+    const VERSION: u32 = 2;
     for view in index.service.values() {
         let (Some(head), Some(body)) = (
             view.named(catalog::ALLOY_TIME_TO_HEADERS),
@@ -1007,7 +1082,7 @@ fn rule_streaming(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Find
             FindingBuilder::new(
                 "alloy.response.streaming_dominates",
                 RULE,
-                1,
+                VERSION,
                 "Most of the request was spent streaming the response body",
             )
             .scope(SourceScope::ResponseDelivery)
@@ -1037,6 +1112,7 @@ fn rule_streaming(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Find
 /// R008: the response body did not complete from the service's view.
 fn rule_body_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r008";
+    const VERSION: u32 = 2;
     for view in index.service.values() {
         let Some(body) = view.named(catalog::ALLOY_BODY_DURATION) else {
             continue;
@@ -1053,7 +1129,7 @@ fn rule_body_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
             FindingBuilder::new(
                 "alloy.response.body_incomplete",
                 RULE,
-                1,
+                VERSION,
                 "Response body did not complete",
             )
             .scope(SourceScope::ResponseDelivery)
@@ -1091,9 +1167,19 @@ fn rule_body_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R006: negative measured values are inconsistent evidence.
 fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
     for observation in &index.report.observations {
-        if observation.availability != Availability::Measured {
+        if observation.kind != ObservationKind::Measurement
+            || observation.availability != Availability::Measured
+        {
             continue;
         }
+        // Only a known unit says what the value measures, and every known unit
+        // measures a quantity that cannot be negative.
+        let quantity = match observation.unit {
+            Some(Unit::Microseconds | Unit::Milliseconds | Unit::Seconds) => "duration",
+            Some(Unit::Bytes) => "size",
+            Some(Unit::Count) => "count",
+            _ => continue,
+        };
         let Some(value) = observation.value else {
             continue;
         };
@@ -1104,7 +1190,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
             FindingBuilder::new(
                 "alloy.evidence.negative_measurement",
                 "alloy.r006",
-                2,
+                3,
                 "A measurement reported a negative value",
             )
             .scope(SourceScope::Unknown)
@@ -1113,7 +1199,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
             .confidence(Confidence::ConflictingEvidence)
             .cite(observation, &observation.name, format!("{value}"))
             .explanation(format!(
-                "{} reported {value}, which a duration cannot be. The value is not clamped to zero and is excluded from comparisons.",
+                "{} reported {value}, but a measured {quantity} cannot be negative. The value is not clamped to zero and is excluded from comparisons.",
                 observation.name
             ))
             .does_not_prove(&[
@@ -1128,7 +1214,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R004: telemetry is too incomplete to localize the delay.
 fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r004";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     let degraded: Vec<&Observation> = index
         .report
         .observations
@@ -1142,19 +1228,23 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         .collect();
     let mut budget = MAX_DEGRADED_CITATIONS_PER_RUN;
 
-    // Gateway spans that some service request names as its parent.
-    let served: BTreeSet<&str> = index
+    // Gateway spans that some service request names as its parent, in the
+    // service request's own trace.
+    let served: BTreeSet<SpanKey<'_>> = index
         .service
         .values()
-        .filter_map(|view| view.span.and_then(|span| span.parent_span_id.as_deref()))
+        .filter_map(|view| {
+            let span = view.span?;
+            Some((span.trace_id.as_str(), span.parent_span_id.as_deref()?))
+        })
         .collect();
     // Gateway requests with a measured backend exchange and no service child,
     // each with its time-to-headers and the degraded observations linked to it.
-    let mut missing: BTreeMap<&str, (&Observation, Vec<&Observation>)> = index
+    let mut missing: BTreeMap<SpanKey<'_>, (&Observation, Vec<&Observation>)> = index
         .edge
         .values()
         .filter_map(|view| {
-            let edge_span = view.span_id().filter(|span| !served.contains(span))?;
+            let edge_span = view.key().filter(|key| !served.contains(key))?;
             let ttfb = view
                 .named(catalog::EDGE_BACKEND_TIME_TO_HEADERS)
                 .filter(|ttfb| ttfb.duration_ms().is_some())?;
@@ -1164,21 +1254,33 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     let requests = missing.len();
 
     // Each degraded observation belongs to the nearest gateway span in its
-    // lineage, which is walked once, so the cost is linear in the report.
+    // lineage within its own trace, which is walked once, so the cost is
+    // linear in the report.
     let mut unlinked: Vec<&Observation> = Vec::new();
+    // The trace of the only missing request, when exactly one is missing.
+    let only_trace = match missing.keys().next() {
+        Some(&(trace, _)) if requests == 1 => Some(trace),
+        _ => None,
+    };
     if requests > 0 {
-        let is_gateway = |id: &str| index.edge.contains_key(id);
         for observation in &degraded {
-            let gateway = observation
-                .span
-                .as_ref()
-                .and_then(|span| index.nearest_in_lineage(span, is_gateway));
+            let gateway = observation.span.as_ref().and_then(|span| {
+                let trace = span.trace_id.as_str();
+                let is_gateway = |id: &str| index.edge.contains_key(&(trace, id));
+                index
+                    .nearest_in_lineage(span, is_gateway)
+                    .map(|id| (trace, id))
+            });
+            // With one missing request, evidence that links to no gateway span
+            // can describe only that request, unless it is in another trace.
+            let own_trace = observation.span.as_ref().map(|s| s.trace_id.as_str());
+            let fits_only_request =
+                only_trace.is_some() && (own_trace.is_none() || own_trace == only_trace);
             let cited = match gateway {
                 // Evidence for a gateway request that has service telemetry
                 // belongs to that request, not to this rule.
-                Some(span) => missing.get_mut(span).map(|(_, cited)| cited),
-                // With one missing request, unlinked evidence can describe only it.
-                None if requests == 1 => missing.values_mut().next().map(|(_, cited)| cited),
+                Some(key) => missing.get_mut(&key).map(|(_, cited)| cited),
+                None if fits_only_request => missing.values_mut().next().map(|(_, cited)| cited),
                 None => Some(&mut unlinked),
             };
             if let Some(cited) = cited {
@@ -1216,13 +1318,19 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         out.push(builder.cite_degraded(cited, &mut budget).build());
     }
 
-    // With several missing requests, evidence that links to none of them is
-    // cited once here rather than dropped or copied into every request.
+    // Evidence that links to no missing request (several are missing, or it
+    // is in another trace) is cited once here rather than dropped or copied
+    // into every request.
     if !unlinked.is_empty() {
+        let requests_have = if requests == 1 {
+            "One gateway request has".to_owned()
+        } else {
+            format!("{requests} gateway requests have")
+        };
         let explanation = format!(
-            "{requests} gateway requests have no linked service span. The unsampled, dropped, or \
-             unexported observations cited here link to no gateway span, so they cannot be \
-             attributed to one request."
+            "{requests_have} no linked service span. The unsampled, dropped, or unexported \
+             observations cited here link to no gateway span in their trace, so they cannot be \
+             attributed to a request."
         );
         let builder = FindingBuilder::new(
             "alloy.telemetry.degraded_evidence_unlinked",
@@ -1266,7 +1374,7 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         .owner(Owner::Unknown)
         .confidence(Confidence::Unknown)
         .explanation(
-            "The report contains no measured durations, so no timing conclusion is possible."
+            "The report has no usable measured durations, so no timing conclusion is possible."
                 .into(),
         )
         .does_not_prove(&["that any component was slow or fast"])

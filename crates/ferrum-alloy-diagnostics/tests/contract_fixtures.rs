@@ -38,7 +38,7 @@ fn operation_exceeding_its_enclosing_measurement_lists_unproven_claims() {
     let findings = analyze(&parsed.report, &Thresholds::default());
     let finding = by_code(&findings, "alloy.evidence.operation_exceeds_enclosing");
     assert_eq!(finding.rule_id, "alloy.r006");
-    assert_eq!(finding.rule_version, 2);
+    assert_eq!(finding.rule_version, 3);
     assert!(!finding.does_not_prove.is_empty());
 }
 
@@ -335,6 +335,190 @@ fn unattributed_interval_is_not_called_network_latency() {
     );
 }
 
+/// A trace id that no fixture uses.
+const OTHER_TRACE: &str = "11111111111111111111111111111111";
+
+/// Parses the unattributed-interval fixture after `edit` changes its JSON.
+fn unattributed_with(edit: impl FnOnce(&mut serde_json::Value)) -> ParsedReport {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("unattributed-interval.json")).unwrap();
+    edit(&mut report);
+    parse_offline(&serde_json::to_vec(&report).unwrap(), &Limits::default()).unwrap()
+}
+
+#[test]
+fn negative_service_duration_is_reported_but_never_used_as_timing_evidence() {
+    let parsed = unattributed_with(|report| {
+        report["observations"][1]["value"] = serde_json::json!(-120.0);
+    });
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    let negative = by_code(&findings, "alloy.evidence.negative_measurement");
+    assert_eq!(negative.rule_version, 3);
+    assert_eq!(negative.supporting_observations, ["alloy-ttfh"]);
+    for code in [
+        "alloy.gateway.unattributed_interval",
+        "alloy.evidence.service_exceeds_gateway",
+    ] {
+        assert!(!codes(&findings).contains(&code), "{:?}", codes(&findings));
+    }
+    assert!(
+        findings
+            .iter()
+            .all(|finding| !finding.explanation.contains("1020")),
+        "no residual may be derived from the negative value: {findings:?}"
+    );
+    let not_comparable = by_code(&findings, "alloy.gateway.timings_not_comparable");
+    assert_eq!(not_comparable.confidence, Confidence::Unknown);
+}
+
+#[test]
+fn unrecognized_observation_kind_is_never_used_as_timing_evidence() {
+    let parsed = unattributed_with(|report| {
+        report["observations"][1]["kind"] = serde_json::json!("future-kind");
+    });
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.path == "/observations/1/kind"),
+        "{:?}",
+        parsed.warnings
+    );
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    // The gateway request is reported as not comparable, never silently
+    // dropped, and the observation of unknown kind supports no timing claim.
+    assert_eq!(codes(&findings), ["alloy.gateway.timings_not_comparable"]);
+    let only = &findings[0];
+    assert_eq!(only.rule_version, 2);
+    assert_eq!(only.confidence, Confidence::Unknown);
+    assert_eq!(only.supporting_observations, ["alloy-ttfh", "edge-ttfb"]);
+    assert!(lists_missing(only, "usable service measurement"));
+}
+
+#[test]
+fn service_span_in_another_trace_is_not_joined_to_the_gateway_request() {
+    let parsed = unattributed_with(|report| {
+        report["observations"][1]["span"]["trace_id"] = serde_json::json!(OTHER_TRACE);
+    });
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    assert!(
+        !codes(&findings).contains(&"alloy.gateway.unattributed_interval"),
+        "a matching parent span id in another trace is not a link: {:?}",
+        codes(&findings)
+    );
+    let missing = by_code(&findings, "alloy.telemetry.service_span_missing");
+    assert_eq!(missing.rule_version, 3);
+    assert_eq!(missing.supporting_observations, ["edge-ttfb"]);
+}
+
+#[test]
+fn equal_span_ids_in_different_traces_stay_separate_requests() {
+    let parsed = unattributed_with(|report| {
+        let observations = report["observations"].as_array_mut().unwrap();
+        let mut other = observations[0].clone();
+        other["id"] = serde_json::json!("edge-ttfb-other-trace");
+        other["value"] = serde_json::json!(5000.0);
+        other["span"]["trace_id"] = serde_json::json!(OTHER_TRACE);
+        observations.insert(0, other);
+    });
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    // Same-trace control: the linked gateway and service timings still compare.
+    let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+    assert_eq!(residual.rule_version, 2);
+    assert!(
+        residual.explanation.contains("780.0 ms"),
+        "{}",
+        residual.explanation
+    );
+    assert_eq!(
+        residual.supporting_observations,
+        ["alloy-ttfh", "edge-ttfb"]
+    );
+    // The other trace's gateway request has no service span of its own.
+    let missing = by_code(&findings, "alloy.telemetry.service_span_missing");
+    assert_eq!(missing.supporting_observations, ["edge-ttfb-other-trace"]);
+}
+
+#[test]
+fn operations_in_another_trace_never_dominate_a_service_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("db-operation-dominates.json")).unwrap();
+    for index in [1, 2] {
+        report["observations"][index]["span"]["trace_id"] = serde_json::json!(OTHER_TRACE);
+    }
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    for code in [
+        "alloy.service.operation_dominates",
+        "alloy.evidence.operation_exceeds_enclosing",
+    ] {
+        assert!(!codes(&findings).contains(&code), "{:?}", codes(&findings));
+    }
+}
+
+/// The residual finding for the unattributed-interval fixture as a verified
+/// collector could supply it, with the given gateway and service trust.
+fn verified_collection_residual(gateway: Trust, service: Trust) -> Finding {
+    let mut report = parsed("unattributed-interval.json").report;
+    report.collection.verification = Verification::Verified;
+    report.observations[0].trust = gateway;
+    report.observations[0].scope.attempt = Some(1);
+    report.observations[1].trust = service;
+    let findings = analyze(&report, &Thresholds::default());
+    by_code(&findings, "alloy.gateway.unattributed_interval").clone()
+}
+
+fn lists_missing(finding: &Finding, text: &str) -> bool {
+    finding.missing_evidence.iter().any(|m| m.contains(text))
+}
+
+#[test]
+fn residual_is_confirmed_only_when_both_timings_are_verified() {
+    let both = verified_collection_residual(Trust::Verified, Trust::Verified);
+    assert_eq!(both.confidence, Confidence::Confirmed);
+    assert!(both.missing_evidence.is_empty(), "{both:?}");
+
+    // Verified gateway timing, unverified service timing.
+    let partial = verified_collection_residual(Trust::Verified, Trust::Unverified);
+    assert_eq!(partial.confidence, Confidence::Likely);
+    assert!(lists_missing(&partial, "service provenance"));
+    assert!(!lists_missing(&partial, "gateway provenance"));
+
+    // The inverse.
+    let inverse = verified_collection_residual(Trust::Unverified, Trust::Verified);
+    assert_eq!(inverse.confidence, Confidence::Likely);
+    assert!(lists_missing(&inverse, "gateway provenance"));
+    assert!(!lists_missing(&inverse, "service provenance"));
+}
+
+#[test]
+fn offline_residual_claiming_verified_provenance_stays_likely() {
+    let parsed = unattributed_with(|report| {
+        report["collection"]["verification"] = serde_json::json!("verified");
+        for index in [0, 1] {
+            report["observations"][index]["trust"] = serde_json::json!("verified");
+        }
+        report["observations"][0]["scope"]["attempt"] = serde_json::json!(1);
+    });
+    assert_eq!(
+        parsed.report.collection.verification,
+        Verification::Unverified
+    );
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.gateway.unattributed_interval");
+
+    assert_eq!(finding.confidence, Confidence::Likely);
+    assert!(!lists_missing(finding, "attempt identity"));
+    assert!(lists_missing(finding, "verified gateway provenance"));
+    assert!(lists_missing(finding, "verified service provenance"));
+}
+
 #[test]
 fn missing_service_span_is_unknown_and_not_a_network_fault() {
     let findings = findings("service-span-missing.json");
@@ -405,7 +589,7 @@ fn missing_service_findings_only_cite_degraded_evidence_for_their_request() {
         "span-linked degraded evidence belongs to only its gateway request"
     );
     let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
-    assert_eq!(unlinked.rule_version, 2);
+    assert_eq!(unlinked.rule_version, 3);
     assert_eq!(
         unlinked.supporting_observations,
         ["alloy-not-sampled"],
@@ -440,7 +624,7 @@ fn rerooted_degraded_evidence_is_cited_on_the_only_missing_request() {
     let finding = by_code(&findings, "alloy.telemetry.service_span_missing");
 
     assert_eq!(finding.rule_id, "alloy.r004");
-    assert_eq!(finding.rule_version, 2);
+    assert_eq!(finding.rule_version, 3);
     assert_eq!(
         finding.supporting_observations,
         [
@@ -482,6 +666,39 @@ fn rerooted_degraded_evidence_is_cited_once_when_the_request_is_ambiguous() {
             assert_eq!(finding.evidence.len(), 1, "{:?}", finding.evidence);
         }
     }
+}
+
+#[test]
+fn degraded_evidence_from_another_trace_is_not_cited_on_the_only_missing_request() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("service-span-missing.json")).unwrap();
+    let observations = report["observations"].as_array_mut().unwrap();
+    let mut other = observations[1].clone();
+    other["id"] = serde_json::json!("alloy-not-sampled-other-trace");
+    // Its parent span id equals the gateway span id, but in another trace.
+    other["span"] = serde_json::json!({
+        "trace_id": OTHER_TRACE,
+        "span_id": "aaaabbbbccccdddd",
+        "parent_span_id": "1111222233334444"
+    });
+    observations.push(other);
+
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+    let findings = analyze(&parsed.report, &Thresholds::default());
+
+    let missing = by_code(&findings, "alloy.telemetry.service_span_missing");
+    assert_eq!(
+        missing.supporting_observations,
+        ["alloy-not-sampled", "edge-ttfb"],
+        "span-less evidence may describe the only missing request; another trace's may not"
+    );
+    let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
+    assert_eq!(
+        unlinked.supporting_observations,
+        ["alloy-not-sampled-other-trace"]
+    );
+    assert!(unlinked.explanation.starts_with("One gateway request"));
 }
 
 /// Adds a gateway request on `gateway_span` whose service span
