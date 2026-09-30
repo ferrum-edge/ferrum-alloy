@@ -619,33 +619,35 @@ type GeneratedSpan = (bool, usize, Option<f64>, Option<f64>, u64, u64, u64, bool
 fn generated_otlp(spans: &[GeneratedSpan]) -> String {
     let resources = spans
         .iter()
-        .map(|&(edge, service, first, second, start_ms, len_ms, id, skewed)| {
-            let start = if skewed { 1_000 } else { T0 + start_ms * MS };
-            let (scope, name, keys) = if edge {
-                ("ferrum-edge", "edge-public", EDGE_KEYS)
-            } else {
-                ("ferrum-alloy-telemetry", SERVICES[service], ALLOY_KEYS)
-            };
-            let attributes: Vec<Value> = keys
-                .iter()
-                .zip([first, second])
-                .filter_map(|(key, value)| value.map(|v| f64_attr(key, v)))
-                .collect();
-            json!({
-                "resource": { "attributes": [str_attr("service.name", name)] },
-                "scopeSpans": [{
-                    "scope": { "name": scope },
-                    "spans": [{
-                        "traceId": PHASE_TRACE,
-                        "spanId": format!("{id:016x}"),
-                        "kind": 2,
-                        "startTimeUnixNano": start.to_string(),
-                        "endTimeUnixNano": (start + len_ms * MS).to_string(),
-                        "attributes": attributes,
+        .map(
+            |&(edge, service, first, second, start_ms, len_ms, id, skewed)| {
+                let start = if skewed { 1_000 } else { T0 + start_ms * MS };
+                let (scope, name, keys) = if edge {
+                    ("ferrum-edge", "edge-public", EDGE_KEYS)
+                } else {
+                    ("ferrum-alloy-telemetry", SERVICES[service], ALLOY_KEYS)
+                };
+                let attributes: Vec<Value> = keys
+                    .iter()
+                    .zip([first, second])
+                    .filter_map(|(key, value)| value.map(|v| f64_attr(key, v)))
+                    .collect();
+                json!({
+                    "resource": { "attributes": [str_attr("service.name", name)] },
+                    "scopeSpans": [{
+                        "scope": { "name": scope },
+                        "spans": [{
+                            "traceId": PHASE_TRACE,
+                            "spanId": format!("{id:016x}"),
+                            "kind": 2,
+                            "startTimeUnixNano": start.to_string(),
+                            "endTimeUnixNano": (start + len_ms * MS).to_string(),
+                            "attributes": attributes,
+                        }],
                     }],
-                }],
-            })
-        })
+                })
+            },
+        )
         .collect();
     otlp(resources)
 }
