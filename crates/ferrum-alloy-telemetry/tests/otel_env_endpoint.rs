@@ -30,7 +30,7 @@ fn environment_endpoint_errors_never_disclose_the_endpoint() {
         let output = Command::new(std::env::current_exe().unwrap())
             .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .env(name, endpoint)
+            .env(&name, endpoint)
             .args([
                 "--exact",
                 "environment_endpoint_error_child_never_discloses_the_endpoint",
