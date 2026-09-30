@@ -18,7 +18,7 @@
 //! evidence and never used in a comparison. Spans are identified by trace id
 //! and span id together, and a parent link is followed only within its trace.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::catalog::{self, EDGE_GATEWAY_ERROR_TOKENS, EDGE_PRE_UPSTREAM_PHASES};
 use crate::model::{
@@ -116,12 +116,6 @@ fn span_key(span: &SpanRef) -> SpanKey<'_> {
     (span.trace_id.as_str(), span.span_id.as_str())
 }
 
-/// Returns `true` when `child` names `parent` as its parent in the same trace.
-fn is_child_of(child: &SpanRef, parent: &SpanRef) -> bool {
-    child.trace_id == parent.trace_id
-        && child.parent_span_id.as_deref() == Some(parent.span_id.as_str())
-}
-
 /// A gateway or service request reconstructed from observations sharing a span.
 #[derive(Debug, Default)]
 struct RequestView<'a> {
@@ -146,6 +140,9 @@ struct Index<'a> {
     edge: BTreeMap<SpanKey<'a>, RequestView<'a>>,
     /// Alloy server requests keyed by span identity.
     service: BTreeMap<SpanKey<'a>, RequestView<'a>>,
+    /// Service requests keyed by their gateway parent span. Values retain the
+    /// span-key order of `service` so linked services stay deterministic.
+    services_by_parent: BTreeMap<SpanKey<'a>, Vec<SpanKey<'a>>>,
     operations: Vec<&'a Observation>,
     /// Alloy span identity -> parent span id in the same trace, for every Alloy
     /// observation with a span.
@@ -191,11 +188,25 @@ impl<'a> Index<'a> {
                 _ => {}
             }
         }
+        let mut services_by_parent: BTreeMap<SpanKey<'a>, Vec<SpanKey<'a>>> = BTreeMap::new();
+        for (service_key, view) in &service {
+            let Some(span) = view.span else {
+                continue;
+            };
+            let Some(parent) = span.parent_span_id.as_deref() else {
+                continue;
+            };
+            services_by_parent
+                .entry((span.trace_id.as_str(), parent))
+                .or_insert_with(Vec::new)
+                .push(*service_key);
+        }
         Self {
             report,
             verified_collection: report.collection.verification == Verification::Verified,
             edge,
             service,
+            services_by_parent,
             operations,
             alloy_parents,
         }
@@ -206,10 +217,17 @@ impl<'a> Index<'a> {
     }
 
     /// Service requests whose parent is the given gateway span, in its trace.
-    fn services_under(&self, edge_span: &SpanRef) -> Vec<&RequestView<'a>> {
-        self.service
-            .values()
-            .filter(|view| view.span.is_some_and(|span| is_child_of(span, edge_span)))
+    fn services_under(
+        &self,
+        edge_span: &SpanRef,
+        mut parent_lookup: impl FnMut(),
+    ) -> Vec<&RequestView<'a>> {
+        parent_lookup();
+        self.services_by_parent
+            .get(&(edge_span.trace_id.as_str(), edge_span.span_id.as_str()))
+            .into_iter()
+            .flatten()
+            .filter_map(|key| self.service.get(key))
             .collect()
     }
 
@@ -325,28 +343,31 @@ fn ms(value: f64) -> String {
     format!("{value:.1} ms")
 }
 
-struct FindingBuilder(Finding);
+struct FindingBuilder(Finding, HashSet<String>);
 
 impl FindingBuilder {
     fn new(code: &str, rule_id: &str, rule_version: u32, title: &str) -> Self {
-        Self(Finding {
-            code: code.to_owned(),
-            rule_id: rule_id.to_owned(),
-            rule_version,
-            title: title.to_owned(),
-            explanation: String::new(),
-            scope: SourceScope::Unknown,
-            confidence: Confidence::Unknown,
-            severity: Severity::Info,
-            evidence: Vec::new(),
-            alternatives: Vec::new(),
-            does_not_prove: Vec::new(),
-            remediation: Vec::new(),
-            owner: Owner::Unknown,
-            confirm_with: Vec::new(),
-            supporting_observations: Vec::new(),
-            missing_evidence: Vec::new(),
-        })
+        Self(
+            Finding {
+                code: code.to_owned(),
+                rule_id: rule_id.to_owned(),
+                rule_version,
+                title: title.to_owned(),
+                explanation: String::new(),
+                scope: SourceScope::Unknown,
+                confidence: Confidence::Unknown,
+                severity: Severity::Info,
+                evidence: Vec::new(),
+                alternatives: Vec::new(),
+                does_not_prove: Vec::new(),
+                remediation: Vec::new(),
+                owner: Owner::Unknown,
+                confirm_with: Vec::new(),
+                supporting_observations: Vec::new(),
+                missing_evidence: Vec::new(),
+            },
+            HashSet::new(),
+        )
     }
     fn explanation(mut self, text: String) -> Self {
         self.0.explanation = text;
@@ -373,7 +394,7 @@ impl FindingBuilder {
             attempt: observation.scope.attempt,
             ..evidence(source_for(observation), key, value)
         });
-        if !self.0.supporting_observations.contains(&observation.id) {
+        if self.1.insert(observation.id.clone()) {
             self.0.supporting_observations.push(observation.id.clone());
         }
         self
@@ -452,7 +473,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     for view in index.edge.values() {
         let services = view
             .span
-            .map(|span| index.services_under(span))
+            .map(|span| index.services_under(span, || {}))
             .unwrap_or_default();
         if let Some(rejected) = view.named(catalog::EDGE_REQUEST_REJECTED) {
             let phase = rejected.attr("phase");
@@ -894,7 +915,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         let Some(edge_ms) = ttfb.duration_ms() else {
             continue;
         };
-        let services = index.services_under(edge_span);
+        let services = index.services_under(edge_span, || {});
         if services.is_empty() {
             continue;
         }
@@ -1472,6 +1493,108 @@ mod tests {
             report.observations.push(observation);
         }
         report
+    }
+
+    #[test]
+    fn indexed_services_match_the_previous_scan_on_fixtures() {
+        for fixture in [
+            "db-operation-after-headers.json",
+            "db-operation-dominates.json",
+            "edge-rejected-before-upstream.json",
+            "forged-verified-claim.json",
+            "gateway-error-token.json",
+            "service-exceeds-gateway.json",
+            "service-span-missing.json",
+            "unattributed-interval.json",
+        ] {
+            let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/fixtures/reports")
+                .join(fixture);
+            let bytes = std::fs::read(fixture_path).unwrap();
+            let report: DiagnosticReport = serde_json::from_slice(&bytes).unwrap();
+            let index = Index::build(&report);
+
+            for edge in index.edge.values() {
+                let Some(edge_span) = edge.span else {
+                    continue;
+                };
+                let indexed = index
+                    .services_under(edge_span, || {})
+                    .into_iter()
+                    .map(|view| view.observations[0].id.as_str())
+                    .collect::<Vec<_>>();
+                let previous_scan = index
+                    .service
+                    .values()
+                    .filter(|view| {
+                        view.span.is_some_and(|service_span| {
+                            service_span.trace_id == edge_span.trace_id
+                                && service_span.parent_span_id.as_deref()
+                                    == Some(edge_span.span_id.as_str())
+                        })
+                    })
+                    .map(|view| view.observations[0].id.as_str())
+                    .collect::<Vec<_>>();
+
+                assert_eq!(indexed, previous_scan, "fixture {fixture}");
+            }
+        }
+    }
+
+    #[test]
+    fn service_parent_lookups_are_bounded_at_raised_maximum_cardinality() {
+        use crate::parse::{Limits, check_report};
+
+        const EDGE_COUNT: usize = 5_000;
+
+        let mut report = report_with_spans(EDGE_COUNT, 0);
+        let mut edge_report: DiagnosticReport = serde_json::from_str(include_str!(
+            "../../../contracts/fixtures/reports/edge-rejected-before-upstream.json"
+        ))
+        .unwrap();
+        let edge_template = edge_report.observations.remove(0);
+        for number in 0..EDGE_COUNT {
+            let edge_span_id = format!("{:016x}", number + EDGE_COUNT + 1);
+            let edge_trace_id = report.observations[number]
+                .span
+                .as_ref()
+                .unwrap()
+                .trace_id
+                .clone();
+            report.observations[number]
+                .span
+                .as_mut()
+                .unwrap()
+                .parent_span_id = Some(edge_span_id.clone());
+
+            let mut edge = edge_template.clone();
+            edge.id = format!("edge-{number}");
+            let span = edge.span.as_mut().unwrap();
+            span.trace_id = edge_trace_id;
+            span.span_id = edge_span_id;
+            span.parent_span_id = None;
+            report.observations.push(edge);
+        }
+        let limits = Limits {
+            max_bytes: 16 * 1024 * 1024,
+            max_observations: EDGE_COUNT * 2,
+            ..Limits::default()
+        };
+        check_report(&report, &limits).unwrap();
+
+        let index = Index::build(&report);
+        let mut parent_lookups = 0;
+        let linked_services = index
+            .edge
+            .values()
+            .filter_map(|view| view.span)
+            .map(|span| index.services_under(span, || parent_lookups += 1).len())
+            .sum::<usize>();
+
+        assert_eq!(report.observations.len(), limits.max_observations);
+        assert_eq!(linked_services, EDGE_COUNT);
+        assert_eq!(parent_lookups, EDGE_COUNT);
+        assert!(parent_lookups <= EDGE_COUNT);
     }
 
     #[test]
