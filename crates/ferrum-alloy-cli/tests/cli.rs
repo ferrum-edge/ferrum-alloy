@@ -808,11 +808,33 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
     git(&["tag", "v0.1.0"]);
     let commit = git(&["rev-parse", "HEAD"]);
     let abbreviated = &commit[..7];
-    let revisions = ["main", "v0.1.0", commit.as_str(), abbreviated];
+    let selectors = [
+        ("--alloy-branch", "main", "branch"),
+        ("--alloy-tag", "v0.1.0", "tag"),
+        ("--alloy-rev", commit.as_str(), "rev"),
+        ("--alloy-rev", abbreviated, "rev"),
+    ];
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let fixture_url = format!("file://{}", fixture.to_string_lossy());
+    let default_target = dir.path().join("generated-default");
+    let default_output = bin()
+        .args([
+            "new",
+            "fixture-default",
+            "--path",
+            default_target.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&default_output), 0, "{}", stderr(&default_output));
+    let default_dependency = read(&default_target, "Cargo.toml");
+    let default_dependency = default_dependency
+        .lines()
+        .find(|line| line.starts_with("ferrum-alloy = "))
+        .unwrap();
+    assert!(default_dependency.contains("branch = \"main\""));
 
-    for (index, revision) in revisions.iter().enumerate() {
+    for (index, (option, value, selector)) in selectors.iter().enumerate() {
         let target = dir.path().join(format!("generated-{index}"));
         let output = bin()
             .args([
@@ -820,8 +842,8 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
                 &format!("fixture-{index}"),
                 "--path",
                 target.to_str().unwrap(),
-                "--alloy-rev",
-                revision,
+                option,
+                value,
             ])
             .output()
             .unwrap();
@@ -832,8 +854,15 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
             .lines()
             .find(|line| line.starts_with("ferrum-alloy = "))
             .unwrap();
-        assert!(dependency.contains("rev = "), "{dependency}");
-        assert!(!dependency.contains("branch = "), "{dependency}");
+        assert!(dependency.contains(&format!("{selector} = ")), "{dependency}");
+        assert_eq!(
+            ["branch", "tag", "rev"]
+                .iter()
+                .filter(|key| dependency.contains(&format!("{key} = ")))
+                .count(),
+            1,
+            "{dependency}"
+        );
         let dependency =
             dependency.replace("https://github.com/ferrum-edge/ferrum-alloy", &fixture_url);
         let manifest = format!(
@@ -853,10 +882,27 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
             .unwrap();
         assert!(
             resolved.status.success(),
-            "revision {revision:?} did not resolve: {}",
+            "{selector} {value:?} did not resolve: {}",
             String::from_utf8_lossy(&resolved.stderr)
         );
     }
+}
+
+#[test]
+fn new_alloy_rev_rejects_named_refs_and_conflicting_selectors() {
+    let named_ref = run(&["new", "fixture", "--alloy-rev", "main"]);
+    assert_eq!(code(&named_ref), 3, "{}", stderr(&named_ref));
+    assert!(stderr(&named_ref).contains("--alloy-branch or --alloy-tag"));
+
+    let conflicting = run(&[
+        "new",
+        "fixture",
+        "--alloy-branch",
+        "main",
+        "--alloy-tag",
+        "v0.1.0",
+    ]);
+    assert_eq!(code(&conflicting), 2, "{}", stderr(&conflicting));
 }
 
 #[test]
