@@ -8,15 +8,107 @@
 mod support;
 
 use axum::Router;
-#[cfg(feature = "openapi")]
 use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use ferrum_alloy::config::{AlloyConfig, ConfigError};
 use ferrum_alloy::{AlloyApp, AlloyError, AlloyParts, TelemetryInit};
-#[cfg(feature = "openapi")]
-use http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use serde_json::Value;
 use support::config;
-#[cfg(feature = "openapi")]
 use tower::ServiceExt;
+
+async fn assert_method_not_allowed(response: axum::response::Response) {
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let allow = response.headers().get("allow").unwrap();
+    assert!(!allow.is_empty());
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json"
+    );
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let problem: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        problem,
+        serde_json::json!({
+            "type": "tag:ferrumedge.com,2026:alloy/problem/method-not-allowed",
+            "title": "Method not allowed",
+            "status": 405,
+            "detail": "The route does not support this method."
+        })
+    );
+}
+
+#[tokio::test]
+async fn built_in_routes_return_problem_details_for_disallowed_methods() {
+    let mut cfg = config();
+    #[cfg(feature = "openapi")]
+    {
+        cfg.openapi.public = true;
+        #[cfg(feature = "openapi-ui")]
+        {
+            cfg.openapi.ui = true;
+        }
+    }
+    #[cfg(not(feature = "openapi"))]
+    let app = AlloyApp::new("paths");
+    #[cfg(feature = "openapi")]
+    let app = AlloyApp::new("paths").openapi(&document());
+    #[cfg(feature = "diagnostics")]
+    let app = app.diagnostics_authorizer(
+        |_: ferrum_alloy::diagnostics::DiagnosticsRequest| async {
+            ferrum_alloy::diagnostics::DiagnosticsAccess::Deny
+        },
+    );
+    let parts = app
+        .config(cfg)
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .into_parts()
+        .unwrap();
+
+    let mut application_paths = vec!["/livez", "/readyz"];
+    #[cfg(feature = "openapi")]
+    application_paths.push("/openapi.json");
+    #[cfg(feature = "openapi-ui")]
+    application_paths.extend([
+        "/docs",
+        "/docs/swagger-ui.css",
+        "/docs/swagger-ui-bundle.js",
+        "/docs/swagger-ui-bundle.js.LICENSE.txt",
+        "/docs/swagger-initializer.js",
+    ]);
+    for path in application_paths {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        assert_method_not_allowed(parts.router.clone().oneshot(request).await.unwrap()).await;
+    }
+
+    let mut management_paths = vec!["/livez", "/readyz", "/health", "/metrics"];
+    #[cfg(feature = "openapi")]
+    management_paths.push("/openapi.json");
+    #[cfg(feature = "openapi-ui")]
+    management_paths.extend([
+        "/docs",
+        "/docs/swagger-ui.css",
+        "/docs/swagger-ui-bundle.js",
+        "/docs/swagger-ui-bundle.js.LICENSE.txt",
+        "/docs/swagger-initializer.js",
+    ]);
+    #[cfg(feature = "diagnostics")]
+    management_paths.push("/diagnostics/v1/requests/request-id");
+    let management = parts.management_router.as_ref().unwrap();
+    for path in management_paths {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        assert_method_not_allowed(management.clone().oneshot(request).await.unwrap()).await;
+    }
+}
 
 /// Composes `app` with an empty router, so no application route can be
 /// involved.

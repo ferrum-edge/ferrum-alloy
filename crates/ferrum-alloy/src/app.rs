@@ -394,6 +394,7 @@ impl AlloyApp {
         let timeout = Duration::from_millis(config.server.request_timeout_ms);
         let deadline = HeadersDeadlineLayer::new(timeout);
         let mut app = app
+            .method_not_allowed_fallback(crate::normalize::method_not_allowed_response)
             .fallback_service(user_router.layer(RecordRouteLayer))
             .layer(NormalizeLayer)
             .layer(deadline)
@@ -406,7 +407,12 @@ impl AlloyApp {
         // needs a restart, so the liveness probe bypasses the limit. It gets
         // every other layer. Readiness stays behind the limit.
         if let Some(liveness) = liveness {
-            app = app.merge(liveness.layer(NormalizeLayer).layer(deadline));
+            app = app.merge(
+                liveness
+                    .method_not_allowed_fallback(crate::normalize::method_not_allowed_response)
+                    .layer(NormalizeLayer)
+                    .layer(deadline),
+            );
         }
         #[allow(unused_mut, reason = "optional layers are feature-gated")]
         let mut app = app

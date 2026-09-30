@@ -23,6 +23,13 @@ use tower_service::Service;
 
 use crate::problem::{Problem, ProblemKind};
 
+/// The Problem Details response used when a registered route rejects a method.
+pub(crate) fn method_not_allowed_response() -> Response {
+    Problem::new(ProblemKind::MethodNotAllowed)
+        .with_detail("The route does not support this method.")
+        .into_response()
+}
+
 /// Layer producing [`Normalize`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NormalizeLayer;
@@ -81,12 +88,11 @@ fn normalize(response: Response, slot: Option<&RouteSlot>) -> Response {
             if is_empty_untyped(&response) && response.headers().contains_key(ALLOW) =>
         {
             let allow = response.headers().get(ALLOW).cloned();
-            let mut problem = Problem::new(ProblemKind::MethodNotAllowed)
-                .with_detail("The route does not support this method.");
+            let mut problem = method_not_allowed_response();
             if let Some(allow) = allow {
-                problem = problem.with_header(ALLOW, allow);
+                problem.headers_mut().insert(ALLOW, allow);
             }
-            problem.into_response()
+            problem
         }
         _ => response,
     }
