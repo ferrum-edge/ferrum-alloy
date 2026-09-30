@@ -153,40 +153,40 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
 
 /// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.8
 /// (`src/retry.rs`), with the only meaning each token supports. v0.9.8 added
-/// `request_timeout`. A header carries no Edge version, so each meaning also
-/// holds for v0.9.7: there, `backend_timeout` also covered route deadlines that
-/// expired before any backend held the request.
+/// `request_timeout`. A header carries no Edge version. Edge v0.9.7 also used
+/// `backend_timeout` for route deadlines that expired before a backend held
+/// the request, so readers keep that older meaning in mind.
 pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     (
         "connection_failure",
-        "The gateway could not set up a connection to the configured backend (DNS, TCP, TLS, or pool).",
+        "Pre-wire connect, DNS or TLS failure: the gateway could not set up a connection to the backend. Also the token for every ErrorClass whose request_reached_wire is false.",
     ),
     (
         "backend_timeout",
-        "A gateway backend or route deadline elapsed.",
+        "A backend held the request (it accepted the connection and was sent the request) but did not answer in time. Never used for a timeout no backend held.",
     ),
     (
         "backend_error",
-        "The backend exchange failed, or the gateway refused locally after dispatch was considered.",
+        "The backend returned a 5xx, or a post-wire 5xx had no more specific token. Also the metric label for an unclassified backend 5xx. Never used for a response that did not reach a backend.",
     ),
     (
         "circuit_breaker_open",
-        "The gateway's circuit breaker for this backend was open.",
+        "The circuit breaker for the backend was open; the request never reached a backend.",
     ),
     (
         "overload",
-        "The gateway shed load, was draining, or hit an output ceiling.",
+        "Gateway resource refusal: overload or drain reject_new_requests (503), or response-transformer output above the configured response ceiling (502).",
     ),
     (
         "config_stale",
-        "The gateway data plane's configuration fence was stale.",
+        "Data-plane stale-config fence.",
     ),
     (
         "concurrency_limit",
-        "An adaptive or static gateway concurrency limit rejected the request.",
+        "adaptive_concurrency admission refused the request.",
     ),
     (
         "request_timeout",
-        "A gateway route's total request deadline expired before any backend held the request.",
+        "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before any backend held the request: during the client upload, a gateway-local phase, admission, or retry backoff. New in v0.9.8 (#5762).",
     ),
 ];

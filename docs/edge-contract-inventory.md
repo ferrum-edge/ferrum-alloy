@@ -109,7 +109,7 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 |---|---|---|
 | Edge active health check `GET {http_path}` (default `/health`, healthy `[200, 302]`) | EXISTING | `src/config/types.rs:1463-1526`, `src/health_check.rs:85-92`, `:3242-3277`. Alloy's export sets `http_path` to the manifest's `health.path` (typically `/readyz`) and `healthy_status_codes: [200]`. |
 | Edge admin `POST/PUT/GET/DELETE /api-specs` | EXISTING | `src/admin/mod.rs:3673-3716`, `docs/api_specs.md`. Not available in file mode. **Alloy never calls it.** `ferrum-alloy openapi export` produces the artifact that operators or Nexus publish. |
-| G01 authenticated diagnostic lookup: `X-Ferrum-Diagnostic-Ref`, `GET /diagnostics/v1/refs/{ref}`, `diagnostics:read` | **PROPOSED** (Anvil `docs/g01-gateway-diagnostic-contract.md`; ferrum-edge#5767) | Not implemented in Edge (no source hits). Alloy would treat it as `gateway_detail` evidence once it exists. |
+| G01 authenticated diagnostic lookup: `X-Ferrum-Diagnostic-Ref`, `GET /diagnostics/v1/refs/{ref}`, `diagnostics:read` | **EXISTING on Edge main; unreleased** (ferrum-edge#5767; `contracts-edge-0.9.8`, `vocabularies/gateway-headers.json`) | Edge main implements G01. The pinned contract marks the header unreleased; Alloy treats it as unavailable until an Edge release ships it and as `gateway_detail` evidence once supported. |
 | Alloy `/livez`, `/readyz` (application and management listeners) | EXISTING (Alloy) | Status only, `no-store` |
 | Alloy management `/health`, `/metrics`, `/openapi.json` | EXISTING (Alloy) | Bearer token when configured; loopback bind by default |
 
@@ -138,7 +138,7 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 | `alloy.response.body.outcome`, `alloy.response.body.bytes`, `alloy.response.upgraded` | EXISTING | Body finalization |
 | `alloy.admission.wait_ms` | EXISTING | Admission wait when enabled |
 | Operation spans with `alloy.operation.duration_ms`, `alloy.operation.kind`, `alloy.db.pool_wait_ms` | EXISTING | Explicitly instrumented operations |
-| Diagnostic report `ferrum.diagnostic_report` v1 | EXISTING in Alloy; **PROPOSED** as a shared contract | Findings are an Anvil `DiagnosticFinding` superset. Two `EvidenceSource` values (`gateway_telemetry`, `service_telemetry`) are proposed additions to Anvil's schema. Anvil import is **not tested**. |
+| Diagnostic report `ferrum.diagnostic_report` v1 | EXISTING in Alloy; shared schema adopted from `contracts-edge-0.9.8` | Alloy's Finding remains a superset of Anvil's `DiagnosticFinding`. The shared tag fixtures are checked against Alloy's Finding schema; Anvil import is **not tested**. |
 
 ## 9. Cross-repository dependencies
 

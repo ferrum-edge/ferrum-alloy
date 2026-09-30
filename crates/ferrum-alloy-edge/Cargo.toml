@@ -39,6 +39,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
+ring = { workspace = true }
 
 [lints]
 workspace = true
