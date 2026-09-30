@@ -1416,8 +1416,10 @@ impl AlloyConfig {
             ("health.readiness_path", &self.health.readiness_path),
             ("openapi.path", &self.openapi.path),
         ] {
-            if !path.starts_with('/') || path.contains(['{', '}', '*', ' ']) {
-                error(format!("{name} must be a literal path starting with '/'"));
+            if !is_literal_path(path) {
+                error(format!(
+                    "{name} must be a literal path starting with '/', without '{{', '}}', '*', spaces, or a segment starting with ':'"
+                ));
             }
         }
         if self.health.liveness_path == self.health.readiness_path {
@@ -1736,6 +1738,15 @@ fn openapi_ui_issues(config: &AlloyConfig, error: &mut impl FnMut(String)) {
     if ui == "/diagnostics" || ui.starts_with("/diagnostics/") {
         error("openapi.ui_path must be outside /diagnostics".into());
     }
+}
+
+/// A path that axum routes literally. `{`, `}`, and `*` are capture syntax,
+/// and axum 0.8 refuses a segment starting with `:` (its former capture
+/// syntax) by panicking, so none of them may appear.
+fn is_literal_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains(['{', '}', '*', ' '])
+        && !path.split('/').any(|segment| segment.starts_with(':'))
 }
 
 /// An absolute path of non-empty segments other than `.` and `..`, made only

@@ -3,7 +3,9 @@
 //! It binds to loopback by default. Detailed health, metrics, and the
 //! OpenAPI document require `Authorization: Bearer <management.token>` when a
 //! token is configured; configuration validation refuses a non-loopback
-//! management bind without a token. Every response is `no-store`.
+//! management bind without a token, and `AlloyParts::serve_on` a management
+//! listener actually bound off loopback without one. Every response is
+//! `no-store`.
 //!
 //! Requests are rate-limited before any handler or token check runs: per
 //! client, and except for the probes, which have a budget of their own, per
@@ -16,6 +18,7 @@
 //! `GET /diagnostics/v1/requests/{request_id}`, which the authorizer rather
 //! than the management token guards (see `crate::diagnostics`).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
@@ -77,9 +80,23 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Applies the rule that validation applies to `management.bind` to `addr`,
+/// the address a management listener is actually bound to: off loopback, a
+/// token is required. `token` says whether one is configured.
+pub(crate) fn check_listener(addr: SocketAddr, token: bool) -> Result<(), String> {
+    if token || addr.ip().is_loopback() {
+        return Ok(());
+    }
+    Err(format!(
+        "the management listener is bound to {addr}, which is not loopback; set management.token (FERRUM_ALLOY_MANAGEMENT_TOKEN) or bind it to loopback"
+    ))
+}
+
 pub(crate) fn authorized(headers: &HeaderMap, token: Option<&Secret>) -> bool {
     let Some(token) = token else {
-        // Only reachable on a loopback bind (enforced by config validation).
+        // Only reachable on a loopback listener: validation checks
+        // `management.bind`, and `AlloyParts::serve_on` the address a
+        // listener is actually bound to (`check_listener`).
         return true;
     };
     headers

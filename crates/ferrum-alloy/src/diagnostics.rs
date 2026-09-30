@@ -141,6 +141,18 @@ pub(crate) fn check_config(config: &AlloyConfig) -> Result<(), ConfigError> {
     }
 }
 
+/// Applies the loopback rule of [`check_config`] to `addr`, the address the
+/// management listener is actually bound to, which a listener passed to
+/// `AlloyParts::serve_on` need not share with `management.bind`.
+pub(crate) fn check_listener(addr: SocketAddr) -> Result<(), String> {
+    if addr.ip().is_loopback() {
+        return Ok(());
+    }
+    Err(format!(
+        "diagnostic retrieval requires a loopback management listener, but it is bound to {addr}; terminate TLS in a proxy on the same host instead"
+    ))
+}
+
 /// What the authorizer sees of a retrieval request.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

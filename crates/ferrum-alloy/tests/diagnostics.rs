@@ -535,6 +535,32 @@ fn startup_requires_a_loopback_management_listener() {
 }
 
 #[tokio::test]
+async fn serving_refuses_retrieval_on_a_listener_off_loopback() {
+    // `management.bind` is loopback and a management token is configured,
+    // but the listener handed to `serve_on` accepts connections on every
+    // interface. The token does not make retrieval acceptable there.
+    let parts = app()
+        .diagnostics_authorizer(authorize)
+        .config(settings())
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .shutdown_signal(std::future::pending())
+        .into_parts()
+        .unwrap();
+    assert!(parts.config.management.bind.ip().is_loopback());
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let management = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        parts.serve_on(app_listener, Some(management)),
+    )
+    .await
+    .expect("serve_on refused the listener instead of serving");
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("loopback management listener"), "{error}");
+    assert!(!error.contains("management.token"), "{error}");
+}
+
+#[tokio::test]
 async fn retrieval_works_over_real_connections() {
     let app = app().diagnostics_authorizer(authorize);
     let server = start(app, settings()).await;
