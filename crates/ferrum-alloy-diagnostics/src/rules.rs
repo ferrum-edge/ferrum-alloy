@@ -1476,13 +1476,42 @@ mod tests {
 
     #[test]
     fn operation_ancestry_work_is_linear_for_unrelated_self_parented_spans() {
-        let report = report_with_spans(1_000, 1_000);
+        const SERVICE_COUNT: usize = 2_500;
+        const OPERATION_COUNT: usize = 2_500;
+
+        let report = report_with_spans(SERVICE_COUNT, OPERATION_COUNT);
+        assert_eq!(report.observations.len(), 5_000);
         let index = Index::build(&report);
         let mut parent_lookups = 0;
         let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
 
         assert!(candidates.is_empty());
-        assert_eq!(parent_lookups, 1_000);
+        assert_eq!(parent_lookups, OPERATION_COUNT);
+        assert!(parent_lookups <= OPERATION_COUNT * 64);
+    }
+
+    #[test]
+    fn operation_ancestry_stops_after_64_parent_hops() {
+        let mut report = report_with_spans(66, 1);
+        for number in 1..66 {
+            report.observations[number]
+                .span
+                .as_mut()
+                .unwrap()
+                .parent_span_id = Some(format!("{:016x}", number - 1));
+        }
+        report.observations[66]
+            .span
+            .as_mut()
+            .unwrap()
+            .parent_span_id = Some(format!("{:016x}", 65));
+
+        let index = Index::build(&report);
+        let mut parent_lookups = 0;
+        let candidates = index.operations_by_service_ancestor(|| parent_lookups += 1);
+
+        assert_eq!(parent_lookups, 64);
+        assert_eq!(candidates.values().map(Vec::len).sum::<usize>(), 64);
     }
 
     #[test]
