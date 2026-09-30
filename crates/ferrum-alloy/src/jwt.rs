@@ -7,8 +7,14 @@
 //! * `iss`, `aud`, and `exp` are required; `nbf` is checked when present;
 //! * keys come only from the configured JWKS URL — never from `jku`, `x5u`,
 //!   or embedded `jwk` headers in the token;
-//! * a token without `kid` is accepted only when exactly one key could
-//!   verify it;
+//! * a JWK is used only to verify signatures: one whose `use` is not `sig`,
+//!   or whose `key_ops` lack `verify`, is ignored;
+//! * a JWK verifies only algorithms its key type and curve support and, when
+//!   it declares `alg`, only that algorithm (RFC 8725, section 3.1);
+//! * a token is verified against exactly one key: the one whose `kid` and
+//!   algorithm match the token's. A token without `kid` is accepted only when
+//!   exactly one key could verify it; several matching keys are ambiguous and
+//!   the token is rejected;
 //! * JWKS refreshes are single-flight, rate-limited (also for unknown
 //!   `kid`s), time-bounded, size-bounded, and never follow redirects. Each
 //!   runs in its own task, so a caller that stops waiting never cancels it;
@@ -19,7 +25,8 @@
 //! * an expired key set keeps verifying known `kid`s for at most
 //!   `jwks_max_stale_ms` while it is revalidated in the background or while
 //!   refreshes fail, then verification fails closed;
-//! * a JWKS outage is `503 auth-unavailable`, not `401`.
+//! * a JWKS outage is `503 auth-unavailable`, not `401`, also when a failed
+//!   refresh leaves a cached key set that holds no key for the token.
 //!
 //! Authentication proves who the caller is; [`Authorize`] is where the
 //! application decides what they may do. Forwarded identity headers never
@@ -36,7 +43,9 @@ use futures_util::future::BoxFuture;
 use http::Request;
 use http::header::{AUTHORIZATION, HeaderValue, WWW_AUTHENTICATE};
 use http::request::Parts;
-use jsonwebtoken::jwk::{JwkSet, PublicKeyUse};
+use jsonwebtoken::jwk::{
+    AlgorithmParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
+};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
@@ -112,7 +121,103 @@ where
 
 struct Key {
     kid: Option<String>,
+    /// The algorithms this key may verify: those its key type supports,
+    /// narrowed to its `alg` when the JWK declares one. Never empty.
+    algorithms: Vec<Algorithm>,
     key: DecodingKey,
+}
+
+impl Key {
+    /// The key a JWK contributes, or `None` when it may never verify a token
+    /// signature: its `use` is not `sig`, its `key_ops` lack `verify`, its key
+    /// type supports no accepted algorithm, or it declares an `alg` that its
+    /// key type cannot use.
+    fn from_jwk(jwk: &Jwk) -> Option<Self> {
+        let common = &jwk.common;
+        let signature_use = matches!(common.public_key_use, None | Some(PublicKeyUse::Signature));
+        let verify_operation = match &common.key_operations {
+            None => true,
+            Some(operations) => operations.contains(&KeyOperations::Verify),
+        };
+        if !signature_use || !verify_operation {
+            return None;
+        }
+        let algorithms: Vec<Algorithm> = key_type_algorithms(&jwk.algorithm)
+            .iter()
+            .copied()
+            .filter(|&algorithm| declared_algorithm_permits(common.key_algorithm, algorithm))
+            .collect();
+        if algorithms.is_empty() {
+            return None;
+        }
+        let key = DecodingKey::from_jwk(jwk).ok()?;
+        Some(Self {
+            kid: common.key_id.clone(),
+            algorithms,
+            key,
+        })
+    }
+
+    /// Whether this key may verify a token with `kid` and `algorithm`. Any
+    /// key's `kid` matches a token without one.
+    fn matches(&self, kid: Option<&str>, algorithm: Algorithm) -> bool {
+        let kid_matches = kid.is_none() || self.kid.as_deref() == kid;
+        kid_matches && self.algorithms.contains(&algorithm)
+    }
+}
+
+/// The accepted algorithms a JWK's key type and curve support.
+fn key_type_algorithms(parameters: &AlgorithmParameters) -> &'static [Algorithm] {
+    match parameters {
+        AlgorithmParameters::RSA(_) => &[
+            Algorithm::RS256,
+            Algorithm::RS384,
+            Algorithm::RS512,
+            Algorithm::PS256,
+            Algorithm::PS384,
+            Algorithm::PS512,
+        ],
+        AlgorithmParameters::EllipticCurve(ec) => match ec.curve {
+            EllipticCurve::P256 => &[Algorithm::ES256],
+            EllipticCurve::P384 => &[Algorithm::ES384],
+            _ => &[],
+        },
+        AlgorithmParameters::OctetKeyPair(okp) if okp.curve == EllipticCurve::Ed25519 => {
+            &[Algorithm::EdDSA]
+        }
+        // Symmetric (`oct`) and unknown key types never verify.
+        _ => &[],
+    }
+}
+
+/// Whether a JWK's declared `alg`, if any, permits `algorithm`. An `alg`
+/// this crate does not recognize permits nothing.
+fn declared_algorithm_permits(declared: Option<KeyAlgorithm>, algorithm: Algorithm) -> bool {
+    match declared {
+        None => true,
+        Some(declared) => declared == KeyAlgorithm::from(algorithm),
+    }
+}
+
+/// Keys to verify a token with.
+struct Keys {
+    keys: Arc<Vec<Key>>,
+    /// Whether the key source vouches for these keys now: they come from a
+    /// successful refresh, from a fresh cache, or from a cache whose latest
+    /// refresh succeeded within `jwks_min_refresh_interval_ms`. `false` for
+    /// cached keys used because a refresh failed or could not run: a token
+    /// they cannot verify may be signed by a key the JWKS now holds.
+    current: bool,
+}
+
+impl Keys {
+    /// Keys the key source vouches for now.
+    fn current(keys: Arc<Vec<Key>>) -> Self {
+        Self {
+            keys,
+            current: true,
+        }
+    }
 }
 
 struct KeyState {
@@ -137,9 +242,12 @@ type Outcome = Option<Result<Arc<Vec<Key>>, AuthError>>;
 
 /// What [`JwtVerifier::refresh`] did.
 enum Refresh {
-    /// Nothing: a refresh started within `jwks_min_refresh_interval_ms`, or
-    /// the state lock is poisoned.
-    Skipped,
+    /// Nothing: the latest refresh started within
+    /// `jwks_min_refresh_interval_ms`. `failed` is whether it failed.
+    RateLimited { failed: bool },
+    /// Nothing: the state lock is poisoned, or there is no runtime to fetch
+    /// on.
+    Unavailable,
     /// A refresh is running or started after the caller's snapshot; its
     /// outcome arrives on the receiver.
     Started(watch::Receiver<Outcome>),
@@ -410,17 +518,7 @@ impl JwtVerifier {
             body.extend_from_slice(&chunk);
         }
         let set: JwkSet = serde_json::from_slice(&body).map_err(|_| AuthError::KeysUnavailable)?;
-        let keys: Vec<Key> = set
-            .keys
-            .iter()
-            .filter(|jwk| !matches!(jwk.common.public_key_use, Some(ref u) if *u != PublicKeyUse::Signature))
-            .filter_map(|jwk| {
-                DecodingKey::from_jwk(jwk).ok().map(|key| Key {
-                    kid: jwk.common.key_id.clone(),
-                    key,
-                })
-            })
-            .collect();
+        let keys: Vec<Key> = set.keys.iter().filter_map(Key::from_jwk).collect();
         Ok((keys, lifetime))
     }
 
@@ -445,17 +543,17 @@ impl JwtVerifier {
                 }
             }
             // A poisoned lock never refreshes; `cached` already fails closed.
-            Err(_) => return Refresh::Skipped,
+            Err(_) => return Refresh::Unavailable,
         }
         let Ok(mut state) = self.inner.state.write() else {
-            return Refresh::Skipped;
+            return Refresh::Unavailable;
         };
         if let Some(pending) = self.pending(&state, seen) {
             return pending;
         }
         // Outside a Tokio runtime there is nothing to run the fetch on.
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return Refresh::Skipped;
+            return Refresh::Unavailable;
         };
         // Recorded before the fetch, so the rate limit counts from here. Age
         // is measured from here too, so fetch latency counts against the
@@ -489,7 +587,8 @@ impl JwtVerifier {
         }
         let recent = state.last_attempt.map(|at| at.elapsed());
         if recent.is_some_and(|age| age < self.inner.min_refresh) {
-            return Some(Refresh::Skipped);
+            let failed = state.latest.as_ref().is_some_and(refresh_failed);
+            return Some(Refresh::RateLimited { failed });
         }
         None
     }
@@ -542,10 +641,13 @@ impl JwtVerifier {
     /// Waits for a refresh (single flight, rate limited) and returns the
     /// keys to verify with. A successful refresh's keys are used as fetched,
     /// even when the fetch took longer than their lifetime. Otherwise the
-    /// cached keys are used while fresh or stale, and never once expired.
-    async fn refreshed(&self, seen: u64) -> Result<Arc<Vec<Key>>, AuthError> {
-        let failure = match self.refresh(seen) {
-            Refresh::Skipped => AuthError::KeysUnavailable,
+    /// cached keys are used while fresh or stale, and never once expired;
+    /// they are current only when the rate limit holds against a refresh
+    /// that succeeded.
+    async fn refreshed(&self, seen: u64) -> Result<Keys, AuthError> {
+        let (current, failure) = match self.refresh(seen) {
+            Refresh::RateLimited { failed } => (!failed, AuthError::KeysUnavailable),
+            Refresh::Unavailable => (false, AuthError::KeysUnavailable),
             Refresh::Started(mut receiver) => {
                 let outcome = receiver
                     .wait_for(|outcome| outcome.is_some())
@@ -556,10 +658,10 @@ impl JwtVerifier {
                     self.clear_abandoned();
                 }
                 match outcome {
-                    Some(Ok(keys)) if !keys.is_empty() => return Ok(keys),
+                    Some(Ok(keys)) if !keys.is_empty() => return Ok(Keys::current(keys)),
                     Some(Ok(_)) => return Err(AuthError::KeysUnavailable),
-                    Some(Err(error)) => error,
-                    None => AuthError::KeysUnavailable,
+                    Some(Err(error)) => (false, error),
+                    None => (false, AuthError::KeysUnavailable),
                 }
             }
         };
@@ -567,25 +669,24 @@ impl JwtVerifier {
         if cached.freshness == Freshness::Expired || cached.keys.is_empty() {
             return Err(failure);
         }
-        Ok(cached.keys)
+        Ok(Keys {
+            keys: cached.keys,
+            current,
+        })
     }
 
+    /// The one key that may verify a token with `kid` and `algorithm`, if
+    /// any. Several such keys are ambiguous, and none of them is tried.
     fn select<'k>(
         keys: &'k [Key],
         kid: Option<&str>,
+        algorithm: Algorithm,
     ) -> Result<Option<&'k DecodingKey>, AuthError> {
-        match kid {
-            Some(kid) => Ok(keys
-                .iter()
-                .find(|k| k.kid.as_deref() == Some(kid))
-                .map(|k| &k.key)),
-            None => match keys {
-                [only] => Ok(Some(&only.key)),
-                [] => Ok(None),
-                _ => Err(AuthError::Invalid(
-                    "token has no kid and the key set is ambiguous",
-                )),
-            },
+        let mut candidates = keys.iter().filter(|k| k.matches(kid, algorithm));
+        match (candidates.next(), candidates.next()) {
+            (None, _) => Ok(None),
+            (Some(key), None) => Ok(Some(&key.key)),
+            (Some(_), Some(_)) => Err(AuthError::Invalid("ambiguous signing key")),
         }
     }
 
@@ -599,30 +700,42 @@ impl JwtVerifier {
             return Err(AuthError::Invalid("algorithm not allowed"));
         }
         let kid = header.kid.as_deref();
+        let alg = header.alg;
         let cached = self.cached();
         let keys = match cached.freshness {
             // Expiry takes precedence over selection errors: the refreshed
             // set may no longer be ambiguous or may contain usable keys.
             Freshness::Expired => self.refreshed(cached.attempts).await?,
             Freshness::Fresh => {
-                if Self::select(&cached.keys, kid)?.is_some() {
-                    cached.keys
+                if Self::select(&cached.keys, kid, alg)?.is_some() {
+                    Keys::current(cached.keys)
                 } else {
                     self.refreshed(cached.attempts).await?
                 }
             }
             // Past its lifetime but within the stale bound: verify now and
             // revalidate in the background, so no request waits on the JWKS.
+            // A stale set that cannot answer (no key, or several) waits for
+            // the refresh instead.
             Freshness::Stale => {
-                if Self::select(&cached.keys, kid)?.is_some() {
+                if matches!(Self::select(&cached.keys, kid, alg), Ok(Some(_))) {
                     self.refresh(cached.attempts);
-                    cached.keys
+                    Keys::current(cached.keys)
                 } else {
                     self.refreshed(cached.attempts).await?
                 }
             }
         };
-        let key = Self::select(&keys, kid)?.ok_or(AuthError::Invalid("unknown signing key"))?;
+        let key = match Self::select(&keys.keys, kid, alg) {
+            Ok(Some(key)) => key,
+            // Several matching keys are a problem with the key set, not with
+            // its availability: `401` whether or not a refresh failed.
+            Err(error) => return Err(error),
+            Ok(None) if keys.current => return Err(AuthError::Invalid("unknown signing key")),
+            // No cached key can verify the token, and the key source could
+            // not say whether it holds one now: an outage, not a bad token.
+            Ok(None) => return Err(AuthError::KeysUnavailable),
+        };
         let mut validation = Validation::new(header.alg);
         validation.algorithms = vec![header.alg];
         validation.set_issuer(&[self.inner.issuer.as_str()]);
@@ -670,6 +783,11 @@ impl JwtVerifier {
             authorizer: None,
         }
     }
+}
+
+/// Whether a refresh completed and failed.
+fn refresh_failed(latest: &watch::Receiver<Outcome>) -> bool {
+    matches!(*latest.borrow(), Some(Err(_)))
 }
 
 fn unauthorized(error: Option<&AuthError>) -> Problem {
