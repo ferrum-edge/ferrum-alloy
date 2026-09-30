@@ -1640,11 +1640,7 @@ mod tests {
             .unwrap()
             .span_id
             .clone();
-        direct.observations[1]
-            .span
-            .as_mut()
-            .unwrap()
-            .parent_span_id = Some(service_span.clone());
+        direct.observations[1].span.as_mut().unwrap().parent_span_id = Some(service_span.clone());
         let mut indirect = direct.clone();
         let intermediate_id = "intermediate-alloy-span";
         indirect.observations[1]
