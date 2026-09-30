@@ -537,10 +537,12 @@ pub struct AlloyParts {
     /// trust can be evaluated.
     pub router: Router,
     /// The management router, when enabled. [`AlloyParts::serve`] and
-    /// [`AlloyParts::serve_on`] refuse to serve it off loopback without a
-    /// management token. Without a token its handlers admit every request, so
-    /// when you serve it yourself, keep that check: bind loopback or configure
-    /// the token. Serve it with a listener that
+    /// [`AlloyParts::serve_on`] refuse to serve it on a listener that
+    /// [`AlloyParts::check_management_listener`] refuses. Without a
+    /// management token its handlers admit every request, so when you serve
+    /// it yourself, call [`AlloyParts::check_management_listener`] on your
+    /// listener first and do not serve it if that fails; nothing else checks
+    /// where it is served. Serve it with a listener that
     /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):
     /// its rate limits key clients by that transport address, and requests
     /// without either all share one budget. Behind a proxy or sidecar, every
@@ -585,9 +587,21 @@ impl AlloyParts {
         Arc::clone(&self.app_stats)
     }
 
-    /// Applies the management access policy to the address `listener` is
-    /// bound to. An address that cannot be read is refused.
-    fn check_management_listener(&self, listener: &TcpListener) -> Result<(), AlloyError> {
+    /// Checks that [`AlloyParts::management_router`] may be served on
+    /// `listener`, by the address it is actually bound to: any loopback
+    /// address is accepted, and another address only with a management
+    /// token. With diagnostic retrieval installed (feature `diagnostics`),
+    /// only a loopback address is accepted, token or not. An address that
+    /// cannot be read is refused.
+    ///
+    /// [`AlloyParts::serve_on`] calls this before serving. Call it yourself
+    /// before serving the management router on your own listener.
+    ///
+    /// # Errors
+    ///
+    /// [`AlloyError::Config`] when the policy refuses the address, and
+    /// [`AlloyError::Serve`] when the address cannot be read.
+    pub fn check_management_listener(&self, listener: &TcpListener) -> Result<(), AlloyError> {
         let addr = listener.local_addr().map_err(AlloyError::Serve)?;
         let mut errors = Vec::new();
         if let Err(message) = management::check_listener(addr, self.management_token) {

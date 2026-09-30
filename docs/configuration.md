@@ -184,7 +184,7 @@ Each section below shows a key, its default, and its meaning.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Serve the management listener. |
-| `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`, and is refused while diagnostic retrieval is installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)). `AlloyParts::serve_on` applies the same rules to the address a listener handed to it is actually bound to, and refuses to serve otherwise; only its port may differ from this setting. |
+| `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`, and is refused while diagnostic retrieval is installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)). `AlloyParts::serve_on` applies the same rules to the address a listener handed to it is actually bound to, which may differ from this setting, and refuses to serve otherwise: any loopback address is accepted without a token, any address with one, and diagnostic retrieval only on loopback. If you serve `AlloyParts::management_router` yourself, call `AlloyParts::check_management_listener` first. |
 | `token` | none | Bearer token (at least 32 characters) for `/health`, `/metrics`, the OpenAPI document, and its documentation UI. `/livez` and `/readyz` stay unauthenticated. |
 
 #### `[management.rate_limit]`

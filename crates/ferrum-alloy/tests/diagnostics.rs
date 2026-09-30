@@ -561,6 +561,20 @@ async fn serving_refuses_retrieval_on_a_listener_off_loopback() {
 }
 
 #[tokio::test]
+async fn check_management_listener_refuses_retrieval_off_loopback() {
+    // For an application that serves `management_router` itself.
+    let parts = parts(settings());
+    let off_loopback = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let error = parts
+        .check_management_listener(&off_loopback)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("loopback management listener"), "{error}");
+    let loopback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    parts.check_management_listener(&loopback).unwrap();
+}
+
+#[tokio::test]
 async fn retrieval_works_over_real_connections() {
     let app = app().diagnostics_authorizer(authorize);
     let server = start(app, settings()).await;

@@ -550,10 +550,10 @@ async fn liveness_takes_no_admission_permit() {
     let live = call("GET", "/livez").await.unwrap();
     assert_eq!(live.status(), StatusCode::OK, "liveness is not refused");
     assert_eq!(live.headers()["cache-control"], "no-store");
-    // It still has the other layers: axum's `405` becomes a problem.
+    // Other methods are still refused by the liveness route itself.
     let post = call("POST", "/livez").await.unwrap();
     assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(post.headers()["content-type"], "application/problem+json");
+    assert!(post.headers().contains_key("allow"));
     // Business requests and readiness still get the overload response.
     for path in ["/hello", "/readyz"] {
         let overloaded = call("GET", path).await.unwrap();

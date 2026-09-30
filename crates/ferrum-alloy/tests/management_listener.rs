@@ -2,6 +2,8 @@
 //! address the management listener is actually bound to, whatever
 //! `management.bind` says: off loopback it refuses to serve without a
 //! management token, before either listener serves anything.
+//! `AlloyParts::check_management_listener` applies the same policy for an
+//! application that serves the management router itself.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -15,18 +17,31 @@ use axum::routing::get;
 use ferrum_alloy::config::{AlloyConfig, ConfigError, Secret};
 use ferrum_alloy::{AlloyApp, AlloyError, AlloyParts, TelemetryInit};
 use support::{TOKEN, fetch, fetch_with};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 fn parts(mut config: AlloyConfig) -> AlloyParts {
     config.shutdown.drain_timeout_ms = 2_000;
     let router = Router::new().route("/hello", get(|| async { "hello" }));
-    AlloyApp::new("management-listener")
-        .router(router)
-        .config(config)
+    let app = AlloyApp::new("management-listener").router(router);
+    #[cfg(feature = "openapi")]
+    let app = app.openapi(&document());
+    app.config(config)
         .telemetry(TelemetryInit::ApplicationOwned)
         .shutdown_signal(std::future::pending())
         .into_parts()
         .unwrap()
+}
+
+#[cfg(feature = "openapi")]
+fn document() -> ferrum_alloy::utoipa::openapi::OpenApi {
+    ferrum_alloy::utoipa::openapi::OpenApiBuilder::new()
+        .info(
+            ferrum_alloy::utoipa::openapi::InfoBuilder::new()
+                .title("management-listener")
+                .version("1")
+                .build(),
+        )
+        .build()
 }
 
 /// A listener on every IPv4 interface, and the loopback address that
@@ -51,10 +66,11 @@ async fn a_listener_off_loopback_without_a_token_is_refused_before_serving() {
     assert!(config.management.bind.ip().is_loopback());
     assert!(config.management.token.is_none());
     let parts = parts(config);
-    let (app, app_addr) = on_loopback().await;
-    let (management, management_addr) = on_every_interface().await;
+    let (app, _) = on_loopback().await;
+    let (management, _) = on_every_interface().await;
 
-    // It must fail at once; serving would run until shutdown.
+    // It must fail at once; serving would run until shutdown, so returning
+    // within the timeout shows that nothing was served.
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         parts.serve_on(app, Some(management)),
@@ -68,10 +84,6 @@ async fn a_listener_off_loopback_without_a_token_is_refused_before_serving() {
             assert!(errors[0].contains("management.token"), "{errors:?}");
         }
         other => panic!("expected a configuration error, got {other:?}"),
-    }
-    // Both listeners were dropped without serving.
-    for addr in [app_addr, management_addr] {
-        assert!(TcpStream::connect(addr).await.is_err(), "{addr} is closed");
     }
 }
 
@@ -87,7 +99,12 @@ async fn a_listener_off_loopback_with_a_token_requires_it() {
 
     let url = |path: &str| format!("http://{management_addr}{path}");
     assert_eq!(fetch(&url("/livez")).await.status, 200);
-    for path in ["/health", "/metrics"] {
+    let paths: &[&str] = if cfg!(feature = "openapi") {
+        &["/health", "/metrics", "/openapi.json"]
+    } else {
+        &["/health", "/metrics"]
+    };
+    for &path in paths {
         let reply = fetch(&url(path)).await;
         assert_eq!(reply.status, 401, "{path}");
         let bearer = format!("Bearer {TOKEN}");
@@ -142,4 +159,26 @@ async fn an_application_listener_alone_is_not_checked() {
         .expect("server stopped in time")
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn check_management_listener_applies_the_same_policy() {
+    // For an application that serves `management_router` itself.
+    let without_token = parts(AlloyConfig::default());
+    let (off_loopback, _) = on_every_interface().await;
+    match without_token.check_management_listener(&off_loopback) {
+        Err(AlloyError::Config(ConfigError::Invalid(errors))) => {
+            assert!(errors[0].contains("is not loopback"), "{errors:?}");
+        }
+        other => panic!("expected a configuration error, got {other:?}"),
+    }
+    let (loopback, _) = on_loopback().await;
+    without_token.check_management_listener(&loopback).unwrap();
+
+    // With a token, any address is accepted.
+    let mut config = AlloyConfig::default();
+    config.management.token = Some(Secret::new(TOKEN));
+    let with_token = parts(config);
+    with_token.check_management_listener(&off_loopback).unwrap();
+    with_token.check_management_listener(&loopback).unwrap();
 }

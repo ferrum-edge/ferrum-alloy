@@ -94,9 +94,12 @@ pub(crate) fn check_listener(addr: SocketAddr, token: bool) -> Result<(), String
 
 pub(crate) fn authorized(headers: &HeaderMap, token: Option<&Secret>) -> bool {
     let Some(token) = token else {
-        // Only reachable on a loopback listener: validation checks
-        // `management.bind`, and `AlloyParts::serve_on` the address a
-        // listener is actually bound to (`check_listener`).
+        // Without a token every request is admitted. Validation refuses a
+        // non-loopback `management.bind`, and `AlloyParts::serve` and
+        // `serve_on` refuse a listener actually bound off loopback
+        // (`check_listener`). An application serving `management_router`
+        // itself must call `AlloyParts::check_management_listener`; nothing
+        // here can see where the router is served.
         return true;
     };
     headers
