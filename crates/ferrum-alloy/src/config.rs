@@ -1745,12 +1745,10 @@ fn redact_endpoint(endpoint: &str) -> String {
     };
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
-    let authority = authority
-        .rfind('@')
-        .map_or_else(
-            || authority.to_owned(),
-            |at| format!("<redacted>@{}", &authority[at + 1..]),
-        );
+    let authority = authority.rfind('@').map_or_else(
+        || authority.to_owned(),
+        |at| format!("<redacted>@{}", &authority[at + 1..]),
+    );
     let suffix = &rest[authority_end..];
     let query_start = suffix.find('?');
     let fragment_start = suffix.find('#');
