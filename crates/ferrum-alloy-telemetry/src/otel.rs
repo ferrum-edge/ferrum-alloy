@@ -7,6 +7,9 @@
 //!   thread, so exporter internals cannot instrument themselves recursively.
 //! * The OTLP exporter is built on that thread, which keeps its blocking HTTP
 //!   client out of the async runtime.
+//! * Spans, resource updates, flushes, and shutdowns are handled in queue
+//!   order; a flush or shutdown never discards the messages queued behind it,
+//!   though a shutdown handles at most one further queue's worth of them.
 //! * Configuration errors (bad endpoint, invalid ratio) fail at startup.
 //!
 //! Component versions: `opentelemetry`/`opentelemetry_sdk`/`opentelemetry-otlp`
@@ -322,6 +325,12 @@ pub fn layer_active() -> bool {
     probe.context().span().span_context().is_valid()
 }
 
+/// Bound on a flush, and on waiting for queue space for a resource update.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Work for the export thread. The channel is FIFO and the worker handles
+/// every message in the order it was queued, so a span queued before a
+/// flush is exported by that flush and no control message is skipped.
 enum Message {
     Span(Box<SpanData>, usize),
     Resource(Resource),
@@ -337,6 +346,7 @@ pub struct BoundedSpanProcessor {
     max_queue_bytes: usize,
     metrics: Arc<Metrics>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
+    controls_queued: AtomicUsize,
 }
 
 impl fmt::Debug for BoundedSpanProcessor {
@@ -409,6 +419,7 @@ impl BoundedSpanProcessor {
             metrics: Arc::clone(&metrics),
             max_batch: config.max_export_batch,
             delay: Duration::from_millis(config.scheduled_delay_ms),
+            capacity: config.max_queue_spans,
         };
         let handle = thread::Builder::new()
             .name("ferrum-alloy-otlp".into())
@@ -447,17 +458,22 @@ impl BoundedSpanProcessor {
             max_queue_bytes: config.max_queue_bytes,
             metrics,
             worker: Mutex::new(Some(handle)),
+            controls_queued: AtomicUsize::new(0),
         })
     }
 
-    fn control(&self, make: fn(SyncSender<()>) -> Message, timeout: Duration) -> OTelSdkResult {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        let deadline = Instant::now() + timeout;
-        let mut message = make(ack_tx);
-        // Control messages wait for queue space, bounded by the timeout.
+    /// Flush and shutdown requests accepted into the queue so far. A test
+    /// observable, not a stable API.
+    #[doc(hidden)]
+    pub fn controls_queued(&self) -> usize {
+        self.controls_queued.load(Ordering::SeqCst)
+    }
+
+    /// Queues `message`, waiting for queue space until `deadline`.
+    fn enqueue(&self, mut message: Message, deadline: Instant, timeout: Duration) -> OTelSdkResult {
         loop {
             match self.sender.try_send(message) {
-                Ok(()) => break,
+                Ok(()) => return Ok(()),
                 Err(TrySendError::Full(returned)) => {
                     if Instant::now() >= deadline {
                         return Err(OTelSdkError::Timeout(timeout));
@@ -468,10 +484,21 @@ impl BoundedSpanProcessor {
                 Err(TrySendError::Disconnected(_)) => return Err(OTelSdkError::AlreadyShutdown),
             }
         }
+    }
+
+    fn control(&self, make: fn(SyncSender<()>) -> Message, timeout: Duration) -> OTelSdkResult {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        let deadline = Instant::now() + timeout;
+        // Control messages wait for queue space, bounded by the timeout.
+        self.enqueue(make(ack_tx), deadline, timeout)?;
+        self.controls_queued.fetch_add(1, Ordering::SeqCst);
         let remaining = deadline.saturating_duration_since(Instant::now());
-        ack_rx
-            .recv_timeout(remaining)
-            .map_err(|_| OTelSdkError::Timeout(timeout))
+        match ack_rx.recv_timeout(remaining) {
+            Ok(()) => Ok(()),
+            Err(RecvTimeoutError::Timeout) => Err(OTelSdkError::Timeout(timeout)),
+            // The worker exited without answering: the pipeline is shut down.
+            Err(RecvTimeoutError::Disconnected) => Err(OTelSdkError::AlreadyShutdown),
+        }
     }
 }
 
@@ -506,7 +533,7 @@ impl SpanProcessor for BoundedSpanProcessor {
     }
 
     fn force_flush(&self) -> OTelSdkResult {
-        self.control(Message::Flush, Duration::from_secs(5))
+        self.control(Message::Flush, CONTROL_TIMEOUT)
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
@@ -527,7 +554,9 @@ impl SpanProcessor for BoundedSpanProcessor {
     }
 
     fn set_resource(&mut self, resource: &Resource) {
-        let _ = self.sender.try_send(Message::Resource(resource.clone()));
+        // Waits for queue space (bounded) instead of dropping the update.
+        let message = Message::Resource(resource.clone());
+        let _ = self.enqueue(message, Instant::now() + CONTROL_TIMEOUT, CONTROL_TIMEOUT);
     }
 }
 
@@ -538,44 +567,43 @@ struct Worker {
     metrics: Arc<Metrics>,
     max_batch: usize,
     delay: Duration,
+    /// Queue capacity: the most messages queued behind a shutdown that are
+    /// still handled, so producers that keep sending cannot hold it open.
+    capacity: usize,
+}
+
+/// Spans accumulated for the next export request.
+struct Batch {
+    spans: Vec<SpanData>,
+    bytes: usize,
 }
 
 impl Worker {
     fn run<E: SpanExporter>(self, mut exporter: E) {
-        let mut batch: Vec<SpanData> = Vec::with_capacity(self.max_batch);
-        let mut batch_bytes = 0usize;
+        let mut batch = Batch {
+            spans: Vec::with_capacity(self.max_batch),
+            bytes: 0,
+        };
+        let mut shutdown_acks = Vec::new();
         let mut next_export = Instant::now() + self.delay;
         loop {
             let wait = next_export.saturating_duration_since(Instant::now());
             match self.receiver.recv_timeout(wait) {
-                Ok(Message::Span(span, size)) => {
-                    batch.push(*span);
-                    batch_bytes += size;
-                    if batch.len() >= self.max_batch {
-                        self.export(&exporter, &mut batch, &mut batch_bytes);
+                Ok(message) => {
+                    if self.dispatch(&mut exporter, &mut batch, message, &mut shutdown_acks) {
                         next_export = Instant::now() + self.delay;
                     }
-                }
-                Ok(Message::Resource(resource)) => exporter.set_resource(&resource),
-                Ok(Message::Flush(ack)) => {
-                    self.drain_queue(&mut batch, &mut batch_bytes);
-                    self.export(&exporter, &mut batch, &mut batch_bytes);
-                    let _ = exporter.force_flush();
-                    let _ = ack.send(());
-                }
-                Ok(Message::Shutdown(ack)) => {
-                    self.drain_queue(&mut batch, &mut batch_bytes);
-                    self.export(&exporter, &mut batch, &mut batch_bytes);
-                    let _ = exporter.shutdown();
-                    let _ = ack.send(());
-                    return;
+                    if !shutdown_acks.is_empty() {
+                        self.finish(&mut exporter, &mut batch, shutdown_acks);
+                        return;
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    self.export(&exporter, &mut batch, &mut batch_bytes);
+                    self.export(&exporter, &mut batch);
                     next_export = Instant::now() + self.delay;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.export(&exporter, &mut batch, &mut batch_bytes);
+                    self.export(&exporter, &mut batch);
                     let _ = exporter.shutdown();
                     return;
                 }
@@ -583,25 +611,74 @@ impl Worker {
         }
     }
 
-    fn drain_queue(&self, batch: &mut Vec<SpanData>, batch_bytes: &mut usize) {
-        while let Ok(message) = self.receiver.try_recv() {
-            if let Message::Span(span, size) = message {
-                batch.push(*span);
-                *batch_bytes += size;
+    /// Handles one message in queue order. Spans, resource updates, and
+    /// flushes take effect at once; shutdown acknowledgements are collected
+    /// and answered only after the exporter has shut down. Returns `true`
+    /// when a full batch was exported.
+    fn dispatch<E: SpanExporter>(
+        &self,
+        exporter: &mut E,
+        batch: &mut Batch,
+        message: Message,
+        shutdown_acks: &mut Vec<SyncSender<()>>,
+    ) -> bool {
+        match message {
+            Message::Span(span, size) => {
+                batch.spans.push(*span);
+                batch.bytes += size;
+                if batch.spans.len() >= self.max_batch {
+                    self.export(exporter, batch);
+                    return true;
+                }
             }
+            Message::Resource(resource) => {
+                // Spans queued before the update are exported under the
+                // resource that was current when they were queued.
+                self.export(exporter, batch);
+                exporter.set_resource(&resource);
+            }
+            Message::Flush(ack) => {
+                self.export(exporter, batch);
+                let _ = exporter.force_flush();
+                let _ = ack.send(());
+            }
+            Message::Shutdown(ack) => shutdown_acks.push(ack),
+        }
+        false
+    }
+
+    /// Completes a shutdown. Messages already queued behind it are still
+    /// handled in order, so a flush, resource update, or second shutdown is
+    /// never discarded with its acknowledgement. At most one queue's worth
+    /// is taken; anything later is dropped with the queue and its caller
+    /// sees `AlreadyShutdown`.
+    fn finish<E: SpanExporter>(
+        &self,
+        exporter: &mut E,
+        batch: &mut Batch,
+        mut shutdown_acks: Vec<SyncSender<()>>,
+    ) {
+        for _ in 0..self.capacity {
+            let Ok(message) = self.receiver.try_recv() else {
+                break;
+            };
+            self.dispatch(exporter, batch, message, &mut shutdown_acks);
+        }
+        self.export(exporter, batch);
+        let _ = exporter.shutdown();
+        for ack in shutdown_acks {
+            let _ = ack.send(());
         }
     }
 
-    fn export<E: SpanExporter>(
-        &self,
-        exporter: &E,
-        batch: &mut Vec<SpanData>,
-        batch_bytes: &mut usize,
-    ) {
-        while !batch.is_empty() {
-            let take = batch.len().min(self.max_batch);
-            let chunk: Vec<SpanData> = batch.drain(..take).collect();
+    fn export<E: SpanExporter>(&self, exporter: &E, batch: &mut Batch) {
+        while !batch.spans.is_empty() {
+            let take = batch.spans.len().min(self.max_batch);
+            let chunk: Vec<SpanData> = batch.spans.drain(..take).collect();
             let count = chunk.len();
+            // An exporter panic unwinds and ends this thread: waiting
+            // callers then get `AlreadyShutdown`, later spans are counted as
+            // `shutdown` losses, and `exporter.shutdown()` is not called.
             let result = block_on(exporter.export(chunk));
             // Saturating: a timed-out shutdown may already have counted these.
             let _ = self
@@ -621,13 +698,13 @@ impl Worker {
                     .add("export_failed", count as u64),
             }
         }
-        let released = *batch_bytes;
+        let released = batch.bytes;
         let _ = self
             .queued_bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(released))
             });
-        *batch_bytes = 0;
+        batch.bytes = 0;
     }
 }
 
@@ -647,5 +724,154 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
             Poll::Ready(output) => return output,
             Poll::Pending => thread::park(),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use opentelemetry::Key;
+    use opentelemetry_sdk::testing::trace::new_test_export_span_data;
+
+    /// Records exporter calls in the order they happen.
+    #[derive(Debug, Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<String>>>);
+
+    impl Recorder {
+        fn push(&self, event: String) {
+            self.0.lock().unwrap().push(event);
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl SpanExporter for Recorder {
+        fn export(
+            &self,
+            batch: Vec<SpanData>,
+        ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+            self.push(format!("export:{}", batch.len()));
+            std::future::ready(Ok(()))
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+            self.push("shutdown".into());
+            Ok(())
+        }
+
+        fn force_flush(&self) -> OTelSdkResult {
+            self.push("flush".into());
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            let name = resource
+                .get(&Key::from_static_str("service.name"))
+                .map(|value| value.to_string());
+            self.push(format!("resource:{}", name.unwrap_or_default()));
+        }
+    }
+
+    fn span() -> Message {
+        let span = new_test_export_span_data();
+        let size = estimate_bytes(&span);
+        Message::Span(Box::new(span), size)
+    }
+
+    fn ask(sender: &SyncSender<Message>, make: fn(SyncSender<()>) -> Message) -> Receiver<()> {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        sender.send(make(ack_tx)).unwrap();
+        ack_rx
+    }
+
+    #[test]
+    fn messages_queued_behind_a_flush_or_shutdown_are_handled_in_order() {
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let metrics = Arc::new(Metrics::default());
+        let worker = Worker {
+            receiver,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            queued_spans: Arc::new(AtomicUsize::new(3)),
+            metrics: Arc::clone(&metrics),
+            max_batch: 16,
+            delay: Duration::from_secs(60),
+            capacity: 16,
+        };
+        let resource = Resource::builder_empty()
+            .with_service_name("orders-api")
+            .build();
+
+        // Everything is queued before the worker starts, so each flush and
+        // shutdown finds later messages already waiting behind it.
+        sender.send(span()).unwrap();
+        let first_flush = ask(&sender, Message::Flush);
+        sender.send(Message::Resource(resource)).unwrap();
+        sender.send(span()).unwrap();
+        let shutdown = ask(&sender, Message::Shutdown);
+        sender.send(span()).unwrap();
+        let late_flush = ask(&sender, Message::Flush);
+        let second_shutdown = ask(&sender, Message::Shutdown);
+        drop(sender);
+
+        let exporter = Recorder::default();
+        let recorder = exporter.clone();
+        worker.run(exporter);
+
+        assert_eq!(
+            recorder.events(),
+            [
+                "export:1",
+                "flush",
+                "resource:orders-api",
+                "export:2",
+                "flush",
+                "shutdown",
+            ]
+        );
+        for (name, ack) in [
+            ("first flush", first_flush),
+            ("shutdown", shutdown),
+            ("late flush", late_flush),
+            ("second shutdown", second_shutdown),
+        ] {
+            assert_eq!(ack.try_recv(), Ok(()), "{name} was not acknowledged");
+        }
+        let exported = metrics.telemetry_spans_exported.load(Ordering::Relaxed);
+        assert_eq!(exported, 3);
+    }
+
+    #[test]
+    fn a_shutdown_handles_at_most_one_queue_of_later_messages() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let worker = Worker {
+            receiver,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            queued_spans: Arc::new(AtomicUsize::new(0)),
+            metrics: Arc::new(Metrics::default()),
+            max_batch: 8,
+            delay: Duration::from_secs(60),
+            capacity: 2,
+        };
+        let shutdown = ask(&sender, Message::Shutdown);
+        let first = ask(&sender, Message::Flush);
+        let second = ask(&sender, Message::Flush);
+        let beyond = ask(&sender, Message::Flush);
+
+        let exporter = Recorder::default();
+        let recorder = exporter.clone();
+        // The sender stays alive, as a busy producer's would: the worker
+        // must still return.
+        worker.run(exporter);
+
+        assert_eq!(recorder.events(), ["flush", "flush", "shutdown"]);
+        assert_eq!(shutdown.try_recv(), Ok(()));
+        assert_eq!(first.try_recv(), Ok(()));
+        assert_eq!(second.try_recv(), Ok(()));
+        // Dropped with the queue: its caller sees the disconnect at once.
+        assert_eq!(beyond.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        drop(sender);
     }
 }
