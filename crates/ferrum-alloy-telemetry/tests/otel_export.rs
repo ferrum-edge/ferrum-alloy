@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::body::Body;
@@ -218,40 +218,59 @@ async fn trusted_parent_links_exported_spans_and_ids_agree_with_logs() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn server_span_ends_after_the_body_not_at_headers() {
+    const TICK: &[u8] = b"data: tick\n\n";
     let (pipeline, exporter, metrics) = memory_pipeline(&config());
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(pipeline.layer()));
+    // The test itself produces the body, so every instant below is taken at a
+    // known point of the response lifecycle. Runner or scheduler delays can
+    // only lengthen the measured intervals, never reorder them.
+    let (mut sender, channel) =
+        http_body_util::channel::Channel::<Bytes, std::convert::Infallible>::new(2);
+    let slot = Arc::new(Mutex::new(Some(channel)));
     let router = Router::new()
         .route(
             "/events",
-            get(|| async {
-                let (mut sender, body) =
-                    http_body_util::channel::Channel::<Bytes, std::convert::Infallible>::new(2);
-                tokio::spawn(async move {
-                    for _ in 0..3 {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        if sender
-                            .send_data(Bytes::from_static(b"data: tick\n\n"))
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                });
-                axum::response::Response::new(Body::new(body))
+            get(move || {
+                let channel = slot.lock().unwrap().take().unwrap();
+                async move { axum::response::Response::new(Body::new(channel)) }
             }),
         )
         .layer(RecordRouteLayer);
     let service = telemetry(Arc::clone(&metrics), TelemetryConfig::default()).layer(router);
-    let started = Instant::now();
     let response = service
         .oneshot(request("/events", "203.0.113.1:1", None))
         .await
         .unwrap();
-    let headers_after = started.elapsed();
-    let text = body_text(response).await;
-    assert_eq!(text.matches("tick").count(), 3);
+    // Headers exist from here on; the server span was created before them.
+    let headers_seen = Instant::now();
+    let headers_seen_wall = SystemTime::now();
+    let mut body = response.into_body();
+
+    sender.send_data(Bytes::from_static(TICK)).await.unwrap();
+    let first = body.frame().await.unwrap().unwrap();
+    assert_eq!(first.into_data().unwrap(), Bytes::from_static(TICK));
+    // Neither the headers nor a delivered frame may end the span.
+    pipeline.force_flush().unwrap();
+    assert!(
+        exporter
+            .get_finished_spans()
+            .unwrap()
+            .iter()
+            .all(|s| s.span_kind != SpanKind::Server),
+        "server span ended while the body was still streaming"
+    );
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let last_frame_sent = Instant::now();
+    let last_frame_sent_wall = SystemTime::now();
+    sender.send_data(Bytes::from_static(TICK)).await.unwrap();
+    drop(sender);
+    let mut rest = Vec::new();
+    while let Some(frame) = body.frame().await {
+        rest.push(frame.unwrap().into_data().unwrap());
+    }
+    assert_eq!(rest, [Bytes::from_static(TICK)]);
     pipeline.force_flush().unwrap();
 
     let spans = exporter.get_finished_spans().unwrap();
@@ -259,24 +278,35 @@ async fn server_span_ends_after_the_body_not_at_headers() {
         .iter()
         .find(|s| s.span_kind == SpanKind::Server)
         .unwrap();
-    let span_ms = server
-        .end_time
-        .duration_since(server.start_time)
-        .unwrap()
-        .as_millis();
     assert!(
-        span_ms >= headers_after.as_millis() + 100,
-        "span ended at headers ({headers_after:?}) instead of after the body ({span_ms} ms)"
+        server.start_time <= headers_seen_wall,
+        "span started after the headers were returned"
     );
+    // Same clock as the exported timestamps: the span's end is stamped only
+    // once the body ends, which is after the test sent the final frame.
     assert!(
-        span_ms >= 140,
-        "span must cover the stream, lasted {span_ms} ms"
+        server.end_time >= last_frame_sent_wall,
+        "span ended before the final body frame was sent ({:?} vs {:?} after headers)",
+        server.end_time.duration_since(headers_seen_wall),
+        last_frame_sent_wall.duration_since(headers_seen_wall)
     );
+    assert_eq!(
+        attr(server, "alloy.response.body.outcome")
+            .unwrap()
+            .as_str(),
+        "completed"
+    );
+    // The body duration runs from the layer seeing headers to the body's end,
+    // an interval that encloses the one the test kept the stream open for.
+    let streamed = last_frame_sent.duration_since(headers_seen);
     let body_ms = match attr(server, "alloy.server.body_duration_ms").unwrap() {
         opentelemetry::Value::F64(v) => *v,
         other => panic!("unexpected {other:?}"),
     };
-    assert!(body_ms >= 140.0, "{body_ms}");
+    assert!(
+        body_ms >= streamed.as_secs_f64() * 1_000.0,
+        "body lasted {body_ms} ms but the test streamed it for {streamed:?}"
+    );
     pipeline.shutdown(Duration::from_secs(2)).unwrap();
 }
 
