@@ -12,8 +12,8 @@ use axum::response::Redirect;
 use axum::routing::get;
 use ferrum_alloy::config::HttpClientSettings;
 use ferrum_alloy::http_client::AlloyClient;
-use ferrum_alloy::telemetry::context::RequestContext;
-use ferrum_alloy::telemetry::trace_context::{SpanId, TraceId};
+use ferrum_alloy::telemetry::context::{RequestContext, TraceDecision};
+use ferrum_alloy::telemetry::trace_context::{SpanId, TraceId, validate_tracestate};
 
 async fn server(other: Option<SocketAddr>) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -24,6 +24,7 @@ async fn server(other: Option<SocketAddr>) -> SocketAddr {
             get(|headers: HeaderMap| async move {
                 serde_json::json!({
                     "traceparent": headers.get("traceparent").map(|v| v.to_str().unwrap().to_owned()),
+                    "tracestate": headers.get("tracestate").map(|v| v.to_str().unwrap().to_owned()),
                     "baggage": headers.get("baggage").map(|v| v.to_str().unwrap().to_owned()),
                     "authorization": headers.get("authorization").map(|v| v.to_str().unwrap().to_owned()),
                 })
@@ -52,6 +53,15 @@ fn context() -> RequestContext {
     RequestContext::new(TraceId([0x11; 16]), SpanId([0x22; 8]), true)
 }
 
+/// A context rooted by a trusted peer, with `state` as its accepted
+/// `tracestate`, as the telemetry layer builds for [`TraceDecision::AcceptedRemote`].
+fn accepted_context(state: Option<&str>) -> RequestContext {
+    let mut context = context();
+    context.trace_decision = TraceDecision::AcceptedRemote;
+    context.tracestate = state.and_then(validate_tracestate);
+    context
+}
+
 fn client(propagate: &[&str], redirects: usize) -> AlloyClient {
     let mut settings = HttpClientSettings::default();
     settings.connect_timeout_ms = 1_000;
@@ -61,8 +71,9 @@ fn client(propagate: &[&str], redirects: usize) -> AlloyClient {
     AlloyClient::new(&settings).unwrap()
 }
 
-async fn echo(
+async fn echo_with(
     client: &AlloyClient,
+    context: &RequestContext,
     url: String,
     headers: &[(&str, &str)],
 ) -> (u16, serde_json::Value) {
@@ -71,7 +82,7 @@ async fn echo(
         builder = builder.header(*name, *value);
     }
     let response = client
-        .execute(Some(&context()), builder.build().unwrap())
+        .execute(Some(context), builder.build().unwrap())
         .await
         .unwrap();
     let status = response.status().as_u16();
@@ -80,6 +91,14 @@ async fn echo(
         status,
         serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
     )
+}
+
+async fn echo(
+    client: &AlloyClient,
+    url: String,
+    headers: &[(&str, &str)],
+) -> (u16, serde_json::Value) {
+    echo_with(client, &context(), url, headers).await
 }
 
 #[tokio::test]
@@ -121,6 +140,86 @@ async fn trace_context_goes_only_to_listed_hosts() {
         serde_json::Value::Null,
         "baggage is never forwarded"
     );
+}
+
+#[tokio::test]
+async fn absent_tracestate_stays_absent() {
+    let addr = server(None).await;
+    let client = client(&["127.0.0.1"], 0);
+    let (_, value) = echo_with(
+        &client,
+        &accepted_context(None),
+        format!("http://127.0.0.1:{}/echo", addr.port()),
+        &[],
+    )
+    .await;
+    assert!(value["traceparent"].is_string(), "{value}");
+    assert_eq!(value["tracestate"], serde_json::Value::Null, "{value}");
+}
+
+#[tokio::test]
+async fn rerooted_context_drops_caller_tracestate() {
+    let addr = server(None).await;
+    let client = client(&["127.0.0.1"], 0);
+    // A rerooted request has no accepted state. A header copied from the
+    // inbound request must not survive alongside the new traceparent.
+    let mut rerooted = context();
+    rerooted.trace_decision = TraceDecision::RerootedUntrusted;
+    let (_, value) = echo_with(
+        &client,
+        &rerooted,
+        format!("http://127.0.0.1:{}/echo", addr.port()),
+        &[("tracestate", "attacker=opaque-value")],
+    )
+    .await;
+    assert!(
+        value["traceparent"].is_string(),
+        "traceparent is still propagated: {value}"
+    );
+    assert_eq!(
+        value["tracestate"],
+        serde_json::Value::Null,
+        "stale caller tracestate is dropped: {value}"
+    );
+}
+
+#[tokio::test]
+async fn accepted_tracestate_replaces_stale_caller_state() {
+    let addr = server(None).await;
+    let client = client(&["127.0.0.1"], 0);
+    let (_, value) = echo_with(
+        &client,
+        &accepted_context(Some("accepted=canonical")),
+        format!("http://127.0.0.1:{}/echo", addr.port()),
+        &[("tracestate", "attacker=opaque-value")],
+    )
+    .await;
+    assert_eq!(
+        value["tracestate"].as_str(),
+        Some("accepted=canonical"),
+        "the accepted state wins over the caller-supplied header: {value}"
+    );
+}
+
+#[tokio::test]
+async fn tracestate_is_not_forwarded_to_unlisted_hosts() {
+    let addr = server(None).await;
+    let client = client(&["127.0.0.1"], 0);
+    let (_, value) = echo_with(
+        &client,
+        &accepted_context(Some("accepted=canonical")),
+        format!("http://localhost:{}/echo", addr.port()),
+        &[
+            (
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+            ("tracestate", "attacker=opaque-value"),
+        ],
+    )
+    .await;
+    assert_eq!(value["traceparent"], serde_json::Value::Null, "{value}");
+    assert_eq!(value["tracestate"], serde_json::Value::Null, "{value}");
 }
 
 #[tokio::test]

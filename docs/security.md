@@ -176,7 +176,7 @@ Every `server.tls.reload_interval_ms` (a minute by default), Alloy reads the cer
 
 ## Outbound HTTP (feature `http-client`)
 
-- `traceparent` is sent only to listed hosts. Caller-set `traceparent`/`tracestate` to other hosts, and `baggage` to any host, are removed.
+- `traceparent` and the accepted `tracestate` are sent only to listed hosts. Caller-set `traceparent`/`tracestate` are replaced by the context that is propagated, or removed when that context has none, and `baggage` is removed for every host.
 - Redirects are off by default. When enabled, only same-origin redirects are followed and cross-origin redirects are returned to the caller, so propagated context and credentials never follow to another origin.
 - There are no automatic retries.
 
