@@ -771,6 +771,97 @@ fn generate(dir: &Path, name: &str, with: &[&str]) -> PathBuf {
 }
 
 #[test]
+fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("alloy-fixture");
+    std::fs::create_dir_all(fixture.join("src")).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&fixture)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    let initialized = Command::new("git")
+        .args(["init", "--quiet", "--initial-branch=main"])
+        .arg(&fixture)
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    git(&["config", "user.name", "Alloy CLI test"]);
+    git(&["config", "user.email", "alloy-cli-test@example.invalid"]);
+    std::fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"ferrum-alloy\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "fixture"]);
+    git(&["tag", "v0.1.0"]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    let abbreviated = &commit[..7];
+    let revisions = ["main", "v0.1.0", commit.as_str(), abbreviated];
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let fixture_url = format!("file://{}", fixture.to_string_lossy());
+
+    for (index, revision) in revisions.iter().enumerate() {
+        let target = dir.path().join(format!("generated-{index}"));
+        let output = bin()
+            .args([
+                "new",
+                &format!("fixture-{index}"),
+                "--path",
+                target.to_str().unwrap(),
+                "--alloy-rev",
+                revision,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+
+        let generated = read(&target, "Cargo.toml");
+        let dependency = generated
+            .lines()
+            .find(|line| line.starts_with("ferrum-alloy = "))
+            .unwrap();
+        assert!(dependency.contains("rev = "), "{dependency}");
+        assert!(!dependency.contains("branch = "), "{dependency}");
+        let dependency = dependency.replace(
+            "https://github.com/ferrum-edge/ferrum-alloy",
+            &fixture_url,
+        );
+        let manifest = format!(
+            "[package]\nname = \"fixture-{index}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{dependency}\n"
+        );
+        std::fs::write(target.join("Cargo.toml"), manifest).unwrap();
+
+        let resolved = Command::new(&cargo)
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                target.join("Cargo.toml").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            resolved.status.success(),
+            "revision {revision:?} did not resolve: {}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+    }
+}
+
+#[test]
 fn new_generates_a_complete_project() {
     let dir = tempfile::tempdir().unwrap();
     let target = generate(dir.path(), "orders-api", &["openapi", "edge"]);

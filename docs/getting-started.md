@@ -43,7 +43,7 @@ The `postgres` starter never migrates implicitly. `cargo run -- migrate` applies
 
 The `jwt` starter's `alloy.toml` sets the JWKS lifetime explicitly, using the defaults: `jwks_max_age_ms = 300000` (a shorter `Cache-Control: max-age` wins), `jwks_max_stale_ms = 300000`, and `jwks_min_refresh_interval_ms = 60000`. Replace the example issuer, audience, and JWKS URL, or set `FERRUM_ALLOY_JWT_ISSUER`, `FERRUM_ALLOY_JWT_AUDIENCES`, and `FERRUM_ALLOY_JWT_JWKS_URL`.
 
-The generated `Cargo.toml` follows the `main` branch by default. Pass `--alloy-rev <40-character commit>` to pin a commit, or `--alloy-path <checkout>/crates/ferrum-alloy` to use a local checkout.
+The generated `Cargo.toml` follows the `main` branch by default. Pass `--alloy-rev <revision>` to select a branch, tag, full commit ID, or abbreviated commit ID; the value is written as Cargo's `rev` selector. Pin a commit for reproducible builds. Use `--alloy-path <checkout>/crates/ferrum-alloy` to use a local checkout.
 
 `ferrum-alloy new` refuses non-empty or symlinked targets, validates the name, never overwrites files, and downloads nothing. Cargo fetches dependencies when you build.
 

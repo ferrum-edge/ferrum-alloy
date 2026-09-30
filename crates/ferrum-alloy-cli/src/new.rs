@@ -65,7 +65,7 @@ pub(crate) struct NewArgs {
     /// Git repository for the Ferrum Alloy dependency.
     #[arg(long, default_value = "https://github.com/ferrum-edge/ferrum-alloy")]
     pub(crate) alloy_git: String,
-    /// Git revision (commit, tag, or branch) of the dependency. Pin a commit
+    /// Git revision (branch, tag, or commit) of the dependency. Pin a commit
     /// for reproducible builds.
     #[arg(long, default_value = "main")]
     pub(crate) alloy_rev: String,
@@ -451,15 +451,8 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
                     "--alloy-rev contains unsupported characters".into(),
                 ));
             }
-            let key = if args.alloy_rev.len() == 40
-                && args.alloy_rev.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                "rev"
-            } else {
-                "branch"
-            };
             format!(
-                "# Ferrum Alloy is not published to crates.io; pin a commit with --alloy-rev.\nferrum-alloy = {{ git = {}, {key} = {}{features} }}",
+                "# Ferrum Alloy is not published to crates.io; pin a commit with --alloy-rev.\nferrum-alloy = {{ git = {}, rev = {}{features} }}",
                 toml_string(&args.alloy_git),
                 toml_string(&args.alloy_rev)
             )
