@@ -383,7 +383,7 @@ Refreshes never hold up requests that can be answered from the cache. While the 
 | `connect_timeout_ms` | `2000` | Connection timeout |
 | `request_timeout_ms` | `10000` | Whole-request timeout |
 | `max_redirects` | `0` | Same-origin redirects only. Cross-origin redirects are never followed. |
-| `propagate_trace_context_to` | `[]` | Hosts (exact, or `.suffix`) that receive `traceparent`. Credentials, cookies, and baggage are never forwarded automatically. |
+| `propagate_trace_context_to` | `[]` | Hosts (exact, or `.suffix`) that receive `traceparent` and the accepted `tracestate`. Caller-supplied trace headers are replaced, never forwarded. Credentials, cookies, and baggage are never forwarded automatically. |
 
 ### `[diagnostics]` (feature `diagnostics`)
 

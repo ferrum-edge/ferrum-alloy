@@ -5,7 +5,7 @@
 //! `ferrum-alloy new --with openapi`), run with `cargo run --bin openapi`
 //! through an explicit argument list (no shell), or from `--input`. With
 //! `--manifest`, `servers` is set to the manifest's gateway-facing
-//! `public_path` so the published document and the gateway route agree.
+//! `public_path`, and stripped service base paths are removed from operations.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -35,7 +35,7 @@ pub(crate) struct ExportArgs {
     /// Read the document from this file instead of running the project.
     #[arg(long)]
     input: Option<PathBuf>,
-    /// Service manifest; sets `servers` to its `api.public_path`.
+    /// Service manifest; sets `servers` to `api.public_path` and maps stripped base paths.
     #[arg(long)]
     manifest: Option<PathBuf>,
     /// Output file.
@@ -116,6 +116,40 @@ fn validate(document: &Value) -> Result<(), CliError> {
     Ok(())
 }
 
+fn normalize_paths(
+    document: &mut Value,
+    manifest: &ferrum_alloy_edge::manifest::ServiceManifest,
+) -> Result<(), CliError> {
+    let Some(paths) = document.get_mut("paths").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    if !manifest.api.strip_public_path || manifest.api.service_base_path == "/" {
+        return Ok(());
+    }
+
+    let base_path = manifest.api.service_base_path.trim_end_matches('/');
+    let mut normalized_paths = serde_json::Map::new();
+    for (path, operations) in std::mem::take(paths) {
+        let normalized = if path == base_path {
+            "/"
+        } else if let Some(suffix) = path.strip_prefix(base_path).filter(|s| s.starts_with('/')) {
+            suffix
+        } else {
+            &path
+        };
+        if normalized_paths
+            .insert(normalized.to_owned(), operations)
+            .is_some()
+        {
+            return Err(CliError::Invalid(format!(
+                "OpenAPI paths collide after removing service_base_path {base_path:?}"
+            )));
+        }
+    }
+    *paths = normalized_paths;
+    Ok(())
+}
+
 /// Runs an `openapi` subcommand.
 pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
     let OpenapiCommand::Export(args) = command;
@@ -125,6 +159,7 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
     validate(&document)?;
     if let Some(manifest) = &args.manifest {
         let manifest = crate::edge::read_manifest(manifest)?;
+        normalize_paths(&mut document, &manifest)?;
         if let Some(map) = document.as_object_mut() {
             map.insert(
                 "servers".into(),
