@@ -815,7 +815,14 @@ fn new_alloy_rev_resolves_branches_tags_and_commit_ids() {
         ("--alloy-rev", abbreviated, "rev"),
     ];
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let fixture_url = format!("file://{}", fixture.to_string_lossy());
+    // A file URL with forward slashes: a Windows path's backslashes would be read as
+    // TOML escapes inside the generated dependency string.
+    let fixture_path = fixture.to_string_lossy().replace('\\', "/");
+    let fixture_url = if fixture_path.starts_with('/') {
+        format!("file://{fixture_path}")
+    } else {
+        format!("file:///{fixture_path}")
+    };
     let default_target = dir.path().join("generated-default");
     let default_output = bin()
         .args([
