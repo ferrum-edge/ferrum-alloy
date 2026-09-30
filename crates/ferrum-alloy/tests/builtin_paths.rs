@@ -59,11 +59,7 @@ async fn built_in_routes_return_problem_details_for_disallowed_methods() {
         app.diagnostics_authorizer(|_: ferrum_alloy::diagnostics::DiagnosticsRequest| async {
             ferrum_alloy::diagnostics::DiagnosticsAccess::Deny
         });
-    let parts = app
-        .config(cfg)
-        .telemetry(TelemetryInit::ApplicationOwned)
-        .into_parts()
-        .unwrap();
+    let parts = compose(app, cfg).unwrap();
 
     let mut application_paths = vec!["/livez", "/readyz"];
     #[cfg(feature = "openapi")]
