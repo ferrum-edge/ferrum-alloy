@@ -674,11 +674,9 @@ fn invalid_configuration_fails_at_startup() {
 #[test]
 fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
     let credential_endpoint = "http://sentinel-user:sentinel-password@collector:4318/v1/traces";
-    let mut config = OtlpConfig {
-        enabled: true,
-        endpoint: Some(credential_endpoint.to_owned()),
-        ..OtlpConfig::default()
-    };
+    let mut config = OtlpConfig::default();
+    config.enabled = true;
+    config.endpoint = Some(credential_endpoint.to_owned());
     let config_debug = format!("{config:?}");
     assert!(!config_debug.contains("sentinel-user"));
     assert!(!config_debug.contains("sentinel-password"));

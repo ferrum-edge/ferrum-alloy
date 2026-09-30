@@ -14,10 +14,7 @@ fn rejected_otlp_endpoint_credentials_do_not_reach_alloy_startup_errors() {
     assert!(!config_debug.contains("sentinel-user"));
     assert!(!config_debug.contains("sentinel-password"));
 
-    let error = match AlloyApp::new("otlp-credentials")
-        .config(config)
-        .prepare()
-    {
+    let error = match AlloyApp::new("otlp-credentials").config(config).prepare() {
         Ok(_) => panic!("credential-bearing endpoint was accepted"),
         Err(error) => error,
     };
