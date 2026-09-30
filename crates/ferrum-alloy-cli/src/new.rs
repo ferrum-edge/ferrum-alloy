@@ -60,15 +60,23 @@ pub(crate) struct NewArgs {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub(crate) with: Vec<Integration>,
     /// Depend on a local Ferrum Alloy checkout (path to `crates/ferrum-alloy`).
-    #[arg(long, conflicts_with_all = ["alloy_git", "alloy_rev"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["alloy_git", "alloy_branch", "alloy_tag", "alloy_rev"]
+    )]
     pub(crate) alloy_path: Option<PathBuf>,
     /// Git repository for the Ferrum Alloy dependency.
     #[arg(long, default_value = "https://github.com/ferrum-edge/ferrum-alloy")]
     pub(crate) alloy_git: String,
-    /// Git revision (commit, tag, or branch) of the dependency. Pin a commit
-    /// for reproducible builds.
-    #[arg(long, default_value = "main")]
-    pub(crate) alloy_rev: String,
+    /// Git branch of the dependency (defaults to `main`).
+    #[arg(long, conflicts_with_all = ["alloy_path", "alloy_tag", "alloy_rev"])]
+    pub(crate) alloy_branch: Option<String>,
+    /// Git tag of the dependency.
+    #[arg(long, conflicts_with_all = ["alloy_path", "alloy_branch", "alloy_rev"])]
+    pub(crate) alloy_tag: Option<String>,
+    /// Git commit ID (7–40 hexadecimal characters) of the dependency.
+    #[arg(long, conflicts_with_all = ["alloy_path", "alloy_branch", "alloy_tag"])]
+    pub(crate) alloy_rev: Option<String>,
 }
 
 const BASE: &[(&str, &str)] = &[
@@ -409,6 +417,15 @@ fn toml_string(value: &str) -> String {
     toml::Value::String(value.to_owned()).to_string()
 }
 
+fn validate_git_selector(option: &str, value: &str) -> Result<(), CliError> {
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        return Err(CliError::Invalid(format!(
+            "{option} must be a non-empty Git ref without whitespace"
+        )));
+    }
+    Ok(())
+}
+
 /// Renders every file for `args`, returning `(relative path, content)`.
 pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> {
     validate_name(&args.name)?;
@@ -441,27 +458,32 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
             {
                 return Err(CliError::Invalid("--alloy-git must be an https URL".into()));
             }
-            if args.alloy_rev.is_empty()
-                || !args
-                    .alloy_rev
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
-            {
-                return Err(CliError::Invalid(
-                    "--alloy-rev contains unsupported characters".into(),
-                ));
-            }
-            let key = if args.alloy_rev.len() == 40
-                && args.alloy_rev.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                "rev"
+            let (key, value) = if let Some(branch) = &args.alloy_branch {
+                validate_git_selector("--alloy-branch", branch)?;
+                ("branch", branch.as_str())
+            } else if let Some(tag) = &args.alloy_tag {
+                validate_git_selector("--alloy-tag", tag)?;
+                ("tag", tag.as_str())
+            } else if let Some(rev) = &args.alloy_rev {
+                if !(7..=40).contains(&rev.len())
+                    || !rev.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(CliError::Invalid(
+                        concat!(
+                            "--alloy-rev must be a 7–40 character hexadecimal commit ID; ",
+                            "use --alloy-branch or --alloy-tag for named refs"
+                        )
+                        .into(),
+                    ));
+                }
+                ("rev", rev.as_str())
             } else {
-                "branch"
+                ("branch", "main")
             };
             format!(
                 "# Ferrum Alloy is not published to crates.io; pin a commit with --alloy-rev.\nferrum-alloy = {{ git = {}, {key} = {}{features} }}",
                 toml_string(&args.alloy_git),
-                toml_string(&args.alloy_rev)
+                toml_string(value)
             )
         }
     };
