@@ -1512,24 +1512,17 @@ mod tests {
     #[test]
     fn operation_ancestry_stops_before_repeating_a_two_node_cycle() {
         let mut report = report_with_spans(1, 1);
-        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
+        let trace_id = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .trace_id
+            .clone();
         let cycle_a = "cycle-a";
         let cycle_b = "cycle-b";
-        report.observations[0]
-            .span
-            .as_mut()
-            .unwrap()
-            .span_id = cycle_b.to_owned();
-        report.observations[0]
-            .span
-            .as_mut()
-            .unwrap()
-            .parent_span_id = Some(cycle_a.to_owned());
-        report.observations[1]
-            .span
-            .as_mut()
-            .unwrap()
-            .parent_span_id = Some(cycle_a.to_owned());
+        report.observations[0].span.as_mut().unwrap().span_id = cycle_b.to_owned();
+        report.observations[0].span.as_mut().unwrap().parent_span_id = Some(cycle_a.to_owned());
+        report.observations[1].span.as_mut().unwrap().parent_span_id = Some(cycle_a.to_owned());
         let mut intermediate = report.observations[1].clone();
         intermediate.id = "cycle-a-link".into();
         intermediate.name = "unrelated.alloy.span".into();
@@ -1550,18 +1543,20 @@ mod tests {
     #[test]
     fn self_parented_service_is_returned_once() {
         let mut report = report_with_spans(1, 1);
-        let service_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
-        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
-        report.observations[0]
+        let service_span = report.observations[0]
             .span
-            .as_mut()
+            .as_ref()
             .unwrap()
-            .parent_span_id = Some(service_span.clone());
-        report.observations[1]
+            .span_id
+            .clone();
+        let trace_id = report.observations[0]
             .span
-            .as_mut()
+            .as_ref()
             .unwrap()
-            .parent_span_id = Some(service_span.clone());
+            .trace_id
+            .clone();
+        report.observations[0].span.as_mut().unwrap().parent_span_id = Some(service_span.clone());
+        report.observations[1].span.as_mut().unwrap().parent_span_id = Some(service_span.clone());
 
         let index = Index::build(&report);
         let candidates = index.operations_by_service_ancestor(|| {});
@@ -1573,8 +1568,18 @@ mod tests {
     #[test]
     fn operation_ancestry_follows_a_multi_hop_alloy_descendant() {
         let mut report = report_with_spans(1, 1);
-        let service_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
-        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
+        let service_span = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .span_id
+            .clone();
+        let trace_id = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .trace_id
+            .clone();
         let intermediate_id = "intermediate-alloy-span";
         let operation_span = report.observations[1].span.as_mut().unwrap();
         operation_span.parent_span_id = Some(intermediate_id.to_owned());
@@ -1596,19 +1601,26 @@ mod tests {
     #[test]
     fn operation_under_nested_services_is_indexed_for_each_service() {
         let mut report = report_with_spans(2, 1);
-        let outer_span = report.observations[0].span.as_ref().unwrap().span_id.clone();
-        let inner_span = report.observations[1].span.as_mut().unwrap().span_id.clone();
-        let trace_id = report.observations[0].span.as_ref().unwrap().trace_id.clone();
-        report.observations[1]
+        let outer_span = report.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .span_id
+            .clone();
+        let inner_span = report.observations[1]
             .span
             .as_mut()
             .unwrap()
-            .parent_span_id = Some(outer_span.clone());
-        report.observations[2]
+            .span_id
+            .clone();
+        let trace_id = report.observations[0]
             .span
-            .as_mut()
+            .as_ref()
             .unwrap()
-            .parent_span_id = Some(inner_span.clone());
+            .trace_id
+            .clone();
+        report.observations[1].span.as_mut().unwrap().parent_span_id = Some(outer_span.clone());
+        report.observations[2].span.as_mut().unwrap().parent_span_id = Some(inner_span.clone());
 
         let index = Index::build(&report);
         let candidates = index.operations_by_service_ancestor(|| {});
@@ -1623,7 +1635,12 @@ mod tests {
     fn multi_hop_ancestry_keeps_r002_analysis_findings_unchanged() {
         let direct = report_with_spans(1, 1);
         let mut indirect = direct.clone();
-        let service_span = direct.observations[0].span.as_ref().unwrap().span_id.clone();
+        let service_span = direct.observations[0]
+            .span
+            .as_ref()
+            .unwrap()
+            .span_id
+            .clone();
         let intermediate_id = "intermediate-alloy-span";
         indirect.observations[1]
             .span
