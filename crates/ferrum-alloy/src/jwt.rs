@@ -728,11 +728,13 @@ impl JwtVerifier {
         };
         let key = match Self::select(&keys.keys, kid, alg) {
             Ok(Some(key)) => key,
+            // Several matching keys are a problem with the key set, not with
+            // its availability: `401` whether or not a refresh failed.
+            Err(error) => return Err(error),
+            Ok(None) if keys.current => return Err(AuthError::Invalid("unknown signing key")),
             // No cached key can verify the token, and the key source could
             // not say whether it holds one now: an outage, not a bad token.
-            _ if !keys.current => return Err(AuthError::KeysUnavailable),
-            Ok(None) => return Err(AuthError::Invalid("unknown signing key")),
-            Err(error) => return Err(error),
+            Ok(None) => return Err(AuthError::KeysUnavailable),
         };
         let mut validation = Validation::new(header.alg);
         validation.algorithms = vec![header.alg];

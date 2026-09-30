@@ -17,7 +17,9 @@ use ferrum_alloy::jwt::{JwtVerifier, Principal};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384};
+use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519};
+use rustls_pki_types::PrivatePkcs1KeyDer;
+use rustls_pki_types::pem::PemObject;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -41,7 +43,7 @@ fn b64url(bytes: &[u8]) -> String {
 struct SigningKey {
     kid: String,
     pair: KeyPair,
-    /// `ES256` (P-256) or `ES384` (P-384).
+    /// `ES256` (P-256), `ES384` (P-384), or `EdDSA` (Ed25519).
     alg: Algorithm,
 }
 
@@ -64,7 +66,24 @@ impl SigningKey {
         }
     }
 
+    /// An Ed25519 key for `EdDSA`.
+    fn ed25519(kid: &str) -> Self {
+        Self {
+            kid: kid.into(),
+            pair: KeyPair::generate_for(&PKCS_ED25519).unwrap(),
+            alg: Algorithm::EdDSA,
+        }
+    }
+
     fn jwk(&self) -> Value {
+        if self.alg == Algorithm::EdDSA {
+            let raw = self.pair.public_key_raw();
+            assert_eq!(raw.len(), 32, "Ed25519 public key");
+            return json!({
+                "kty": "OKP", "crv": "Ed25519", "use": "sig", "alg": "EdDSA", "kid": self.kid,
+                "x": b64url(raw),
+            });
+        }
         let (crv, alg, len) = match self.alg {
             Algorithm::ES384 => ("P-384", "ES384", 48),
             _ => ("P-256", "ES256", 32),
@@ -95,13 +114,80 @@ impl SigningKey {
     fn sign(&self, claims: &Value, kid: Option<&str>) -> String {
         let mut header = Header::new(self.alg);
         header.kid = kid.map(str::to_owned);
-        encode(
-            &header,
-            claims,
-            &EncodingKey::from_ec_der(&self.pair.serialize_der()),
-        )
-        .unwrap()
+        let der = self.pair.serialize_der();
+        let key = if self.alg == Algorithm::EdDSA {
+            EncodingKey::from_ed_der(&der)
+        } else {
+            EncodingKey::from_ec_der(&der)
+        };
+        encode(&header, claims, &key).unwrap()
     }
+}
+
+// A static RSA-2048 test key pair, generated nowhere at test time. Both
+// halves are jsonwebtoken 11.1.0's own test fixtures: the private key is
+// `tests/rsa/private_rsa_key_pkcs1.pem`, and the modulus is the `n` that its
+// `rsa_modulus_exponent` test pairs with that file (the exponent is `AQAB`).
+// Test material only; it protects nothing.
+const RSA_PKCS1_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTL
+UTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2V
+rUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8H
+oGfG/AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBI
+Mc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+j8MtvIj812dkS4QMiRVN/
+by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQABAoIBAHREk0I0O9DvECKd
+WUpAmF3mY7oY9PNQiu44Yaf+AoSuyRpRUGTMIgc3u3eivOE8ALX0BmYUO5JtuRNZ
+Dpvt4SAwqCnVUinIf6C+eH/wSurCpapSM0BAHp4aOA7igptyOMgMPYBHNA1e9A7j
+E0dCxKWMl3DSWNyjQTk4zeRGEAEfbNjHrq6YCtjHSZSLmWiG80hnfnYos9hOr5Jn
+LnyS7ZmFE/5P3XVrxLc/tQ5zum0R4cbrgzHiQP5RgfxGJaEi7XcgherCCOgurJSS
+bYH29Gz8u5fFbS+Yg8s+OiCss3cs1rSgJ9/eHZuzGEdUZVARH6hVMjSuwvqVTFaE
+8AgtleECgYEA+uLMn4kNqHlJS2A5uAnCkj90ZxEtNm3E8hAxUrhssktY5XSOAPBl
+xyf5RuRGIImGtUVIr4HuJSa5TX48n3Vdt9MYCprO/iYl6moNRSPt5qowIIOJmIjY
+2mqPDfDt/zw+fcDD3lmCJrFlzcnh0uea1CohxEbQnL3cypeLt+WbU6kCgYEAzSp1
+9m1ajieFkqgoB0YTpt/OroDx38vvI5unInJlEeOjQ+oIAQdN2wpxBvTrRorMU6P0
+7mFUbt1j+Co6CbNiw+X8HcCaqYLR5clbJOOWNR36PuzOpQLkfK8woupBxzW9B8gZ
+mY8rB1mbJ+/WTPrEJy6YGmIEBkWylQ2VpW8O4O0CgYEApdbvvfFBlwD9YxbrcGz7
+MeNCFbMz+MucqQntIKoKJ91ImPxvtc0y6e/Rhnv0oyNlaUOwJVu0yNgNG117w0g4
+t/+Q38mvVC5xV7/cn7x9UMFk6MkqVir3dYGEqIl/OP1grY2Tq9HtB5iyG9L8NIam
+QOLMyUqqMUILxdthHyFmiGkCgYEAn9+PjpjGMPHxL0gj8Q8VbzsFtou6b1deIRRA
+2CHmSltltR1gYVTMwXxQeUhPMmgkMqUXzs4/WijgpthY44hK1TaZEKIuoxrS70nJ
+4WQLf5a9k1065fDsFZD6yGjdGxvwEmlGMZgTwqV7t1I4X0Ilqhav5hcs5apYL7gn
+PYPeRz0CgYALHCj/Ji8XSsDoF/MhVhnGdIs2P99NNdmo3R2Pv0CuZbDKMU559LJH
+UvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8
+oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==
+-----END RSA PRIVATE KEY-----
+";
+
+/// The public modulus of [`RSA_PKCS1_PEM`], base64url without padding.
+const RSA_N: &str = "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_cvI-SXVT9kP\
+    WSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5a\
+    rMhw1SRELB8HoGfG_AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gv\
+    miXLXB1AGLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQ";
+
+/// The static RSA key's JWK, with `kid` and `alg` when given.
+fn rsa_jwk(kid: Option<&str>, alg: Option<&str>) -> Value {
+    let mut jwk = json!({ "kty": "RSA", "use": "sig", "n": RSA_N, "e": "AQAB" });
+    if let Some(kid) = kid {
+        jwk["kid"] = json!(kid);
+    }
+    if let Some(alg) = alg {
+        jwk["alg"] = json!(alg);
+    }
+    jwk
+}
+
+/// A token signed with the static RSA key.
+fn rsa_sign(alg: Algorithm, kid: Option<&str>) -> String {
+    let pem = RSA_PKCS1_PEM.as_bytes();
+    let der = PrivatePkcs1KeyDer::from_pem_slice(pem).unwrap();
+    let mut header = Header::new(alg);
+    header.kid = kid.map(str::to_owned);
+    encode(
+        &header,
+        &claims(),
+        &EncodingKey::from_rsa_der(der.secret_pkcs1_der()),
+    )
+    .unwrap()
 }
 
 /// The challenge sent with a rejected token.
@@ -754,44 +840,160 @@ async fn a_failed_refresh_reports_an_unknown_kid_as_unavailable() {
     let old = SigningKey::new("old");
     let rotated = SigningKey::new("new");
     let jwks = jwks_server(&[&old]).await;
-    // The key set stays fresh for five minutes; refreshes may run every
-    // 300 ms.
-    let verifier = JwtVerifier::new(&settings(jwks.addr, 300)).unwrap();
+    // No rate limit, so every unknown kid refreshes and nothing depends on
+    // timing. The key set stays fresh for five minutes.
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 0)).unwrap();
     let known = || old.sign(&claims(), Some("old"));
     let unknown = || rotated.sign(&claims(), Some("new"));
     assert_eq!(status_of(&verifier, &known()).await, 200);
 
     // The JWKS breaks while the issuer starts signing with a rotated key.
     jwks.serve_body("upstream temporarily unavailable");
-    tokio::time::sleep(Duration::from_millis(400)).await;
     let (status, body, _) = call(&protected(&verifier), Some(&unknown())).await;
     assert_eq!(status, 503, "{body}");
     assert!(body.contains("auth-unavailable"), "{body}");
     assert_eq!(jwks.fetches(), 2, "the refresh was attempted");
 
-    // Within the refresh interval, the failed refresh still decides.
-    assert_eq!(status_of(&verifier, &unknown()).await, 503);
-    assert_eq!(jwks.fetches(), 2, "rate limited");
-
-    // A kid the cached set holds keeps verifying.
+    // A kid the cached set holds keeps verifying without a refresh.
     assert_eq!(status_of(&verifier, &known()).await, 200);
     assert_eq!(jwks.fetches(), 2);
 
     // The JWKS recovers without the kid: that answer is authoritative.
     jwks.serve(&[&old]);
-    tokio::time::sleep(Duration::from_millis(400)).await;
     let (status, _, headers) = call(&protected(&verifier), Some(&unknown())).await;
     assert_eq!(status, 401);
     assert_eq!(headers["www-authenticate"], INVALID_TOKEN);
     assert_eq!(jwks.fetches(), 3);
-    assert_eq!(status_of(&verifier, &unknown()).await, 401, "rate limited");
-    assert_eq!(jwks.fetches(), 3);
 
     // Once the JWKS publishes the rotated key, it verifies.
     jwks.serve(&[&old, &rotated]);
-    tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(status_of(&verifier, &unknown()).await, 200);
     assert_eq!(jwks.fetches(), 4);
+}
+
+#[tokio::test]
+async fn a_rate_limited_retry_after_a_failed_refresh_stays_unavailable() {
+    let old = SigningKey::new("old");
+    let rotated = SigningKey::new("new");
+    let jwks = jwks_server(&[&old]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 2_000)).unwrap();
+    let unknown = || rotated.sign(&claims(), Some("new"));
+    assert_eq!(
+        status_of(&verifier, &old.sign(&claims(), Some("old"))).await,
+        200
+    );
+
+    jwks.serve_body("upstream temporarily unavailable");
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    assert_eq!(status_of(&verifier, &unknown()).await, 503);
+    assert_eq!(jwks.fetches(), 2, "the refresh was attempted");
+    // Within the interval, the failed refresh still decides: no fetch, and
+    // still 503 rather than 401.
+    assert_eq!(status_of(&verifier, &unknown()).await, 503);
+    assert_eq!(jwks.fetches(), 2, "rate limited");
+}
+
+#[tokio::test]
+async fn a_stale_set_with_a_failed_refresh_reports_an_unknown_kid_as_unavailable() {
+    let old = SigningKey::new("old");
+    let jwks = jwks_server(&[&old]).await;
+    let verifier = short_lived(jwks.addr, 300, 60_000);
+    assert_eq!(
+        status_of(&verifier, &old.sign(&claims(), Some("old"))).await,
+        200
+    );
+
+    // Stale, and the refresh an unknown kid waits for fails.
+    *jwks.status.lock().unwrap() = StatusCode::INTERNAL_SERVER_ERROR;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let token = SigningKey::new("new").sign(&claims(), Some("new"));
+    let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(jwks.fetches(), 2);
+    // The stale set still verifies the kid it holds.
+    assert_eq!(
+        status_of(&verifier, &old.sign(&claims(), Some("old"))).await,
+        200
+    );
+}
+
+#[tokio::test]
+async fn an_ambiguous_match_is_401_even_while_refreshes_fail() {
+    let es256 = SigningKey::new("shared");
+    let twin = SigningKey::new("shared");
+    let jwks = jwks_server(&[&twin, &es256]).await;
+    let verifier = short_lived(jwks.addr, 300, 60_000);
+    let token = es256.sign(&claims(), Some("shared"));
+    assert_eq!(status_of(&verifier, &token).await, 401);
+
+    // The stale set is ambiguous, so the request waits for the refresh,
+    // which fails. Ambiguity is a key-set problem, not an outage.
+    *jwks.status.lock().unwrap() = StatusCode::INTERNAL_SERVER_ERROR;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (status, _, headers) = call(&protected(&verifier), Some(&token)).await;
+    assert_eq!(status, 401);
+    assert_eq!(headers["www-authenticate"], INVALID_TOKEN);
+    assert_eq!(jwks.fetches(), 2, "the stale set was revalidated");
+}
+
+#[tokio::test]
+async fn rsa_keys_are_bound_to_their_declared_scheme() {
+    let jwks = jwks_server(&[]).await;
+    let mut config = settings(jwks.addr, 0);
+    config.algorithms = vec!["RS256".into(), "PS256".into()];
+    // (declared `alg`, RS256 status, PS256 status). Without `alg`, an RSA
+    // key verifies every allowlisted RSA scheme.
+    for (declared, rs256, ps256) in [
+        (Some("RS256"), 200, 401),
+        (Some("PS256"), 401, 200),
+        (None, 200, 200),
+    ] {
+        jwks.serve_jwks(&[rsa_jwk(Some("rsa"), declared)]);
+        let verifier = JwtVerifier::new(&config).unwrap();
+        for (alg, expected) in [(Algorithm::RS256, rs256), (Algorithm::PS256, ps256)] {
+            let token = rsa_sign(alg, Some("rsa"));
+            let (status, body, _) = call(&protected(&verifier), Some(&token)).await;
+            assert_eq!(status, expected, "{declared:?} {alg:?}: {body}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn kidless_tokens_are_matched_to_the_key_bound_to_their_algorithm() {
+    let ec = SigningKey::new("ec");
+    let ed = SigningKey::ed25519("ed");
+    let jwks = jwks_server(&[]).await;
+    jwks.serve_jwks(&[rsa_jwk(None, None), ec.jwk(), ed.jwk()]);
+    let mut config = settings(jwks.addr, 60_000);
+    config.algorithms = vec!["RS256".into(), "ES256".into(), "EdDSA".into()];
+    let router = protected(&JwtVerifier::new(&config).unwrap());
+    // One key per algorithm, so tokens without `kid` are unambiguous.
+    let tokens = [
+        ("RS256", rsa_sign(Algorithm::RS256, None)),
+        ("ES256", ec.sign(&claims(), None)),
+        ("EdDSA", ed.sign(&claims(), None)),
+        ("EdDSA with kid", ed.sign(&claims(), Some("ed"))),
+    ];
+    for (name, token) in &tokens {
+        let (status, body, _) = call(&router, Some(token.as_str())).await;
+        assert_eq!(status, 200, "{name}: {body}");
+    }
+    assert_eq!(jwks.fetches(), 1);
+}
+
+#[tokio::test]
+async fn oct_keys_are_ignored_beside_a_usable_key() {
+    let key = SigningKey::new("shared");
+    let jwks = jwks_server(&[]).await;
+    let oct = json!({
+        "kty": "oct", "use": "sig", "alg": "HS256", "kid": "shared", "k": "c2VjcmV0",
+    });
+    jwks.serve_jwks(&[oct, key.jwk()]);
+    let router = protected(&JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap());
+    for kid in [Some("shared"), None] {
+        let (status, body, _) = call(&router, Some(&key.sign(&claims(), kid))).await;
+        assert_eq!(status, 200, "kid {kid:?}: {body}");
+    }
 }
 
 #[tokio::test]
