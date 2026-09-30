@@ -30,6 +30,10 @@ pub(crate) fn method_not_allowed_response() -> Response {
         .into_response()
 }
 
+pub(crate) async fn method_not_allowed_fallback() -> Response {
+    method_not_allowed_response()
+}
+
 /// Layer producing [`Normalize`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NormalizeLayer;

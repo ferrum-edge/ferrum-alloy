@@ -394,7 +394,7 @@ impl AlloyApp {
         let timeout = Duration::from_millis(config.server.request_timeout_ms);
         let deadline = HeadersDeadlineLayer::new(timeout);
         let mut app = app
-            .method_not_allowed_fallback(crate::normalize::method_not_allowed_response)
+            .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
             .fallback_service(user_router.layer(RecordRouteLayer))
             .layer(NormalizeLayer)
             .layer(deadline)
@@ -409,7 +409,7 @@ impl AlloyApp {
         if let Some(liveness) = liveness {
             app = app.merge(
                 liveness
-                    .method_not_allowed_fallback(crate::normalize::method_not_allowed_response)
+                    .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
                     .layer(NormalizeLayer)
                     .layer(deadline),
             );

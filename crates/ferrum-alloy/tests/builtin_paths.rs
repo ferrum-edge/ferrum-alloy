@@ -55,11 +55,10 @@ async fn built_in_routes_return_problem_details_for_disallowed_methods() {
     #[cfg(feature = "openapi")]
     let app = AlloyApp::new("paths").openapi(&document());
     #[cfg(feature = "diagnostics")]
-    let app = app.diagnostics_authorizer(
-        |_: ferrum_alloy::diagnostics::DiagnosticsRequest| async {
+    let app =
+        app.diagnostics_authorizer(|_: ferrum_alloy::diagnostics::DiagnosticsRequest| async {
             ferrum_alloy::diagnostics::DiagnosticsAccess::Deny
-        },
-    );
+        });
     let parts = app
         .config(cfg)
         .telemetry(TelemetryInit::ApplicationOwned)
