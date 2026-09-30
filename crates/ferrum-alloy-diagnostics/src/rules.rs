@@ -198,7 +198,7 @@ impl<'a> Index<'a> {
             };
             services_by_parent
                 .entry((span.trace_id.as_str(), parent))
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(*service_key);
         }
         Self {
@@ -1480,7 +1480,7 @@ mod tests {
             let mut observation = service.clone();
             observation.id = format!("service-{number}");
             let span = observation.span.as_mut().unwrap();
-            span.span_id = format!("{number:016x}");
+            span.span_id = format!("{:016x}", number + 1);
             span.parent_span_id = None;
             report.observations.push(observation);
         }
