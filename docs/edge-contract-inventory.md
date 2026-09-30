@@ -17,6 +17,7 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 | ferrum-edge/ferrum-edge | `v0.9.8` = `e27f2109216352c3fe9e67a7014611f3f66daa91` (2026-09-27) | **Contract baseline.** The latest published release and the default image (`ferrumedge/ferrum-edge@sha256:e5b204f9…b385`). Line references marked "v0.9.8" are from this revision. |
 | ferrum-edge/ferrum-edge | `v0.9.7` = `8fed1346ce2e267eb69c03683cb89ea44d785e0b` (2026-09-25) | Previous release, still supported and tested in CI (`ferrumedge/ferrum-edge@sha256:4c9530e0…874a`). Differs from v0.9.8 in the entries marked "v0.9.8" in §3. |
 | ferrum-edge/ferrum-edge | `05997cee91bb4e1fa3dd1e64506b1512c7b16b8a` (main, 2026-09-24) | Unmarked line references below. `src/plugins/otel_tracing.rs`, `src/plugins/correlation_id.rs`, and `src/config/types.rs` are byte-identical to v0.9.7 and v0.9.8. Line numbers in `src/proxy/mod.rs`, `src/proxy/headers.rs`, `src/plugins/mod.rs`, `src/health_check.rs`, `src/admin/mod.rs`, and `src/config/env_config.rs` differ at both releases. |
+| ferrum-edge/ferrum-edge | `f638465034734e335bde7e76c56e8c8244afba8a` (main, 2026-09-30) | Read only for the G01 entry in §6, which is implemented there but unreleased. Not a supported or pinned revision. |
 | ferrum-edge/ferrum-anvil | `075890f9418718113d5d83da4074c6b00b92bde9` (origin/main) | `DiagnosticFinding` schema, Edge v0.9.7 outcome catalog, G01 proposal. |
 | ferrum-edge/ferrum-foundry | `e2f60b1eb0e881b3302ee7416df2d085f757dec4` | Pinned-Edge approach (`docs/compatibility.json`). No diagnostic UI. |
 | ferrum-edge/ferrum-nexus | `b803a95cf4afd012d3cbb93324f5beac937b20c0` | OpenAPI 3.x publication through Edge `/api-specs`. |
@@ -109,7 +110,7 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 |---|---|---|
 | Edge active health check `GET {http_path}` (default `/health`, healthy `[200, 302]`) | EXISTING | `src/config/types.rs:1463-1526`, `src/health_check.rs:85-92`, `:3242-3277`. Alloy's export sets `http_path` to the manifest's `health.path` (typically `/readyz`) and `healthy_status_codes: [200]`. |
 | Edge admin `POST/PUT/GET/DELETE /api-specs` | EXISTING | `src/admin/mod.rs:3673-3716`, `docs/api_specs.md`. Not available in file mode. **Alloy never calls it.** `ferrum-alloy openapi export` produces the artifact that operators or Nexus publish. |
-| G01 authenticated diagnostic lookup: `X-Ferrum-Diagnostic-Ref`, `GET /diagnostics/v1/refs/{ref}`, `diagnostics:read` | **PROPOSED** (Anvil `docs/g01-gateway-diagnostic-contract.md`; ferrum-edge#5767) | Not implemented in Edge (no source hits). Alloy would treat it as `gateway_detail` evidence once it exists. |
+| G01 authenticated diagnostic lookup: `X-Ferrum-Diagnostic-Ref`, `GET /diagnostics/v1/refs/{ref}`, `diagnostics:read` | **UNAVAILABLE** (ferrum-edge#5767) | Not produced by v0.9.8 or v0.9.7. Implemented on Edge main at `f6384650` (`src/admin/mod.rs:2679-2711`, `:3749-3751`; `X_FERRUM_DIAGNOSTIC_REF_HEADER` in `src/proxy/headers.rs:842`), not yet released; the pinned `contracts-edge-0.9.8` `vocabularies/gateway-headers.json` marks the header `unreleased`. Alloy does not rely on it. Once a supported Edge release ships it, Alloy would treat it as `gateway_detail` evidence. |
 | Alloy `/livez`, `/readyz` (application and management listeners) | EXISTING (Alloy) | Status only, `no-store` |
 | Alloy management `/health`, `/metrics`, `/openapi.json` | EXISTING (Alloy) | Bearer token when configured; loopback bind by default |
 
@@ -138,13 +139,13 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 | `alloy.response.body.outcome`, `alloy.response.body.bytes`, `alloy.response.upgraded` | EXISTING | Body finalization |
 | `alloy.admission.wait_ms` | EXISTING | Admission wait when enabled |
 | Operation spans with `alloy.operation.duration_ms`, `alloy.operation.kind`, `alloy.db.pool_wait_ms` | EXISTING | Explicitly instrumented operations |
-| Diagnostic report `ferrum.diagnostic_report` v1 | EXISTING in Alloy; **PROPOSED** as a shared contract | Findings are an Anvil `DiagnosticFinding` superset. Two `EvidenceSource` values (`gateway_telemetry`, `service_telemetry`) are proposed additions to Anvil's schema. Anvil import is **not tested**. |
+| Diagnostic report `ferrum.diagnostic_report` v1 | EXISTING in Alloy; the shared schema is vendored and pinned from `contracts-edge-0.9.8`, and its shared status is still **PROPOSED** | Alloy's Finding remains a superset of Anvil's `DiagnosticFinding`. The shared tag fixtures are validated against Alloy's Finding schema and deserialized into Alloy's `Finding` type; Anvil import is **not tested**. |
 
 ## 9. Cross-repository dependencies
 
 Alloy does not implement these, and does not claim them:
 
-1. **Edge**: per-attempt CLIENT spans or attempt identity, connection-setup and reuse evidence, and the G01 authenticated diagnostic reference. These are needed for `confirmed` gateway-vs-service timing attribution. Currently PROPOSED or UNAVAILABLE.
+1. **Edge**: per-attempt CLIENT spans or attempt identity, connection-setup and reuse evidence, and the G01 authenticated diagnostic reference. These are needed for `confirmed` gateway-vs-service timing attribution. All are UNAVAILABLE in the supported releases. G01 is implemented on Edge main at `f6384650` but not yet released.
 2. **Edge**: stripping every client-supplied `x-consumer-*` header, not only the two exact names.
 3. **Anvil**: accepting `gateway_telemetry` / `service_telemetry` evidence sources and importing `ferrum.diagnostic_report`.
 4. **Nexus / Foundry / GitForgeOps**: consuming `ferrum.service_manifest`. None do.

@@ -7,3 +7,6 @@
 crates/ferrum-alloy/assets/** -text
 crates/ferrum-alloy/assets/**/*.js -diff linguist-vendored
 crates/ferrum-alloy/assets/**/*.css -diff linguist-vendored
+# Pinned Ferrum contracts are checked byte for byte against the hashes in
+# contracts/ferrum-contracts/PIN. Never convert them.
+contracts/ferrum-contracts/** -text

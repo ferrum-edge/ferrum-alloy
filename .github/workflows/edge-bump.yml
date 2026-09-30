@@ -253,6 +253,7 @@ jobs:
             echo "- [ ] The image digest was verified with Cosign (see the Edge release bump run log)."
             echo "- [ ] Work through the re-audit checklist in docs/compatibility.md and record the result in the revision table of docs/edge-contract-inventory.md."
             echo "- [ ] Mirror any new X-Gateway-Error token in contract::GATEWAY_ERROR_TOKENS, catalog::EDGE_GATEWAY_ERROR_TOKENS, and rule alloy.r007."
+            echo "- [ ] Bump PIN and re-verify vocabularies: move contracts/ferrum-contracts/PIN to the matching contracts-edge-* tag and re-verify the vendored vocabularies (see contracts/README.md)."
             echo "- [ ] Update the prose in docs/compatibility.md and the docs that name Edge releases."
             echo "- [ ] The Ferrum Edge end-to-end and Generated Edge configuration validates jobs pass for both releases."
             echo

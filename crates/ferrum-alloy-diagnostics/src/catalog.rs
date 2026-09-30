@@ -152,10 +152,16 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
 ];
 
 /// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.8
-/// (`src/retry.rs`), with the only meaning each token supports. v0.9.8 added
-/// `request_timeout`. A header carries no Edge version, so each meaning also
-/// holds for v0.9.7: there, `backend_timeout` also covered route deadlines that
-/// expired before any backend held the request.
+/// (`src/retry.rs`), each token with Alloy's user-facing explanation, which
+/// rule `alloy.r007` renders into findings. v0.9.8 added `request_timeout`.
+///
+/// A header names no Edge version, so each explanation holds for every
+/// supported release and is never narrower than an earlier release's meaning:
+/// in v0.9.7, `backend_timeout` also covered route deadlines that expired
+/// before any backend held the request. The release-specific meanings in the
+/// pinned `contracts/ferrum-contracts/vocabularies/gateway-errors.json` are
+/// narrower and use Edge-internal terms, so they are never rendered. The
+/// pairing tests in `ferrum-alloy-edge` check that both token sets agree.
 pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     (
         "connection_failure",

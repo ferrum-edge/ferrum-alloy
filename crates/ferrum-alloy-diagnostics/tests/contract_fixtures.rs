@@ -92,8 +92,25 @@ const FORBIDDEN_CLAIMS: &[&str] = &[
     "backend crashed",
     "service crashed",
     "dns failure",
+    "dns resolution failed",
+    "tls failure",
     "slow handler",
     "network latency",
+];
+
+/// Wording an `X-Gateway-Error` explanation must never use. It either asserts
+/// what the token does not prove, narrows a token to one Edge release's meaning
+/// although the header names no Edge version, or exposes Edge-internal terms.
+const FORBIDDEN_GATEWAY_ERROR_WORDING: &[&str] = &[
+    "dns or tls failure",
+    "a backend held the request",
+    "was sent the request",
+    "the backend returned",
+    "errorclass",
+    "request_reached_wire",
+    "metric label",
+    "mesh_route_dispatch",
+    "request_timeout_ms",
 ];
 
 fn assert_no_forbidden_claims(findings: &[Finding]) {
@@ -122,6 +139,29 @@ fn every_fixture_avoids_invalid_explanations() {
         "gateway-error-token.json",
     ] {
         assert_no_forbidden_claims(&findings(name));
+    }
+}
+
+#[test]
+fn every_gateway_error_token_explanation_avoids_invalid_wording() {
+    let base: serde_json::Value =
+        serde_json::from_slice(&fixture("gateway-error-token.json")).unwrap();
+    for (token, _) in ferrum_alloy_diagnostics::catalog::EDGE_GATEWAY_ERROR_TOKENS {
+        let mut report = base.clone();
+        report["observations"][0]["attributes"]["value"] = serde_json::json!(token);
+        let bytes = serde_json::to_vec(&report).unwrap();
+        let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+        let findings = analyze(&parsed.report, &Thresholds::default());
+        assert_no_forbidden_claims(&findings);
+        let finding = by_code(&findings, "alloy.edge.gateway_error_token");
+        assert_eq!(finding.confidence, Confidence::Likely, "{token}");
+        let explanation = finding.explanation.to_lowercase();
+        for wording in FORBIDDEN_GATEWAY_ERROR_WORDING {
+            assert!(
+                !explanation.contains(wording),
+                "{token} explanation uses {wording:?}: {explanation}"
+            );
+        }
     }
 }
 

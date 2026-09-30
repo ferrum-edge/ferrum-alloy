@@ -43,7 +43,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 | Platforms | Only macOS arm64 was run locally. Linux x86_64, macOS, and Windows results come from hosted CI. |
 | Ferrum Edge versions | The latest release and the one before it (v0.9.8 and v0.9.7) are tested. Older releases are unsupported. A scheduled workflow proposes new releases. |
 | Service manifest | `ferrum.service_manifest` v1 is PROPOSED. Edge does not consume it. |
-| Anvil interoperability | The finding shape is a superset of Anvil's `DiagnosticFinding`. Anvil's diagnostic reference G01 is PROPOSED only; no Anvil import exists. |
+| Anvil interoperability | The finding shape is a superset of Anvil's `DiagnosticFinding`. The shared schema is vendored and pinned from `contracts-edge-0.9.8`, but its shared status is still PROPOSED and no Anvil import exists. The G01 diagnostic reference is UNAVAILABLE in the supported Edge releases (implemented, unreleased, on Edge main at `f6384650`). |
 
 ## Not implemented
 
@@ -62,5 +62,5 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 |---|---|---|
 | Ferrum Edge | Contracts verified against v0.9.8 source (`e27f2109`); images pinned by digest | Pinned. Moving versions follows the rules in [compatibility.md](compatibility.md). |
 | Ferrum Edge | Consuming the service manifest, emitting per-attempt CLIENT spans or `Server-Timing` | Not present upstream. Alloy makes no claims that depend on them. |
-| Ferrum Anvil | G01 diagnostic reference | PROPOSED; no code dependency |
+| Ferrum Edge / Anvil | G01 diagnostic reference | UNAVAILABLE in the supported Edge releases; implemented, unreleased, on Edge main at `f6384650`. No code dependency. |
 | GitForgeOps | `kind` + `spec` resource wrapper for `edge export --format gitforgeops` | Output shape only; not applied in any test |

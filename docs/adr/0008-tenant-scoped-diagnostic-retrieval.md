@@ -6,7 +6,7 @@
 
 Detailed diagnostic evidence leaves a running service only through telemetry export and offline `ferrum-alloy diagnose` files. An operator who holds one request id cannot ask the service for that request's evidence.
 
-Retrieval discloses data about other people's requests, so it needs its own authorization. The management token cannot provide it: it is one shared secret for the whole listener, it names no tenant, and anyone who can scrape `/metrics` holds it. Request ids and trace ids cannot provide it either: callers choose request ids (`telemetry.request_id.accept_incoming` defaults to `any`), and both kinds of id appear in logs, headers, and traces. Ferrum Edge's authenticated diagnostic reference (G01, `X-Ferrum-Diagnostic-Ref`) is PROPOSED and not implemented, so retrieval must work without it.
+Retrieval discloses data about other people's requests, so it needs its own authorization. The management token cannot provide it: it is one shared secret for the whole listener, it names no tenant, and anyone who can scrape `/metrics` holds it. Request ids and trace ids cannot provide it either: callers choose request ids (`telemetry.request_id.accept_incoming` defaults to `any`), and both kinds of id appear in logs, headers, and traces. Ferrum Edge's authenticated diagnostic reference (G01, `X-Ferrum-Diagnostic-Ref`) is not produced by any supported Edge release (it is implemented, unreleased, on Edge main at `f6384650`), so retrieval must work without it.
 
 ## Decision
 
