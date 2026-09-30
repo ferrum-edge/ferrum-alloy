@@ -741,9 +741,8 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
 fn rejected_otlp_endpoint_init_error_is_the_credential_rejection() {
     let mut config = OtlpConfig::default();
     config.enabled = true;
-    config.endpoint = Some(
-        "http://sentinel-user:sentinel-password@collector:4318/v1/traces".to_owned(),
-    );
+    config.endpoint =
+        Some("http://sentinel-user:sentinel-password@collector:4318/v1/traces".to_owned());
     let init_error = ferrum_alloy_telemetry::init::init_logging_and_otel(
         &ferrum_alloy_telemetry::init::LoggingConfig::default(),
         &resource(),
