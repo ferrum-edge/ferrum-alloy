@@ -1621,7 +1621,7 @@ mod tests {
 
     #[test]
     fn multi_hop_ancestry_keeps_r002_analysis_findings_unchanged() {
-        let mut direct = report_with_spans(1, 1);
+        let direct = report_with_spans(1, 1);
         let mut indirect = direct.clone();
         let service_span = direct.observations[0].span.as_ref().unwrap().span_id.clone();
         let intermediate_id = "intermediate-alloy-span";
