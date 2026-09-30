@@ -65,7 +65,8 @@ pub struct ManifestApi {
     /// Gateway listen path prefix, e.g. `/orders`.
     pub public_path: String,
     /// Path prefix the service itself serves. With `strip_public_path`, a
-    /// request to `/orders/1` reaches the service as `{service_base_path}1`.
+    /// request to `/orders/1` reaches the service as `{service_base_path}1`;
+    /// OpenAPI export removes this prefix from matching operation paths.
     #[serde(default = "default_base_path")]
     pub service_base_path: String,
     /// Remove `public_path` before forwarding.

@@ -653,6 +653,76 @@ fn openapi_export_sets_the_gateway_path_and_detects_drift() {
     );
 }
 
+#[test]
+fn openapi_export_maps_service_base_path_when_the_gateway_strips_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(
+        dir.path(),
+        "raw.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/internal/items":{},"/internal":{},"/items-already-public":{},"/internalized":{}}}"#,
+    );
+
+    for (name, service_base_path, strip_public_path, expected_paths) in [
+        (
+            "stripped",
+            "/internal/",
+            true,
+            vec!["/", "/items", "/items-already-public", "/internalized"],
+        ),
+        (
+            "not-stripped",
+            "/internal/",
+            false,
+            vec![
+                "/internal",
+                "/internal/items",
+                "/items-already-public",
+                "/internalized",
+            ],
+        ),
+        (
+            "root-base",
+            "/",
+            true,
+            vec![
+                "/internal",
+                "/internal/items",
+                "/items-already-public",
+                "/internalized",
+            ],
+        ),
+    ] {
+        let manifest = write(
+            dir.path(),
+            &format!("{name}.toml"),
+            &format!(
+                "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"{service_base_path}\"\nstrip_public_path = {strip_public_path}\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n"
+            ),
+        );
+        let out = dir.path().join(format!("{name}.json"));
+        let output = run(&[
+            "openapi",
+            "export",
+            "--input",
+            &input,
+            "--manifest",
+            &manifest,
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out).unwrap()).unwrap();
+        assert_eq!(written["servers"][0]["url"], "/public");
+        let paths = written["paths"].as_object().unwrap();
+        let mut actual_paths: Vec<_> = paths.keys().map(String::as_str).collect();
+        actual_paths.sort_unstable();
+        let mut expected_paths = expected_paths;
+        expected_paths.sort_unstable();
+        assert_eq!(actual_paths, expected_paths, "{name}");
+    }
+}
+
 /// `openapi export --check` reads the existing output only up to the
 /// document limit; a larger file is drift.
 #[test]
