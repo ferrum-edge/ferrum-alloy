@@ -10,7 +10,7 @@
 )]
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -21,13 +21,17 @@ use axum::routing::get;
 use bytes::Bytes;
 use ferrum_alloy_telemetry::metrics::Metrics;
 use ferrum_alloy_telemetry::operation::Operation;
-use ferrum_alloy_telemetry::otel::{OtelPipeline, OtlpConfig, ServiceResource, layer_active};
+use ferrum_alloy_telemetry::otel::{
+    BoundedSpanProcessor, OtelPipeline, OtlpConfig, ServiceResource, layer_active,
+};
 use ferrum_alloy_telemetry::peer::{PeerInfo, TrustedPeers, TrustedPeersConfig};
 use ferrum_alloy_telemetry::{RecordRouteLayer, RequestContext, TelemetryConfig, TelemetryLayer};
 use http_body_util::BodyExt;
 use opentelemetry::trace::{SpanId, SpanKind, TraceId};
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
-use opentelemetry_sdk::trace::{InMemorySpanExporter, SpanData, SpanExporter};
+use opentelemetry_sdk::testing::trace::new_test_export_span_data;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SpanData, SpanExporter, SpanProcessor};
 use tower::{Layer, ServiceExt};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -446,6 +450,113 @@ async fn a_full_queue_drops_spans_instead_of_blocking_requests() {
     let shutdown_started = Instant::now();
     let _ = pipeline.shutdown(Duration::from_millis(300));
     assert!(shutdown_started.elapsed() < Duration::from_secs(2));
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    exporting: bool,
+    open: bool,
+    exported: usize,
+    shutdowns: usize,
+    resources: usize,
+}
+
+/// Blocks every export until the gate opens and counts lifecycle calls.
+#[derive(Debug, Clone, Default)]
+struct GatedExporter(Arc<(Mutex<GateState>, Condvar)>);
+
+impl GatedExporter {
+    fn wait_until_exporting(&self) {
+        let (state, changed) = &*self.0;
+        let guard = state.lock().unwrap();
+        let (_guard, wait) = changed
+            .wait_timeout_while(guard, Duration::from_secs(5), |s| !s.exporting)
+            .unwrap();
+        assert!(!wait.timed_out(), "the export never started");
+    }
+
+    fn open(&self) {
+        let (state, changed) = &*self.0;
+        state.lock().unwrap().open = true;
+        changed.notify_all();
+    }
+
+    fn counts(&self) -> (usize, usize, usize) {
+        let state = self.0.0.lock().unwrap();
+        (state.exported, state.shutdowns, state.resources)
+    }
+}
+
+impl SpanExporter for GatedExporter {
+    fn export(
+        &self,
+        batch: Vec<SpanData>,
+    ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+        let (state, changed) = &*self.0;
+        let mut guard = state.lock().unwrap();
+        guard.exporting = true;
+        changed.notify_all();
+        guard = changed.wait_while(guard, |s| !s.open).unwrap();
+        guard.exported += batch.len();
+        std::future::ready(Ok(()))
+    }
+
+    fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+        self.0.0.lock().unwrap().shutdowns += 1;
+        Ok(())
+    }
+
+    fn set_resource(&mut self, _resource: &Resource) {
+        self.0.0.lock().unwrap().resources += 1;
+    }
+}
+
+#[test]
+fn a_flush_and_a_shutdown_queued_behind_a_blocked_export_both_complete() {
+    let exporter = GatedExporter::default();
+    let shared = exporter.clone();
+    let mut config = config();
+    config.max_queue_spans = 8;
+    config.max_export_batch = 1;
+    let metrics = Arc::new(Metrics::default());
+    let factory = move || Ok(shared);
+    let spawned = BoundedSpanProcessor::spawn(factory, &config, Arc::clone(&metrics));
+    let mut processor = spawned.unwrap();
+
+    processor.on_end(new_test_export_span_data());
+    exporter.wait_until_exporting();
+    // Queued behind the blocked export, ahead of the controls.
+    let resource = Resource::builder_empty()
+        .with_service_name("orders-api")
+        .build();
+    processor.set_resource(&resource);
+
+    let processor = &processor;
+    let timeout = Duration::from_secs(5);
+    let (flush, shutdown) = std::thread::scope(|scope| {
+        let flush = scope.spawn(|| processor.force_flush());
+        let shutdown = scope.spawn(|| processor.shutdown_with_timeout(timeout));
+        // Let both controls reach the queue before the export is released.
+        // Whichever is handled first must not swallow the other.
+        std::thread::sleep(Duration::from_millis(200));
+        exporter.open();
+        (flush.join().unwrap(), shutdown.join().unwrap())
+    });
+
+    assert!(flush.is_ok(), "flush: {flush:?}");
+    assert!(shutdown.is_ok(), "shutdown: {shutdown:?}");
+    let (exported, shutdowns, resources) = exporter.counts();
+    assert_eq!(exported, 1);
+    assert_eq!(shutdowns, 1, "the exporter is shut down exactly once");
+    assert_eq!(resources, 1, "the resource update was applied");
+    assert_eq!(
+        metrics
+            .telemetry_spans_exported
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let after = processor.force_flush();
+    assert!(matches!(after, Err(OTelSdkError::AlreadyShutdown)));
 }
 
 #[tokio::test(flavor = "current_thread")]
