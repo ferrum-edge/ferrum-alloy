@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Reject service manifest proxy IDs when a generated upstream or plugin ID
+  would exceed Ferrum Edge's 254-character resource ID limit.
 - Correct `alloy.response.body.bytes`: it counts the data-frame payload bytes
   handed to Hyper after the response's inner layers ran, so with compression
   enabled it reports the compressed frame payload. It excludes HTTP framing and
