@@ -304,12 +304,13 @@ impl<'a> Index<'a> {
     }
 
     /// Returns the nearest span id in `span`'s lineage that `accept` matches:
-    /// the span itself, its own parent, then its parent's Alloy and gateway
-    /// attempt ancestors. Every id is in `span`'s own trace, and the walk never
-    /// follows a parent into another trace. The walk starts at the span's own
-    /// parent, so a span that is not an Alloy span still reaches the gateway
-    /// above its Alloy parent, and an Alloy span reaches the gateway above its
-    /// attempt. It stops after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle
+    /// the span itself, its own parent, then its parent's Alloy ancestors and
+    /// at most one gateway attempt. Every id is in `span`'s own trace, and the
+    /// walk never follows a parent into another trace. The walk starts at the
+    /// span's own parent, so a span that is not an Alloy span still reaches the
+    /// gateway above its Alloy parent, and an Alloy span reaches the gateway
+    /// above its attempt; a second attempt ends the walk, as it ends service
+    /// linkage. It stops after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle
     /// cannot loop.
     fn nearest_in_lineage<'s>(
         &'s self,
@@ -324,14 +325,18 @@ impl<'a> Index<'a> {
         if accept(current) {
             return Some(current);
         }
+        let mut through_attempt = false;
         for _ in 0..MAX_ANCESTOR_HOPS {
             let key = (trace, current);
-            let parent = self
-                .alloy_parents
-                .get(&key)
-                .or_else(|| self.attempt_parents.get(&key))
-                .copied()
-                .flatten()?;
+            let parent = match self.alloy_parents.get(&key) {
+                Some(parent) => *parent,
+                // One hop through a gateway attempt, never a chain of them.
+                None if !through_attempt => {
+                    through_attempt = true;
+                    self.attempt_parents.get(&key).copied().flatten()
+                }
+                None => None,
+            }?;
             if accept(parent) {
                 return Some(parent);
             }
@@ -1372,13 +1377,14 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         .confidence(Confidence::Unknown)
         .cite(ttfb, "gateway.latency.backend_ttfb_ms", ttfb.duration_ms().map(ms).unwrap_or_default())
         .explanation(
-            "The gateway recorded a backend exchange, but no service span has the gateway span, or one of its backend attempt spans, as its parent. The delay cannot be localized inside the service.".into(),
+            "The gateway recorded a backend exchange, but no service span has the gateway span, or one of its backend attempt spans, as its parent. A service span under an attempt span the gateway did not export cannot be linked either. The delay cannot be localized inside the service.".into(),
         )
         .alternatives(&[
             "the service is not instrumented or does not export traces",
             "the service did not sample or has not yet exported the span",
             "the service's trust policy re-rooted the trace",
             "a different service or intermediary answered",
+            "the gateway's attempt span was not exported (for example, its export buffer was full)",
         ])
         .does_not_prove(&[
             "that the service was never reached",

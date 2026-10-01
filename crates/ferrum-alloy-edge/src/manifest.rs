@@ -215,10 +215,15 @@ fn valid_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// A literal path Ferrum Edge admits as written (`policy_path` canonical form).
-/// v0.9.9 refuses a `;` path parameter in a `listen_path` unless the proxy sets
-/// `allow_path_parameters`, which export never does, and both supported
-/// releases refuse percent-escapes, backslashes, and `.`/`..` segments.
+/// A literal absolute path with no template, query, fragment, `;`, `%`, `\`,
+/// `//`, or `.`/`..` segment.
+///
+/// For `api.public_path`, exported as the `listen_path`, this is what Ferrum
+/// Edge admits as written (`policy_path` canonical form): v0.9.9 refuses a `;`
+/// path parameter unless the proxy sets `allow_path_parameters`, which export
+/// never does, and both supported releases refuse percent-escapes,
+/// backslashes, and dot segments. `api.service_base_path` and `health.path`
+/// use the same rule for simplicity; it is stricter than Edge requires there.
 fn valid_path(value: &str) -> bool {
     value.starts_with('/')
         && !value.contains(['{', '}', '*', '~', ' ', '?', '#', ';', '%', '\\'])

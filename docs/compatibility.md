@@ -55,7 +55,7 @@ What that job verifies is listed in [ADR 0007](adr/0007-real-gateway-integration
 
 ### Attempt and connection cases
 
-Both supported releases run every case; none is gated by release. The extra proxies come from `gen-e2e-edge-config`, which appends them to the unchanged `ferrum-alloy edge export` output, and every fault is produced inside the compose network.
+Both supported releases run every case; none is gated by release. The driver resolves the release under test from `EDGE_IMAGE` (set by CI per matrix row) against `compatibility.json`, or the baseline when it is unset, and the retry case requires that release's attempt-span shape, so a swapped image or a changed shape fails. The extra proxies come from `gen-e2e-edge-config`, which appends them to the unchanged `ferrum-alloy edge export` output, and every fault is produced inside the compose network.
 
 | Case | How it is produced | What is checked |
 |---|---|---|

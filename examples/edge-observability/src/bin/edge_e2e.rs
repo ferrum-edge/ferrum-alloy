@@ -403,9 +403,41 @@ fn parse_traceparent(value: &str) -> Result<(String, String), Failure> {
     Ok((parts[1].to_owned(), parts[2].to_owned()))
 }
 
+/// The tested pairing, compiled in so the driver and CI's Edge matrix read
+/// the same record.
+const COMPATIBILITY: &str = include_str!("../../../../docs/compatibility.json");
+
+/// Supported Edge releases that export no CLIENT span per backend attempt.
+/// Every later release does (Edge #5864, first released in v0.9.9).
+const RELEASES_WITHOUT_ATTEMPT_SPANS: &[&str] = &["v0.9.8"];
+
+/// The Edge release under test: the `compatibility.json` entry whose image is
+/// `EDGE_IMAGE` (set by CI per matrix row), or else the contract baseline the
+/// demo stack defaults to.
+fn edge_release() -> Result<String, Failure> {
+    let pairing: Value = serde_json::from_str(COMPATIBILITY)?;
+    let image = std::env::var("EDGE_IMAGE").unwrap_or_default();
+    let entry = if image.is_empty() {
+        Some(&pairing["edge"])
+    } else {
+        pairing["edge_support"]["tested"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|edge| edge["image"] == image.as_str())
+    };
+    let unknown = || fail(format!("EDGE_IMAGE {image} is not in compatibility.json"));
+    let release = entry
+        .and_then(|edge| edge["release"].as_str())
+        .ok_or_else(unknown)?;
+    Ok(release.to_owned())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Failure> {
     let args = args()?;
+    let release = edge_release()?;
+    println!("Ferrum Edge release under test: {release}");
     std::fs::create_dir_all(&args.out)?;
     let ca = args.out.join("ca.pem");
     compose(&args, &["cp", "alloy:/certs/ca.pem", &ca.to_string_lossy()])?;
@@ -708,6 +740,7 @@ async fn main() -> Result<(), Failure> {
     let evidence = Evidence {
         text: &text,
         out: &args.out,
+        release: &release,
     };
     check_retry(&mut check, &evidence, &cases.retry);
     check_connections(&mut check, &evidence, &cases);
@@ -726,13 +759,20 @@ fn collector() -> Producer {
     }
 }
 
-/// Exported spans, and where per-case diagnoses are kept.
+/// Exported spans, where per-case diagnoses are kept, and the Edge release
+/// that produced them.
 struct Evidence<'a> {
     text: &'a str,
     out: &'a Path,
+    release: &'a str,
 }
 
 impl Evidence<'_> {
+    /// Whether the Edge release under test exports a CLIENT span per attempt.
+    fn attempt_spans(&self) -> bool {
+        !RELEASES_WITHOUT_ATTEMPT_SPANS.contains(&self.release)
+    }
+
     /// Imports one trace, adds `extra` client observations, runs the rules,
     /// and saves the report as `diagnosis-<label>.json`.
     fn diagnose(
@@ -993,10 +1033,20 @@ fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
         .iter()
         .map(|attempt| attempt_number(&spans, attempt))
         .collect();
+    let expected = if evidence.attempt_spans() {
+        ["1", "2"]
+    } else {
+        ["", ""]
+    };
     check.that(
-        "retry: each attempt has its own numbered Edge attempt span, or none has one",
-        numbers == ["1", "2"] || numbers == ["", ""],
-        format!("attempt numbers [{}]", numbers.join(", ")),
+        "retry: the attempts have the Edge attempt spans their release exports",
+        numbers == expected,
+        format!(
+            "Edge {}: attempt numbers [{}], expected [{}]",
+            evidence.release,
+            numbers.join(", "),
+            expected.join(", ")
+        ),
     );
     let statuses: Vec<String> = attempts
         .iter()
