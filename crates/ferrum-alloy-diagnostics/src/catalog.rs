@@ -172,7 +172,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         name: EDGE_BACKEND_ATTEMPT_DURATION,
         start: "edge.backend_attempt_dispatch",
         end: "edge.backend_attempt_completion",
-        meaning: "Ferrum Edge v0.9.9 CLIENT span duration for one backend attempt, from its dispatch until its outcome is known: the response head when the response streams, the complete response when it is buffered, including any connection setup the attempt performed. Exception: on Edge's HTTP/3 frontend bridge to an HTTP/1.1 or HTTP/2 backend, a buffered attempt usually ends at its response head; Edge names no frontend protocol, so a buffered attempt counts as including the body only when it reports connection reuse, which only the direct HTTP/2 and gRPC pools (never that bridge) do. Retries are separate sibling spans and retry backoff falls between them; this is not the request across attempts and backoff.",
+        meaning: "Ferrum Edge v0.9.9 CLIENT span duration for one backend attempt, from its dispatch until its outcome is known: the response head when the response streams, the complete response when it is buffered, including any connection setup the attempt performed. Exception: on Edge's HTTP/3 frontend bridge to an HTTP/1.1 or HTTP/2 backend, a buffered attempt usually ends at its response head; Edge names no frontend protocol, so a buffered attempt counts as including the body only when it carries the `gateway.backend.connection.reused` attribute, which only the direct HTTP/2 and gRPC pools (never that bridge) do. Retries are separate sibling spans and retry backoff falls between them; this is not the request across attempts and backoff.",
     },
     CatalogEntry {
         name: EDGE_BACKEND_CONNECTION_SETUP,

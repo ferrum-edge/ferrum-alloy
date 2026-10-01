@@ -570,7 +570,7 @@ impl FindingBuilder {
 /// R001: Edge rejected the request before any upstream attempt.
 fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r001";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     for view in index.edge.values() {
         let services = view
             .span
@@ -1971,7 +1971,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R004: telemetry is too incomplete to localize the delay.
 fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r004";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     let degraded: Vec<&Observation> = index
         .report
         .observations

@@ -444,7 +444,7 @@ fn insufficient_telemetry_cites_degraded_evidence_within_the_cap() {
         .find(|finding| finding.code == "alloy.telemetry.insufficient")
         .unwrap();
 
-    assert_eq!(finding.rule_version, 3);
+    assert_eq!(finding.rule_version, 4);
     assert_eq!(
         degraded_citations(finding),
         MAX_DEGRADED_CITATIONS_PER_FINDING
