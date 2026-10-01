@@ -53,7 +53,7 @@ The recommended first deployment is Edge presenting an X.509-SVID through `backe
 
 If a sidecar terminates TLS instead, Alloy sees a plaintext loopback connection and must rely on `trust.networks`. The deployment must then guarantee that only the sidecar can reach the service port. Alloy cannot verify that.
 
-Edge v0.9.8 and v0.9.7 reserve only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path. Other `x-consumer-*` names sent by clients pass through Edge. Alloy trusts only those two names, and only from a verified identity.
+Edge v0.9.9 treats the whole `x-consumer-*` namespace as gateway-owned and drops every client copy. Edge v0.9.8 reserves only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path, so other `x-consumer-*` names sent by clients pass through it. Behind either release, Alloy trusts only those two names, and only from a verified identity.
 
 ## Trace context and sampling
 
@@ -266,4 +266,4 @@ OTLP endpoints from Alloy configuration and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
 - Network-boundary trust depends on deployment isolation that Alloy cannot verify.
 - Files that dependencies read are not bounded by Alloy: the `sslrootcert`, `sslcert`, and `sslkey` files named in `FERRUM_ALLOY_DATABASE_URL`, which sqlx reads, and the platform trust store, which `rustls-platform-verifier` reads.
 - The [route-conflict check](configuration.md#route-conflicts-on-the-application-listener) does not report a root catch-all route (`/{*path}`) or fallbacks, including nested routers' fallbacks: Alloy's paths on the application listener take precedence over them without an error.
-- The Edge v0.9.8 gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9.
+- The Edge gaps listed in [edge-contract-inventory.md](edge-contract-inventory.md) §9, some of which remain only in v0.9.8.

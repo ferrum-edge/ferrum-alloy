@@ -842,8 +842,7 @@ fn attempt_of<'a>(spans: &'a BTreeMap<String, Value>, service: &Value) -> Option
 /// The Edge span `service` hangs under: its parent, or the parent of the Edge
 /// attempt span that is its parent. One attempt hop at most.
 fn gateway_parent(spans: &BTreeMap<String, Value>, service: &Value) -> String {
-    attempt_of(spans, service)
-        .map_or_else(|| parent_id(service), parent_id)
+    attempt_of(spans, service).map_or_else(|| parent_id(service), parent_id)
 }
 
 /// The `gateway.backend.attempt` number of the Edge attempt span that parents

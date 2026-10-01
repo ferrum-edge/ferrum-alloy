@@ -196,9 +196,10 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.8`. They are recorded here only to detect drift and are
-/// never rendered: rule `alloy.r007` renders the version-neutral explanations
-/// in `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
+/// `contracts-edge-0.9.9`, unchanged from `contracts-edge-0.9.8`. They are
+/// recorded here only to detect drift and are never rendered: rule
+/// `alloy.r007` renders the version-neutral explanations in
+/// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
 /// meaning because a header names no Edge version. A pin bump that changes a
 /// meaning fails `gateway_error_tokens_match_the_pinned_vocabulary` until the
 /// explanations are re-reviewed and this table is updated.
@@ -285,8 +286,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.8");
-    assert_eq!(pin["commit"], "89ef3917ce6bba142dce50b84f2033d81eb429dd");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.9");
+    assert_eq!(pin["commit"], "25c4e9e00033d7941a1dd0ab733fa74e735546ae");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
@@ -392,6 +393,7 @@ fn released_gateway_diagnostic_headers_match_the_pinned_vocabulary() {
     let local_headers = BTreeSet::from([
         ferrum_alloy_edge::contract::GATEWAY_ERROR.to_owned(),
         ferrum_alloy_edge::contract::GATEWAY_UPSTREAM_STATUS.to_owned(),
+        ferrum_alloy_edge::contract::DIAGNOSTIC_REF.to_owned(),
     ]);
     let (missing, extra) = differences(&canonical_headers, &local_headers);
     assert!(

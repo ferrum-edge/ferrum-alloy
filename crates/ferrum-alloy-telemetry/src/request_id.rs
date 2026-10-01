@@ -1,7 +1,7 @@
 //! Validated request (correlation) identifiers.
 //!
 //! The accepted alphabet and length match the Ferrum Edge `correlation_id`
-//! plugin (v0.9.8): at most 256 bytes of `[A-Za-z0-9._-]`. An id accepted by
+//! plugin (v0.9.9 and v0.9.8): at most 256 bytes of `[A-Za-z0-9._-]`. An id accepted by
 //! Edge is therefore preserved by Alloy, and an id Alloy generates is one Edge
 //! would accept. A request id is a correlation aid, never a credential.
 

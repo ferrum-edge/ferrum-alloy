@@ -1,9 +1,13 @@
 //! Generates reviewable Ferrum Edge configuration from a service manifest.
 //!
 //! Output uses only fields that exist in the configuration schema of Ferrum Edge
-//! v0.9.8 and v0.9.7 (`src/config/types.rs`: `Proxy`, `Upstream`, `PluginConfig`,
+//! v0.9.9 and v0.9.8 (`src/config/types.rs`: `Proxy`, `Upstream`, `PluginConfig`,
 //! `GatewayConfig`, all `deny_unknown_fields`) and GitForgeOps's per-resource
-//! `kind`/`spec` wrapper. Nothing is sent to a running gateway: artifacts are
+//! `kind`/`spec` wrapper. The `Proxy` fields v0.9.9 added are left at their
+//! defaults: `allow_path_parameters` stays `false`, so Edge refuses `;` path
+//! parameters before routing (manifest paths cannot contain `;`), and
+//! `websocket_permessage_deflate` stays `strip`. Emitting either would make the
+//! output invalid on v0.9.8. Nothing is sent to a running gateway: artifacts are
 //! written for review and applied through the operator's normal process.
 //!
 //! When the manifest declares a health check, the backend is expressed as an

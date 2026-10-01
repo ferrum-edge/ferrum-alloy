@@ -523,7 +523,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
             )
             .does_not_prove(&[
                 "that the gateway policy is misconfigured",
-                "which plugin rejected the request (Ferrum Edge v0.9.7 and v0.9.8 record only the phase)",
+                "which plugin rejected the request (Ferrum Edge transaction logs record only the phase)",
             ])
             .confirm_with(&[
                 "the gateway transaction log entry for this request (metadata.rejection_phase)",
@@ -655,9 +655,10 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         ]);
         builder = match known {
             Some((_, meaning)) => builder
-                // Ferrum Edge v0.9.8 strips a backend-supplied X-Gateway-Error,
-                // but v0.9.5/v0.9.7 do not on every path, and the header names no
-                // Edge version or authenticated sender, so it caps at likely.
+                // Ferrum Edge v0.9.9 and v0.9.8 strip a backend-supplied
+                // X-Gateway-Error, but older releases do not on every path, and
+                // the header names no Edge version or authenticated sender, so it
+                // caps at likely.
                 .confidence(Confidence::Likely)
                 .explanation(format!(
                     "X-Gateway-Error: {token}. {meaning} Ferrum Edge before v0.9.8 lets a backend inject the header on some paths, and the header names no gateway version, so it is not authenticated gateway evidence."
@@ -1118,7 +1119,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "that the service was idle during the interval",
         ])
         .confirm_with(&[
-            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.7 or v0.9.8)",
+            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
             "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
         if !confirmed {

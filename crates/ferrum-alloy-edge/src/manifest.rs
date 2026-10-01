@@ -4,7 +4,7 @@
 //! **Status: PROPOSED contract.** No Ferrum product consumes this manifest
 //! yet. `ferrum-alloy edge export` turns it into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing* schema
-//! (verified against Edge v0.9.8). Nexus and Foundry consumption is future
+//! (verified against Edge v0.9.9 and v0.9.8). Nexus and Foundry consumption is future
 //! work; field names may change before any consumer implements them.
 
 use std::collections::BTreeSet;
@@ -215,11 +215,15 @@ fn valid_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// A literal path Ferrum Edge admits as written (`policy_path` canonical form).
+/// v0.9.9 refuses a `;` path parameter in a `listen_path` unless the proxy sets
+/// `allow_path_parameters`, which export never does, and both supported
+/// releases refuse percent-escapes, backslashes, and `.`/`..` segments.
 fn valid_path(value: &str) -> bool {
     value.starts_with('/')
-        && !value.contains(['{', '}', '*', '~', ' ', '?', '#'])
+        && !value.contains(['{', '}', '*', '~', ' ', '?', '#', ';', '%', '\\'])
         && !value.contains("//")
-        && !value.split('/').any(|segment| segment == "..")
+        && !value.split('/').any(|s| matches!(s, "." | ".."))
 }
 
 impl ServiceManifest {

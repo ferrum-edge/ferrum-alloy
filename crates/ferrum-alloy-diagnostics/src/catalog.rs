@@ -137,8 +137,11 @@ pub fn is_known(name: &str) -> bool {
 }
 
 /// Ferrum Edge `rejection_phase` values that run before any upstream attempt
-/// (Edge `docs/plugin_execution_order.md`; the same set in v0.9.7 and v0.9.8, except the
-/// HTTP/3-only `route_request_timeout_h3_upload` added in v0.9.8, which is not yet mapped).
+/// (Edge `docs/plugin_execution_order.md`; the same set in v0.9.9 and v0.9.8, where the
+/// HTTP/3-only `route_request_timeout_h3_upload` is not yet mapped). The phases v0.9.9
+/// adds are not mapped either: `h1_framing_unverified` and `client_trust_withdrawn` are
+/// recorded only in Edge's diagnostic reference, and `websocket_permessage_deflate`
+/// rejects a backend's answer, after the upstream attempt.
 pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "allowed_methods",
     "on_request_received",
@@ -156,9 +159,10 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "adaptive_concurrency",
 ];
 
-/// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.8
-/// (`src/retry.rs`), each token with Alloy's user-facing explanation, which
-/// rule `alloy.r007` renders into findings. v0.9.8 added `request_timeout`.
+/// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.9 and
+/// v0.9.8 (`src/retry.rs`), each token with Alloy's user-facing explanation,
+/// which rule `alloy.r007` renders into findings. v0.9.8 added
+/// `request_timeout`.
 ///
 /// A header names no Edge version, so each explanation holds for every
 /// supported release and is never narrower than an earlier release's meaning:
