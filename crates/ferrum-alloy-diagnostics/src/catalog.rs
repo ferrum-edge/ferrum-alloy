@@ -52,6 +52,47 @@ pub const ALLOY_RESPONSE: &str = "alloy.response";
 /// Client event: a response header value the client observed (e.g. `X-Gateway-Error`).
 pub const CLIENT_RESPONSE_HEADER: &str = "client.response_header";
 
+/// The `header` of a [`CLIENT_RESPONSE_HEADER`] event that records a Ferrum
+/// Edge diagnostic reference (`X-Ferrum-Diagnostic-Ref`, Edge v0.9.9
+/// `src/diagnostic_ref.rs`), compared case-insensitively. Edge stamps it on
+/// the error responses the gateway authors when `FERRUM_DIAGNOSTIC_REFS` is
+/// `errors` or `all` (the default is `off`); v0.9.8 never sends it. It is an
+/// opaque identifier, not a measurement, and Edge exports it on no span.
+pub const EDGE_DIAGNOSTIC_REF_HEADER: &str = "x-ferrum-diagnostic-ref";
+
+/// The grammar of every reference Ferrum Edge v0.9.9 mints, as the pinned
+/// `contracts-edge-0.9.9` `vocabularies/gateway-headers.json` states it:
+/// `fd1_` and 32 lowercase hex digits, or, with
+/// `FERRUM_DIAGNOSTIC_REF_REPLICA_TAG=true`, `fd2_`, an 8-digit lowercase hex
+/// replica id, `_`, and 32 lowercase hex digits. [`is_edge_diagnostic_ref`]
+/// implements it.
+pub const EDGE_DIAGNOSTIC_REF_PATTERN: &str = "^(fd1_[0-9a-f]{32}|fd2_[0-9a-f]{8}_[0-9a-f]{32})$";
+
+/// Whether `value` is a reference Ferrum Edge mints
+/// ([`EDGE_DIAGNOSTIC_REF_PATTERN`]). A value that is not is never
+/// interpreted and never belongs in a lookup URL.
+pub fn is_edge_diagnostic_ref(value: &str) -> bool {
+    if let Some(random) = value.strip_prefix("fd1_") {
+        return is_lower_hex(random, 32);
+    }
+    edge_diagnostic_ref_replica(value).is_some()
+}
+
+/// The replica id a replica-tagged (`fd2_`) reference names, when `value` is
+/// one. Only the gateway process with that replica id resolves it.
+pub fn edge_diagnostic_ref_replica(value: &str) -> Option<&str> {
+    let (replica, random) = value.strip_prefix("fd2_")?.split_once('_')?;
+    if is_lower_hex(replica, 8) && is_lower_hex(random, 32) {
+        Some(replica)
+    } else {
+        None
+    }
+}
+
+fn is_lower_hex(text: &str, len: usize) -> bool {
+    text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Every catalog entry.
 pub const ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {

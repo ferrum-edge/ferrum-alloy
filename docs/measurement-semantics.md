@@ -92,6 +92,21 @@ These come from Edge's own spans and logs. Alloy imports them without reinterpre
 
 HTTP/2 connection setup would be connection-scoped. If Edge ever exports it, Alloy must not charge it to each multiplexed stream; it should be linked as connection-level evidence. A pooled request has no setup phase and is `not_applicable`, not zero.
 
+## Gateway diagnostic reference (Ferrum Edge v0.9.9)
+
+Ferrum Edge v0.9.9 can stamp an opaque `X-Ferrum-Diagnostic-Ref` on the error responses the gateway authors. It is an identifier, not a timing: it has no start, end, unit, or clock domain, and it is never used in a duration, subtraction, or comparison. Alloy records it as one field, defined here and in `catalog.rs` (`EDGE_DIAGNOSTIC_REF_HEADER`, `EDGE_DIAGNOSTIC_REF_PATTERN`, `is_edge_diagnostic_ref`).
+
+| Field | Recorded as | Producer | Grammar | Availability |
+|---|---|---|---|---|
+| Gateway diagnostic reference | A `client.response_header` event (kind `event`, leg `client_to_gateway`) with `header` = `X-Ferrum-Diagnostic-Ref` (matched case-insensitively) and `value` = the reference | Whoever observed the response: a client, a person, or the `edge-e2e` driver. Edge's `otel_tracing` puts it on no span, so the OTLP importer never records one. | `fd1_` and 32 lowercase hex digits, or `fd2_`, an 8-digit lowercase hex replica id, `_`, and 32 lowercase hex digits (`^(fd1_[0-9a-f]{32}\|fd2_[0-9a-f]{8}_[0-9a-f]{32})$`, from the pinned `gateway-headers.json`) | Only from Edge v0.9.9 and later with `FERRUM_DIAGNOSTIC_REFS=errors` (responses with a gateway `X-Gateway-Error` token) or `all` (also plugin rejections, gateway policy refusals, and routing `404`s). The default is `off`, and v0.9.8 never sends it. |
+
+What it does not cover:
+
+- **Absence is unknown.** A response without a reference is not evidence that the backend authored it: references may be off, the release may predate them, or a plugin may have replayed a stored response.
+- **It embeds nothing.** The reference is 128 random bits (plus a random replica id for `fd2_`). It names no cause, route, backend, tenant, or time.
+- **It is not authenticated.** Edge v0.9.9 removes any copy a backend or plugin sets, but the header names no Edge version and any server can send one. Rule `alloy.r007` therefore reports a well-formed reference as `alloy.edge.diagnostic_ref`, at most `likely`, and a malformed one as `alloy.edge.diagnostic_ref_malformed`, `unknown`, with no meaning inferred. Neither raises any other finding.
+- **Alloy does not resolve it.** Only the gateway process that minted it resolves it, through `GET /diagnostics/v1/refs/{ref}` on its admin listener with an admin JWT carrying the `diagnostics:read` scope and an `ns` claim for the gateway's namespace, before it expires (`FERRUM_DIAGNOSTIC_REF_TTL_SECONDS`, default 900) or is evicted. The finding names that lookup in `confirm_with`, only for a well-formed reference. The `ferrum.diagnostic_ref.v1` record it returns is the authenticated gateway evidence that could support more than `likely`; Alloy does not fetch or interpret it yet.
+
 ## Comparing gateway and service measurements
 
 Diagnosis rule `alloy.r003` subtracts a service measurement from a gateway measurement only when all of these hold:

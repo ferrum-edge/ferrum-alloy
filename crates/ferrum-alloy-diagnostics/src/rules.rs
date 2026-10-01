@@ -631,10 +631,11 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     }
 }
 
-/// R007: gateway error classification (X-Gateway-Error token or Edge error class).
+/// R007: gateway error classification (X-Gateway-Error token or Edge error
+/// class), and the gateway diagnostic reference a client observed.
 fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r007";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     let header_events = index.report.observations.iter().filter(|o| {
         o.name == catalog::CLIENT_RESPONSE_HEADER
             && o.attr("header")
@@ -676,6 +677,15 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         out.push(builder.build());
     }
 
+    let references = index.report.observations.iter().filter(|o| {
+        o.name == catalog::CLIENT_RESPONSE_HEADER
+            && o.attr("header")
+                .is_some_and(|h| h.eq_ignore_ascii_case(catalog::EDGE_DIAGNOSTIC_REF_HEADER))
+    });
+    for observation in references {
+        out.push(diagnostic_ref_finding(observation, RULE, VERSION));
+    }
+
     for view in index.edge.values() {
         let Some(error) = view.named(catalog::EDGE_GATEWAY_ERROR) else {
             continue;
@@ -707,6 +717,73 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         .confirm_with(&["the gateway transaction log entry for this request"]);
         out.push(builder.build());
     }
+}
+
+/// A Ferrum Edge diagnostic reference (`X-Ferrum-Diagnostic-Ref`) a client
+/// observed on a response.
+///
+/// The header alone is never gateway evidence: it is not authenticated, and a
+/// server that is not Ferrum Edge can send it. A well-formed reference is
+/// therefore at most `likely`, names the lookup that would resolve it, and
+/// raises no other finding. Alloy does not resolve it. A malformed value is
+/// `unknown`, is not interpreted, and is never put into a lookup.
+fn diagnostic_ref_finding(observation: &Observation, rule: &str, version: u32) -> Finding {
+    let value = observation.attr("value").unwrap_or_default();
+    if !catalog::is_edge_diagnostic_ref(value) {
+        return FindingBuilder::new(
+            "alloy.edge.diagnostic_ref_malformed",
+            rule,
+            version,
+            "Response carried a malformed gateway diagnostic reference",
+        )
+        .scope(SourceScope::Unknown)
+        .severity(Severity::Warning)
+        .owner(Owner::Unknown)
+        .confidence(Confidence::Unknown)
+        .cite(observation, "header.x-ferrum-diagnostic-ref", value)
+        .explanation(format!(
+            "X-Ferrum-Diagnostic-Ref carried {value:?}, which is not a reference Ferrum Edge mints (fd1_ and 32 lowercase hex digits, or fd2_, an 8-digit lowercase hex replica id, _, and 32 lowercase hex digits). No meaning is inferred, and it is not a value to look up."
+        ))
+        .alternatives(&[
+            "a server or intermediary other than Ferrum Edge set the header",
+            "the value was changed after the gateway sent it",
+            "a later Ferrum Edge reference format that this version of Alloy does not know",
+        ])
+        .does_not_prove(&[
+            "that Ferrum Edge sent the header",
+            "that the gateway authored the response",
+            "what failed",
+        ])
+        .build();
+    }
+    let replica = catalog::edge_diagnostic_ref_replica(value)
+        .map(|id| format!(" Only the gateway process with replica id {id} resolves it."))
+        .unwrap_or_default();
+    let lookup = format!(
+        "the gateway's record of this response: GET /diagnostics/v1/refs/{value} on the admin listener of the gateway process that served it, with an admin JWT whose scope includes diagnostics:read and whose ns claim names the gateway's namespace, before the reference expires (FERRUM_DIAGNOSTIC_REF_TTL_SECONDS, default 900)"
+    );
+    FindingBuilder::new(
+        "alloy.edge.diagnostic_ref",
+        rule,
+        version,
+        "Response carried a gateway diagnostic reference",
+    )
+    .scope(SourceScope::Unknown)
+    .severity(Severity::Info)
+    .owner(Owner::GatewayOperator)
+    .confidence(Confidence::Likely)
+    .cite(observation, "header.x-ferrum-diagnostic-ref", value)
+    .explanation(format!(
+        "X-Ferrum-Diagnostic-Ref: {value}. Ferrum Edge v0.9.9 and later stamp this opaque reference on the error responses the gateway authors when FERRUM_DIAGNOSTIC_REFS is errors or all, and remove any copy a backend or plugin sets. It embeds nothing about the request; only the gateway's authenticated lookup resolves it.{replica} The header itself is not authenticated, so it is not gateway evidence, and Alloy does not resolve it."
+    ))
+    .does_not_prove(&[
+        "that Ferrum Edge minted the reference: the header is not authenticated",
+        "what failed, or which side caused it: the reference embeds no cause",
+        "that the reference still resolves: it expires and can be evicted",
+    ])
+    .confirm_with(&[lookup.as_str()])
+    .missing(&["authenticated gateway diagnostic record for this reference"])
+    .build()
 }
 
 fn does_not_prove_for_token(token: &str) -> &'static [&'static str] {

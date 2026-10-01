@@ -21,6 +21,13 @@
 //! Their faults come from inside the compose network (Alloy routes in
 //! `src/main.rs`, proxies from `src/bin/gen_e2e_edge_config.rs`), never from
 //! changes to the host's network.
+//!
+//! `compose.yaml` turns on Edge's gateway diagnostic references
+//! (`FERRUM_DIAGNOSTIC_REFS=errors`). On releases that mint them (v0.9.9 and
+//! later), the refused connection's gateway error must carry a well-formed
+//! `X-Ferrum-Diagnostic-Ref`, and diagnosis must record it without
+//! confirming anything. v0.9.8 does not read the variable, and its run is
+//! unchanged.
 
 #![allow(clippy::print_stdout, reason = "command-line test driver")]
 
@@ -411,6 +418,10 @@ const COMPATIBILITY: &str = include_str!("../../../../docs/compatibility.json");
 /// Every later release does (Edge #5864, first released in v0.9.9).
 const RELEASES_WITHOUT_ATTEMPT_SPANS: &[&str] = &["v0.9.8"];
 
+/// Supported Edge releases that cannot mint a gateway diagnostic reference.
+/// Every later release can (Edge #5767, first released in v0.9.9).
+const RELEASES_WITHOUT_DIAGNOSTIC_REFS: &[&str] = &["v0.9.8"];
+
 /// The Edge release under test: the `compatibility.json` entry whose image is
 /// `EDGE_IMAGE` (set by CI per matrix row), or else the contract baseline the
 /// demo stack defaults to.
@@ -773,6 +784,11 @@ impl Evidence<'_> {
         !RELEASES_WITHOUT_ATTEMPT_SPANS.contains(&self.release)
     }
 
+    /// Whether the Edge release under test mints diagnostic references.
+    fn diagnostic_refs(&self) -> bool {
+        !RELEASES_WITHOUT_DIAGNOSTIC_REFS.contains(&self.release)
+    }
+
     /// Imports one trace, adds `extra` client observations, runs the rules,
     /// and saves the report as `diagnosis-<label>.json`.
     fn diagnose(
@@ -801,7 +817,7 @@ impl Evidence<'_> {
 /// A response header the client observed, as diagnosis input.
 fn client_header(name: &str, value: &str) -> Observation {
     Observation {
-        id: "client:response-header".into(),
+        id: format!("client:response-header:{}", name.to_ascii_lowercase()),
         producer: Producer {
             kind: ProducerKind::Client,
             name: "edge-e2e".into(),
@@ -1383,8 +1399,22 @@ fn check_refused(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
             services.len()
         ),
     );
-    let observed = client_header("X-Gateway-Error", &token);
-    match evidence.diagnose("refused", &trace, vec![observed]) {
+    let mut observed = vec![client_header("X-Gateway-Error", &token)];
+    // Only releases that mint references are checked, so v0.9.8 runs as before.
+    let reference = if evidence.diagnostic_refs() {
+        let name = catalog::EDGE_DIAGNOSTIC_REF_HEADER;
+        let value = header(reply, name).unwrap_or_default();
+        check.that(
+            "refused: Edge stamped a well-formed diagnostic reference",
+            catalog::is_edge_diagnostic_ref(&value),
+            format!("X-Ferrum-Diagnostic-Ref: {value:?}"),
+        );
+        observed.push(client_header("X-Ferrum-Diagnostic-Ref", &value));
+        Some(value)
+    } else {
+        None
+    };
+    match evidence.diagnose("refused", &trace, observed) {
         Ok((_, findings)) => {
             let explained = findings.iter().any(|f| {
                 f.code == "alloy.edge.gateway_error_token"
@@ -1399,6 +1429,18 @@ fn check_refused(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
                 explained && classified && confirmed(&findings).is_empty(),
                 codes(&findings),
             );
+            if let Some(value) = reference {
+                let recorded = findings.iter().any(|f| {
+                    f.code == "alloy.edge.diagnostic_ref"
+                        && f.confidence.as_str() == "likely"
+                        && f.evidence.iter().any(|e| e.value == value)
+                });
+                check.that(
+                    "refused: diagnosis records the reference, capped at likely",
+                    recorded && confirmed(&findings).is_empty(),
+                    codes(&findings),
+                );
+            }
         }
         Err(error) => check.that("refused: diagnosis imported", false, error),
     }

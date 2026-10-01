@@ -137,6 +137,7 @@ fn every_fixture_avoids_invalid_explanations() {
         "service-exceeds-gateway.json",
         "forged-verified-claim.json",
         "gateway-error-token.json",
+        "gateway-diagnostic-ref.json",
     ] {
         assert_no_forbidden_claims(&findings(name));
     }
@@ -988,6 +989,7 @@ fn analysis_and_rendering_are_deterministic() {
         "db-operation-after-headers.json",
         "unattributed-interval.json",
         "gateway-error-token.json",
+        "gateway-diagnostic-ref.json",
     ] {
         let parsed = parsed(name);
         let first = analyze(&parsed.report, &Thresholds::default());
