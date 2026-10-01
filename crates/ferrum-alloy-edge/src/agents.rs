@@ -775,7 +775,9 @@ fn operation_extension(
             unknown_keys(annotations, ANNOTATION_KEYS, &at, problems);
             for (key, value) in annotations {
                 let valid = if key == "title" {
-                    value.as_str().is_some_and(|title| title.len() <= MAX_TEXT_BYTES)
+                    value
+                        .as_str()
+                        .is_some_and(|title| title.len() <= MAX_TEXT_BYTES)
                 } else {
                     value.is_boolean()
                 };
