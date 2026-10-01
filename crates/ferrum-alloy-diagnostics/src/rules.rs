@@ -496,7 +496,7 @@ impl FindingBuilder {
 /// R001: Edge rejected the request before any upstream attempt.
 fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r001";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     for view in index.edge.values() {
         let services = view
             .span
@@ -1009,7 +1009,7 @@ fn same_instance(a: &Observation, b: &Observation) -> bool {
 /// R003: gateway backend time minus service time, when comparable.
 fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r003";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     for view in index.edge.values() {
         let Some(edge_span) = view.span else {
             continue;
@@ -1024,7 +1024,126 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         if services.is_empty() {
             continue;
         }
+        let attempt_durations: Vec<&Observation> = index
+            .report
+            .observations
+            .iter()
+            .filter(|observation| {
+                observation.name == catalog::EDGE_BACKEND_ATTEMPT_DURATION
+                    && observation.span.as_ref().is_some_and(|span| {
+                        span.trace_id == edge_span.trace_id
+                            && span.parent_span_id.as_deref() == Some(edge_span.span_id)
+                    })
+            })
+            .collect();
         if services.len() > 1 {
+            if !attempt_durations.is_empty() {
+                let mut builder = FindingBuilder::new(
+                    "alloy.gateway.multiple_service_attempts",
+                    RULE,
+                    VERSION,
+                    "Several service requests share one gateway request",
+                )
+                .scope(SourceScope::GatewayToUpstream)
+                .severity(Severity::Info)
+                .owner(Owner::GatewayOperator)
+                .confidence(Confidence::Likely)
+                .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
+                .does_not_prove(&["which attempt produced the final response"]);
+                let mut comparisons = Vec::new();
+                for attempt in &attempt_durations {
+                    let Some(attempt_span) = attempt.span.as_ref() else {
+                        continue;
+                    };
+                    let Some(service) = services.iter().find(|service| {
+                        service.span.is_some_and(|span| {
+                            span.parent_span_id.as_deref() == Some(attempt_span.span_id.as_str())
+                        })
+                    }) else {
+                        continue;
+                    };
+                    let streamed = ttfb.attr("edge.response.streamed");
+                    let service_obs = match streamed {
+                        Some("true") => service.named(catalog::ALLOY_TIME_TO_HEADERS),
+                        Some("false") => service.named(catalog::ALLOY_SERVER_DURATION),
+                        _ => None,
+                    };
+                    let (Some(attempt_ms), Some(service_obs), Some(service_ms)) = (
+                        attempt.duration_ms(),
+                        service_obs,
+                        service_obs.and_then(Observation::duration_ms),
+                    )
+                    else {
+                        continue;
+                    };
+                    let residual = attempt_ms - service_ms;
+                    let attempt_number = attempt.scope.attempt.map_or_else(
+                        || "unknown".to_owned(),
+                        |number| number.to_string(),
+                    );
+                    comparisons.push(format!(
+                        "attempt {attempt_number}: gateway attempt {} minus service {} = {}",
+                        ms(attempt_ms),
+                        ms(service_ms),
+                        ms(residual)
+                    ));
+                    builder = builder
+                        .cite(attempt, catalog::EDGE_BACKEND_ATTEMPT_DURATION, ms(attempt_ms))
+                        .cite(service_obs, &service_obs.name, ms(service_ms));
+                    if let Some(setup) = index.report.observations.iter().find(|observation| {
+                        observation.name == catalog::EDGE_BACKEND_CONNECTION_SETUP
+                            && observation.span.as_ref().is_some_and(|span| {
+                                span.trace_id == attempt_span.trace_id
+                                    && span.span_id == attempt_span.span_id
+                            })
+                    }) {
+                        if let Some(setup_ms) = setup.duration_ms() {
+                            builder = builder.cite(
+                                setup,
+                                catalog::EDGE_BACKEND_CONNECTION_SETUP,
+                                ms(setup_ms),
+                            );
+                        }
+                    }
+                    if let Some(reason) = attempt.attr("retry_reason") {
+                        builder = builder.cite(attempt, "gateway.backend.retry_reason", reason);
+                    }
+                    if let Some(reuse) = index.report.observations.iter().find(|observation| {
+                        observation.name == catalog::EDGE_BACKEND_CONNECTION_REUSED
+                            && observation.span.as_ref().is_some_and(|span| {
+                                span.trace_id == attempt_span.trace_id
+                                    && span.span_id == attempt_span.span_id
+                            })
+                    }) {
+                        if let Some(reused) = reuse.attr("reused") {
+                            builder = builder.cite(
+                                reuse,
+                                "gateway.backend.connection.reused",
+                                reused,
+                            );
+                        }
+                    }
+                }
+                let explanation = if comparisons.is_empty() {
+                    format!(
+                        "{} service server spans are linked to this gateway request through attempt spans, but no attempt has a comparable service duration. Per-attempt timings are not subtracted.",
+                        services.len()
+                    )
+                } else {
+                    format!(
+                        "Per-attempt gateway durations are compared with the matching service durations: {}. These residuals can include connection setup and transfer within each attempt; a retry reason identifies a retried attempt.",
+                        comparisons.join("; ")
+                    )
+                };
+                builder = builder.explanation(explanation);
+                for service in &services {
+                    if let Some(first) = service.observations.first() {
+                        builder = builder.cite(first, "alloy.server_span", "linked");
+                    }
+                }
+                out.push(builder.build());
+                continue;
+            }
             let mut builder = FindingBuilder::new(
                 "alloy.gateway.multiple_service_attempts",
                 RULE,
@@ -1053,6 +1172,15 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         let Some(service) = services.first() else {
             continue;
         };
+        let attempt = attempt_durations.iter().find(|attempt| {
+            attempt.span.as_ref().is_some_and(|attempt_span| {
+                service.span.is_some_and(|service_span| {
+                    service_span.parent_span_id.as_deref() == Some(attempt_span.span_id.as_str())
+                })
+            })
+        });
+        let comparison_gateway = attempt.copied().unwrap_or(ttfb);
+        let comparison_gateway_ms = comparison_gateway.duration_ms().unwrap_or(edge_ms);
         let streamed = ttfb.attr("edge.response.streamed");
         let (service_obs, comparison) = match streamed {
             Some("true") => (
@@ -1117,7 +1245,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             );
             continue;
         };
-        let residual = edge_ms - service_ms;
+        let residual = comparison_gateway_ms - service_ms;
         if residual < 0.0 {
             out.push(
                 FindingBuilder::new(
@@ -1130,14 +1258,31 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                 .severity(Severity::Warning)
                 .owner(Owner::Unknown)
                 .confidence(Confidence::ConflictingEvidence)
-                .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
+                .cite(
+                    comparison_gateway,
+                    if attempt.is_some() {
+                        catalog::EDGE_BACKEND_ATTEMPT_DURATION
+                    } else {
+                        "gateway.latency.backend_ttfb_ms"
+                    },
+                    ms(comparison_gateway_ms),
+                )
                 .cite(service_obs, &service_obs.name, ms(service_ms))
-                .explanation(format!(
-                    "The service measured {} but the gateway measured only {} for the enclosing backend exchange. The difference ({}) is negative, which the declared boundaries do not allow; it is reported instead of being clamped to zero.",
-                    ms(service_ms),
-                    ms(edge_ms),
-                    ms(residual)
-                ))
+                .explanation(if attempt.is_some() {
+                    format!(
+                        "The service measured {} but the gateway measured only {} for this backend attempt. The difference ({}) is negative, which the declared boundaries do not allow; it is reported instead of being clamped to zero.",
+                        ms(service_ms),
+                        ms(comparison_gateway_ms),
+                        ms(residual)
+                    )
+                } else {
+                    format!(
+                        "The service measured {} but the gateway measured only {} for the enclosing backend exchange. The difference ({}) is negative, which the declared boundaries do not allow; it is reported instead of being clamped to zero.",
+                        ms(service_ms),
+                        ms(comparison_gateway_ms),
+                        ms(residual)
+                    )
+                })
                 .alternatives(&[
                     "the measurements describe different requests or attempts",
                     "one producer's boundaries differ from its documentation",
@@ -1151,14 +1296,15 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             continue;
         }
         if residual < thresholds.residual_min_ms
-            || residual / edge_ms < thresholds.residual_min_fraction
+            || residual / comparison_gateway_ms < thresholds.residual_min_fraction
         {
             continue;
         }
         // The residual depends on both measurements, so a confirmed claim needs
         // verified provenance for each of them plus the gateway's attempt.
-        let attempt_known = ttfb.scope.attempt.is_some();
-        let gateway_verified = index.verified(ttfb);
+        let attempt_known =
+            comparison_gateway.scope.attempt.is_some() || ttfb.scope.attempt.is_some();
+        let gateway_verified = index.verified(comparison_gateway);
         let service_verified = index.verified(service_obs);
         let confirmed = attempt_known && gateway_verified && service_verified;
         let mut builder = FindingBuilder::new(
@@ -1175,15 +1321,33 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         } else {
             Confidence::Likely
         })
-        .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
+        .cite(
+            comparison_gateway,
+            if attempt.is_some() {
+                catalog::EDGE_BACKEND_ATTEMPT_DURATION
+            } else {
+                "gateway.latency.backend_ttfb_ms"
+            },
+            ms(comparison_gateway_ms),
+        )
         .cite(service_obs, &service_obs.name, ms(service_ms))
-        .explanation(format!(
-            "The gateway measured {} from backend dispatch to response headers; the {comparison} was {}. {} ({:.0}%) is unattributed: neither producer measured it.",
-            ms(edge_ms),
-            ms(service_ms),
-            ms(residual),
-            residual / edge_ms * 100.0
-        ))
+        .explanation(if attempt.is_some() {
+            format!(
+                "The gateway measured {} for this backend attempt; the {comparison} was {}. {} ({:.0}%) is unattributed: neither producer measured it.",
+                ms(comparison_gateway_ms),
+                ms(service_ms),
+                ms(residual),
+                residual / comparison_gateway_ms * 100.0
+            )
+        } else {
+            format!(
+                "The gateway measured {} from backend dispatch to response headers; the {comparison} was {}. {} ({:.0}%) is unattributed: neither producer measured it.",
+                ms(comparison_gateway_ms),
+                ms(service_ms),
+                ms(residual),
+                residual / comparison_gateway_ms * 100.0
+            )
+        })
         .alternatives(&[
             "connection establishment (DNS, TCP, TLS) by the gateway",
             "gateway retries and backoff for attempts that never reached the service",
@@ -1199,16 +1363,60 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "network latency",
             "that the network is slow",
             "that the service was idle during the interval",
-        ])
-        .confirm_with(&[
-            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
-            "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
+        if let Some(attempt) = attempt {
+            builder = builder.confirm_with(&[
+                "gateway attempt span connection reuse and setup attributes",
+                "gateway retry reason and sibling attempt intervals",
+            ]);
+            if let Some(attempt_span) = attempt.span.as_ref() {
+                if let Some(setup) = index.report.observations.iter().find(|observation| {
+                    observation.name == catalog::EDGE_BACKEND_CONNECTION_SETUP
+                        && observation.span.as_ref().is_some_and(|span| {
+                            span.trace_id == attempt_span.trace_id
+                                && span.span_id == attempt_span.span_id
+                        })
+                }) {
+                    if let Some(setup_ms) = setup.duration_ms() {
+                        builder = builder.cite(
+                            setup,
+                            catalog::EDGE_BACKEND_CONNECTION_SETUP,
+                            ms(setup_ms),
+                        );
+                    }
+                }
+                if let Some(reuse) = index.report.observations.iter().find(|observation| {
+                    observation.name == catalog::EDGE_BACKEND_CONNECTION_REUSED
+                        && observation.span.as_ref().is_some_and(|span| {
+                            span.trace_id == attempt_span.trace_id
+                                && span.span_id == attempt_span.span_id
+                        })
+                }) {
+                    if let Some(reused) = reuse.attr("reused") {
+                        builder = builder.cite(
+                            reuse,
+                            "gateway.backend.connection.reused",
+                            reused,
+                        );
+                    }
+                }
+                if let Some(reason) = attempt.attr("retry_reason") {
+                    builder = builder.cite(attempt, "gateway.backend.retry_reason", reason);
+                }
+            }
+        } else {
+            builder = builder.confirm_with(&[
+                "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
+                "gateway retry logs (\"Retrying backend request\") for this request",
+            ]);
+        }
         if !confirmed {
             if !attempt_known {
                 builder = builder.missing(&["gateway attempt identity"]);
             }
-            builder = builder.missing(&["gateway connection setup timing"]);
+            if attempt.is_none() {
+                builder = builder.missing(&["gateway connection setup timing"]);
+            }
             if !gateway_verified {
                 builder = builder.missing(&["verified gateway provenance for the backend timing"]);
             }
@@ -1374,7 +1582,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R004: telemetry is too incomplete to localize the delay.
 fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r004";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     let degraded: Vec<&Observation> = index
         .report
         .observations

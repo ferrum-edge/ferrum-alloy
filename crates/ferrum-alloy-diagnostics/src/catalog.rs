@@ -44,9 +44,21 @@ pub const EDGE_GATEWAY_ERROR: &str = "edge.gateway_error";
 /// Edge event: the final response status the gateway returned.
 pub const EDGE_RESPONSE: &str = "edge.response";
 /// Edge event: one backend attempt, from a Ferrum Edge v0.9.9 `otel_tracing`
-/// CLIENT span. It links the service span it parents to the gateway request;
-/// its timing and attempt attributes are not interpreted.
+/// CLIENT span. It links the service span it parents to the gateway request
+/// and carries its attempt number and any emitted retry or connection status.
 pub const EDGE_BACKEND_ATTEMPT: &str = "edge.backend.attempt";
+/// Edge: elapsed time of one v0.9.9 backend-attempt CLIENT span.
+pub const EDGE_BACKEND_ATTEMPT_DURATION: &str = "edge.backend.attempt.duration";
+/// Edge: connection setup completed by one backend attempt.
+pub const EDGE_BACKEND_CONNECTION_SETUP: &str = "edge.backend.connection.setup";
+/// Edge: DNS phase of a connection established by one backend attempt.
+pub const EDGE_BACKEND_CONNECTION_DNS: &str = "edge.backend.connection.dns";
+/// Edge: TCP phase of a connection established by one backend attempt.
+pub const EDGE_BACKEND_CONNECTION_TCP_CONNECT: &str = "edge.backend.connection.tcp_connect";
+/// Edge: TLS phase of a connection established by one backend attempt.
+pub const EDGE_BACKEND_CONNECTION_TLS_HANDSHAKE: &str = "edge.backend.connection.tls_handshake";
+/// Edge event: whether one backend attempt reused a pooled connection.
+pub const EDGE_BACKEND_CONNECTION_REUSED: &str = "edge.backend.connection_reused";
 /// Alloy event: the service received and answered a request.
 pub const ALLOY_RESPONSE: &str = "alloy.response";
 /// Client event: a response header value the client observed (e.g. `X-Gateway-Error`).
@@ -155,6 +167,36 @@ pub const ENTRIES: &[CatalogEntry] = &[
         end: "edge.plugin_phases",
         meaning: "Ferrum Edge latency_plugin_execution_ms: cumulative plugin execution time.",
     },
+    CatalogEntry {
+        name: EDGE_BACKEND_ATTEMPT_DURATION,
+        start: "edge.backend_attempt_dispatch",
+        end: "edge.backend_attempt_completion",
+        meaning: "Ferrum Edge v0.9.9 CLIENT span duration for one backend attempt, including connection setup, request and response exchange, and body transfer when buffered. Retries are separate sibling spans; this is not the full request across attempts and backoff.",
+    },
+    CatalogEntry {
+        name: EDGE_BACKEND_CONNECTION_SETUP,
+        start: "edge.backend_connection_setup_start",
+        end: "edge.backend_connection_established",
+        meaning: "Ferrum Edge gateway.backend.connection.setup_ms: total connection setup performed by this attempt. Absent when setup was not observed or the connection was reused; a reused connection has no setup phase.",
+    },
+    CatalogEntry {
+        name: EDGE_BACKEND_CONNECTION_DNS,
+        start: "edge.backend_dns_resolution_start",
+        end: "edge.backend_dns_resolution_end",
+        meaning: "Ferrum Edge gateway.backend.connection.dns_ms: DNS phase observed while this attempt established a connection.",
+    },
+    CatalogEntry {
+        name: EDGE_BACKEND_CONNECTION_TCP_CONNECT,
+        start: "edge.backend_tcp_connect_start",
+        end: "edge.backend_tcp_connect_end",
+        meaning: "Ferrum Edge gateway.backend.connection.tcp_connect_ms: TCP phase observed while this attempt established a connection.",
+    },
+    CatalogEntry {
+        name: EDGE_BACKEND_CONNECTION_TLS_HANDSHAKE,
+        start: "edge.backend_tls_handshake_start",
+        end: "edge.backend_tls_handshake_end",
+        meaning: "Ferrum Edge gateway.backend.connection.tls_handshake_ms: TLS handshake observed while this attempt established a connection.",
+    },
 ];
 
 /// Event names rules understand.
@@ -163,6 +205,7 @@ pub const EVENTS: &[&str] = &[
     EDGE_GATEWAY_ERROR,
     EDGE_RESPONSE,
     EDGE_BACKEND_ATTEMPT,
+    EDGE_BACKEND_CONNECTION_REUSED,
     ALLOY_RESPONSE,
     CLIENT_RESPONSE_HEADER,
 ];

@@ -79,7 +79,7 @@ Dropping a future cancels cooperative local work only. It cannot guarantee that 
 
 ## Ferrum Edge measurements (v0.9.9 and v0.9.8)
 
-These come from Edge's own spans and logs. Alloy imports them without reinterpreting them. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
+These come from Edge's own spans and logs. Alloy interprets only the documented attempt and timing fields. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
 
 | Name | Start | End | Scope | Limitations |
 |---|---|---|---|---|
@@ -87,10 +87,12 @@ These come from Edge's own spans and logs. Alloy imports them without reinterpre
 | `edge.backend.time_to_headers` (`gateway.latency.backend_ttfb_ms`) | First backend dispatch | Response headers available | **All attempts and retry backoff** | For **buffered** responses (`gateway.response.streamed = false`), it equals the full backend exchange including the body. `-1` means unknown, and Alloy records it as `unavailable`. |
 | `edge.backend.total` (`gateway.latency.backend_total_ms`) | First backend dispatch | Body fully buffered | Buffered responses only | Omitted when streaming. |
 | `edge.plugin_execution` | — | — | Cumulative plugin time | Not an interval; never subtracted from anything. |
-| Connection acquisition / DNS / TCP / TLS setup | — | — | — | **Unsupported** in v0.9.8. v0.9.9 puts `gateway.backend.connection.*_ms` on attempt CLIENT spans from its direct HTTP/2 and gRPC pools; Alloy does not interpret them yet. |
-| Per-attempt response-header wait | — | — | — | **Unsupported** in v0.9.8. v0.9.9 attempt spans have a duration; Alloy does not interpret it yet. |
+| `edge.backend.attempt.duration` (`CLIENT` span duration) | Attempt dispatch / handoff | Attempt completion | One backend attempt | Derived from an Edge v0.9.9 attempt span's start and end timestamps. Includes the attempt's connection setup, exchange, and body where buffered; does not include other attempts or the interval between attempts. Unsupported in v0.9.8. |
+| `edge.backend.connection.setup` (`gateway.backend.connection.setup_ms`) | Connection setup starts | A new connection is established | Connection setup performed by one attempt | Exported only when Edge's direct HTTP/2 or gRPC pools observe a completed setup. An absent value is unknown; `gateway.backend.connection.reused = true` means setup is not applicable to that attempt. Unsupported in v0.9.8. |
+| `edge.backend.connection.dns` (`gateway.backend.connection.dns_ms`), `.tcp_connect` (`gateway.backend.connection.tcp_connect_ms`), `.tls_handshake` (`gateway.backend.connection.tls_handshake_ms`) | Respective setup phase begins | Respective phase ends | Connection setup performed by one attempt | Optional component durations emitted by Edge's direct HTTP/2 and gRPC pools. Each phase is a component of setup and must not be added to the whole setup duration. Unsupported in v0.9.8. |
+| `edge.backend.connection_reused` (`gateway.backend.connection.reused`) | Connection selected for attempt | — | One backend attempt | Event carrying `reused=true` or `false`; it is not a duration. Edge may omit it when the pool did not report reuse or setup. Unsupported in v0.9.8. |
 
-HTTP/2 connection setup would be connection-scoped. If Edge ever exports it, Alloy must not charge it to each multiplexed stream; it should be linked as connection-level evidence. A pooled request has no setup phase and is `not_applicable`, not zero.
+The attempt span's full duration overlaps its connection setup and the backend SERVER span. Those intervals are nested, so they are never summed. Connection setup is attributed to the attempt that established the connection; a reused connection has no setup phase. The attempt's `gateway.backend.retry_reason` attribute identifies a retry, while the gap between sibling attempt span intervals is only an elapsed inter-attempt interval: it can include retry backoff and dispatch work and is not presented as a measured backoff duration.
 
 ## Gateway diagnostic reference (Ferrum Edge v0.9.9)
 
@@ -112,22 +114,24 @@ What it does not cover:
 Diagnosis rule `alloy.r003` subtracts a service measurement from a gateway measurement only when all of these hold:
 
 1. **Linkage.** The Alloy SERVER span's parent is the Edge SERVER span (v0.9.8), or an Edge attempt span whose parent is the Edge SERVER span (v0.9.9), in the same trace. This comes from explicit trace and span ids, never timestamps.
-2. **Single attempt reached the service.** Exactly one Alloy SERVER span is linked. With more than one, Alloy reports `alloy.gateway.multiple_service_attempts` and makes no comparison.
+2. **Attempt linkage.** With Edge v0.9.9 attempt spans, each service SERVER span is matched to the CLIENT span it names as parent, and r003 compares that attempt's duration with the matching service measurement. With Edge v0.9.8 input, attempt spans are absent: one linked service is compared with the gateway aggregate, while multiple linked services produce `alloy.gateway.multiple_service_attempts` with no invented per-attempt breakdown.
 3. **Matching boundaries.**
-   - Streamed responses: Edge `backend_ttfb` against Alloy `time_to_headers`.
-   - Buffered responses: Edge `backend_ttfb` (which includes the body) against Alloy `duration`.
+   - With an attempt span, its duration is compared with the matching service measurement.
+   - Without an attempt span, streamed responses use Edge `backend_ttfb` against Alloy `time_to_headers`.
+   - Without an attempt span, buffered responses use Edge `backend_ttfb` (which includes the body) against Alloy `duration`.
    - Unknown buffering mode: no comparison (`alloy.gateway.timings_not_comparable`).
 4. **Both values are usable durations** (see [Duration evidence](#duration-evidence)). A matching service measurement without a usable duration yields `alloy.gateway.timings_not_comparable` and no difference.
 
-The result is an **unattributed residual**, never "network latency". It can include:
+The result is an **unattributed residual**, never "network latency". For a v0.9.9 attempt comparison it is local to that attempt and can include:
 
 - connection setup;
-- retry attempts and backoff that never reached the service;
 - request transfer, TLS, and queueing before Alloy middleware;
 - intermediaries;
 - response header transfer (streamed) or body transfer and flow control (buffered).
 
-Because Alloy reads no gateway attempt identity (v0.9.8 records none, and v0.9.9's attempt spans are used only for linkage), a residual is at most `likely`. The residual depends on both measurements, so `confirmed` requires a verified collection path, verified provenance for both the gateway and the service measurement, and a gateway attempt index. Otherwise the finding stays `likely`, and `missing_evidence` names what is missing: the attempt identity, verified gateway provenance, or verified service provenance.
+For a gateway aggregate comparison, it may also include connection setup and time spent in retry attempts or between attempts. The attempt span's `gateway.backend.retry_reason` associates each retry with its CLIENT span. A gap between sibling spans can include retry backoff and dispatch work, so Alloy does not report that gap as a pure backoff duration. Explicit setup and reuse evidence are attributed to the attempt that emitted them.
+
+The residual depends on both measurements, so `confirmed` requires a verified collection path and verified provenance for both gateway and service measurements. Offline OTLP input remains at most `likely`. When v0.9.8 has no attempt identity, `missing_evidence` names it; a v0.9.9 attempt comparison cites the attempt number when emitted.
 
 A **negative** residual is not clamped to zero. It is reported as `conflicting_evidence` (`alloy.evidence.service_exceeds_gateway`), and the comparison is suppressed.
 

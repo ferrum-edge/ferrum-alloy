@@ -727,9 +727,26 @@ fn gateway_span(backend_ttfb_ms: f64) -> Value {
 }
 
 /// An Edge v0.9.9 CLIENT span for backend attempt `number`, a child of the
-/// gateway span, with a connection-setup timing Alloy does not interpret.
+/// gateway span, with the connection evidence emitted by Edge.
 fn attempt_span(span_id: &str, number: u32, start_ms: u64) -> Value {
     let start = T0 + start_ms * MS;
+    let mut attributes = vec![json!({
+        "key": "gateway.backend.attempt",
+        "value": { "intValue": number.to_string() }
+    })];
+    if number == 1 {
+        attributes.push(f64_attr("gateway.backend.connection.setup_ms", 12.5));
+    }
+    attributes.push(json!({
+        "key": "gateway.backend.connection.reused",
+        "value": { "boolValue": number > 1 }
+    }));
+    if number > 1 {
+        attributes.push(json!({
+            "key": "gateway.backend.retry_reason",
+            "value": { "stringValue": "connection_failure" }
+        }));
+    }
     json!({
         "traceId": PHASE_TRACE,
         "spanId": span_id,
@@ -738,10 +755,7 @@ fn attempt_span(span_id: &str, number: u32, start_ms: u64) -> Value {
         "kind": 3,
         "startTimeUnixNano": start.to_string(),
         "endTimeUnixNano": (start + 250 * MS).to_string(),
-        "attributes": [
-            { "key": "gateway.backend.attempt", "value": { "intValue": number.to_string() } },
-            f64_attr("gateway.backend.connection.setup_ms", 12.5),
-        ],
+        "attributes": attributes,
     })
 }
 
@@ -763,20 +777,29 @@ fn edge_attempt_span_links_the_service_to_the_gateway_request() {
         attempt.span.as_ref().unwrap().parent_span_id.as_deref(),
         Some(GATEWAY_SPAN)
     );
-    // Only the link is imported: no attempt timing, setup value, or attempt scope.
+    // The link, attempt duration, setup timing, and connection reuse are imported.
     let from_attempt = report
         .observations
         .iter()
         .filter(|o| o.span.as_ref().is_some_and(|s| s.span_id == FIRST_ATTEMPT))
         .count();
-    assert_eq!(from_attempt, 1);
+    assert_eq!(from_attempt, 4);
     assert_eq!(attempt.value, None);
-    assert!(
-        report
-            .observations
-            .iter()
-            .all(|o| o.scope.attempt.is_none())
-    );
+    let timing = report
+        .observation(&format!("edge:{FIRST_ATTEMPT}:attempt_duration"))
+        .unwrap();
+    assert_eq!(timing.name, "edge.backend.attempt.duration");
+    assert_eq!(timing.scope.attempt, Some(1));
+    assert_eq!(timing.duration_ms(), Some(250.0));
+    let setup = report
+        .observation(&format!("edge:{FIRST_ATTEMPT}:connection_setup"))
+        .unwrap();
+    assert_eq!(setup.name, "edge.backend.connection.setup");
+    assert_eq!(setup.duration_ms(), Some(12.5));
+    let reused = report
+        .observation(&format!("edge:{FIRST_ATTEMPT}:connection_reused"))
+        .unwrap();
+    assert_eq!(reused.attr("reused"), Some("false"));
 
     let findings = analyze(&report, &Thresholds::default());
     let found = codes(&findings);
@@ -802,23 +825,104 @@ fn edge_retry_attempt_spans_report_several_service_attempts() {
     let resources = vec![edge_resource(edge), alloy_resource("orders-api", alloy)];
     let input = otlp(resources);
     let report = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+    let reused_setup = report
+        .observation(&format!("edge:{SECOND_ATTEMPT}:connection_setup"))
+        .unwrap();
+    assert_eq!(reused_setup.availability, Availability::NotApplicable);
     let findings = analyze(&report, &Thresholds::default());
     let found = codes(&findings);
     let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
     assert_eq!(multiple.confidence, Confidence::Likely);
+    assert!(multiple.explanation.contains("attempt 1"));
+    assert!(multiple.explanation.contains("attempt 2"));
+    assert!(multiple
+        .evidence
+        .iter()
+        .any(|e| e.key == "gateway.backend.connection.setup"));
+    assert!(multiple
+        .evidence
+        .iter()
+        .any(|e| e.key == "gateway.backend.connection.reused"));
+    assert!(multiple
+        .evidence
+        .iter()
+        .any(|e| e.key == "gateway.backend.retry_reason" && e.attempt == Some(2)));
     for code in [
-        "alloy.gateway.unattributed_interval",
         "alloy.gateway.timings_not_comparable",
         "alloy.evidence.service_exceeds_gateway",
         "alloy.telemetry.service_span_missing",
     ] {
         assert!(!found.contains(&code), "{code}: {found:?}");
     }
-    assert!(
-        findings
-            .iter()
-            .flat_map(|f| &f.evidence)
-            .all(|e| e.attempt.is_none())
+    assert!(multiple.evidence.iter().any(|e| e.attempt == Some(1)));
+    assert!(multiple.evidence.iter().any(|e| e.attempt == Some(2)));
+}
+
+#[test]
+fn multiple_service_spans_without_attempt_spans_keep_the_legacy_r003_output() {
+    let edge = vec![gateway_span(450.0)];
+    let alloy = vec![
+        server_span(ORDERS_SPAN, Some(GATEWAY_SPAN), 20),
+        server_span(RETRIED_SPAN, Some(GATEWAY_SPAN), 370),
+    ];
+    let report = import(
+        &otlp(vec![edge_resource(edge), alloy_resource("orders-api", alloy)]),
+        None,
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let multiple = by_code(
+        &analyze(&report, &Thresholds::default()),
+        "alloy.gateway.multiple_service_attempts",
+    );
+    assert_eq!(multiple.rule_version, 3);
+    assert_eq!(
+        multiple.explanation,
+        "2 service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 exports a span per attempt, but Alloy does not interpret per-attempt timing. Gateway and service timings are not compared."
+    );
+    assert_eq!(multiple.missing_evidence, ["per-attempt gateway spans or attempt identifiers"]);
+}
+
+#[test]
+fn committed_attempt_span_fixture_imports_per_attempt_timing() {
+    let report = import(
+        include_str!("../../../contracts/fixtures/otlp/edge-attempt-spans.jsonl"),
+        None,
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let findings = analyze(&report, &Thresholds::default());
+    let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+    assert!(residual
+        .evidence
+        .iter()
+        .any(|e| e.key == "edge.backend.attempt.duration"));
+    assert!(residual
+        .evidence
+        .iter()
+        .any(|e| e.key == "edge.backend.connection.setup"));
+}
+
+#[test]
+fn committed_v098_fixture_preserves_multiple_attempt_refusal() {
+    let report = import(
+        include_str!("../../../contracts/fixtures/otlp/edge-no-attempt-spans.jsonl"),
+        None,
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let findings = analyze(&report, &Thresholds::default());
+    let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
+    assert_eq!(multiple.rule_version, 3);
+    assert!(multiple
+        .explanation
+        .contains("Gateway and service timings are not compared."));
+    assert_eq!(
+        multiple.missing_evidence,
+        ["per-attempt gateway spans or attempt identifiers"]
     );
 }
 
