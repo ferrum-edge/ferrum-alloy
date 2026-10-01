@@ -1072,15 +1072,14 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                         attempt.duration_ms(),
                         service_obs,
                         service_obs.and_then(Observation::duration_ms),
-                    )
-                    else {
+                    ) else {
                         continue;
                     };
                     let residual = attempt_ms - service_ms;
-                    let attempt_number = attempt.scope.attempt.map_or_else(
-                        || "unknown".to_owned(),
-                        |number| number.to_string(),
-                    );
+                    let attempt_number = attempt
+                        .scope
+                        .attempt
+                        .map_or_else(|| "unknown".to_owned(), |number| number.to_string());
                     comparisons.push(format!(
                         "attempt {attempt_number}: gateway attempt {} minus service {} = {}",
                         ms(attempt_ms),
@@ -1088,7 +1087,11 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                         ms(residual)
                     ));
                     builder = builder
-                        .cite(attempt, catalog::EDGE_BACKEND_ATTEMPT_DURATION, ms(attempt_ms))
+                        .cite(
+                            attempt,
+                            catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+                            ms(attempt_ms),
+                        )
                         .cite(service_obs, &service_obs.name, ms(service_ms));
                     if let Some(setup) = index.report.observations.iter().find(|observation| {
                         observation.name == catalog::EDGE_BACKEND_CONNECTION_SETUP
@@ -1116,11 +1119,8 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                             })
                     }) {
                         if let Some(reused) = reuse.attr("reused") {
-                            builder = builder.cite(
-                                reuse,
-                                "gateway.backend.connection.reused",
-                                reused,
-                            );
+                            builder =
+                                builder.cite(reuse, "gateway.backend.connection.reused", reused);
                         }
                     }
                 }
@@ -1393,11 +1393,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
                         })
                 }) {
                     if let Some(reused) = reuse.attr("reused") {
-                        builder = builder.cite(
-                            reuse,
-                            "gateway.backend.connection.reused",
-                            reused,
-                        );
+                        builder = builder.cite(reuse, "gateway.backend.connection.reused", reused);
                     }
                 }
                 if let Some(reason) = attempt.attr("retry_reason") {

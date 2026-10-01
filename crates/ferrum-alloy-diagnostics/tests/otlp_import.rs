@@ -835,18 +835,24 @@ fn edge_retry_attempt_spans_report_several_service_attempts() {
     assert_eq!(multiple.confidence, Confidence::Likely);
     assert!(multiple.explanation.contains("attempt 1"));
     assert!(multiple.explanation.contains("attempt 2"));
-    assert!(multiple
-        .evidence
-        .iter()
-        .any(|e| e.key == "gateway.backend.connection.setup"));
-    assert!(multiple
-        .evidence
-        .iter()
-        .any(|e| e.key == "gateway.backend.connection.reused"));
-    assert!(multiple
-        .evidence
-        .iter()
-        .any(|e| e.key == "gateway.backend.retry_reason" && e.attempt == Some(2)));
+    assert!(
+        multiple
+            .evidence
+            .iter()
+            .any(|e| e.key == "gateway.backend.connection.setup")
+    );
+    assert!(
+        multiple
+            .evidence
+            .iter()
+            .any(|e| e.key == "gateway.backend.connection.reused")
+    );
+    assert!(
+        multiple
+            .evidence
+            .iter()
+            .any(|e| e.key == "gateway.backend.retry_reason" && e.attempt == Some(2))
+    );
     for code in [
         "alloy.gateway.timings_not_comparable",
         "alloy.evidence.service_exceeds_gateway",
@@ -866,7 +872,10 @@ fn multiple_service_spans_without_attempt_spans_keep_the_legacy_r003_output() {
         server_span(RETRIED_SPAN, Some(GATEWAY_SPAN), 370),
     ];
     let report = import(
-        &otlp(vec![edge_resource(edge), alloy_resource("orders-api", alloy)]),
+        &otlp(vec![
+            edge_resource(edge),
+            alloy_resource("orders-api", alloy),
+        ]),
         None,
         collector(),
         &ImportLimits::default(),
@@ -881,7 +890,10 @@ fn multiple_service_spans_without_attempt_spans_keep_the_legacy_r003_output() {
         multiple.explanation,
         "2 service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 exports a span per attempt, but Alloy does not interpret per-attempt timing. Gateway and service timings are not compared."
     );
-    assert_eq!(multiple.missing_evidence, ["per-attempt gateway spans or attempt identifiers"]);
+    assert_eq!(
+        multiple.missing_evidence,
+        ["per-attempt gateway spans or attempt identifiers"]
+    );
 }
 
 #[test]
@@ -895,14 +907,18 @@ fn committed_attempt_span_fixture_imports_per_attempt_timing() {
     .unwrap();
     let findings = analyze(&report, &Thresholds::default());
     let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
-    assert!(residual
-        .evidence
-        .iter()
-        .any(|e| e.key == "edge.backend.attempt.duration"));
-    assert!(residual
-        .evidence
-        .iter()
-        .any(|e| e.key == "edge.backend.connection.setup"));
+    assert!(
+        residual
+            .evidence
+            .iter()
+            .any(|e| e.key == "edge.backend.attempt.duration")
+    );
+    assert!(
+        residual
+            .evidence
+            .iter()
+            .any(|e| e.key == "edge.backend.connection.setup")
+    );
 }
 
 #[test]
@@ -917,9 +933,11 @@ fn committed_v098_fixture_preserves_multiple_attempt_refusal() {
     let findings = analyze(&report, &Thresholds::default());
     let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
     assert_eq!(multiple.rule_version, 3);
-    assert!(multiple
-        .explanation
-        .contains("Gateway and service timings are not compared."));
+    assert!(
+        multiple
+            .explanation
+            .contains("Gateway and service timings are not compared.")
+    );
     assert_eq!(
         multiple.missing_evidence,
         ["per-attempt gateway spans or attempt identifiers"]
