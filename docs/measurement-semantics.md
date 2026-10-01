@@ -51,7 +51,7 @@ All are measured by `ferrum-alloy-telemetry`'s layer in the service process, wit
 | `alloy.server.body_duration` | Headers produced | Body finalized: final frame handed to Hyper, body error, or drop (`alloy.response_body_finalized`) | ms | `alloy.server.body_duration_ms` | Frames handed to Hyper, not bytes received by the client. Flow control and client read speed affect it. |
 | `alloy.server.duration` | Middleware entry | Body finalized | ms / s | `alloy.server.duration_ms`; `http_server_request_duration_seconds` | Covers streaming. The OpenTelemetry span for the request ends at the same point, because the span is entered during body polls and stamped at finalization. |
 | `alloy.admission.wait` | Admission layer entered | Permit granted or refused | ms | `alloy.admission.wait_ms` | Only when `server.max_in_flight_requests > 0`. The permit is released at response headers; streaming bodies do not hold it. |
-| `alloy.response.body.bytes` | — | — | bytes | span attribute | Data frame bytes handed to Hyper (not on the wire, not compressed size). |
+| `alloy.response.body.bytes` | — | — | bytes | span attribute | Data-frame payload bytes handed to Hyper after the response's inner layers ran. Alloy's telemetry layer is outermost, so when compression is enabled its compression layer sits inside it and this counts the compressed frame payload. It excludes HTTP framing (chunked encoding, headers) and TLS overhead, and is not proof the client received it. |
 
 ### Body outcomes
 
