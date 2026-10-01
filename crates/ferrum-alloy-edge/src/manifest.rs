@@ -6,6 +6,10 @@
 //! configuration or GitForgeOps resources using Edge's *existing* schema
 //! (verified against Edge v0.9.9 and v0.9.8). Nexus and Foundry consumption is future
 //! work; field names may change before any consumer implements them.
+//!
+//! The optional `[agents]` section is read only by `ferrum-alloy openapi
+//! export`, which stamps it into the OpenAPI document as Edge v0.9.9's
+//! document-level `x-ferrum-mcp` extension (see [`crate::agents`]).
 
 use std::collections::BTreeSet;
 
@@ -42,6 +46,10 @@ pub struct ServiceManifest {
     /// Declared authentication requirement (informational).
     #[serde(default)]
     pub auth: ManifestAuth,
+    /// AI-agent tools: the document-level `x-ferrum-mcp` that `openapi
+    /// export` writes. Absent: the document is left as the code produced it.
+    #[serde(default)]
+    pub agents: Option<ManifestAgents>,
 }
 
 /// Service identity.
@@ -199,6 +207,25 @@ pub struct ManifestAuth {
     pub mode: Option<String>,
 }
 
+/// AI-agent tools published through Edge's OpenAPI to MCP bridge (PROPOSED).
+///
+/// Only operations whose handlers declare `expose: true` in their own
+/// `x-ferrum-mcp` become tools; `openapi export` lists them in the extension's
+/// `include`, so Edge's default of publishing every `GET` never applies.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ManifestAgents {
+    /// Publish the exposed operations as MCP tools. Off by default; `false`
+    /// exports `x-ferrum-mcp: false`.
+    pub enabled: bool,
+    /// MCP endpoint path (`x-ferrum-mcp.endpoint.path`), under
+    /// `api.public_path`. Edge's default is `{public_path}/mcp`.
+    pub endpoint_path: Option<String>,
+    /// Tool-name prefix (`x-ferrum-mcp.namespace`, 1-64 characters of
+    /// `A-Za-z0-9_-`). Defaults to `service.name`.
+    pub namespace: Option<String>,
+}
+
 /// Manifest validation error.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("invalid service manifest:\n  - {}", .0.join("\n  - "))]
@@ -345,6 +372,21 @@ impl ServiceManifest {
             && !matches!(mode.as_str(), "none" | "gateway" | "service")
         {
             errors.push("auth.mode must be none, gateway, or service".into());
+        }
+        if let Some(agents) = &self.agents {
+            if let Some(endpoint) = &agents.endpoint_path {
+                let prefix = format!("{}/", self.api.public_path.trim_end_matches('/'));
+                if !valid_path(endpoint) {
+                    errors.push("agents.endpoint_path must be a literal absolute path".into());
+                } else if !endpoint.starts_with(&prefix) || endpoint.len() == prefix.len() {
+                    errors.push("agents.endpoint_path must be below api.public_path".into());
+                }
+            }
+            if let Some(namespace) = &agents.namespace
+                && !crate::agents::is_valid_namespace(namespace)
+            {
+                errors.push("agents.namespace must be 1-64 characters of A-Za-z0-9_-".into());
+            }
         }
         if errors.is_empty() {
             Ok(())

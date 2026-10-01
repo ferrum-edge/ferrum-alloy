@@ -6,11 +6,14 @@
 //!   removal of unverified gateway-asserted headers.
 //! * [`manifest`] and [`export`]: a PROPOSED service manifest and generation of
 //!   reviewable Edge file-mode and GitForgeOps resources.
+//! * [`agents`]: the `x-ferrum-mcp` OpenAPI extension (Edge v0.9.9's OpenAPI
+//!   to MCP bridge) that `ferrum-alloy openapi export` stamps and checks.
 //!
 //! The adapter depends on the telemetry crate (for transport trust) and the
 //! diagnostics crate, never on the `ferrum-alloy` umbrella crate or on Edge's
 //! implementation.
 
+pub mod agents;
 pub mod contract;
 pub mod export;
 pub mod manifest;

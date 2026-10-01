@@ -26,6 +26,8 @@ mod rate_limit;
 mod server;
 mod shadow;
 
+#[cfg(feature = "openapi")]
+pub mod agents;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 #[cfg(feature = "http-client")]

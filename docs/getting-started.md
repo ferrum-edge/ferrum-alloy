@@ -32,7 +32,7 @@ The generated project contains:
 
 | Option | Adds |
 |---|---|
-| `openapi` | An `openapi` binary and a parity test |
+| `openapi` | An `openapi` binary, a parity test, and one read-only operation offered to AI agents ([AI-agent tools](agent-tools.md)) |
 | `postgres` | `src/db.rs` (`POST /notes`, `GET /notes/{id}`) over a pool built from `[database]`, the `postgres` readiness check, `migrations/`, a `migrate` subcommand, tests, and a PostgreSQL service container in the generated CI |
 | `jwt` | `src/auth.rs` (`GET /me`) with a verifier built from `[auth.jwt]` and an `Authorize` scope policy, and tests that sign tokens with a local key and serve its JWKS on loopback |
 | `http-client` | `src/upstream.rs` (`GET /upstream`, calling `UPSTREAM_URL`) with the client built from `[http_client]`: explicit timeouts, no redirects, and an empty trace-propagation allow-list, and a test against a local server |
@@ -168,6 +168,11 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    `api.public_path`. If `api.strip_public_path` is enabled, `api.service_base_path` is removed
    from operation paths that start with that prefix; paths already written relative to the
    service base remain unchanged. With stripping disabled, operation paths are preserved.
+
+   To let AI agents call selected operations through Edge's OpenAPI to MCP bridge (Edge
+   v0.9.9), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
+   manifest. The export then writes the `x-ferrum-mcp` extension and refuses metadata Edge
+   would reject. Read [AI-agent tools](agent-tools.md) for what is safe to expose first.
 
 2. Give Edge a client certificate with a SPIFFE URI SAN (`upstream.gateway_client_cert_path` in the manifest), and configure Alloy:
 

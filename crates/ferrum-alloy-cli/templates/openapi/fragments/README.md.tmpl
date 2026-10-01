@@ -1,0 +1,15 @@
+
+## OpenAPI
+
+```bash
+ferrum-alloy openapi export --manifest ferrum-service.toml --output openapi.json
+ferrum-alloy openapi export --manifest ferrum-service.toml --output openapi.json --check
+```
+
+The document is served on the management listener at `/openapi.json` (token-protected).
+
+### AI agents
+
+`get_item` is offered to AI agents as a read-only MCP tool. Its `#[utoipa::path]` declares `AgentTool::expose()`, and `[agents]` in `ferrum-service.toml` is enabled, so the exported document carries the `x-ferrum-mcp` extension that Ferrum Edge reads on `POST /api-specs`. Nothing else is exposed.
+
+Expose only what an agent should be able to do on a user's behalf, and start with read-only operations. A state-changing operation needs its own `AgentTool::expose()`. The export refuses tool metadata Edge would reject or an agent could not use, such as an exposed operation without a description.

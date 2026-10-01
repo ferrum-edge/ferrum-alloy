@@ -6,6 +6,12 @@
 //! through an explicit argument list (no shell), or from `--input`. With
 //! `--manifest`, `servers` is set to the manifest's gateway-facing
 //! `public_path`, and stripped service base paths are removed from operations.
+//!
+//! AI-agent tool metadata (`x-ferrum-mcp`, see
+//! [`ferrum_alloy_edge::agents`]): the manifest's `[agents]` section becomes
+//! the document-level extension, exposed operations get their method's
+//! default MCP annotations, and metadata Ferrum Edge would reject or an agent
+//! could not use fails the export and `--check` with exit 3.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -35,7 +41,8 @@ pub(crate) struct ExportArgs {
     /// Read the document from this file instead of running the project.
     #[arg(long)]
     input: Option<PathBuf>,
-    /// Service manifest; sets `servers` to `api.public_path` and maps stripped base paths.
+    /// Service manifest; sets `servers` to `api.public_path`, maps stripped base paths, and
+    /// stamps `[agents]` as the document-level `x-ferrum-mcp`.
     #[arg(long)]
     manifest: Option<PathBuf>,
     /// Output file.
@@ -157,9 +164,12 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
     let mut document: Value = serde_json::from_slice(&bytes)
         .map_err(|e| CliError::Invalid(format!("document is not JSON: {e}")))?;
     validate(&document)?;
-    if let Some(manifest) = &args.manifest {
-        let manifest = crate::edge::read_manifest(manifest)?;
-        normalize_paths(&mut document, &manifest)?;
+    let manifest = match &args.manifest {
+        Some(path) => Some(crate::edge::read_manifest(path)?),
+        None => None,
+    };
+    if let Some(manifest) = &manifest {
+        normalize_paths(&mut document, manifest)?;
         if let Some(map) = document.as_object_mut() {
             map.insert(
                 "servers".into(),
@@ -167,6 +177,8 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
             );
         }
     }
+    ferrum_alloy_edge::agents::prepare(&mut document, manifest.as_ref())
+        .map_err(|e| CliError::Invalid(e.to_string()))?;
     let rendered = format!(
         "{}\n",
         serde_json::to_string_pretty(&document).map_err(|e| CliError::Io(e.to_string()))?

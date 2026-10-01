@@ -1,6 +1,6 @@
 # ferrum-alloy-edge
 
-Optional [Ferrum Edge](https://ferrumedge.com/) adapter for Ferrum Alloy services: gateway trust modes based on transport identity, the service manifest, the diagnostic contract, and Edge configuration export.
+Optional [Ferrum Edge](https://ferrumedge.com/) adapter for Ferrum Alloy services: gateway trust modes based on transport identity, the service manifest, the diagnostic contract, Edge configuration export, and the checks behind the `x-ferrum-mcp` AI-agent tool metadata that `ferrum-alloy openapi export` writes.
 
 See the [Edge contract inventory](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/edge-contract-inventory.md) and [compatibility](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/compatibility.md) for the tested Edge releases.
 

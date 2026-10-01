@@ -1,0 +1,7 @@
+
+# AI-agent tools (PROPOSED). `ferrum-alloy openapi export --manifest
+# ferrum-service.toml` writes this as the document-level `x-ferrum-mcp`
+# extension that Ferrum Edge reads on `POST /api-specs`. Only operations
+# whose handler declares `AgentTool::expose()` become MCP tools.
+[agents]
+enabled = true
