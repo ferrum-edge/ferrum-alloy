@@ -238,7 +238,10 @@ fn diagnose_keeps_reports_private_and_preserves_permissions() {
     );
 
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4640)).unwrap();
-    assert_eq!(target.metadata().unwrap().permissions().mode() & 0o7777, 0o4640);
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o7777,
+        0o4640
+    );
     let output = run(&args);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert_eq!(
