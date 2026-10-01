@@ -204,6 +204,105 @@ fn diagnose_writes_reports_atomically() {
     assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
 }
 
+#[cfg(unix)]
+#[test]
+fn diagnose_keeps_reports_private_and_preserves_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture("otlp/edge-alloy-trace.jsonl");
+    let target = dir.path().join("report.json");
+    let args = [
+        "diagnose",
+        "--otlp",
+        &path,
+        "--trace-id",
+        "4bf92f3577b34da6a3ce929d0e0e4736",
+        "--write-report",
+        target.to_str().unwrap(),
+    ];
+
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4640)).unwrap();
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o7777,
+        0o4640
+    );
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o7777,
+        0o640
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnose_replaces_symlinks_without_preserving_target_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture("otlp/edge-alloy-trace.jsonl");
+    let regular_target = dir.path().join("regular-target.json");
+    let regular_link = dir.path().join("regular-link.json");
+    let directory_target = dir.path().join("directory-target");
+    let directory_link = dir.path().join("directory-link.json");
+
+    std::fs::write(&regular_target, b"keep this content").unwrap();
+    std::fs::set_permissions(&regular_target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&regular_target, &regular_link).unwrap();
+    std::fs::create_dir(&directory_target).unwrap();
+    symlink(&directory_target, &directory_link).unwrap();
+
+    let run_report = |target: &Path| {
+        run(&[
+            "diagnose",
+            "--otlp",
+            &path,
+            "--trace-id",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "--write-report",
+            target.to_str().unwrap(),
+        ])
+    };
+
+    let output = run_report(&regular_link);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let metadata = std::fs::symlink_metadata(&regular_link).unwrap();
+    assert!(metadata.file_type().is_file());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::read(&regular_target).unwrap(),
+        b"keep this content"
+    );
+    assert_eq!(
+        regular_target.metadata().unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+
+    let output = run_report(&directory_link);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let metadata = std::fs::symlink_metadata(&directory_link).unwrap();
+    assert!(metadata.file_type().is_file());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert!(directory_target.is_dir());
+    assert_eq!(std::fs::read_dir(&directory_target).unwrap().count(), 0);
+}
+
 /// One trace of `count` Alloy SERVER spans, five observations each.
 fn many_server_spans(count: u64) -> String {
     let attributes: Vec<serde_json::Value> = [
