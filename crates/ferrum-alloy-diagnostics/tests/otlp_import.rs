@@ -1068,7 +1068,10 @@ fn a_service_outlasting_its_attempt_is_conflicting_and_not_compared() {
     // The negative residual is never reported as a comparison.
     assert!(!explanation.contains("attempt 2:"), "{explanation}");
     assert!(!explanation.contains("-50.0"), "{explanation}");
-    assert!(explanation.contains("conflicting evidence"), "{explanation}");
+    assert!(
+        explanation.contains("conflicting evidence"),
+        "{explanation}"
+    );
     let compared_second = multiple
         .evidence
         .iter()
