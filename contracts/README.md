@@ -3,7 +3,7 @@
 | Path | Contract | Status |
 |---|---|---|
 | `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.9` under `ferrum-contracts/`; shared status still **PROPOSED** (Anvil import not tested) |
-| `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007, a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests |
+| `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007 (including an observed Ferrum Edge diagnostic reference), a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests |
 | `fixtures/reports/*.expected.txt` | Deterministic rendering snapshots | Regenerate with `UPDATE_SNAPSHOTS=1` and review the diff |
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
 | `fixtures/manifests/*.toml` | `ferrum.service_manifest` v1 examples | **PROPOSED**; no consumer outside Alloy |

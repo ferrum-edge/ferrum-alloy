@@ -1,0 +1,27 @@
+{
+  "schema": "ferrum.diagnostic_report",
+  "schema_version": "1.0",
+  "collection": { "collector": { "kind": "client", "name": "fixture" }, "method": "fixture", "verification": "unverified" },
+  "observations": [
+    {
+      "id": "client-gateway-error",
+      "producer": { "kind": "client", "name": "curl" },
+      "kind": "event",
+      "name": "client.response_header",
+      "availability": "measured",
+      "scope": { "leg": "client_to_gateway" },
+      "attributes": { "header": "X-Gateway-Error", "value": "connection_failure" },
+      "trust": "user_asserted"
+    },
+    {
+      "id": "client-diagnostic-ref",
+      "producer": { "kind": "client", "name": "curl" },
+      "kind": "event",
+      "name": "client.response_header",
+      "availability": "measured",
+      "scope": { "leg": "client_to_gateway" },
+      "attributes": { "header": "X-Ferrum-Diagnostic-Ref", "value": "fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f" },
+      "trust": "user_asserted"
+    }
+  ]
+}

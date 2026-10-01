@@ -407,6 +407,27 @@ fn released_gateway_diagnostic_headers_match_the_pinned_vocabulary() {
 }
 
 #[test]
+fn diagnostic_reference_grammar_matches_the_pinned_vocabulary() {
+    use ferrum_alloy_diagnostics::catalog;
+    let headers = pinned_json("vocabularies/gateway-headers.json");
+    let entry = headers["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "X-Ferrum-Diagnostic-Ref")
+        .unwrap();
+    assert_eq!(
+        entry["values"]["pattern"].as_str().unwrap(),
+        catalog::EDGE_DIAGNOSTIC_REF_PATTERN,
+        "the pinned reference grammar changed: update catalog::is_edge_diagnostic_ref"
+    );
+    assert_eq!(
+        catalog::EDGE_DIAGNOSTIC_REF_HEADER,
+        ferrum_alloy_edge::contract::DIAGNOSTIC_REF
+    );
+}
+
+#[test]
 fn pinned_diagnostic_schema_and_finding_fixtures_match_alloy() {
     let root = repo_root();
     let local_schema = repo_json(LOCAL_SCHEMA);
