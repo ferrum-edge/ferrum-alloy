@@ -91,7 +91,7 @@ Also:
 
 - At least one operation, and at most 256, must be selected.
 - `x-ferrum-mcp` cannot be combined with `x-ferrum-validate`, and the endpoint must not overlap a selected operation's path.
-- Every `x-ferrum-mcp` value must use Edge's closed keys, with the right types. An annotation `title` is at most 8 KiB, as Edge allows. This applies even when the extension is disabled, so a typo fails before it is enabled.
+- Every `x-ferrum-mcp` value must use Edge's closed keys, with the right types. An annotation `title` is at most 8 KiB, as Edge allows. When the document-level extension is disabled, only its top-level closed keys, the `enabled` boolean type, and each operation's `x-ferrum-mcp` metadata are checked; the disabled document's other fields (`endpoint`, `namespace`, `include`, `exclude`, `limits`, `forward_request_headers`) are not. Those subtrees are validated once the extension is enabled. A typo in a top-level key therefore fails before the extension is turned on, while a wrong-typed `namespace` or `limits` value in a disabled document is caught only when it is enabled.
 
 Edge checks more at import than the export does, including reserved header parameters, cookie parameters, parameter styles, and `allowed_methods`. CI submits an exported document to the real `POST /api-specs` on every supported Edge release: the `edge-config` job submits `contracts/fixtures/openapi/orders-api.openapi.json`, which includes an undeclared `GET` that must stay unpublished.
 
