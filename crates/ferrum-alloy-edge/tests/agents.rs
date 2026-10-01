@@ -384,9 +384,15 @@ fn validation_and_tools_cannot_share_a_document() {
 #[test]
 fn manifest_agents_section_is_validated() {
     for (agents, expected) in [
-        ("endpoint_path = \"/other/mcp\"", "endpoint_path must be below"),
+        (
+            "endpoint_path = \"/other/mcp\"",
+            "endpoint_path must be below",
+        ),
         ("endpoint_path = \"/shop\"", "endpoint_path must be below"),
-        ("endpoint_path = \"/shop/../mcp\"", "endpoint_path must be a literal"),
+        (
+            "endpoint_path = \"/shop/../mcp\"",
+            "endpoint_path must be a literal",
+        ),
         ("namespace = \"orders api\"", "agents.namespace"),
         ("namespace = \"\"", "agents.namespace"),
     ] {

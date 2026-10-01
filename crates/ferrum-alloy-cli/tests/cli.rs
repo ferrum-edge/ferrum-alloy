@@ -1024,7 +1024,11 @@ fn openapi_export_stamps_agent_tool_metadata() {
     let hints = serde_json::json!({ "destructiveHint": false, "readOnlyHint": false });
     assert_eq!(create, &hints);
     // Undeclared and hidden operations are not touched.
-    assert!(paths["/orders/{id}"]["delete"].get("x-ferrum-mcp").is_none());
+    assert!(
+        paths["/orders/{id}"]["delete"]
+            .get("x-ferrum-mcp")
+            .is_none()
+    );
     assert_eq!(
         paths["/orders/{id}/receipt"]["get"]["x-ferrum-mcp"],
         serde_json::json!({ "expose": false })
