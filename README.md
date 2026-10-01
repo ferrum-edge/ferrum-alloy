@@ -99,6 +99,14 @@ To go further, read [Getting started](docs/getting-started.md).
 | [Benchmarks](docs/benchmarks.md) | Local, same-host overhead measurements and their limits |
 | [Release readiness](docs/release.md) | Packaging checks, the release checklist, and open owner decisions |
 
+## Contracts
+
+[ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
+This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding fixtures; it publishes no contracts.
+The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
+See the [contracts guide](contracts/README.md) for details.
+Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
+
 ## Development
 
 ```bash
