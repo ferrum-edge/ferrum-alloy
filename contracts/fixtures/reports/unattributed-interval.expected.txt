@@ -8,7 +8,7 @@ Ferrum Alloy diagnosis
 Findings (1):
 
 1. [warning] Large unattributed interval between gateway and service (alloy.gateway.unattributed_interval)
-   confidence: likely   scope: gateway_to_upstream   owner: unknown   rule: alloy.r003 v2
+   confidence: likely   scope: gateway_to_upstream   owner: unknown   rule: alloy.r003 v3
    The gateway measured 900.0 ms from backend dispatch to response headers; the service time-to-headers (streamed response) was 120.0 ms. 780.0 ms (87%) is unattributed: neither producer measured it.
    Evidence:
      - gateway_telemetry gateway.latency.backend_ttfb_ms = 900.0 ms

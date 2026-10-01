@@ -15,10 +15,11 @@
 //! hands the service that span as its parent, so the service's SERVER span
 //! nests under the attempt and the attempt under the Edge SERVER span. Each
 //! attempt becomes an `edge.backend.attempt` link event plus attempt-scoped
-//! duration and connection observations. Only a
-//! CLIENT span with `gateway.backend.attempt`, which Edge sets on every attempt
-//! span, is an attempt: other Edge CLIENT spans (for example mesh workload
-//! metrics on outbound traffic) are ignored.
+//! duration and connection observations. The attempt duration comes from the
+//! span's start and end, and is `unavailable` when either is missing or the
+//! end precedes the start. Only a CLIENT span with `gateway.backend.attempt`,
+//! which Edge sets on every attempt span, is an attempt: other Edge CLIENT
+//! spans (for example mesh workload metrics on outbound traffic) are ignored.
 //!
 //! The resource `service.name` names the service that emitted an Alloy span,
 //! or the gateway that emitted a Ferrum Edge span. It is never confused with
@@ -807,7 +808,6 @@ fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
     }
     report.observations.push(attempt);
 
-    let duration_ms = span.end.saturating_sub(span.start) as f64 / 1_000_000.0;
     let mut attempt_duration = base(
         Draft {
             span,
@@ -817,12 +817,30 @@ fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
         },
         ObservationKind::Measurement,
     );
-    attempt_duration.availability = Availability::Measured;
-    attempt_duration.value = Some(duration_ms);
-    attempt_duration.unit = Some(Unit::Milliseconds);
-    attempt_duration.clock = Some(ClockDomain::MonotonicLocal);
-    attempt_duration.interval = interval(span);
     attempt_duration.scope.attempt = number;
+    // A duration needs both timestamps, the end not before the start. Without
+    // them the duration is unavailable, never zero, and the raw timestamps
+    // Edge exported are kept.
+    if let Some(window) = interval(span) {
+        let nanos = window.end_unix_nano - window.start_unix_nano;
+        attempt_duration.availability = Availability::Measured;
+        attempt_duration.value = Some(nanos as f64 / 1_000_000.0);
+        attempt_duration.unit = Some(Unit::Milliseconds);
+        attempt_duration.clock = Some(ClockDomain::MonotonicLocal);
+        attempt_duration.interval = Some(window);
+    } else {
+        attempt_duration.availability = Availability::Unavailable;
+        for (key, nanos) in [
+            ("span.start_unix_nano", span.start),
+            ("span.end_unix_nano", span.end),
+        ] {
+            if nanos > 0 {
+                attempt_duration
+                    .attributes
+                    .insert(key.to_owned(), nanos.to_string());
+            }
+        }
+    }
     if let Some(number) = number {
         attempt_duration
             .attributes

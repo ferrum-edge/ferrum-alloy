@@ -943,6 +943,7 @@ fn pending(cases: &Cases, text: &str) -> Vec<String> {
 
 /// Every timing attribute the tested Edge and Alloy releases put on a SERVER
 /// span. Each is request-scoped; neither producer measures connection setup
+/// on a SERVER span. Edge v0.9.9 times setup only on an attempt CLIENT span
 /// (`docs/measurement-semantics.md`).
 const REQUEST_TIMINGS: &[&str] = &[
     "gateway.latency.total_ms",
@@ -962,9 +963,11 @@ const SETUP_MISSING: &str = "gateway connection setup timing";
 
 /// Evidence that would charge a connection-setup phase to one request: a
 /// SERVER-span timing outside the request-scoped set, an observation the
-/// catalog does not define, a confirmed finding, or an unattributed interval
-/// that does not list setup timing as missing evidence. Unknown is not zero:
-/// setup must stay unmeasured, never appear as a value.
+/// catalog does not define, a confirmed finding, a connection setup that is
+/// not scoped to a gateway attempt, or an unattributed interval that neither
+/// cites the attempt's measured setup or reused connection nor lists setup
+/// timing as missing evidence. Unknown is not zero: setup Edge did not
+/// measure stays unmeasured, never appears as a value.
 fn setup_charges(
     spans: &[&Value],
     diagnosis: &DiagnosticReport,
@@ -983,18 +986,52 @@ fn setup_charges(
         if !catalog::is_known(&observation.name) {
             problems.push(format!("observation {}", observation.name));
         }
+        let setup = observation.name == catalog::EDGE_BACKEND_CONNECTION_SETUP;
+        if setup && observation.scope.attempt.is_none() {
+            problems.push(format!("{} is not scoped to an attempt", observation.id));
+        }
     }
     for finding in findings {
         if finding.confidence.as_str() == "confirmed" {
             problems.push(format!("{} is confirmed", finding.code));
         }
         let lists_setup = finding.missing_evidence.iter().any(|m| m == SETUP_MISSING);
-        if finding.code == "alloy.gateway.unattributed_interval" && !lists_setup {
+        // Behind Edge v0.9.9 an attempt span can measure the setup, or show
+        // that the attempt reused a connection and had none.
+        let cites_setup = finding.evidence.iter().any(|e| {
+            e.key == catalog::EDGE_BACKEND_CONNECTION_SETUP
+                || (e.key == "gateway.backend.connection.reused" && e.value == "true")
+        });
+        if finding.code == "alloy.gateway.unattributed_interval" && !lists_setup && !cites_setup {
             problems.push(format!("{} does not list {SETUP_MISSING}", finding.code));
         }
     }
     problems
 }
+
+/// Connection setup measured for a request whose gateway connection was
+/// already open. Edge times setup only on the attempt that opened it.
+fn measured_setup(diagnosis: &DiagnosticReport) -> Vec<String> {
+    diagnosis
+        .observations
+        .iter()
+        .filter(|o| o.name == catalog::EDGE_BACKEND_CONNECTION_SETUP)
+        .filter(|o| o.duration_ms().is_some())
+        .map(|o| format!("{} measures setup on a reused connection", o.id))
+        .collect()
+}
+
+/// Observations imported from an Edge v0.9.9 attempt span: the only ones
+/// scoped to an attempt.
+const ATTEMPT_OBSERVATIONS: &[&str] = &[
+    catalog::EDGE_BACKEND_ATTEMPT,
+    catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+    catalog::EDGE_BACKEND_CONNECTION_SETUP,
+    catalog::EDGE_BACKEND_CONNECTION_DNS,
+    catalog::EDGE_BACKEND_CONNECTION_TCP_CONNECT,
+    catalog::EDGE_BACKEND_CONNECTION_TLS_HANDSHAKE,
+    catalog::EDGE_BACKEND_CONNECTION_REUSED,
+];
 
 /// Edge's default fixed retry backoff (`docs/retry.md` in Ferrum Edge).
 const RETRY_BACKOFF_MS: f64 = 100.0;
@@ -1009,7 +1046,8 @@ const COMPARISONS: &[&str] = &[
 /// A retried request: two Alloy SERVER spans under one Edge SERVER span
 /// (behind Edge v0.9.9, each through its own numbered attempt span), and a
 /// diagnosis that reports several attempts without splitting the gateway's
-/// measurement between them.
+/// measurement between them. Only Edge v0.9.9's attempt spans scope evidence
+/// to an attempt.
 fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
     check.that(
         "retry: the client received the recovered response",
@@ -1111,26 +1149,35 @@ fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
                 .iter()
                 .any(|f| f.code == "alloy.gateway.multiple_service_attempts");
             check.that(
-                "retry: diagnosis reports multiple attempts and compares no timings",
+                "retry: diagnosis reports multiple attempts and no gateway-wide comparison",
                 multiple && compared.is_empty(),
                 codes(&findings),
             );
-            let scoped = diagnosis
+            let scoped: Vec<&Observation> = diagnosis
                 .observations
                 .iter()
                 .filter(|o| o.scope.attempt.is_some())
-                .count();
-            let cited = findings
+                .collect();
+            let invented = scoped
                 .iter()
-                .flat_map(|f| &f.evidence)
-                .filter(|e| e.attempt.is_some())
+                .filter(|o| !ATTEMPT_OBSERVATIONS.contains(&o.name.as_str()))
                 .count();
-            let per_attempt = scoped + cited;
+            let cited = findings.iter().flat_map(|f| &f.evidence);
+            let numbers: BTreeSet<u32> = scoped
+                .iter()
+                .filter_map(|o| o.scope.attempt)
+                .chain(cited.filter_map(|e| e.attempt))
+                .collect();
+            let expected: BTreeSet<u32> = if evidence.attempt_spans() {
+                BTreeSet::from([1, 2])
+            } else {
+                BTreeSet::new()
+            };
             check.that(
-                "retry: diagnosis invents no per-attempt breakdown or confirmed finding",
-                per_attempt == 0 && confirmed(&findings).is_empty(),
+                "retry: diagnosis scopes values only to Edge attempt spans and confirms nothing",
+                invented == 0 && numbers == expected && confirmed(&findings).is_empty(),
                 format!(
-                    "{per_attempt} attempt-scoped values; confirmed: {}",
+                    "attempts {numbers:?}, expected {expected:?}; {invented} values not from an attempt span; confirmed: {}",
                     confirmed(&findings).join(", ")
                 ),
             );
@@ -1188,14 +1235,17 @@ fn check_connections(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases) 
             format!("edge {}, alloy {}", edges.len(), services.len()),
         );
         let name = if label == "cold" {
-            "reuse: the cold request's connection setup stays unmeasured, not zero"
+            "reuse: the cold request's connection setup is attempt-scoped or unmeasured, not zero"
         } else {
             "reuse: no connection setup is charged to the reused request"
         };
         match evidence.diagnose(&format!("reuse-{label}"), &trace, Vec::new()) {
             Ok((diagnosis, findings)) => {
                 let both: Vec<&Value> = edges.iter().chain(&services).copied().collect();
-                let problems = setup_charges(&both, &diagnosis, &findings);
+                let mut problems = setup_charges(&both, &diagnosis, &findings);
+                if label == "reused" {
+                    problems.extend(measured_setup(&diagnosis));
+                }
                 let detail = if problems.is_empty() {
                     codes(&findings)
                 } else {

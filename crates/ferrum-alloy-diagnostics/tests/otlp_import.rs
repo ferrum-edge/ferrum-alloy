@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use ferrum_alloy_diagnostics::catalog;
 use ferrum_alloy_diagnostics::model::{
     Availability, CollectionMethod, Confidence, DiagnosticReport, Finding, Interval, Producer,
     ProducerKind, Severity, Trust, Verification,
@@ -809,6 +810,25 @@ fn edge_attempt_span_links_the_service_to_the_gateway_request() {
     );
     let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
     assert_eq!(residual.confidence, Confidence::Likely);
+    assert!(
+        residual.explanation.contains("150.0 ms"),
+        "{}",
+        residual.explanation
+    );
+    // The attempt measured its setup, so setup timing is not missing, and
+    // other attempts and backoff lie outside the attempt span.
+    assert!(
+        !residual
+            .missing_evidence
+            .iter()
+            .any(|m| m == "gateway connection setup timing"),
+        "{residual:?}"
+    );
+    let retries = residual
+        .alternatives
+        .iter()
+        .any(|a| a.contains("gateway retries"));
+    assert!(!retries, "{residual:?}");
 }
 
 #[test]
@@ -839,7 +859,7 @@ fn edge_retry_attempt_spans_report_several_service_attempts() {
         multiple
             .evidence
             .iter()
-            .any(|e| e.key == "gateway.backend.connection.setup")
+            .any(|e| e.key == catalog::EDGE_BACKEND_CONNECTION_SETUP)
     );
     assert!(
         multiple
@@ -854,6 +874,7 @@ fn edge_retry_attempt_spans_report_several_service_attempts() {
             .any(|e| e.key == "gateway.backend.retry_reason" && e.attempt == Some(2))
     );
     for code in [
+        "alloy.gateway.unattributed_interval",
         "alloy.gateway.timings_not_comparable",
         "alloy.evidence.service_exceeds_gateway",
         "alloy.telemetry.service_span_missing",
@@ -862,6 +883,8 @@ fn edge_retry_attempt_spans_report_several_service_attempts() {
     }
     assert!(multiple.evidence.iter().any(|e| e.attempt == Some(1)));
     assert!(multiple.evidence.iter().any(|e| e.attempt == Some(2)));
+    // Attempt 1 measured its setup and attempt 2 reused the connection.
+    assert!(multiple.missing_evidence.is_empty(), "{multiple:?}");
 }
 
 #[test]
@@ -905,19 +928,42 @@ fn committed_attempt_span_fixture_imports_per_attempt_timing() {
         &ImportLimits::default(),
     )
     .unwrap();
+    // The service span comes from its own resource, not from the gateway's.
+    let service = report
+        .observation("alloy:c3c3c3c3c3c3c3c3:time_to_headers")
+        .unwrap();
+    assert_eq!(service.producer.kind, ProducerKind::Alloy);
+    assert_eq!(service.producer.instance.as_deref(), Some("orders-1"));
+    let timing = report
+        .observation("edge:a1a1a1a1a1a1a1a1:attempt_duration")
+        .unwrap();
+    assert_eq!(timing.producer.version.as_deref(), Some("0.9.9"));
+    assert_eq!(timing.duration_ms(), Some(452.0));
     let findings = analyze(&report, &Thresholds::default());
     let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
     assert!(
         residual
             .evidence
             .iter()
-            .any(|e| e.key == "edge.backend.attempt.duration")
+            .any(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION)
     );
     assert!(
         residual
             .evidence
             .iter()
-            .any(|e| e.key == "edge.backend.connection.setup")
+            .any(|e| e.key == catalog::EDGE_BACKEND_CONNECTION_SETUP)
+    );
+    assert!(
+        residual.explanation.contains("352.0 ms"),
+        "{}",
+        residual.explanation
+    );
+    assert!(
+        !residual
+            .missing_evidence
+            .iter()
+            .any(|m| m == "gateway connection setup timing"),
+        "{residual:?}"
     );
 }
 
@@ -930,6 +976,10 @@ fn committed_v098_fixture_preserves_multiple_attempt_refusal() {
         &ImportLimits::default(),
     )
     .unwrap();
+    let ttfb = report
+        .observation("edge:00f067aa0ba902b7:backend_ttfb")
+        .unwrap();
+    assert_eq!(ttfb.producer.version.as_deref(), Some("0.9.8"));
     let findings = analyze(&report, &Thresholds::default());
     let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
     assert_eq!(multiple.rule_version, 3);
@@ -941,6 +991,275 @@ fn committed_v098_fixture_preserves_multiple_attempt_refusal() {
     assert_eq!(
         multiple.missing_evidence,
         ["per-attempt gateway spans or attempt identifiers"]
+    );
+}
+
+/// `span` with its `gateway.response.streamed` attribute set to `streamed`,
+/// or without one.
+fn with_streamed(mut span: Value, streamed: Option<bool>) -> Value {
+    let key = "gateway.response.streamed";
+    let attributes = span["attributes"].as_array_mut().unwrap();
+    attributes.retain(|a| a["key"] != key);
+    if let Some(streamed) = streamed {
+        attributes.push(json!({
+            "key": key,
+            "value": { "boolValue": streamed }
+        }));
+    }
+    span
+}
+
+/// `span` with the double attribute `key` set to `value`.
+fn with_f64(mut span: Value, key: &str, value: f64) -> Value {
+    let attributes = span["attributes"].as_array_mut().unwrap();
+    attributes.retain(|a| a["key"] != key);
+    attributes.push(f64_attr(key, value));
+    span
+}
+
+/// An attempt span with only its attempt number, as from a pool that reports
+/// no connection evidence (the bundled HTTP/1.1 client, for example).
+fn bare_attempt_span(span_id: &str, number: u32, start_ms: u64) -> Value {
+    let mut span = attempt_span(span_id, number, start_ms);
+    span["attributes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["key"] == "gateway.backend.attempt");
+    span
+}
+
+/// Imports Edge and Alloy spans of one trace and runs the rules.
+fn analyze_spans(edge: Vec<Value>, alloy: Vec<Value>) -> (DiagnosticReport, Vec<Finding>) {
+    let resources = vec![edge_resource(edge), alloy_resource("orders-api", alloy)];
+    let input = otlp(resources);
+    let imported = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+    let report = round_trip(&imported);
+    let findings = analyze(&report, &Thresholds::default());
+    (report, findings)
+}
+
+#[test]
+fn a_service_outlasting_its_attempt_is_conflicting_and_not_compared() {
+    let edge = vec![
+        gateway_span(450.0),
+        attempt_span(FIRST_ATTEMPT, 1, 10),
+        attempt_span(SECOND_ATTEMPT, 2, 360),
+    ];
+    let slow = server_span(RETRIED_SPAN, Some(SECOND_ATTEMPT), 370);
+    let slow = with_f64(slow, "alloy.server.time_to_headers_ms", 300.0);
+    let slow = with_f64(slow, "alloy.server.duration_ms", 400.0);
+    let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20), slow];
+    let (_, findings) = analyze_spans(edge, alloy);
+
+    let conflict = by_code(&findings, "alloy.evidence.service_exceeds_gateway");
+    assert_eq!(conflict.confidence, Confidence::ConflictingEvidence);
+    assert!(
+        conflict
+            .evidence
+            .iter()
+            .any(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION && e.attempt == Some(2)),
+        "{conflict:?}"
+    );
+    let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
+    assert_eq!(multiple.confidence, Confidence::Likely);
+    let explanation = &multiple.explanation;
+    let first = "attempt 1: gateway attempt 250.0 ms minus service 100.0 ms = 150.0 ms";
+    assert!(explanation.contains(first), "{explanation}");
+    // The negative residual is never reported as a comparison.
+    assert!(!explanation.contains("attempt 2:"), "{explanation}");
+    assert!(!explanation.contains("-50.0"), "{explanation}");
+    assert!(explanation.contains("conflicting evidence"), "{explanation}");
+    let compared_second = multiple
+        .evidence
+        .iter()
+        .any(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION && e.attempt == Some(2));
+    assert!(!compared_second, "{multiple:?}");
+}
+
+#[test]
+fn an_attempt_span_without_a_usable_interval_is_not_timed() {
+    let mut no_start = attempt_span(FIRST_ATTEMPT, 1, 10);
+    let fields = no_start.as_object_mut().unwrap();
+    fields.remove("startTimeUnixNano");
+    let mut reversed = attempt_span(FIRST_ATTEMPT, 1, 10);
+    reversed["endTimeUnixNano"] = json!((T0 + 5 * MS).to_string());
+    let cases = [
+        (no_start, vec!["span.end_unix_nano"]),
+        (reversed, vec!["span.start_unix_nano", "span.end_unix_nano"]),
+    ];
+    for (attempt, kept) in cases {
+        let edge = vec![gateway_span(300.0), attempt];
+        let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20)];
+        let (report, findings) = analyze_spans(edge, alloy);
+        let timing = report
+            .observation(&format!("edge:{FIRST_ATTEMPT}:attempt_duration"))
+            .unwrap();
+        // Unknown, never zero, and the raw timestamps stay visible.
+        assert_eq!(timing.availability, Availability::Unavailable);
+        assert_eq!(timing.value, None);
+        for key in kept {
+            assert!(timing.attr(key).is_some(), "{key}: {timing:?}");
+        }
+        let found = codes(&findings);
+        for code in [
+            "alloy.gateway.unattributed_interval",
+            "alloy.evidence.service_exceeds_gateway",
+        ] {
+            assert!(!found.contains(&code), "{code}: {found:?}");
+        }
+        let not_comparable = by_code(&findings, "alloy.gateway.timings_not_comparable");
+        assert_eq!(not_comparable.confidence, Confidence::Unknown);
+        assert!(
+            not_comparable
+                .missing_evidence
+                .iter()
+                .any(|m| m.starts_with("a usable gateway attempt duration")),
+            "{not_comparable:?}"
+        );
+        let cited = not_comparable
+            .evidence
+            .iter()
+            .find(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION)
+            .map(|e| e.value.as_str());
+        assert_eq!(cited, Some("unavailable"), "{not_comparable:?}");
+    }
+}
+
+#[test]
+fn setup_timing_is_missing_unless_the_attempt_measured_or_skipped_it() {
+    let cases = [
+        // A pool that reports no connection evidence.
+        (bare_attempt_span(FIRST_ATTEMPT, 1, 10), true),
+        // A reused connection has no setup phase.
+        (attempt_span(FIRST_ATTEMPT, 2, 10), false),
+    ];
+    for (attempt, listed) in cases {
+        let edge = vec![gateway_span(300.0), attempt];
+        let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20)];
+        let (_, findings) = analyze_spans(edge, alloy);
+        let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+        let lists_setup = residual
+            .missing_evidence
+            .iter()
+            .any(|m| m == "gateway connection setup timing");
+        assert_eq!(lists_setup, listed, "{residual:?}");
+    }
+}
+
+#[test]
+fn a_buffered_attempt_without_pool_evidence_falls_back_to_the_gateway_aggregate() {
+    // Edge's HTTP/3 bridge to an HTTP/1.1 or HTTP/2 backend can end a buffered
+    // attempt at its response head, and its client reports no connection.
+    let edge = vec![
+        with_streamed(gateway_span(300.0), Some(false)),
+        bare_attempt_span(FIRST_ATTEMPT, 1, 10),
+    ];
+    let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20)];
+    let (_, findings) = analyze_spans(edge, alloy);
+    let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+    assert!(
+        residual
+            .evidence
+            .iter()
+            .any(|e| e.key == "gateway.latency.backend_ttfb_ms" && e.value == "300.0 ms"),
+        "{residual:?}"
+    );
+    assert!(
+        !residual
+            .evidence
+            .iter()
+            .any(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION),
+        "{residual:?}"
+    );
+    let fallback = "a gateway attempt end boundary that includes the buffered response body";
+    assert!(
+        residual.missing_evidence.iter().any(|m| m == fallback),
+        "{residual:?}"
+    );
+
+    // The direct HTTP/2 and gRPC pools report the connection, and their
+    // buffered attempts end with the complete response.
+    let mut attempt = attempt_span(FIRST_ATTEMPT, 1, 10);
+    attempt["endTimeUnixNano"] = json!((T0 + 330 * MS).to_string());
+    let edge = vec![with_streamed(gateway_span(400.0), Some(false)), attempt];
+    let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20)];
+    let (_, findings) = analyze_spans(edge, alloy);
+    let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+    assert!(
+        residual
+            .evidence
+            .iter()
+            .any(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION && e.value == "320.0 ms"),
+        "{residual:?}"
+    );
+    assert!(
+        residual.explanation.contains("120.0 ms"),
+        "{}",
+        residual.explanation
+    );
+}
+
+#[test]
+fn attempt_durations_are_compared_when_the_gateway_aggregate_is_unknown() {
+    let edge = vec![
+        gateway_span(-1.0),
+        attempt_span(FIRST_ATTEMPT, 1, 10),
+        attempt_span(SECOND_ATTEMPT, 2, 360),
+    ];
+    let alloy = vec![
+        server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20),
+        server_span(RETRIED_SPAN, Some(SECOND_ATTEMPT), 370),
+    ];
+    let (_, findings) = analyze_spans(edge, alloy);
+    let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
+    for number in [1, 2] {
+        let compared = format!("attempt {number}: gateway attempt 250.0 ms");
+        assert!(multiple.explanation.contains(&compared), "{multiple:?}");
+    }
+    assert!(
+        multiple
+            .evidence
+            .iter()
+            .any(|e| e.key == "gateway.latency.backend_ttfb_ms" && e.value == "unavailable"),
+        "{multiple:?}"
+    );
+
+    // One attempt is compared on its own.
+    let edge = vec![gateway_span(-1.0), attempt_span(FIRST_ATTEMPT, 1, 10)];
+    let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20)];
+    let (_, findings) = analyze_spans(edge, alloy);
+    let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+    assert!(
+        residual
+            .evidence
+            .iter()
+            .any(|e| e.key == catalog::EDGE_BACKEND_ATTEMPT_DURATION)
+    );
+
+    // Without a buffering mode, the attempts are not compared, and the
+    // finding says so.
+    let edge = vec![
+        with_streamed(gateway_span(-1.0), None),
+        attempt_span(FIRST_ATTEMPT, 1, 10),
+        attempt_span(SECOND_ATTEMPT, 2, 360),
+    ];
+    let alloy = vec![
+        server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20),
+        server_span(RETRIED_SPAN, Some(SECOND_ATTEMPT), 370),
+    ];
+    let (_, findings) = analyze_spans(edge, alloy);
+    let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
+    assert!(
+        multiple.explanation.contains("Not compared: attempt 1"),
+        "{}",
+        multiple.explanation
+    );
+    assert!(
+        multiple
+            .missing_evidence
+            .iter()
+            .any(|m| m == "gateway response buffering mode"),
+        "{multiple:?}"
     );
 }
 
