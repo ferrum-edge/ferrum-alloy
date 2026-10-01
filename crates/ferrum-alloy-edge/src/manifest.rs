@@ -319,12 +319,10 @@ impl ServiceManifest {
                     crate::export::CORRELATION_ID_PLUGIN_ID_SUFFIX
                 )
             }),
-            self.gateway.otel_endpoint.as_ref().map(|_| {
-                format!(
-                    "{proxy_id}{}",
-                    crate::export::OTEL_TRACING_PLUGIN_ID_SUFFIX
-                )
-            }),
+            self.gateway
+                .otel_endpoint
+                .as_ref()
+                .map(|_| format!("{proxy_id}{}", crate::export::OTEL_TRACING_PLUGIN_ID_SUFFIX)),
         ]
         .into_iter()
         .flatten()

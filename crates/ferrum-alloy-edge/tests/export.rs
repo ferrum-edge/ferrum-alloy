@@ -267,9 +267,11 @@ fn proxy_id_boundary_accounts_for_the_longest_generated_resource_id() {
     manifest.validate().unwrap();
 
     let resources = resources(&manifest);
-    assert!(generated_ids(&resources)
-        .iter()
-        .all(|id| id.len() <= EDGE_RESOURCE_ID_MAX_LENGTH));
+    assert!(
+        generated_ids(&resources)
+            .iter()
+            .all(|id| id.len() <= EDGE_RESOURCE_ID_MAX_LENGTH)
+    );
     let longest_id = format!("{}-correlation-id", manifest.proxy_id());
     assert!(generated_ids(&resources).contains(&longest_id.as_str()));
 
@@ -308,10 +310,16 @@ fn each_generated_id_suffix_is_checked_at_its_boundary() {
         manifest.validate().unwrap();
 
         let resources = resources(&manifest);
-        assert!(generated_ids(&resources)
-            .iter()
-            .all(|id| id.len() <= EDGE_RESOURCE_ID_MAX_LENGTH));
-        assert!(generated_ids(&resources).iter().any(|id| id.ends_with(suffix)));
+        assert!(
+            generated_ids(&resources)
+                .iter()
+                .all(|id| id.len() <= EDGE_RESOURCE_ID_MAX_LENGTH)
+        );
+        assert!(
+            generated_ids(&resources)
+                .iter()
+                .any(|id| id.ends_with(suffix))
+        );
 
         manifest.gateway.proxy_id = Some("a".repeat(base_length + 1));
         let error = manifest.validate().unwrap_err().to_string();
