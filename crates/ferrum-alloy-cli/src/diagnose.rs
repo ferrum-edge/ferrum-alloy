@@ -15,7 +15,7 @@ use std::fs::OpenOptions;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{ErrorKind, Write};
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -102,22 +102,29 @@ fn temp_suffix() -> String {
     format!(".{}.{random:016x}.tmp", std::process::id())
 }
 
+#[cfg(unix)]
+fn preserved_permissions(path: &Path) -> Option<std::fs::Permissions> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())
+        .map(|metadata| std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o777))
+}
+
 /// Writes `bytes` to `path` through a new temporary file in the same
 /// directory and a rename, so `path` never holds a partial report. The
 /// temporary file is removed when a later step fails. A symbolic link at
-/// `path` is replaced, not written through. New files are private on Unix;
-/// replacements retain the destination's permissions.
+/// `path` is replaced, not written through, and its target's permissions are
+/// not carried over. New files are private on Unix; replacements of regular
+/// files retain only the permission bits, not the owner, group, ACLs, or
+/// extended attributes.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let failed = |e: std::io::Error| CliError::Io(format!("write {}: {e}", path.display()));
     let Some(name) = path.file_name() else {
         let message = format!("{} names no file", path.display());
         return Err(CliError::Invalid(message));
     };
-    let permissions = match std::fs::metadata(path) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(e) if e.kind() == ErrorKind::NotFound => None,
-        Err(e) => return Err(failed(e)),
-    };
+    #[cfg(unix)]
+    let permissions = preserved_permissions(path);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     // Do not expose a report through its temporary name while it is written.
@@ -137,13 +144,13 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
             Err(e) => return Err(failed(e)),
         }
     };
-    let written = file
-        .write_all(bytes)
-        .and_then(|()| match permissions {
-            Some(permissions) => file.set_permissions(permissions),
-            None => Ok(()),
-        })
-        .and_then(|()| file.sync_all());
+    let written = file.write_all(bytes);
+    #[cfg(unix)]
+    let written = written.and_then(|()| match permissions {
+        Some(permissions) => file.set_permissions(permissions),
+        None => Ok(()),
+    });
+    let written = written.and_then(|()| file.sync_all());
     // Closed before the rename, which Windows requires.
     drop(file);
     if let Err(e) = written.and_then(|()| std::fs::rename(&temp, path)) {
