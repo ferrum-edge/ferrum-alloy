@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use ferrum_alloy_diagnostics::catalog::{self, edge_diagnostic_ref_replica, is_edge_diagnostic_ref};
+use ferrum_alloy_diagnostics::catalog::{
+    self, edge_diagnostic_ref_replica, is_edge_diagnostic_ref,
+};
 use ferrum_alloy_diagnostics::model::{
     Availability, Collection, CollectionMethod, Confidence, DiagnosticReport, Leg, Observation,
     ObservationKind, Owner, Producer, ProducerKind, Scope, Severity, Trust, Verification,
