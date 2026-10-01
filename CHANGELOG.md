@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Correct `alloy.response.body.bytes`: it counts the data-frame payload bytes
+  handed to Hyper after the response's inner layers ran, so with compression
+  enabled it reports the compressed frame payload. It excludes HTTP framing and
+  TLS overhead and is not proof the client received it.
+- Correct the documented `x-ferrum-mcp` validation scope: a disabled
+  document-level extension still checks top-level closed keys, the `enabled`
+  boolean type, and per-operation metadata, while `endpoint`, `namespace`,
+  `include`, `exclude`, `limits`, and `forward_request_headers` are validated
+  only when it is enabled. Add adjacent disabled/enabled tests.
 - Pin Ferrum Edge v0.9.10 and keep v0.9.9 as the previous supported release.
   Re-audit Edge #5954: MCP request charset checks and fail-closed handling for
   uninspectable or over-nested JSON-RPC batches do not change contracts Alloy

@@ -417,6 +417,43 @@ fn extensions_are_closed_like_edge() {
 }
 
 #[test]
+fn disabled_document_subtrees_are_not_deeply_checked() {
+    let malformed = json!({
+        "enabled": false,
+        "namespace": 17,
+        "endpoint": "not-an-object",
+        "include": 5,
+        "limits": { "max_request_body_bytes": "wrong-type" },
+        "forward_request_headers": 7
+    });
+    let mut document = orders();
+    document[X_FERRUM_MCP] = malformed.clone();
+    // Disabled: the top-level closed keys and `enabled`'s type run, but the
+    // other document subtrees are not validated, so the wrong types pass.
+    let problems = lint(&document, None);
+    assert!(problems.is_empty(), "{problems:?}");
+
+    // A disabled document still enforces the document-level closed keys.
+    document[X_FERRUM_MCP] = json!({ "enabled": false, "endpoints": {} });
+    assert_problem(&lint(&document, None), "has the unknown key \"endpoints\"");
+
+    // Enabled: those subtrees are validated.
+    let mut enabled = malformed;
+    enabled["enabled"] = json!(true);
+    document[X_FERRUM_MCP] = enabled;
+    let problems = lint(&document, None);
+    for expected in [
+        "`x-ferrum-mcp.endpoint` must be an object",
+        "`x-ferrum-mcp.namespace` must be 1-64 characters",
+        "`x-ferrum-mcp.include` must be an object with operations and/or tags",
+        "`x-ferrum-mcp.limits.max_request_body_bytes` must be a positive integer",
+        "`x-ferrum-mcp.forward_request_headers` must be an array",
+    ] {
+        assert_problem(&problems, expected);
+    }
+}
+
+#[test]
 fn the_endpoint_stays_under_the_public_path_and_clear_of_operations() {
     let mut document = orders();
     document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/elsewhere/mcp" } });
