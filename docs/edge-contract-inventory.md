@@ -164,6 +164,8 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 
 `ferrum-alloy edge export` writes only fields that exist in the `deny_unknown_fields` resources of both Edge v0.9.9 (`src/config/types.rs`: `Proxy` 2776, `Upstream` 1910, `PluginConfig` 3247, `GatewayConfig` 3398) and v0.9.8 (`Proxy` 2646, `Upstream` 1843, `PluginConfig` 3101, `GatewayConfig` 3252), and GitForgeOps's `kind`/`spec` wrapper (`src/config/strict.rs:321-332`). v0.9.9 adds two `Proxy` fields that export deliberately leaves at their defaults (re-audit item 6): `allow_path_parameters` (`false`) and `websocket_permessage_deflate` (`strip`). Manifest paths cannot contain `;`, `%`, `\`, or `.`/`..` segments, so no generated `listen_path` needs the opt-in.
 
+Edge v0.9.10 validates resource IDs in `src/config/types.rs`: IDs are 1–254 bytes, start with an ASCII alphanumeric, and then contain only ASCII alphanumerics, `.`, `_`, or `-`. Manifest validation applies that limit to each generated ID selected by the manifest: `-upstream` for health checks, `-correlation-id` for the correlation plugin, and `-otel-tracing` for OTLP tracing.
+
 | Generated item | Status | Validation |
 |---|---|---|
 | Proxy: `listen_path`, `backend_scheme` (never `backend_protocol`), `strip_listen_path`, `backend_path`, `backend_*_timeout_ms`, `upstream_id`, `plugins`, `labels`, `backend_tls_*` | EXISTING | CI: `ferrum-edge validate -m file` passes on v0.9.10 and v0.9.9 for `contracts/fixtures/manifests/plain-http.edge.yaml` and for the e2e TLS config. The e2e stack serves traffic with it. |

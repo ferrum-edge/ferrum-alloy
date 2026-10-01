@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 pub const MANIFEST_SCHEMA: &str = "ferrum.service_manifest";
 /// Supported major version.
 pub const MANIFEST_MAJOR: u32 = 1;
+/// Maximum resource ID length accepted by the supported Ferrum Edge releases,
+/// in bytes.
+pub const EDGE_RESOURCE_ID_MAX_LENGTH: usize = 254;
 
 /// A service manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,7 +238,7 @@ fn valid_id(value: &str) -> bool {
     // Edge proxy/upstream id rule: ^[a-zA-Z0-9][a-zA-Z0-9._-]*$, <= 254.
     let bytes = value.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= 254
+        && bytes.len() <= EDGE_RESOURCE_ID_MAX_LENGTH
         && bytes[0].is_ascii_alphanumeric()
         && bytes
             .iter()
@@ -304,6 +307,34 @@ impl ServiceManifest {
         }
         if !valid_id(self.proxy_id()) {
             errors.push("gateway.proxy_id must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$".into());
+        }
+        let proxy_id = self.proxy_id();
+        let longest_derived_id = [
+            self.health
+                .as_ref()
+                .map(|_| format!("{proxy_id}{}", crate::export::UPSTREAM_ID_SUFFIX)),
+            self.gateway.correlation_id.then(|| {
+                format!(
+                    "{proxy_id}{}",
+                    crate::export::CORRELATION_ID_PLUGIN_ID_SUFFIX
+                )
+            }),
+            self.gateway.otel_endpoint.as_ref().map(|_| {
+                format!(
+                    "{proxy_id}{}",
+                    crate::export::OTEL_TRACING_PLUGIN_ID_SUFFIX
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(String::len);
+        if let Some(derived_id) = longest_derived_id
+            && derived_id.len() > EDGE_RESOURCE_ID_MAX_LENGTH
+        {
+            errors.push(format!(
+                "gateway.proxy_id produces derived resource ID {derived_id:?} over Edge's {EDGE_RESOURCE_ID_MAX_LENGTH}-character limit"
+            ));
         }
         if !valid_id(&self.gateway.namespace) {
             errors.push("gateway.namespace is invalid".into());

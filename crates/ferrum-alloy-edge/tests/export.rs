@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use ferrum_alloy_edge::export::{file_mode_document, file_mode_yaml, gitforgeops_files, resources};
-use ferrum_alloy_edge::manifest::ServiceManifest;
+use ferrum_alloy_edge::manifest::{EDGE_RESOURCE_ID_MAX_LENGTH, ServiceManifest};
 use ferrum_alloy_edge::yaml;
 use serde_json::{Value, json};
 
@@ -18,6 +18,20 @@ fn manifest() -> ServiceManifest {
         &std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap(),
     )
     .unwrap()
+}
+
+fn generated_ids(resources: &ferrum_alloy_edge::export::EdgeResources) -> Vec<&str> {
+    let mut ids = Vec::new();
+    if let Some(upstream) = &resources.upstream {
+        ids.push(upstream["id"].as_str().unwrap());
+    }
+    ids.extend(
+        resources
+            .plugin_configs
+            .iter()
+            .map(|plugin| plugin["id"].as_str().unwrap()),
+    );
+    ids
 }
 
 /// Field names of Ferrum Edge v0.9.9 and v0.9.8 resources
@@ -242,6 +256,85 @@ fn gitforgeops_files_use_kind_and_spec_only() {
             .collect();
         assert_eq!(top, vec!["kind", "spec"], "{}", file.path);
     }
+}
+
+#[test]
+fn proxy_id_boundary_accounts_for_the_longest_generated_resource_id() {
+    let mut manifest = manifest();
+    let longest_suffix_length = "-correlation-id".len();
+    let max_proxy_id_length = EDGE_RESOURCE_ID_MAX_LENGTH - longest_suffix_length;
+    manifest.gateway.proxy_id = Some("a".repeat(max_proxy_id_length));
+    manifest.validate().unwrap();
+
+    let resources = resources(&manifest);
+    assert!(generated_ids(&resources)
+        .iter()
+        .all(|id| id.len() <= EDGE_RESOURCE_ID_MAX_LENGTH));
+    let longest_id = format!("{}-correlation-id", manifest.proxy_id());
+    assert!(generated_ids(&resources).contains(&longest_id.as_str()));
+
+    manifest.gateway.proxy_id = Some("a".repeat(max_proxy_id_length + 1));
+    let error = manifest.validate().unwrap_err().to_string();
+    assert!(error.contains("254-character limit"), "{error}");
+    assert!(error.contains("-correlation-id"), "{error}");
+}
+
+#[test]
+fn each_generated_id_suffix_is_checked_at_its_boundary() {
+    for (family, suffix, base_length) in [
+        (
+            "upstream",
+            "-upstream",
+            EDGE_RESOURCE_ID_MAX_LENGTH - "-upstream".len(),
+        ),
+        (
+            "correlation",
+            "-correlation-id",
+            EDGE_RESOURCE_ID_MAX_LENGTH - "-correlation-id".len(),
+        ),
+        (
+            "otel",
+            "-otel-tracing",
+            EDGE_RESOURCE_ID_MAX_LENGTH - "-otel-tracing".len(),
+        ),
+    ] {
+        let mut manifest = manifest();
+        if family != "upstream" {
+            manifest.health = None;
+        }
+        manifest.gateway.correlation_id = family == "correlation";
+        manifest.gateway.otel_endpoint = (family == "otel").then(|| "http://otel".to_owned());
+        manifest.gateway.proxy_id = Some("a".repeat(base_length));
+        manifest.validate().unwrap();
+
+        let resources = resources(&manifest);
+        assert!(generated_ids(&resources)
+            .iter()
+            .all(|id| id.len() <= EDGE_RESOURCE_ID_MAX_LENGTH));
+        assert!(generated_ids(&resources).iter().any(|id| id.ends_with(suffix)));
+
+        manifest.gateway.proxy_id = Some("a".repeat(base_length + 1));
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains("254-character limit"), "{family}: {error}");
+        assert!(error.contains(suffix), "{family}: {error}");
+    }
+}
+
+#[test]
+fn direct_proxy_id_can_use_the_full_edge_limit_without_derived_resources() {
+    let mut manifest = manifest();
+    manifest.health = None;
+    manifest.gateway.correlation_id = false;
+    manifest.gateway.otel_endpoint = None;
+    manifest.gateway.proxy_id = Some("a".repeat(EDGE_RESOURCE_ID_MAX_LENGTH));
+
+    manifest.validate().unwrap();
+    let resources = resources(&manifest);
+    assert!(generated_ids(&resources).is_empty());
+    assert_eq!(
+        resources.proxy["id"].as_str().unwrap().len(),
+        EDGE_RESOURCE_ID_MAX_LENGTH
+    );
 }
 
 /// Literal paths Ferrum Edge refuses as a `listen_path`: a `;` path parameter

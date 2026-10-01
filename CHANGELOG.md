@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Reject service manifest proxy IDs when a generated upstream or plugin ID
+  would exceed Ferrum Edge's 254-character resource ID limit.
 - Pin Ferrum Edge v0.9.10 and keep v0.9.9 as the previous supported release.
   Re-audit Edge #5954: MCP request charset checks and fail-closed handling for
   uninspectable or over-nested JSON-RPC batches do not change contracts Alloy

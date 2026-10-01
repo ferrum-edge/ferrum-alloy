@@ -162,6 +162,10 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    ferrum-edge validate -m file -c edge.yaml
    ```
 
+   Edge resource IDs are limited to 254 characters. Manifest validation checks
+   the proxy ID and any generated `-upstream`, `-correlation-id`, or
+   `-otel-tracing` IDs selected by the health check and gateway plugin settings.
+
    Or write a GitForgeOps tree with `--format gitforgeops --output DIR`. Nothing is applied to a gateway.
 
    When exporting OpenAPI with `--manifest`, the document server URL uses the manifest's

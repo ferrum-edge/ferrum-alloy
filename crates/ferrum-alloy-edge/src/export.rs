@@ -20,6 +20,10 @@ use serde_json::{Map, Value, json};
 use crate::manifest::ServiceManifest;
 use crate::yaml;
 
+pub(crate) const UPSTREAM_ID_SUFFIX: &str = "-upstream";
+pub(crate) const CORRELATION_ID_PLUGIN_ID_SUFFIX: &str = "-correlation-id";
+pub(crate) const OTEL_TRACING_PLUGIN_ID_SUFFIX: &str = "-otel-tracing";
+
 /// Generated gateway resources.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeResources {
@@ -51,7 +55,7 @@ fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<&String>) 
 pub fn resources(manifest: &ServiceManifest) -> EdgeResources {
     let proxy_id = manifest.proxy_id().to_owned();
     let namespace = manifest.gateway.namespace.clone();
-    let upstream_id = format!("{proxy_id}-upstream");
+    let upstream_id = format!("{proxy_id}{UPSTREAM_ID_SUFFIX}");
     let tls = |map: &mut Map<String, Value>| {
         if manifest.upstream.scheme == "https" {
             map.insert("backend_tls_verify_server_cert".into(), Value::Bool(true));
@@ -76,7 +80,7 @@ pub fn resources(manifest: &ServiceManifest) -> EdgeResources {
     let mut plugin_configs = Vec::new();
     let mut plugin_refs = Vec::new();
     if manifest.gateway.correlation_id {
-        let id = format!("{proxy_id}-correlation-id");
+        let id = format!("{proxy_id}{CORRELATION_ID_PLUGIN_ID_SUFFIX}");
         plugin_configs.push(json!({
             "id": id,
             "plugin_name": "correlation_id",
@@ -89,7 +93,7 @@ pub fn resources(manifest: &ServiceManifest) -> EdgeResources {
         plugin_refs.push(json!({ "plugin_config_id": id }));
     }
     if let Some(endpoint) = &manifest.gateway.otel_endpoint {
-        let id = format!("{proxy_id}-otel-tracing");
+        let id = format!("{proxy_id}{OTEL_TRACING_PLUGIN_ID_SUFFIX}");
         let mut config = json!({
             "endpoint": endpoint,
             "service_name": format!("ferrum-edge-{namespace}"),
