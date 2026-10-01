@@ -4,6 +4,7 @@
   "files": {
     "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json": "a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410",
     "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-connection-failure.json": "05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310",
+    "contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json": "8411fccad676ee33b76b1b58994084a95eda8be5202c8f672397a78ede9c9f92",
     "contracts/ferrum-contracts/schemas/diagnostic-report/v1.schema.json": "7c9e6f6344dcca1f18824c38326668348bf70bd2c2713d12624186e7e70522b0",
     "contracts/ferrum-contracts/vocabularies/gateway-errors.json": "e52da87a35faadd9668a97ca5d284eca2bcdf21795b70bf1c7c724ee4d07b76a",
     "contracts/ferrum-contracts/vocabularies/gateway-headers.json": "6ed57f067fdc0148dbb1622b770bf259bcb2fcf09c0545b8aa89105d8199685f"

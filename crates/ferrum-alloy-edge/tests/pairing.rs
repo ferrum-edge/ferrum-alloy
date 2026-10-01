@@ -327,6 +327,15 @@ fn ferrum_contracts_pin_matches_the_vendored_files() {
 }
 
 #[test]
+fn edge_diagnostic_ref_pattern_matches_the_pinned_schema() {
+    let schema = pinned_json("schemas/diagnostic-ref/v1.schema.json");
+    assert_eq!(
+        ferrum_alloy_diagnostics::catalog::EDGE_DIAGNOSTIC_REF_PATTERN,
+        schema["properties"]["ref"]["pattern"].as_str().unwrap()
+    );
+}
+
+#[test]
 fn gateway_error_tokens_match_the_pinned_vocabulary() {
     let errors = pinned_json("vocabularies/gateway-errors.json");
     let entries = errors["x_gateway_error_tokens"].as_array().unwrap();

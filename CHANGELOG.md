@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Document the central ferrum-contracts store, vendor and pin the diagnostic-ref v1 schema, and correct the shared `[agents]` schema status.
 - Interpret Ferrum Edge v0.9.9 backend attempt spans for per-attempt timing,
   connection setup, and connection reuse; preserve the v0.9.8 multiple-attempt
   behavior when attempt spans are absent. Rule `alloy.r003` (now version 3)

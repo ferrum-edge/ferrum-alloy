@@ -28,6 +28,7 @@ Local cargo runs are permitted in this repository; hosted CI remains the source 
 - Never install a global subscriber, OpenTelemetry provider, or crypto provider from library code. `AlloyApp` may install a subscriber only in `TelemetryInit::Auto` when none exists.
 - Trust comes from transport identity (`PeerInfo`), never from headers. Do not add a `trusted = true` switch.
 - Do not invent Ferrum Edge contracts. Anything new goes into `docs/edge-contract-inventory.md` marked PROPOSED, until Edge implements it.
+- Shared contracts live in ferrum-contracts; see the README's Contracts section and `contracts/README.md` before changing vendored files.
 - Timing fields must be defined in `docs/measurement-semantics.md` and `crates/ferrum-alloy-diagnostics/src/catalog.rs` before they are exposed. Unknown is not zero. Never sum nested durations. Never call a residual "network latency".
 - Diagnosis rules stay deterministic, with no network and no AI. Every finding lists `does_not_prove`. Offline input never yields `confirmed`.
 - New `FERRUM_ALLOY_*` variables go in `config::ENV_VARS` and `docs/configuration.md`; a test enforces this.
