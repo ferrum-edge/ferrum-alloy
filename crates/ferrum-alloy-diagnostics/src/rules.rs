@@ -21,6 +21,8 @@
 //! A service span is linked to a gateway request when its parent is the
 //! gateway's span, or a gateway backend attempt (`edge.backend.attempt`, a
 //! Ferrum Edge v0.9.9 CLIENT span) whose own parent is the gateway's span.
+//! Observations from an attempt span describe that attempt, never a gateway
+//! request of their own.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -135,6 +137,11 @@ impl<'a> RequestView<'a> {
     fn key(&self) -> Option<SpanKey<'a>> {
         self.span.map(span_key)
     }
+
+    /// The duration of a backend attempt span, for an attempt's view.
+    fn attempt_duration(&self) -> Option<&'a Observation> {
+        self.named(catalog::EDGE_BACKEND_ATTEMPT_DURATION)
+    }
 }
 
 struct Index<'a> {
@@ -156,6 +163,12 @@ struct Index<'a> {
     /// Gateway backend attempt span identity -> parent span id in the same
     /// trace. Attempts are links, never gateway requests of their own.
     attempt_parents: BTreeMap<SpanKey<'a>, Option<&'a str>>,
+    /// Gateway backend attempts keyed by attempt span identity: the link,
+    /// duration, and connection observations of each attempt span.
+    attempts: BTreeMap<SpanKey<'a>, RequestView<'a>>,
+    /// Attempt span identities keyed by their parent span, in the order of
+    /// `attempts`.
+    attempts_by_parent: BTreeMap<SpanKey<'a>, Vec<SpanKey<'a>>>,
 }
 
 const SERVICE_NAMES: &[&str] = &[
@@ -166,6 +179,17 @@ const SERVICE_NAMES: &[&str] = &[
     catalog::ALLOY_ADMISSION_WAIT,
 ];
 
+/// Observations that describe one gateway backend attempt span.
+const ATTEMPT_NAMES: &[&str] = &[
+    catalog::EDGE_BACKEND_ATTEMPT,
+    catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+    catalog::EDGE_BACKEND_CONNECTION_SETUP,
+    catalog::EDGE_BACKEND_CONNECTION_DNS,
+    catalog::EDGE_BACKEND_CONNECTION_TCP_CONNECT,
+    catalog::EDGE_BACKEND_CONNECTION_TLS_HANDSHAKE,
+    catalog::EDGE_BACKEND_CONNECTION_REUSED,
+];
+
 impl<'a> Index<'a> {
     fn build(report: &'a DiagnosticReport) -> Self {
         let mut edge: BTreeMap<SpanKey<'_>, RequestView<'_>> = BTreeMap::new();
@@ -173,15 +197,22 @@ impl<'a> Index<'a> {
         let mut operations = Vec::new();
         let mut alloy_parents = BTreeMap::new();
         let mut attempt_parents = BTreeMap::new();
+        let mut attempts: BTreeMap<SpanKey<'_>, RequestView<'_>> = BTreeMap::new();
         for observation in &report.observations {
             let key = observation.span.as_ref().map_or(NO_SPAN, span_key);
             match observation.producer.kind {
-                ProducerKind::Edge if observation.name == catalog::EDGE_BACKEND_ATTEMPT => {
-                    if let Some(span) = &observation.span {
+                ProducerKind::Edge if ATTEMPT_NAMES.contains(&observation.name.as_str()) => {
+                    let Some(span) = &observation.span else {
+                        continue;
+                    };
+                    if observation.name == catalog::EDGE_BACKEND_ATTEMPT {
                         attempt_parents
-                            .entry(span_key(span))
+                            .entry(key)
                             .or_insert(span.parent_span_id.as_deref());
                     }
+                    let view = attempts.entry(key).or_default();
+                    view.span = view.span.or(Some(span));
+                    view.observations.push(observation);
                 }
                 ProducerKind::Edge => {
                     let view = edge.entry(key).or_default();
@@ -224,6 +255,19 @@ impl<'a> Index<'a> {
                 .or_default()
                 .push(*service_key);
         }
+        let mut attempts_by_parent: BTreeMap<SpanKey<'a>, Vec<SpanKey<'a>>> = BTreeMap::new();
+        for (attempt_key, view) in &attempts {
+            let Some(span) = view.span else {
+                continue;
+            };
+            let Some(parent) = span.parent_span_id.as_deref() else {
+                continue;
+            };
+            attempts_by_parent
+                .entry((span.trace_id.as_str(), parent))
+                .or_default()
+                .push(*attempt_key);
+        }
         Self {
             report,
             verified_collection: report.collection.verification == Verification::Verified,
@@ -233,6 +277,8 @@ impl<'a> Index<'a> {
             operations,
             alloy_parents,
             attempt_parents,
+            attempts,
+            attempts_by_parent,
         }
     }
 
@@ -248,6 +294,34 @@ impl<'a> Index<'a> {
             .flatten()
             .filter_map(|key| self.service.get(key))
             .collect()
+    }
+
+    /// Backend attempt spans whose parent is the given gateway span, in its
+    /// trace.
+    fn attempts_under(&self, edge_span: &SpanRef) -> Vec<&RequestView<'a>> {
+        self.attempts_by_parent
+            .get(&(edge_span.trace_id.as_str(), edge_span.span_id.as_str()))
+            .into_iter()
+            .flatten()
+            .filter_map(|key| self.attempts.get(key))
+            .collect()
+    }
+
+    /// The backend attempt span a service span names as its parent, when that
+    /// attempt's own parent is the given gateway span in the same trace.
+    fn attempt_of(
+        &self,
+        service: &RequestView<'a>,
+        edge_span: &SpanRef,
+    ) -> Option<&RequestView<'a>> {
+        let span = service.span?;
+        let parent = span.parent_span_id.as_deref()?;
+        let attempt = self.attempts.get(&(span.trace_id.as_str(), parent))?;
+        let gateway = attempt.span?.parent_span_id.as_deref();
+        if span.trace_id != edge_span.trace_id || gateway != Some(edge_span.span_id.as_str()) {
+            return None;
+        }
+        Some(attempt)
     }
 
     /// Returns the measured service ancestors of `span`, following each
@@ -496,7 +570,7 @@ impl FindingBuilder {
 /// R001: Edge rejected the request before any upstream attempt.
 fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r001";
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
     for view in index.edge.values() {
         let services = view
             .span
@@ -1006,10 +1080,484 @@ fn same_instance(a: &Observation, b: &Observation) -> bool {
     }
 }
 
+/// Rule id of the gateway-to-service timing comparison.
+const R003: &str = "alloy.r003";
+/// Version of [`R003`].
+const R003_VERSION: u32 = 3;
+
+/// Why a service span directly under the gateway span is not compared when
+/// the gateway request has attempt spans.
+const UNLINKED_SERVICE_NOTE: &str =
+    "A service span whose parent is the gateway span, not an attempt span, is not compared.";
+
+/// What confirms a residual that a gateway backend attempt span explains.
+const ATTEMPT_CONFIRM_WITH: &[&str] = &[
+    "gateway attempt span connection reuse and setup attributes",
+    "gateway retry reason and sibling attempt intervals",
+];
+
+/// Why a backend attempt's duration is not compared with the service request
+/// it reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AttemptGap {
+    /// The gateway recorded no response buffering mode, so the matching
+    /// service measurement is unknown.
+    UnknownBuffering,
+    /// The attempt span has no usable duration: a timestamp is missing, or
+    /// its end precedes its start.
+    AttemptDuration,
+    /// A buffered attempt that may have ended at its response head.
+    BufferedEnd,
+    /// The service measurement with matching boundaries is missing or
+    /// unusable.
+    ServiceMeasurement,
+}
+
+impl AttemptGap {
+    /// Why the attempt was not compared.
+    fn reason(self) -> &'static str {
+        match self {
+            Self::UnknownBuffering => "the gateway did not record whether the response streamed",
+            Self::AttemptDuration => {
+                "the attempt span lacks a timestamp, or its end precedes its start"
+            }
+            Self::BufferedEnd => {
+                "the buffered attempt may have ended at its response head (HTTP/3 bridge)"
+            }
+            Self::ServiceMeasurement => {
+                "the matching service measurement is missing or not a usable duration"
+            }
+        }
+    }
+
+    /// The evidence that would make the attempt comparable.
+    fn missing(self) -> &'static str {
+        match self {
+            Self::UnknownBuffering => "gateway response buffering mode",
+            Self::AttemptDuration => {
+                "a usable gateway attempt duration (both span timestamps, end not before start)"
+            }
+            Self::BufferedEnd => {
+                "a gateway attempt end boundary that includes the buffered response body"
+            }
+            Self::ServiceMeasurement => "a usable service measurement with matching boundaries",
+        }
+    }
+}
+
+/// One backend attempt's duration and the service measurement whose
+/// boundaries match it.
+#[derive(Debug, Clone, Copy)]
+struct AttemptTiming<'a> {
+    duration: &'a Observation,
+    service: &'a Observation,
+    gateway_ms: f64,
+    service_ms: f64,
+}
+
+/// Pairs a backend attempt span's duration with the service measurement whose
+/// boundaries match it. A streamed attempt ends at the response head, so it
+/// matches the service's time to headers. A buffered attempt ends with the
+/// complete response, so it matches the service's total duration, except on
+/// Ferrum Edge's HTTP/3 bridge to an HTTP/1.1 or HTTP/2 backend, where it
+/// usually ends at the response head. Edge names no frontend protocol, but
+/// only its direct HTTP/2 and gRPC pools, which that bridge does not use,
+/// report connection reuse. A buffered attempt without that report is not
+/// compared.
+fn attempt_timing<'a>(
+    attempt: &RequestView<'a>,
+    service: &RequestView<'a>,
+    streamed: Option<&str>,
+) -> Result<AttemptTiming<'a>, AttemptGap> {
+    let name = match streamed {
+        Some("true") => catalog::ALLOY_TIME_TO_HEADERS,
+        Some("false") => catalog::ALLOY_SERVER_DURATION,
+        _ => return Err(AttemptGap::UnknownBuffering),
+    };
+    let Some(duration) = attempt.attempt_duration() else {
+        return Err(AttemptGap::AttemptDuration);
+    };
+    let Some(gateway_ms) = duration.duration_ms() else {
+        return Err(AttemptGap::AttemptDuration);
+    };
+    let pooled = attempt.named(catalog::EDGE_BACKEND_CONNECTION_REUSED);
+    if streamed == Some("false") && pooled.is_none() {
+        return Err(AttemptGap::BufferedEnd);
+    }
+    let Some(service_obs) = service.named(name) else {
+        return Err(AttemptGap::ServiceMeasurement);
+    };
+    let Some(service_ms) = service_obs.duration_ms() else {
+        return Err(AttemptGap::ServiceMeasurement);
+    };
+    Ok(AttemptTiming {
+        duration,
+        service: service_obs,
+        gateway_ms,
+        service_ms,
+    })
+}
+
+/// A duration as cited: its value, or its availability when it has none.
+fn cited(observation: &Observation) -> String {
+    match observation.duration_ms() {
+        Some(value) => ms(value),
+        None => observation.availability.as_str().to_owned(),
+    }
+}
+
+/// The attempt number Edge recorded on a backend attempt span.
+fn attempt_number(attempt: &RequestView<'_>) -> Option<u32> {
+    attempt
+        .observations
+        .iter()
+        .find_map(|observation| observation.scope.attempt)
+}
+
+/// Whether Edge said what connection setup cost a backend attempt: a measured
+/// setup, or a reused connection, which has no setup phase.
+fn setup_known(attempt: &RequestView<'_>) -> bool {
+    let measured = attempt
+        .named(catalog::EDGE_BACKEND_CONNECTION_SETUP)
+        .is_some_and(|setup| setup.duration_ms().is_some());
+    let reused = attempt
+        .named(catalog::EDGE_BACKEND_CONNECTION_REUSED)
+        .is_some_and(|reuse| reuse.attr("reused") == Some("true"));
+    measured || reused
+}
+
+/// Cites the connection setup, connection reuse, and retry reason Edge
+/// recorded on a backend attempt span.
+fn cite_attempt_connection(
+    mut builder: FindingBuilder,
+    attempt: &RequestView<'_>,
+    duration: &Observation,
+) -> FindingBuilder {
+    if let Some(setup) = attempt.named(catalog::EDGE_BACKEND_CONNECTION_SETUP)
+        && let Some(value) = setup.duration_ms()
+    {
+        builder = builder.cite(setup, catalog::EDGE_BACKEND_CONNECTION_SETUP, ms(value));
+    }
+    if let Some(reuse) = attempt.named(catalog::EDGE_BACKEND_CONNECTION_REUSED)
+        && let Some(reused) = reuse.attr("reused")
+    {
+        builder = builder.cite(reuse, "gateway.backend.connection.reused", reused);
+    }
+    if let Some(reason) = duration.attr("retry_reason") {
+        builder = builder.cite(duration, "gateway.backend.retry_reason", reason);
+    }
+    builder
+}
+
+/// `alloy.evidence.service_exceeds_gateway` for one backend attempt: the
+/// service measured longer than the attempt that reached it.
+fn service_exceeds_attempt(timing: AttemptTiming<'_>) -> Finding {
+    let residual = timing.gateway_ms - timing.service_ms;
+    let service = timing.service;
+    FindingBuilder::new(
+        "alloy.evidence.service_exceeds_gateway",
+        "alloy.r006",
+        3,
+        "Service measured longer than the gateway's backend measurement",
+    )
+    .scope(SourceScope::GatewayToUpstream)
+    .severity(Severity::Warning)
+    .owner(Owner::Unknown)
+    .confidence(Confidence::ConflictingEvidence)
+    .cite(
+        timing.duration,
+        catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+        ms(timing.gateway_ms),
+    )
+    .cite(service, &service.name, ms(timing.service_ms))
+    .explanation(format!(
+        "The service measured {} but the gateway measured only {} for this backend attempt. The difference ({}) is negative, which the declared boundaries do not allow; it is reported instead of being clamped to zero.",
+        ms(timing.service_ms),
+        ms(timing.gateway_ms),
+        ms(residual)
+    ))
+    .alternatives(&[
+        "the measurements describe different requests or attempts",
+        "one producer's boundaries differ from its documentation",
+    ])
+    .does_not_prove(&[
+        "which measurement is inaccurate",
+        "whether clock skew or a misattributed parent span explains the difference",
+    ])
+    .build()
+}
+
+/// `alloy.gateway.timings_not_comparable` for the backend attempt that reached
+/// the only service request linked to a gateway request.
+fn attempt_not_comparable(
+    ttfb: &Observation,
+    attempt: &RequestView<'_>,
+    service: &RequestView<'_>,
+    gap: AttemptGap,
+) -> Finding {
+    let mut builder = FindingBuilder::new(
+        "alloy.gateway.timings_not_comparable",
+        R003,
+        R003_VERSION,
+        "Gateway and service timings are not comparable",
+    )
+    .scope(SourceScope::GatewayToUpstream)
+    .severity(Severity::Info)
+    .owner(Owner::Unknown)
+    .confidence(Confidence::Unknown)
+    .cite(ttfb, "gateway.latency.backend_ttfb_ms", cited(ttfb))
+    .explanation(format!(
+        "The service request is linked to the gateway request through a backend attempt span, but {}, so no difference is computed.",
+        gap.reason()
+    ))
+    .does_not_prove(&[
+        "whether the gateway or service was fast or slow",
+        "the size or cause of any gateway-to-service timing difference",
+    ])
+    .missing(&[gap.missing()]);
+    if ttfb.duration_ms().is_none() {
+        builder = builder.missing(&["gateway backend time to headers"]);
+    }
+    if let Some(duration) = attempt.attempt_duration() {
+        builder = builder.cite(
+            duration,
+            catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+            cited(duration),
+        );
+    }
+    if let Some(first) = service.observations.first() {
+        builder = builder.cite(first, "alloy.server_span", "linked");
+    }
+    builder.build()
+}
+
+/// Compares the duration of the backend attempt that reached the only service
+/// request linked to a gateway request with that service request.
+fn compare_attempt(
+    index: &Index<'_>,
+    thresholds: &Thresholds,
+    ttfb: &Observation,
+    attempt: &RequestView<'_>,
+    timing: AttemptTiming<'_>,
+    out: &mut Vec<Finding>,
+) {
+    let duration = timing.duration;
+    let service = timing.service;
+    let gateway_ms = timing.gateway_ms;
+    let service_ms = timing.service_ms;
+    let residual = gateway_ms - service_ms;
+    if residual < 0.0 {
+        out.push(service_exceeds_attempt(timing));
+        return;
+    }
+    if residual < thresholds.residual_min_ms
+        || residual / gateway_ms < thresholds.residual_min_fraction
+    {
+        return;
+    }
+    let streamed = ttfb.attr("edge.response.streamed");
+    let comparison = if streamed == Some("true") {
+        "service time-to-headers (streamed response)"
+    } else {
+        "service total duration (buffered response: the attempt includes the body)"
+    };
+    // The residual depends on both measurements, so a confirmed claim needs
+    // verified provenance for each of them plus the gateway's attempt.
+    let attempt_known = duration.scope.attempt.is_some();
+    let gateway_verified = index.verified(duration);
+    let service_verified = index.verified(service);
+    let confirmed = attempt_known && gateway_verified && service_verified;
+    // Other attempts and the time between attempts lie outside this attempt
+    // span, so retries and backoff are not alternatives here.
+    let mut builder = FindingBuilder::new(
+        "alloy.gateway.unattributed_interval",
+        R003,
+        R003_VERSION,
+        "Large unattributed interval between gateway and service",
+    )
+    .scope(SourceScope::GatewayToUpstream)
+    .severity(Severity::Warning)
+    .owner(Owner::Unknown)
+    .confidence(if confirmed {
+        Confidence::Confirmed
+    } else {
+        Confidence::Likely
+    })
+    .cite(
+        duration,
+        catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+        ms(gateway_ms),
+    )
+    .cite(service, &service.name, ms(service_ms))
+    .explanation(format!(
+        "The gateway measured {} for this backend attempt; the {comparison} was {}. {} ({:.0}%) is unattributed: neither producer measured it.",
+        ms(gateway_ms),
+        ms(service_ms),
+        ms(residual),
+        residual / gateway_ms * 100.0
+    ))
+    .alternatives(&[
+        "connection establishment (DNS, TCP, TLS) by the gateway for this attempt",
+        "request transfer and queuing before the request entered Alloy middleware (accept backlog, TLS, header parsing)",
+        "an intermediary between gateway and service",
+    ])
+    .alternatives(&[if streamed == Some("true") {
+        "transfer of the response headers back to the gateway"
+    } else {
+        "response body transfer and flow control back to the gateway"
+    }])
+    .does_not_prove(&[
+        "network latency",
+        "that the network is slow",
+        "that the service was idle during the interval",
+    ])
+    .confirm_with(ATTEMPT_CONFIRM_WITH);
+    builder = cite_attempt_connection(builder, attempt, duration);
+    if !confirmed {
+        if !attempt_known {
+            builder = builder.missing(&["gateway attempt identity"]);
+        }
+        if !setup_known(attempt) {
+            builder = builder.missing(&["gateway connection setup timing"]);
+        }
+        if !gateway_verified {
+            builder = builder.missing(&["verified gateway provenance for the backend timing"]);
+        }
+        if !service_verified {
+            builder = builder.missing(&["verified service provenance for the service timing"]);
+        }
+    }
+    out.push(builder.build());
+}
+
+/// `alloy.gateway.multiple_service_attempts` for a gateway request whose
+/// backend attempt spans have durations. Each attempt is compared with the
+/// service request it reached; an attempt that is not compared says why, and
+/// one the service outlasted is reported as conflicting evidence instead.
+fn compare_attempts<'a>(
+    index: &Index<'a>,
+    edge_span: &SpanRef,
+    ttfb: &Observation,
+    services: &[&RequestView<'a>],
+    out: &mut Vec<Finding>,
+) {
+    let streamed = ttfb.attr("edge.response.streamed");
+    let mut builder = FindingBuilder::new(
+        "alloy.gateway.multiple_service_attempts",
+        R003,
+        R003_VERSION,
+        "Several service requests share one gateway request",
+    )
+    .scope(SourceScope::GatewayToUpstream)
+    .severity(Severity::Info)
+    .owner(Owner::GatewayOperator)
+    .confidence(Confidence::Likely)
+    .cite(ttfb, "gateway.latency.backend_ttfb_ms", cited(ttfb))
+    .does_not_prove(&["which attempt produced the final response"]);
+    // Each service request with the attempt span it names as its parent, in
+    // attempt order.
+    let mut linked = Vec::new();
+    let mut unlinked = 0;
+    for service in services {
+        match index.attempt_of(service, edge_span) {
+            Some(attempt) => linked.push((attempt_number(attempt), attempt, *service)),
+            None => unlinked += 1,
+        }
+    }
+    linked.sort_by_key(|(number, _, _)| (number.is_none(), *number));
+    let mut compared = Vec::new();
+    let mut skipped = Vec::new();
+    let mut conflicting = Vec::new();
+    let mut gaps = BTreeSet::new();
+    let mut setup_unknown = false;
+    for (number, attempt, service) in linked {
+        let label = match number {
+            Some(number) => number.to_string(),
+            None => "unknown".to_owned(),
+        };
+        let timing = match attempt_timing(attempt, service, streamed) {
+            Ok(timing) => timing,
+            Err(gap) => {
+                if let Some(duration) = attempt.attempt_duration() {
+                    builder = builder.cite(
+                        duration,
+                        catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+                        cited(duration),
+                    );
+                }
+                skipped.push(format!("attempt {label}, because {}", gap.reason()));
+                gaps.insert(gap);
+                continue;
+            }
+        };
+        let residual = timing.gateway_ms - timing.service_ms;
+        if residual < 0.0 {
+            out.push(service_exceeds_attempt(timing));
+            conflicting.push(format!("attempt {label}"));
+            continue;
+        }
+        compared.push(format!(
+            "attempt {label}: gateway attempt {} minus service {} = {}",
+            ms(timing.gateway_ms),
+            ms(timing.service_ms),
+            ms(residual)
+        ));
+        let service_obs = timing.service;
+        builder = builder.cite(
+            timing.duration,
+            catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+            ms(timing.gateway_ms),
+        );
+        builder = builder.cite(service_obs, &service_obs.name, ms(timing.service_ms));
+        builder = cite_attempt_connection(builder, attempt, timing.duration);
+        setup_unknown |= !setup_known(attempt);
+    }
+    let summary = if compared.is_empty() {
+        format!(
+            "{} service server spans are linked to this gateway request, but no backend attempt span has a comparable service duration. Per-attempt timings are not subtracted.",
+            services.len()
+        )
+    } else {
+        format!(
+            "Per-attempt gateway durations are compared with the matching service durations: {}. These residuals can include connection setup and transfer within each attempt; a retry reason identifies a retried attempt.",
+            compared.join("; ")
+        )
+    };
+    let mut parts = vec![summary];
+    if !conflicting.is_empty() {
+        parts.push(format!(
+            "The service measured longer than the gateway attempt for {}, which is reported as conflicting evidence and not compared.",
+            conflicting.join(", ")
+        ));
+    }
+    if !skipped.is_empty() {
+        parts.push(format!("Not compared: {}.", skipped.join("; ")));
+    }
+    if unlinked > 0 {
+        parts.push(UNLINKED_SERVICE_NOTE.to_owned());
+    }
+    builder = builder.explanation(parts.join(" "));
+    for gap in gaps {
+        builder = builder.missing(&[gap.missing()]);
+    }
+    if unlinked > 0 {
+        builder = builder.missing(&["an attempt span for every linked service"]);
+    }
+    if setup_unknown {
+        builder = builder.missing(&["gateway connection setup timing"]);
+    }
+    for service in services {
+        if let Some(first) = service.observations.first() {
+            builder = builder.cite(first, "alloy.server_span", "linked");
+        }
+    }
+    out.push(builder.build());
+}
+
 /// R003: gateway backend time minus service time, when comparable.
 fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &mut Vec<Finding>) {
-    const RULE: &str = "alloy.r003";
-    const VERSION: u32 = 2;
+    const RULE: &str = R003;
+    const VERSION: u32 = R003_VERSION;
     for view in index.edge.values() {
         let Some(edge_span) = view.span else {
             continue;
@@ -1017,14 +1565,28 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
         let Some(ttfb) = view.named(catalog::EDGE_BACKEND_TIME_TO_HEADERS) else {
             continue;
         };
-        let Some(edge_ms) = ttfb.duration_ms() else {
+        // Edge's "unknown" backend time ends the comparison unless the
+        // gateway's attempt spans carry their own durations.
+        let timed_attempts = index
+            .attempts_under(edge_span)
+            .iter()
+            .any(|attempt| attempt.attempt_duration().is_some());
+        let edge_ms = ttfb.duration_ms();
+        if edge_ms.is_none() && !timed_attempts {
             continue;
-        };
+        }
         let services = index.services_under(edge_span);
         if services.is_empty() {
             continue;
         }
         if services.len() > 1 {
+            if timed_attempts {
+                compare_attempts(index, edge_span, ttfb, &services, out);
+                continue;
+            }
+            let Some(edge_ms) = edge_ms else {
+                continue;
+            };
             let mut builder = FindingBuilder::new(
                 "alloy.gateway.multiple_service_attempts",
                 RULE,
@@ -1054,6 +1616,34 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             continue;
         };
         let streamed = ttfb.attr("edge.response.streamed");
+        // A buffered attempt whose end boundary is uncertain falls back to the
+        // gateway's aggregate, which includes the body.
+        let mut fallback = None;
+        if let Some(attempt) = index.attempt_of(service, edge_span)
+            && attempt.attempt_duration().is_some()
+        {
+            let gap = match attempt_timing(attempt, service, streamed) {
+                Ok(timing) => {
+                    compare_attempt(index, thresholds, ttfb, attempt, timing, out);
+                    continue;
+                }
+                Err(gap) => gap,
+            };
+            // An unusable attempt duration, or no gateway aggregate, leaves
+            // nothing to compare. Otherwise the aggregate comparison reports
+            // an unknown buffering mode or service measurement as it does
+            // without attempt spans.
+            if edge_ms.is_none() || gap == AttemptGap::AttemptDuration {
+                out.push(attempt_not_comparable(ttfb, attempt, service, gap));
+                continue;
+            }
+            if gap == AttemptGap::BufferedEnd {
+                fallback = Some(gap);
+            }
+        }
+        let Some(edge_ms) = edge_ms else {
+            continue;
+        };
         let (service_obs, comparison) = match streamed {
             Some("true") => (
                 service.named(catalog::ALLOY_TIME_TO_HEADERS),
@@ -1199,11 +1789,15 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "network latency",
             "that the network is slow",
             "that the service was idle during the interval",
-        ])
-        .confirm_with(&[
-            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
-            "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
+        if fallback.is_some() {
+            builder = builder.confirm_with(ATTEMPT_CONFIRM_WITH);
+        } else {
+            builder = builder.confirm_with(&[
+                "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
+                "gateway retry logs (\"Retrying backend request\") for this request",
+            ]);
+        }
         if !confirmed {
             if !attempt_known {
                 builder = builder.missing(&["gateway attempt identity"]);
@@ -1215,6 +1809,9 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             if !service_verified {
                 builder = builder.missing(&["verified service provenance for the service timing"]);
             }
+        }
+        if let Some(gap) = fallback {
+            builder = builder.missing(&[gap.missing()]);
         }
         out.push(builder.build());
     }
@@ -1374,7 +1971,7 @@ fn rule_negative_values(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// R004: telemetry is too incomplete to localize the delay.
 fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r004";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     let degraded: Vec<&Observation> = index
         .report
         .observations

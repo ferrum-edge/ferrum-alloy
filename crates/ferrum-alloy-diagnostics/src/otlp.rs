@@ -14,11 +14,12 @@
 //! Ferrum Edge v0.9.9 also exports one CLIENT span per backend attempt and
 //! hands the service that span as its parent, so the service's SERVER span
 //! nests under the attempt and the attempt under the Edge SERVER span. Each
-//! attempt becomes an `edge.backend.attempt` event that carries only that
-//! link; its timing and connection attributes are not interpreted. Only a
-//! CLIENT span with `gateway.backend.attempt`, which Edge sets on every attempt
-//! span, is an attempt: other Edge CLIENT spans (for example mesh workload
-//! metrics on outbound traffic) are ignored.
+//! attempt becomes an `edge.backend.attempt` link event plus attempt-scoped
+//! duration and connection observations. The attempt duration comes from the
+//! span's start and end, and is `unavailable` when either is missing or the
+//! end precedes the start. Only a CLIENT span with `gateway.backend.attempt`,
+//! which Edge sets on every attempt span, is an attempt: other Edge CLIENT
+//! spans (for example mesh workload metrics on outbound traffic) are ignored.
 //!
 //! The resource `service.name` names the service that emitted an Alloy span,
 //! or the gateway that emitted a Ferrum Edge span. It is never confused with
@@ -769,10 +770,8 @@ fn is_edge_attempt(span: &RawSpan) -> bool {
     span.kind == SPAN_KIND_CLIENT && span.attributes.contains_key(ATTEMPT_ATTRIBUTE)
 }
 
-/// One Ferrum Edge backend attempt (an Edge v0.9.9 CLIENT span). It records
-/// only the link from the attempt to the gateway request and the attempt
-/// number for display: no timing, and no attempt scope, because Alloy does
-/// not yet interpret per-attempt evidence.
+/// One Ferrum Edge backend attempt (an Edge v0.9.9 CLIENT span), its duration,
+/// and the connection evidence Edge emitted for that attempt.
 fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
     let mut attempt = base(
         Draft {
@@ -784,12 +783,161 @@ fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
         ObservationKind::Event,
     );
     attempt.availability = Availability::Measured;
-    if let Some(number) = span.attributes.get(ATTEMPT_ATTRIBUTE) {
+    let number = span.attributes.get(ATTEMPT_ATTRIBUTE).and_then(|value| {
+        value
+            .as_string()
+            .parse::<u32>()
+            .ok()
+            .filter(|number| *number > 0)
+    });
+    attempt.scope.attempt = number;
+    if let Some(number) = number {
         attempt
             .attributes
-            .insert("attempt".to_owned(), number.as_string());
+            .insert("attempt".to_owned(), number.to_string());
+    }
+    if let Some(reason) = span.attributes.get("gateway.backend.retry_reason") {
+        attempt
+            .attributes
+            .insert("retry_reason".to_owned(), reason.as_string());
+    }
+    if let Some(reused) = span.attributes.get("gateway.backend.connection.reused") {
+        attempt
+            .attributes
+            .insert("connection.reused".to_owned(), reused.as_string());
     }
     report.observations.push(attempt);
+
+    let mut attempt_duration = base(
+        Draft {
+            span,
+            id_suffix: "attempt_duration",
+            name: catalog::EDGE_BACKEND_ATTEMPT_DURATION,
+            leg: Leg::GatewayToService,
+        },
+        ObservationKind::Measurement,
+    );
+    attempt_duration.scope.attempt = number;
+    // A duration needs both timestamps, the end not before the start. Without
+    // them the duration is unavailable, never zero, and the raw timestamps
+    // Edge exported are kept.
+    if let Some(window) = interval(span) {
+        let nanos = window.end_unix_nano - window.start_unix_nano;
+        attempt_duration.availability = Availability::Measured;
+        attempt_duration.value = Some(nanos as f64 / 1_000_000.0);
+        attempt_duration.unit = Some(Unit::Milliseconds);
+        attempt_duration.clock = Some(ClockDomain::MonotonicLocal);
+        attempt_duration.interval = Some(window);
+    } else {
+        attempt_duration.availability = Availability::Unavailable;
+        for (key, nanos) in [
+            ("span.start_unix_nano", span.start),
+            ("span.end_unix_nano", span.end),
+        ] {
+            if nanos > 0 {
+                attempt_duration
+                    .attributes
+                    .insert(key.to_owned(), nanos.to_string());
+            }
+        }
+    }
+    if let Some(number) = number {
+        attempt_duration
+            .attributes
+            .insert("attempt".to_owned(), number.to_string());
+    }
+    if let Some(reason) = span.attributes.get("gateway.backend.retry_reason") {
+        attempt_duration
+            .attributes
+            .insert("retry_reason".to_owned(), reason.as_string());
+    }
+    report.observations.push(attempt_duration);
+
+    for (suffix, name, attribute) in [
+        (
+            "connection_setup",
+            catalog::EDGE_BACKEND_CONNECTION_SETUP,
+            "gateway.backend.connection.setup_ms",
+        ),
+        (
+            "connection_dns",
+            catalog::EDGE_BACKEND_CONNECTION_DNS,
+            "gateway.backend.connection.dns_ms",
+        ),
+        (
+            "connection_tcp_connect",
+            catalog::EDGE_BACKEND_CONNECTION_TCP_CONNECT,
+            "gateway.backend.connection.tcp_connect_ms",
+        ),
+        (
+            "connection_tls_handshake",
+            catalog::EDGE_BACKEND_CONNECTION_TLS_HANDSHAKE,
+            "gateway.backend.connection.tls_handshake_ms",
+        ),
+    ] {
+        if let Some(mut measurement) = duration(
+            Draft {
+                span,
+                id_suffix: suffix,
+                name,
+                leg: Leg::GatewayToService,
+            },
+            attribute,
+        ) {
+            measurement.scope.attempt = number;
+            if let Some(number) = number {
+                measurement
+                    .attributes
+                    .insert("attempt".to_owned(), number.to_string());
+            }
+            report.observations.push(measurement);
+        }
+    }
+
+    if span
+        .attributes
+        .get("gateway.backend.connection.reused")
+        .is_some_and(|value| value.as_string() == "true")
+        && !span
+            .attributes
+            .contains_key("gateway.backend.connection.setup_ms")
+    {
+        let mut setup = base(
+            Draft {
+                span,
+                id_suffix: "connection_setup",
+                name: catalog::EDGE_BACKEND_CONNECTION_SETUP,
+                leg: Leg::GatewayToService,
+            },
+            ObservationKind::Measurement,
+        );
+        setup.availability = Availability::NotApplicable;
+        setup.scope.attempt = number;
+        report.observations.push(setup);
+    }
+
+    if let Some(reused) = span.attributes.get("gateway.backend.connection.reused") {
+        let mut connection = base(
+            Draft {
+                span,
+                id_suffix: "connection_reused",
+                name: catalog::EDGE_BACKEND_CONNECTION_REUSED,
+                leg: Leg::GatewayToService,
+            },
+            ObservationKind::Event,
+        );
+        connection.availability = Availability::Measured;
+        connection.scope.attempt = number;
+        connection
+            .attributes
+            .insert("reused".to_owned(), reused.as_string());
+        if let Some(number) = number {
+            connection
+                .attributes
+                .insert("attempt".to_owned(), number.to_string());
+        }
+        report.observations.push(connection);
+    }
 }
 
 fn alloy_observations(span: &RawSpan, report: &mut DiagnosticReport) {

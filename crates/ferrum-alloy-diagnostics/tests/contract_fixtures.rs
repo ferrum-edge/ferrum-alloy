@@ -432,7 +432,7 @@ fn unrecognized_observation_kind_is_never_used_as_timing_evidence() {
     // dropped, and the observation of unknown kind supports no timing claim.
     assert_eq!(codes(&findings), ["alloy.gateway.timings_not_comparable"]);
     let only = &findings[0];
-    assert_eq!(only.rule_version, 2);
+    assert_eq!(only.rule_version, 3);
     assert_eq!(only.confidence, Confidence::Unknown);
     assert_eq!(only.supporting_observations, ["alloy-ttfh", "edge-ttfb"]);
     assert!(lists_missing(only, "usable service measurement"));
@@ -451,7 +451,7 @@ fn service_span_in_another_trace_is_not_joined_to_the_gateway_request() {
         codes(&findings)
     );
     let missing = by_code(&findings, "alloy.telemetry.service_span_missing");
-    assert_eq!(missing.rule_version, 3);
+    assert_eq!(missing.rule_version, 4);
     assert_eq!(missing.supporting_observations, ["edge-ttfb"]);
 }
 
@@ -469,7 +469,7 @@ fn equal_span_ids_in_different_traces_stay_separate_requests() {
 
     // Same-trace control: the linked gateway and service timings still compare.
     let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
-    assert_eq!(residual.rule_version, 2);
+    assert_eq!(residual.rule_version, 3);
     assert!(
         residual.explanation.contains("780.0 ms"),
         "{}",
@@ -630,7 +630,7 @@ fn missing_service_findings_only_cite_degraded_evidence_for_their_request() {
         "span-linked degraded evidence belongs to only its gateway request"
     );
     let unlinked = by_code(&findings, "alloy.telemetry.degraded_evidence_unlinked");
-    assert_eq!(unlinked.rule_version, 3);
+    assert_eq!(unlinked.rule_version, 4);
     assert_eq!(
         unlinked.supporting_observations,
         ["alloy-not-sampled"],
@@ -665,7 +665,7 @@ fn rerooted_degraded_evidence_is_cited_on_the_only_missing_request() {
     let finding = by_code(&findings, "alloy.telemetry.service_span_missing");
 
     assert_eq!(finding.rule_id, "alloy.r004");
-    assert_eq!(finding.rule_version, 3);
+    assert_eq!(finding.rule_version, 4);
     assert_eq!(
         finding.supporting_observations,
         [
