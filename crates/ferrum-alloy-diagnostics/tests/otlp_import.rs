@@ -904,10 +904,8 @@ fn multiple_service_spans_without_attempt_spans_keep_the_legacy_r003_output() {
         &ImportLimits::default(),
     )
     .unwrap();
-    let multiple = by_code(
-        &analyze(&report, &Thresholds::default()),
-        "alloy.gateway.multiple_service_attempts",
-    );
+    let findings = analyze(&report, &Thresholds::default());
+    let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
     assert_eq!(multiple.rule_version, 3);
     assert_eq!(
         multiple.explanation,
