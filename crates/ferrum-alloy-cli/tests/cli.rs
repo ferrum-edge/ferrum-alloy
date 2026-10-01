@@ -238,6 +238,7 @@ fn diagnose_keeps_reports_private_and_preserves_permissions() {
     );
 
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4640)).unwrap();
+    assert_eq!(target.metadata().unwrap().permissions().mode() & 0o7777, 0o4640);
     let output = run(&args);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert_eq!(
@@ -259,11 +260,7 @@ fn diagnose_replaces_symlinks_without_preserving_target_permissions() {
     let directory_link = dir.path().join("directory-link.json");
 
     std::fs::write(&regular_target, b"keep this content").unwrap();
-    std::fs::set_permissions(
-        &regular_target,
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
+    std::fs::set_permissions(&regular_target, std::fs::Permissions::from_mode(0o644)).unwrap();
     symlink(&regular_target, &regular_link).unwrap();
     std::fs::create_dir(&directory_target).unwrap();
     symlink(&directory_target, &directory_link).unwrap();
@@ -285,7 +282,10 @@ fn diagnose_replaces_symlinks_without_preserving_target_permissions() {
     let metadata = std::fs::symlink_metadata(&regular_link).unwrap();
     assert!(metadata.file_type().is_file());
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::read(&regular_target).unwrap(), b"keep this content");
+    assert_eq!(
+        std::fs::read(&regular_target).unwrap(),
+        b"keep this content"
+    );
     assert_eq!(
         regular_target.metadata().unwrap().permissions().mode() & 0o777,
         0o644
