@@ -17,7 +17,7 @@ Every timing Alloy exposes, whether as a span attribute, metric, log field, `Ser
 |---|---|
 | `measured` | A value exists. |
 | `unavailable` | The producer supports the measurement but has no value for this request. For example, Edge exports `-1` for `backend_ttfb` on a rejected request. |
-| `unsupported` | The producer version cannot measure it. For example, Edge v0.9.8 has no per-attempt timing. |
+| `unsupported` | The producer version cannot measure it. For example, legacy Edge v0.9.8 has no per-attempt timing. |
 | `not_applicable` | The phase did not happen. For example, a reused connection has no TLS handshake. |
 | `not_sampled` | The trace was not sampled. |
 | `export_pending` | Recorded but not yet exported. |
@@ -39,7 +39,7 @@ Any other observation is kept in the report but never enters a subtraction, domi
 
 ## Span linkage
 
-Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Ferrum Edge v0.9.9 hands the service a CLIENT span per backend attempt as its parent, so a service span is linked to a gateway request when its parent is the Edge SERVER span or an Edge attempt span (`edge.backend.attempt`) whose parent is that SERVER span. Only one attempt hop is followed, both for linking service spans and for attributing degraded evidence. A service span whose attempt span was not exported (Edge drops spans when its export buffer is full) is not linked. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
+Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Supported Ferrum Edge v0.9.9 and v0.9.10 hand the service a CLIENT span per backend attempt as its parent, so a service span is linked to a gateway request when its parent is the Edge SERVER span or an Edge attempt span (`edge.backend.attempt`) whose parent is that SERVER span. Only one attempt hop is followed, both for linking service spans and for attributing degraded evidence. A service span whose attempt span was not exported (Edge drops spans when its export buffer is full) is not linked. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
 
 ## Alloy service measurements
 
@@ -77,7 +77,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.
 
-## Ferrum Edge measurements (v0.9.9 and v0.9.8)
+## Ferrum Edge measurements (supported v0.9.10 and v0.9.9; legacy v0.9.8 input)
 
 These come from Edge's own spans and logs. Alloy interprets only the documented attempt and timing fields. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
 
@@ -98,7 +98,7 @@ The attempt span's full duration overlaps its connection setup and the backend S
 
 **Retry backoff is not attributed.** The attempt's `gateway.backend.retry_reason` attribute identifies a retry. Edge v0.9.9 states only that retry backoff falls between attempt spans; it exports no backoff duration. The gap between sibling attempt span intervals is an elapsed inter-attempt interval that can include backoff, target selection, and gateway-local waits before the next dispatch, so Alloy neither reports it as a backoff duration nor subtracts it. Backoff attribution is deferred until Edge exports a backoff measurement.
 
-## Gateway diagnostic reference (Ferrum Edge v0.9.9)
+## Gateway diagnostic reference (Ferrum Edge v0.9.9 and later)
 
 Ferrum Edge v0.9.9 can stamp an opaque `X-Ferrum-Diagnostic-Ref` on the error responses the gateway authors. It is an identifier, not a timing: it has no start, end, unit, or clock domain, and it is never used in a duration, subtraction, or comparison. Alloy records it as one field, defined here and in `catalog.rs` (`EDGE_DIAGNOSTIC_REF_HEADER`, `EDGE_DIAGNOSTIC_REF_PATTERN`, `is_edge_diagnostic_ref`).
 
