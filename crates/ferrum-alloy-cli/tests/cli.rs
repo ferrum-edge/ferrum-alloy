@@ -204,6 +204,40 @@ fn diagnose_writes_reports_atomically() {
     assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
 }
 
+#[cfg(unix)]
+#[test]
+fn diagnose_keeps_reports_private_and_preserves_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture("otlp/edge-alloy-trace.jsonl");
+    let target = dir.path().join("report.json");
+    let args = [
+        "diagnose",
+        "--otlp",
+        &path,
+        "--trace-id",
+        "4bf92f3577b34da6a3ce929d0e0e4736",
+        "--write-report",
+        target.to_str().unwrap(),
+    ];
+
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let output = run(&args);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}
+
 /// One trace of `count` Alloy SERVER spans, five observations each.
 fn many_server_spans(count: u64) -> String {
     let attributes: Vec<serde_json::Value> = [
