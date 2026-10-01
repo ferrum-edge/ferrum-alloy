@@ -18,7 +18,7 @@
 //! * `e2e-refused` (`/refused`): a port on the Alloy container where nothing
 //!   listens, so every connection attempt is refused.
 //!
-//! Every field is in the proxy schema of Ferrum Edge v0.9.8 and v0.9.7
+//! Every field is in the proxy schema of Ferrum Edge v0.9.9 and v0.9.8
 //! (`src/config/types.rs` `Proxy` and `RetryConfig`, `docs/retry.md`), which
 //! are identical for these fields.
 

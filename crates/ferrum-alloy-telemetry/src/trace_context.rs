@@ -4,7 +4,7 @@
 //! Parsing follows <https://www.w3.org/TR/trace-context/>: lowercase hex only,
 //! version `ff` invalid, all-zero ids invalid, version `00` has exactly four
 //! fields, and future versions may carry additional `-`-prefixed data. This
-//! matches Ferrum Edge's `otel_tracing` parser (v0.9.8), so both hops accept
+//! matches Ferrum Edge's `otel_tracing` parser (v0.9.9 and v0.9.8), so both hops accept
 //! and reject the same inputs.
 //!
 //! Receiving a valid `traceparent` never authenticates the sender. Whether a

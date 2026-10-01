@@ -3,17 +3,19 @@
 //! Every item is an EXISTING contract of the Ferrum Edge release named in
 //! [`EDGE_RELEASE`], verified against its source. `docs/edge-contract-inventory.md`
 //! records producers, consumers, trust rules, and tests for each. Nothing
-//! here invents gateway headers: Edge v0.9.8 sends no route id, attempt
-//! number, or diagnostics header to backends.
+//! here invents gateway headers: neither Edge v0.9.9 nor v0.9.8 sends a route
+//! id, attempt number, or diagnostics header to backends.
 
 /// The Ferrum Edge release these contracts were verified against.
-pub const EDGE_RELEASE: &str = "v0.9.8";
+pub const EDGE_RELEASE: &str = "v0.9.9";
 /// Source commit of [`EDGE_RELEASE`].
-pub const EDGE_SOURCE_COMMIT: &str = "e27f2109216352c3fe9e67a7014611f3f66daa91";
+pub const EDGE_SOURCE_COMMIT: &str = "234717ce41965cd1e2b5c6c761a25475c5d7628c";
 
 /// Authenticated consumer username injected by Edge after authentication.
-/// Edge strips client-supplied copies at admission (`src/plugins/mod.rs`,
-/// `src/proxy/mod.rs`). Trust it only from a verified gateway identity.
+/// Edge strips client-supplied copies at admission: v0.9.9 drops the whole
+/// `x-consumer-*` namespace (`src/proxy/headers.rs`
+/// `is_consumer_assertion_header`), v0.9.8 only this name and
+/// [`CONSUMER_CUSTOM_ID`]. Trust it only from a verified gateway identity.
 pub const CONSUMER_USERNAME: &str = "x-consumer-username";
 /// Mapped consumer `custom_id`, when the consumer has one.
 pub const CONSUMER_CUSTOM_ID: &str = "x-consumer-custom-id";
@@ -23,9 +25,14 @@ pub const CORRELATION_ID: &str = "x-request-id";
 pub const GATEWAY_ERROR: &str = "x-gateway-error";
 /// `degraded` when Edge used its all-unhealthy fallback target.
 pub const GATEWAY_UPSTREAM_STATUS: &str = "x-gateway-upstream-status";
+/// Opaque gateway diagnostic reference (Edge v0.9.9, off by default with
+/// `FERRUM_DIAGNOSTIC_REFS`), resolved through Edge's admin API. Edge strips a
+/// backend copy. Alloy neither emits nor interprets it.
+pub const DIAGNOSTIC_REF: &str = "x-ferrum-diagnostic-ref";
 
-/// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`). Edge v0.9.8 added
-/// `request_timeout`; older releases send only the first seven.
+/// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`), the same in Edge
+/// v0.9.9 and v0.9.8. v0.9.8 added `request_timeout`; older releases send
+/// only the first seven.
 pub const GATEWAY_ERROR_TOKENS: &[&str] = &[
     "connection_failure",
     "backend_timeout",

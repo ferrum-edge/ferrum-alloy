@@ -9,6 +9,12 @@
 //! span parentage, identity, and timing attributes read from the
 //! collector's OTLP/JSON file. Nothing is inferred from a mock.
 //!
+//! Edge v0.9.8 hands Alloy its SERVER span as the `traceparent` parent. Edge
+//! v0.9.9 exports a CLIENT span per backend attempt and hands Alloy that span
+//! instead, so Alloy's SERVER span nests under the attempt and the attempt
+//! under the Edge SERVER span. Both releases are in the support window, so the
+//! parentage checks accept either shape and nothing deeper.
+//!
 //! Besides the happy path it drives the attempt and connection cases: a
 //! gateway retry, a cold and a reused gateway connection, concurrent HTTP/2
 //! streams, a client cancelling mid-body, and a refused backend connection.
@@ -397,9 +403,41 @@ fn parse_traceparent(value: &str) -> Result<(String, String), Failure> {
     Ok((parts[1].to_owned(), parts[2].to_owned()))
 }
 
+/// The tested pairing, compiled in so the driver and CI's Edge matrix read
+/// the same record.
+const COMPATIBILITY: &str = include_str!("../../../../docs/compatibility.json");
+
+/// Supported Edge releases that export no CLIENT span per backend attempt.
+/// Every later release does (Edge #5864, first released in v0.9.9).
+const RELEASES_WITHOUT_ATTEMPT_SPANS: &[&str] = &["v0.9.8"];
+
+/// The Edge release under test: the `compatibility.json` entry whose image is
+/// `EDGE_IMAGE` (set by CI per matrix row), or else the contract baseline the
+/// demo stack defaults to.
+fn edge_release() -> Result<String, Failure> {
+    let pairing: Value = serde_json::from_str(COMPATIBILITY)?;
+    let image = std::env::var("EDGE_IMAGE").unwrap_or_default();
+    let entry = if image.is_empty() {
+        Some(&pairing["edge"])
+    } else {
+        pairing["edge_support"]["tested"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|edge| edge["image"] == image.as_str())
+    };
+    let unknown = || fail(format!("EDGE_IMAGE {image} is not in compatibility.json"));
+    let release = entry
+        .and_then(|edge| edge["release"].as_str())
+        .ok_or_else(unknown)?;
+    Ok(release.to_owned())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Failure> {
     let args = args()?;
+    let release = edge_release()?;
+    println!("Ferrum Edge release under test: {release}");
     std::fs::create_dir_all(&args.out)?;
     let ca = args.out.join("ca.pem");
     compose(&args, &["cp", "alloy:/certs/ca.pem", &ca.to_string_lossy()])?;
@@ -566,17 +604,15 @@ async fn main() -> Result<(), Failure> {
         .as_str()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let alloy_parent = alloy["parentSpanId"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let alloy_parent = parent_id(alloy);
+    let alloy_gateway = gateway_parent(&spans, alloy);
     check.that(
-        "Alloy SERVER span is a child of the Edge SERVER span",
-        alloy_parent == edge_id,
-        format!("alloy parent {alloy_parent}, edge span {edge_id}"),
+        "Alloy SERVER span is under the Edge SERVER span, directly or through its attempt span",
+        alloy_gateway == edge_id,
+        format!("alloy parent {alloy_parent}, its Edge span {alloy_gateway}, edge span {edge_id}"),
     );
     check.that(
-        "Edge echoed the same parent it injected upstream",
+        "Edge echoed its SERVER span to the client",
         item_edge_parent == edge_id,
         format!("echoed {item_edge_parent}, edge span {edge_id}"),
     );
@@ -704,6 +740,7 @@ async fn main() -> Result<(), Failure> {
     let evidence = Evidence {
         text: &text,
         out: &args.out,
+        release: &release,
     };
     check_retry(&mut check, &evidence, &cases.retry);
     check_connections(&mut check, &evidence, &cases);
@@ -722,13 +759,20 @@ fn collector() -> Producer {
     }
 }
 
-/// Exported spans, and where per-case diagnoses are kept.
+/// Exported spans, where per-case diagnoses are kept, and the Edge release
+/// that produced them.
 struct Evidence<'a> {
     text: &'a str,
     out: &'a Path,
+    release: &'a str,
 }
 
 impl Evidence<'_> {
+    /// Whether the Edge release under test exports a CLIENT span per attempt.
+    fn attempt_spans(&self) -> bool {
+        !RELEASES_WITHOUT_ATTEMPT_SPANS.contains(&self.release)
+    }
+
     /// Imports one trace, adds `extra` client observations, runs the rules,
     /// and saves the report as `diagnosis-<label>.json`.
     fn diagnose(
@@ -823,6 +867,32 @@ fn parent_id(span: &Value) -> String {
     lower(span, "parentSpanId")
 }
 
+/// OTLP `SPAN_KIND_CLIENT`.
+const CLIENT_KIND: u64 = 3;
+
+/// The Edge CLIENT span of one backend attempt that parents `service`, when
+/// its parent is one. Edge v0.9.9 exports a span per attempt and hands it to
+/// the backend as the `traceparent` parent; v0.9.8 hands over its SERVER span.
+fn attempt_of<'a>(spans: &'a BTreeMap<String, Value>, service: &Value) -> Option<&'a Value> {
+    spans
+        .get(&parent_id(service))
+        .filter(|span| span["x-scope"] == EDGE_SCOPE && span["kind"] == CLIENT_KIND)
+}
+
+/// The Edge span `service` hangs under: its parent, or the parent of the Edge
+/// attempt span that is its parent. One attempt hop at most.
+fn gateway_parent(spans: &BTreeMap<String, Value>, service: &Value) -> String {
+    attempt_of(spans, service).map_or_else(|| parent_id(service), parent_id)
+}
+
+/// The `gateway.backend.attempt` number of the Edge attempt span that parents
+/// `service`, or an empty string when its parent is not an attempt span.
+fn attempt_number(spans: &BTreeMap<String, Value>, service: &Value) -> String {
+    attempt_of(spans, service)
+        .map(|attempt| attr_str(attempt, "gateway.backend.attempt"))
+        .unwrap_or_default()
+}
+
 /// Cases whose spans have not all arrived yet.
 fn pending(cases: &Cases, text: &str) -> Vec<String> {
     let trace_of = |reply: &Reply| echoed(reply).map(|(trace, _)| trace);
@@ -843,7 +913,13 @@ fn pending(cases: &Cases, text: &str) -> Vec<String> {
                 return true;
             };
             let spans = raw_spans(text, trace);
-            servers(&spans, EDGE_SCOPE).is_empty() || servers(&spans, ALLOY_SCOPE).len() < *alloy
+            let services = servers(&spans, ALLOY_SCOPE);
+            // Behind Edge v0.9.9 a service span's parent is an attempt span,
+            // which may be exported apart from the SERVER span.
+            let orphaned = services
+                .iter()
+                .any(|service| !spans.contains_key(&parent_id(service)));
+            servers(&spans, EDGE_SCOPE).is_empty() || services.len() < *alloy || orphaned
         })
         .map(|(label, _, _)| label)
         .collect()
@@ -914,8 +990,9 @@ const COMPARISONS: &[&str] = &[
     "alloy.evidence.service_exceeds_gateway",
 ];
 
-/// A retried request: two Alloy SERVER spans under one Edge SERVER span, and
-/// a diagnosis that reports several attempts without splitting the gateway's
+/// A retried request: two Alloy SERVER spans under one Edge SERVER span
+/// (behind Edge v0.9.9, each through its own numbered attempt span), and a
+/// diagnosis that reports several attempts without splitting the gateway's
 /// measurement between them.
 fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
     check.that(
@@ -936,12 +1013,40 @@ fn check_retry(check: &mut Check, evidence: &Evidence<'_>, reply: &Reply) {
         format!("edge {}, alloy {}", edges.len(), attempts.len()),
     );
     let parents: Vec<String> = attempts.iter().copied().map(parent_id).collect();
+    let gateways: Vec<String> = attempts
+        .iter()
+        .map(|attempt| gateway_parent(&spans, attempt))
+        .collect();
     check.that(
-        "retry: both attempts are children of the same Edge SERVER span",
+        "retry: both attempts are under the same Edge SERVER span",
         attempts.len() == 2
             && edges.iter().all(|s| span_id(s) == parent)
-            && parents.iter().all(|p| *p == parent),
-        format!("parents {}; echoed {parent}", parents.join(", ")),
+            && gateways.iter().all(|p| *p == parent),
+        format!(
+            "parents {}; their Edge spans {}; echoed {parent}",
+            parents.join(", "),
+            gateways.join(", ")
+        ),
+    );
+    // Edge v0.9.9 gives every attempt its own CLIENT span; v0.9.8 gives none.
+    let numbers: Vec<String> = attempts
+        .iter()
+        .map(|attempt| attempt_number(&spans, attempt))
+        .collect();
+    let expected = if evidence.attempt_spans() {
+        ["1", "2"]
+    } else {
+        ["", ""]
+    };
+    check.that(
+        "retry: the attempts have the Edge attempt spans their release exports",
+        numbers == expected,
+        format!(
+            "Edge {}: attempt numbers [{}], expected [{}]",
+            evidence.release,
+            numbers.join(", "),
+            expected.join(", ")
+        ),
     );
     let statuses: Vec<String> = attempts
         .iter()
@@ -1055,12 +1160,15 @@ fn check_connections(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases) 
         let spans = raw_spans(evidence.text, &trace);
         let edges = servers(&spans, EDGE_SCOPE);
         let services = servers(&spans, ALLOY_SCOPE);
+        let linked = services
+            .iter()
+            .all(|service| gateway_parent(&spans, service) == parent);
         check.that(
-            &format!("reuse: the {label} request has one Edge and one child Alloy SERVER span"),
+            &format!("reuse: the {label} request has one Edge and one Alloy SERVER span under it"),
             edges.len() == 1
                 && services.len() == 1
                 && edges.iter().all(|s| span_id(s) == parent)
-                && services.iter().all(|s| parent_id(s) == parent),
+                && linked,
             format!("edge {}, alloy {}", edges.len(), services.len()),
         );
         let name = if label == "cold" {
@@ -1120,8 +1228,9 @@ fn check_concurrency(check: &mut Check, evidence: &Evidence<'_>, replies: &[Repl
         let edges = servers(&spans, EDGE_SCOPE);
         let services = servers(&spans, ALLOY_SCOPE);
         let counts = (edges.len(), services.len());
+        let linked = |service: &Value| gateway_parent(&spans, service) == parent;
         match (edges.as_slice(), services.as_slice()) {
-            ([edge], [service]) if span_id(edge) == parent && parent_id(service) == parent => {
+            ([edge], [service]) if span_id(edge) == parent && linked(service) => {
                 streams.push((*service).clone());
             }
             _ => problems.push(format!("request {index}: edge and alloy spans {counts:?}")),
@@ -1135,7 +1244,7 @@ fn check_concurrency(check: &mut Check, evidence: &Evidence<'_>, replies: &[Repl
         }
     }
     check.that(
-        "http2: each stream has one Edge and one child Alloy SERVER span",
+        "http2: each stream has one Edge and one Alloy SERVER span under it",
         problems.is_empty() && streams.len() == STREAMS,
         problems.join("; "),
     );
@@ -1206,9 +1315,12 @@ fn check_cancellation(check: &mut Check, evidence: &Evidence<'_>, cases: &Cases)
         edge_attr("gateway.client.disconnected") == "true",
         detail.clone(),
     );
+    let linked = services
+        .iter()
+        .all(|service| gateway_parent(&spans, service) == parent);
     check.that(
         "cancel: Alloy recorded the request exactly once, as cancelled",
-        outcomes == ["cancelled"] && services.iter().all(|s| parent_id(s) == parent),
+        outcomes == ["cancelled"] && linked,
         detail,
     );
     let body_ms = services

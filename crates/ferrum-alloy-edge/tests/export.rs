@@ -20,8 +20,10 @@ fn manifest() -> ServiceManifest {
     .unwrap()
 }
 
-/// Field names of Ferrum Edge v0.9.8 resources (`src/config/types.rs`,
-/// `deny_unknown_fields`) that the generator may emit.
+/// Field names of Ferrum Edge v0.9.9 and v0.9.8 resources
+/// (`src/config/types.rs`, `deny_unknown_fields`) that the generator may emit.
+/// v0.9.9's `allow_path_parameters` and `websocket_permessage_deflate` are
+/// deliberately absent: v0.9.8 rejects them, and their defaults are wanted.
 const PROXY_FIELDS: &[&str] = &[
     "id",
     "name",
@@ -65,7 +67,7 @@ const PLUGIN_CONFIG_FIELDS: &[&str] = &[
     "proxy_id",
     "enabled",
 ];
-/// `otel_tracing` ALLOWED_CONFIG_KEYS in Edge v0.9.8.
+/// `otel_tracing` ALLOWED_CONFIG_KEYS in Edge v0.9.9 and v0.9.8 (unchanged).
 const OTEL_TRACING_KEYS: &[&str] = &[
     "endpoint",
     "service_name",
@@ -101,7 +103,7 @@ fn generated_resources_use_only_existing_edge_fields() {
     for key in keys(&resources.proxy) {
         assert!(
             PROXY_FIELDS.contains(&key),
-            "proxy field {key} is not an Edge v0.9.8 field"
+            "proxy field {key} is not an Edge v0.9.9 and v0.9.8 field"
         );
     }
     let upstream = resources.upstream.as_ref().unwrap();
@@ -239,6 +241,28 @@ fn gitforgeops_files_use_kind_and_spec_only() {
             .map(|l| l.split(':').next().unwrap())
             .collect();
         assert_eq!(top, vec!["kind", "spec"], "{}", file.path);
+    }
+}
+
+/// Literal paths Ferrum Edge refuses as a `listen_path`: a `;` path parameter
+/// (v0.9.9 without `allow_path_parameters`, which export never sets), and on
+/// both supported releases a `.` segment, a percent-escape, or a backslash.
+const REFUSED_PATHS: &[&str] = &[
+    "/orders;v=1",
+    "/orders/./items",
+    "/orders%2Fitems",
+    "/orders\\items",
+];
+
+#[test]
+fn paths_edge_would_refuse_are_rejected() {
+    let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
+    for path in REFUSED_PATHS {
+        let line = format!("public_path = {path:?}");
+        let text = fixture.replace("public_path = \"/orders\"", &line);
+        assert_ne!(text, fixture);
+        let error = ServiceManifest::from_toml(&text).unwrap_err().to_string();
+        assert!(error.contains("api.public_path"), "{path}: {error}");
     }
 }
 

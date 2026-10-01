@@ -18,4 +18,4 @@ Ferrum Anvil already defines a `DiagnosticFinding` shape: confidence `confirmed`
 ## Consequences
 
 - Anvil integration is PROPOSED until Anvil's importer is tested with these reports.
-- `confirmed` gateway attribution needs authenticated gateway detail (Anvil G01 / ferrum-edge#5767), which no supported Edge release produces yet (it is implemented, unreleased, on Edge main at `f6384650`).
+- `confirmed` gateway attribution needs authenticated gateway detail (Anvil G01 / ferrum-edge#5767), which Edge v0.9.9 releases, off by default, and v0.9.8 lacks. Alloy does not consume it yet, so no imported finding is `confirmed`.

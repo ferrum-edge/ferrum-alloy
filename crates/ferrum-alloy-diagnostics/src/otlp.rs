@@ -11,6 +11,15 @@
 //! zero. Spans are linked only through explicit parent span ids; wall-clock
 //! timestamps from different producers are never subtracted.
 //!
+//! Ferrum Edge v0.9.9 also exports one CLIENT span per backend attempt and
+//! hands the service that span as its parent, so the service's SERVER span
+//! nests under the attempt and the attempt under the Edge SERVER span. Each
+//! attempt becomes an `edge.backend.attempt` event that carries only that
+//! link; its timing and connection attributes are not interpreted. Only a
+//! CLIENT span with `gateway.backend.attempt`, which Edge sets on every attempt
+//! span, is an attempt: other Edge CLIENT spans (for example mesh workload
+//! metrics on outbound traffic) are ignored.
+//!
 //! The resource `service.name` names the service that emitted an Alloy span,
 //! or the gateway that emitted a Ferrum Edge span. It is never confused with
 //! the producer, which names the telemetry library.
@@ -160,6 +169,9 @@ impl AttrValue {
 }
 
 const SPAN_KIND_SERVER: i64 = 2;
+const SPAN_KIND_CLIENT: i64 = 3;
+/// The attempt number Edge v0.9.9 sets on every backend attempt span.
+const ATTEMPT_ATTRIBUTE: &str = "gateway.backend.attempt";
 const MAX_ATTR_BYTES: usize = 512;
 
 /// Lists the distinct trace ids in an OTLP/JSON export.
@@ -226,6 +238,9 @@ pub fn import(
         match span.producer.kind {
             ProducerKind::Edge if span.kind == SPAN_KIND_SERVER => {
                 edge_observations(span, &mut report)
+            }
+            ProducerKind::Edge if is_edge_attempt(span) => {
+                edge_attempt_observation(span, &mut report)
             }
             ProducerKind::Alloy => alloy_observations(span, &mut report),
             _ => {}
@@ -746,6 +761,35 @@ fn edge_observations(span: &RawSpan, report: &mut DiagnosticReport) {
             .insert("error_class".to_owned(), class.as_string());
         report.observations.push(error);
     }
+}
+
+/// Whether an Edge span is a backend attempt: a CLIENT span carrying the
+/// attempt number Edge v0.9.9 puts on every attempt span.
+fn is_edge_attempt(span: &RawSpan) -> bool {
+    span.kind == SPAN_KIND_CLIENT && span.attributes.contains_key(ATTEMPT_ATTRIBUTE)
+}
+
+/// One Ferrum Edge backend attempt (an Edge v0.9.9 CLIENT span). It records
+/// only the link from the attempt to the gateway request and the attempt
+/// number for display: no timing, and no attempt scope, because Alloy does
+/// not yet interpret per-attempt evidence.
+fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
+    let mut attempt = base(
+        Draft {
+            span,
+            id_suffix: "attempt",
+            name: catalog::EDGE_BACKEND_ATTEMPT,
+            leg: Leg::GatewayToService,
+        },
+        ObservationKind::Event,
+    );
+    attempt.availability = Availability::Measured;
+    if let Some(number) = span.attributes.get(ATTEMPT_ATTRIBUTE) {
+        attempt
+            .attributes
+            .insert("attempt".to_owned(), number.as_string());
+    }
+    report.observations.push(attempt);
 }
 
 fn alloy_observations(span: &RawSpan, report: &mut DiagnosticReport) {

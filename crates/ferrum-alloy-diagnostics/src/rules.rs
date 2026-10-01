@@ -17,6 +17,10 @@
 //! value. Negative or otherwise invalid values are reported as inconsistent
 //! evidence and never used in a comparison. Spans are identified by trace id
 //! and span id together, and a parent link is followed only within its trace.
+//!
+//! A service span is linked to a gateway request when its parent is the
+//! gateway's span, or a gateway backend attempt (`edge.backend.attempt`, a
+//! Ferrum Edge v0.9.9 CLIENT span) whose own parent is the gateway's span.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -140,13 +144,18 @@ struct Index<'a> {
     edge: BTreeMap<SpanKey<'a>, RequestView<'a>>,
     /// Alloy server requests keyed by span identity.
     service: BTreeMap<SpanKey<'a>, RequestView<'a>>,
-    /// Service requests keyed by their gateway parent span. Values retain the
-    /// span-key order of `service` so linked services stay deterministic.
+    /// Service requests keyed by their gateway parent span: the service span's
+    /// parent, or the parent of the gateway attempt span that is its parent.
+    /// Values retain the span-key order of `service` so linked services stay
+    /// deterministic.
     services_by_parent: BTreeMap<SpanKey<'a>, Vec<SpanKey<'a>>>,
     operations: Vec<&'a Observation>,
     /// Alloy span identity -> parent span id in the same trace, for every Alloy
     /// observation with a span.
     alloy_parents: BTreeMap<SpanKey<'a>, Option<&'a str>>,
+    /// Gateway backend attempt span identity -> parent span id in the same
+    /// trace. Attempts are links, never gateway requests of their own.
+    attempt_parents: BTreeMap<SpanKey<'a>, Option<&'a str>>,
 }
 
 const SERVICE_NAMES: &[&str] = &[
@@ -163,9 +172,17 @@ impl<'a> Index<'a> {
         let mut service: BTreeMap<SpanKey<'_>, RequestView<'_>> = BTreeMap::new();
         let mut operations = Vec::new();
         let mut alloy_parents = BTreeMap::new();
+        let mut attempt_parents = BTreeMap::new();
         for observation in &report.observations {
             let key = observation.span.as_ref().map_or(NO_SPAN, span_key);
             match observation.producer.kind {
+                ProducerKind::Edge if observation.name == catalog::EDGE_BACKEND_ATTEMPT => {
+                    if let Some(span) = &observation.span {
+                        attempt_parents
+                            .entry(span_key(span))
+                            .or_insert(span.parent_span_id.as_deref());
+                    }
+                }
                 ProducerKind::Edge => {
                     let view = edge.entry(key).or_default();
                     view.span = view.span.or(observation.span.as_ref());
@@ -196,8 +213,14 @@ impl<'a> Index<'a> {
             let Some(parent) = span.parent_span_id.as_deref() else {
                 continue;
             };
+            let trace = span.trace_id.as_str();
+            // One hop through a gateway attempt, never a chain of them.
+            let gateway = match attempt_parents.get(&(trace, parent)) {
+                Some(&Some(attempt_parent)) => attempt_parent,
+                _ => parent,
+            };
             services_by_parent
-                .entry((span.trace_id.as_str(), parent))
+                .entry((trace, gateway))
                 .or_default()
                 .push(*service_key);
         }
@@ -209,6 +232,7 @@ impl<'a> Index<'a> {
             services_by_parent,
             operations,
             alloy_parents,
+            attempt_parents,
         }
     }
 
@@ -280,12 +304,14 @@ impl<'a> Index<'a> {
     }
 
     /// Returns the nearest span id in `span`'s lineage that `accept` matches:
-    /// the span itself, its own parent, then its parent's Alloy ancestors. Every
-    /// id is in `span`'s own trace, and the walk never follows a parent into
-    /// another trace. The walk starts at the span's own parent, so a span that
-    /// is not an Alloy span still reaches the gateway above its Alloy parent.
-    /// It stops after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle cannot
-    /// loop.
+    /// the span itself, its own parent, then its parent's Alloy ancestors and
+    /// at most one gateway attempt. Every id is in `span`'s own trace, and the
+    /// walk never follows a parent into another trace. The walk starts at the
+    /// span's own parent, so a span that is not an Alloy span still reaches the
+    /// gateway above its Alloy parent, and an Alloy span reaches the gateway
+    /// above its attempt; a second attempt ends the walk, as it ends service
+    /// linkage. It stops after [`MAX_ANCESTOR_HOPS`] parents, so a parent cycle
+    /// cannot loop.
     fn nearest_in_lineage<'s>(
         &'s self,
         span: &'s SpanRef,
@@ -299,12 +325,18 @@ impl<'a> Index<'a> {
         if accept(current) {
             return Some(current);
         }
+        let mut through_attempt = false;
         for _ in 0..MAX_ANCESTOR_HOPS {
-            let parent = self
-                .alloy_parents
-                .get(&(trace, current))
-                .copied()
-                .flatten()?;
+            let key = (trace, current);
+            let parent = match self.alloy_parents.get(&key) {
+                Some(parent) => *parent,
+                // One hop through a gateway attempt, never a chain of them.
+                None if !through_attempt => {
+                    through_attempt = true;
+                    self.attempt_parents.get(&key).copied().flatten()
+                }
+                None => None,
+            }?;
             if accept(parent) {
                 return Some(parent);
             }
@@ -496,7 +528,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
             )
             .does_not_prove(&[
                 "that the gateway policy is misconfigured",
-                "which plugin rejected the request (Ferrum Edge v0.9.7 and v0.9.8 record only the phase)",
+                "which plugin rejected the request (Ferrum Edge transaction logs record only the phase)",
             ])
             .confirm_with(&[
                 "the gateway transaction log entry for this request (metadata.rejection_phase)",
@@ -628,9 +660,10 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
         ]);
         builder = match known {
             Some((_, meaning)) => builder
-                // Ferrum Edge v0.9.8 strips a backend-supplied X-Gateway-Error,
-                // but v0.9.5/v0.9.7 do not on every path, and the header names no
-                // Edge version or authenticated sender, so it caps at likely.
+                // Ferrum Edge v0.9.9 and v0.9.8 strip a backend-supplied
+                // X-Gateway-Error, but older releases do not on every path, and
+                // the header names no Edge version or authenticated sender, so it
+                // caps at likely.
                 .confidence(Confidence::Likely)
                 .explanation(format!(
                     "X-Gateway-Error: {token}. {meaning} Ferrum Edge before v0.9.8 lets a backend inject the header on some paths, and the header names no gateway version, so it is not authenticated gateway evidence."
@@ -927,7 +960,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             .confidence(Confidence::Likely)
             .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
             .explanation(format!(
-                "{} service server spans have the same gateway span as parent. Ferrum Edge v0.9.7 and v0.9.8 reuse one traceparent for every retry attempt and record no attempt identity, so these are probably separate attempts; gateway and service timings are not compared.",
+                "{} service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 exports a span per attempt, but Alloy does not interpret per-attempt timing. Gateway and service timings are not compared.",
                 services.len()
             ))
             .does_not_prove(&["which attempt produced the final response"])
@@ -1091,7 +1124,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             "that the service was idle during the interval",
         ])
         .confirm_with(&[
-            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.7 or v0.9.8)",
+            "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
             "gateway retry logs (\"Retrying backend request\") for this request",
         ]);
         if !confirmed {
@@ -1344,13 +1377,14 @@ fn rule_incomplete(index: &Index<'_>, out: &mut Vec<Finding>) {
         .confidence(Confidence::Unknown)
         .cite(ttfb, "gateway.latency.backend_ttfb_ms", ttfb.duration_ms().map(ms).unwrap_or_default())
         .explanation(
-            "The gateway recorded a backend exchange, but no service span has the gateway span as its parent. The delay cannot be localized inside the service.".into(),
+            "The gateway recorded a backend exchange, but no service span has the gateway span, or one of its backend attempt spans, as its parent. A service span under an attempt span the gateway did not export cannot be linked either. The delay cannot be localized inside the service.".into(),
         )
         .alternatives(&[
             "the service is not instrumented or does not export traces",
             "the service did not sample or has not yet exported the span",
             "the service's trust policy re-rooted the trace",
             "a different service or intermediary answered",
+            "the gateway's attempt span was not exported (for example, its export buffer was full)",
         ])
         .does_not_prove(&[
             "that the service was never reached",
