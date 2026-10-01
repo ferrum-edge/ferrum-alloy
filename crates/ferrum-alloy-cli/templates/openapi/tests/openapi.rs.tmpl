@@ -1,5 +1,6 @@
 //! OpenAPI parity: every documented path is routed, and the committed
 //! openapi.json matches the code (`ferrum-alloy openapi export --check`).
+//! Only the declared operation is offered to AI agents.
 
 #[test]
 fn documented_paths_are_the_registered_routes() {
@@ -7,4 +8,18 @@ fn documented_paths_are_the_registered_routes() {
     let mut paths: Vec<&str> = document.paths.paths.keys().map(String::as_str).collect();
     paths.sort_unstable();
     assert_eq!(paths, vec!["/hello", "/items", "/items/{id}"]);
+}
+
+#[test]
+fn only_get_item_is_offered_to_agents() {
+    let document = {{crate_name}}::openapi();
+    let document = serde_json::to_value(document).unwrap();
+    let tool = &document["paths"]["/items/{id}"]["get"]["x-ferrum-mcp"];
+    assert_eq!(tool["expose"], true);
+    // Nothing is exposed without a declaration; a state-changing operation
+    // needs its own `AgentTool::expose()`.
+    for (path, method) in [("/hello", "get"), ("/items", "post")] {
+        let operation = &document["paths"][path][method];
+        assert!(operation.get("x-ferrum-mcp").is_none(), "{method} {path}");
+    }
 }

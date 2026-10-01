@@ -250,6 +250,9 @@ const STARTER_OPENAPI_DOCUMENT: &str =
     include_str!("../templates/starters/fragments/openapi_document.rs.tmpl");
 const STARTER_OPENAPI_README: &str =
     include_str!("../templates/starters/fragments/README-openapi.md.tmpl");
+const OPENAPI_README: &str = include_str!("../templates/openapi/fragments/README.md.tmpl");
+const OPENAPI_AGENTS: &str =
+    include_str!("../templates/openapi/fragments/ferrum-service.toml.tmpl");
 
 /// Replacement text for the chosen starters; empty when there are none.
 #[derive(Default)]
@@ -553,11 +556,11 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
         ),
         (
             "{{readme_openapi}}",
-            if openapi {
-                "\n## OpenAPI\n\n```bash\nferrum-alloy openapi export --manifest ferrum-service.toml --output openapi.json\nferrum-alloy openapi export --manifest ferrum-service.toml --output openapi.json --check\n```\n\nThe document is served on the management listener at `/openapi.json` (token-protected).\n"
-            } else {
-                ""
-            },
+            if openapi { OPENAPI_README } else { "" },
+        ),
+        (
+            "{{manifest_agents}}",
+            if openapi { OPENAPI_AGENTS } else { "" },
         ),
     ];
     let mut sources: Vec<(&str, &str)> = BASE.to_vec();

@@ -1,0 +1,28 @@
+# PROPOSED contract: ferrum.service_manifest v1 with the optional [agents]
+# section (docs/agent-tools.md). `ferrum-alloy openapi export --input
+# orders-api.input.json --manifest orders-api.toml` produces
+# orders-api.openapi.json; CI submits that document to Ferrum Edge
+# `POST /api-specs`.
+schema = "ferrum.service_manifest"
+schema_version = "1.0"
+
+[service]
+name = "orders-api"
+version = "0.1.0"
+description = "Orders service built with Ferrum Alloy"
+
+[api]
+public_path = "/shop"
+service_base_path = "/"
+strip_public_path = true
+openapi = "orders-api.openapi.json"
+
+[upstream]
+host = "orders.internal"
+port = 8080
+scheme = "http"
+
+[agents]
+enabled = true
+endpoint_path = "/shop/mcp"
+namespace = "orders"

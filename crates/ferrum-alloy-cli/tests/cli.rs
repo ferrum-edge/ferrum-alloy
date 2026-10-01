@@ -979,6 +979,241 @@ fn openapi_export_maps_service_base_path_when_the_gateway_strips_it() {
     }
 }
 
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// `[agents]` becomes the document-level `x-ferrum-mcp`, and exposed
+/// operations get their method's default annotations. The result is the
+/// snapshot CI submits to Ferrum Edge `POST /api-specs`
+/// (`UPDATE_SNAPSHOTS=1` regenerates it).
+#[test]
+fn openapi_export_stamps_agent_tool_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("openapi.json");
+    let input = fixture("openapi/orders-api.input.json");
+    let manifest = fixture("openapi/orders-api.toml");
+    let snapshot = fixture("openapi/orders-api.openapi.json");
+    let output = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--manifest",
+        &manifest,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+        std::fs::copy(&out, &snapshot).unwrap();
+    }
+    let document = read_json(&out);
+    assert_eq!(document, read_json(Path::new(&snapshot)));
+
+    let extension = &document["x-ferrum-mcp"];
+    let operations = serde_json::json!(["create_order", "get_order", "list_orders"]);
+    assert_eq!(extension["include"]["operations"], operations);
+    assert_eq!(extension["namespace"], "orders");
+    assert_eq!(extension["endpoint"]["path"], "/shop/mcp");
+    let paths = &document["paths"];
+    let list = &paths["/orders"]["get"]["x-ferrum-mcp"]["annotations"];
+    assert_eq!(list, &serde_json::json!({ "readOnlyHint": true }));
+    // The declared hint stays; the method's default is added.
+    let create = &paths["/orders"]["post"]["x-ferrum-mcp"]["annotations"];
+    let hints = serde_json::json!({ "destructiveHint": false, "readOnlyHint": false });
+    assert_eq!(create, &hints);
+    // Undeclared and hidden operations are not touched.
+    for path in ["/orders/{id}", "/orders/{id}/status"] {
+        let operation = paths[path].get("delete").unwrap_or(&paths[path]["get"]);
+        assert!(operation.get("x-ferrum-mcp").is_none(), "{path}");
+    }
+    assert_eq!(
+        paths["/orders/{id}/receipt"]["get"]["x-ferrum-mcp"],
+        serde_json::json!({ "expose": false })
+    );
+
+    // The committed snapshot is current.
+    let check = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--manifest",
+        &manifest,
+        "--output",
+        &snapshot,
+        "--check",
+    ]);
+    assert_eq!(code(&check), 0, "{}", stderr(&check));
+    assert!(!stderr(&check).contains("warning"), "{}", stderr(&check));
+
+    // A hand-written `x-ferrum-mcp: true` without `include` is valid for
+    // Edge but publishes the undeclared GET operations: a warning.
+    let mut document = read_json(Path::new(&input));
+    document["x-ferrum-mcp"] = true.into();
+    let input = write(dir.path(), "hand-written.json", &document.to_string());
+    let output = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let warning = stderr(&output);
+    assert!(
+        warning.contains("warning: `x-ferrum-mcp` has no `include`"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("paths./orders/{id}/status.get"),
+        "{warning}"
+    );
+}
+
+/// Breaks the agent-tool fixture in one of the ways the export refuses and
+/// returns the expected problem, or `None` past the last case.
+fn break_agent_tools(case: usize, document: &mut serde_json::Value) -> Option<&'static str> {
+    match case {
+        0 => {
+            let get = &mut document["paths"]["/orders/{id}"]["get"];
+            get.as_object_mut().unwrap().remove("operationId");
+            Some("paths./orders/{id}.get is exposed to agents but has no operationId")
+        }
+        1 => {
+            let get = &mut document["paths"]["/orders"]["get"];
+            let get = get.as_object_mut().unwrap();
+            get.remove("summary");
+            get.remove("description");
+            get["x-ferrum-mcp"] = serde_json::json!({ "expose": true });
+            Some("paths./orders.get is exposed to agents but has no description")
+        }
+        2 => {
+            let body = &mut document["paths"]["/orders"]["post"]["requestBody"];
+            body["content"] = serde_json::json!({ "application/xml": {} });
+            Some("paths./orders.post takes a request body with no JSON media type")
+        }
+        3 => {
+            document["paths"]["/orders/{id}"]["head"] = serde_json::json!({
+                "operationId": "probe_order",
+                "summary": "Probe an order.",
+                "responses": { "200": { "description": "OK" } },
+                "x-ferrum-mcp": { "expose": true }
+            });
+            Some("paths./orders/{id}.head cannot be exposed to agents")
+        }
+        4 => {
+            let get = &mut document["paths"]["/orders/{id}"]["get"];
+            get["x-ferrum-mcp"]["readOnly"] = true.into();
+            Some("has the unknown key \"readOnly\"")
+        }
+        5 => {
+            document["x-ferrum-mcp"] = true.into();
+            Some("already sets a document-level `x-ferrum-mcp`")
+        }
+        6 => {
+            document["x-ferrum-validate"] = true.into();
+            Some("cannot be combined with `x-ferrum-validate`")
+        }
+        7 => {
+            for index in 0..256 {
+                document["paths"][format!("/r{index}")] = serde_json::json!({ "get": {
+                    "operationId": format!("r{index}"),
+                    "summary": "One of many.",
+                    "x-ferrum-mcp": { "expose": true }
+                }});
+            }
+            Some("selects 259 operations; Edge publishes at most 256")
+        }
+        8 => {
+            let tool = &mut document["paths"]["/orders"]["post"]["x-ferrum-mcp"];
+            tool["annotations"]["readOnlyHint"] = true.into();
+            Some("paths./orders.post changes state but claims `readOnlyHint: true`")
+        }
+        9 => {
+            let cancel = &mut document["paths"]["/orders/{id}"]["delete"];
+            cancel["x-ferrum-mcp"] = serde_json::json!({
+                "expose": true,
+                "description": "Cancel one of the caller's orders",
+                "annotations": { "destructiveHint": false }
+            });
+            Some("paths./orders/{id}.delete is a DELETE but claims `destructiveHint: false`")
+        }
+        _ => None,
+    }
+}
+
+/// Metadata Ferrum Edge would reject, or that an agent could not use, fails
+/// the export (and `--check`) with exit 3 and writes nothing.
+#[test]
+fn openapi_export_refuses_unsafe_agent_tool_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = fixture("openapi/orders-api.toml");
+    let fixture_input = fixture("openapi/orders-api.input.json");
+    let original = read_json(Path::new(&fixture_input));
+    for case in 0.. {
+        let mut document = original.clone();
+        let Some(expected) = break_agent_tools(case, &mut document) else {
+            break;
+        };
+        let input = write(dir.path(), "input.json", &document.to_string());
+        let out = dir.path().join("openapi.json");
+        let output = run(&[
+            "openapi",
+            "export",
+            "--input",
+            &input,
+            "--manifest",
+            &manifest,
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        assert_eq!(code(&output), 3, "{expected}: {}", stderr(&output));
+        assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+        assert!(!out.exists(), "{expected}: nothing is written");
+    }
+
+    // `--check` reports the problem as invalid input, not as drift.
+    let mut document = original.clone();
+    document["paths"]["/orders"]["post"]["requestBody"]["content"] = serde_json::json!({});
+    let input = write(dir.path(), "input.json", &document.to_string());
+    let snapshot = fixture("openapi/orders-api.openapi.json");
+    let check = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--manifest",
+        &manifest,
+        "--output",
+        &snapshot,
+        "--check",
+    ]);
+    assert_eq!(code(&check), 3, "{}", stderr(&check));
+
+    // Without a manifest, a hand-written document-level extension is checked
+    // as Edge reads it: a state-changing operation selected only by a tag is
+    // refused.
+    let mut document = original;
+    document["x-ferrum-mcp"] = serde_json::json!({ "include": { "tags": ["orders"] } });
+    document["paths"]["/orders/{id}"]["delete"]["tags"] = serde_json::json!(["orders"]);
+    let input = write(dir.path(), "input.json", &document.to_string());
+    let out = dir.path().join("openapi.json");
+    let output = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    let expected = "paths./orders/{id}.delete changes state and is selected only by tag";
+    assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+}
+
 /// `openapi export --check` reads the existing output only up to the
 /// document limit; a larger file is drift.
 #[test]
@@ -1274,6 +1509,12 @@ fn new_generates_a_complete_project() {
             .unwrap()
             .contains(".openapi(&orders_api::openapi())")
     );
+    // OpenAPI projects publish their declared agent tools.
+    let manifest = std::fs::read_to_string(target.join("ferrum-service.toml")).unwrap();
+    assert!(
+        manifest.contains("\n[agents]\nenabled = true\n"),
+        "{manifest}"
+    );
     // The generated config and manifest pass the tool's own validation.
     let check = run(&[
         "check",
@@ -1348,6 +1589,8 @@ fn new_generates_database_auth_and_client_starters() {
         let import = format!("use only_{module}::{module};");
         assert!(main.contains(&import), "{main}");
         assert!(target.join(format!("src/{module}.rs")).is_file());
+        // Without OpenAPI there is nothing to offer to agents.
+        assert!(!read(&target, "ferrum-service.toml").contains("[agents]"));
     }
 }
 
@@ -1420,6 +1663,12 @@ fn generated_projects_build_and_pass_their_tests() {
             .unwrap();
             assert_eq!(document["servers"][0]["url"], format!("/{name}"));
             assert!(document["paths"]["/items/{id}"].is_object());
+            // `get_item` is the template's one agent tool, read-only.
+            let extension = &document["x-ferrum-mcp"];
+            assert_eq!(extension["include"]["operations"][0], "get_item");
+            assert_eq!(extension["namespace"], name);
+            let tool = &document["paths"]["/items/{id}"]["get"]["x-ferrum-mcp"];
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
             let check = bin()
                 .current_dir(&target)
                 .env("CARGO_TARGET_DIR", dir.path().join("target"))

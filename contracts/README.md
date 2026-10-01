@@ -8,6 +8,8 @@
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
 | `fixtures/manifests/*.toml` | `ferrum.service_manifest` v1 examples | **PROPOSED**; no consumer outside Alloy |
 | `fixtures/manifests/*.edge.yaml` | Generated Ferrum Edge file-mode configuration | Snapshots; regenerate with `UPDATE_SNAPSHOTS=1`. CI validates `plain-http.edge.yaml` with `ferrum-edge validate` on every supported Edge release (v0.9.9 and v0.9.8). |
+| `fixtures/openapi/orders-api.{toml,input.json}` | A manifest with the `[agents]` section and a utoipa-style document declaring agent tools (`x-ferrum-mcp`) | **PROPOSED** manifest section; the extension is Edge v0.9.9's |
+| `fixtures/openapi/orders-api.openapi.json` | What `openapi export` writes for them | Snapshot; regenerate with `UPDATE_SNAPSHOTS=1`. CI submits it to the real `POST /api-specs` on every supported Edge release (`edge-config` job). |
 
 A parity test (`crates/ferrum-alloy-diagnostics/tests/schema_parity.rs`) fails when the Rust enums and the JSON Schema disagree.
 
@@ -36,3 +38,14 @@ hashes in `ferrum-contracts/PIN` and the pinned tag/commit assertion in
 `crates/ferrum-alloy-edge/tests/pairing.rs`, then run CI. Update local
 vocabulary copies to match and review any reported drift, including the
 recorded pinned meanings.
+
+## Service manifest schema
+
+ferrum-contracts publishes `schemas/service-manifest/v1.schema.json` (PROPOSED),
+transcribed from `manifest.rs`, with `additionalProperties: false` at the top
+level. Alloy does not vendor it, so nothing here must stay byte-identical to
+it, but the shared schema predates the optional `[agents]` section and rejects
+a manifest that uses it. The section is additive, and Alloy's own parser
+accepts manifests with or without it. Adding `agents` (`enabled`,
+`endpoint_path`, `namespace`) to the shared schema needs a ferrum-contracts
+revision.

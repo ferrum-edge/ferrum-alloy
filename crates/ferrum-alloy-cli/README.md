@@ -4,7 +4,7 @@ The `ferrum-alloy` command:
 
 - `new`: starter projects that compile and pass their own tests. The project templates are compiled into the binary.
 - `check`: configuration validation.
-- `openapi export`: with drift detection.
+- `openapi export`: with drift detection, and the AI-agent tool metadata (`x-ferrum-mcp`) Ferrum Edge reads, checked against Edge's rules ([AI-agent tools](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/agent-tools.md)).
 - `edge export`: Ferrum Edge file-mode YAML or a GitForgeOps tree.
 - `diagnose`: deterministic explanations of evidence from files, or of one request's live report fetched with `--url` from a running service. The credential comes from `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or `--token-file`, never from an argument.
 

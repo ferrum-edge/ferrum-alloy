@@ -67,7 +67,7 @@ To go further, read [Getting started](docs/getting-started.md).
 |---|---|
 | `ferrum-alloy new` | Creates a starter project that compiles and passes its own tests |
 | `ferrum-alloy check` | Validates configuration |
-| `ferrum-alloy openapi export` | Exports the OpenAPI spec and detects drift |
+| `ferrum-alloy openapi export` | Exports the OpenAPI spec, with the AI-agent tool metadata Ferrum Edge reads (`x-ferrum-mcp`), and detects drift |
 | `ferrum-alloy edge export` | Exports Edge file-mode YAML (checked in CI with `ferrum-edge validate`) or a GitForgeOps tree |
 | `ferrum-alloy diagnose` | Explains evidence deterministically, from files or from one request's live report fetched from a running service on explicit request |
 
@@ -91,6 +91,7 @@ To go further, read [Getting started](docs/getting-started.md).
 | [Measurement semantics](docs/measurement-semantics.md) | What every timing means |
 | [Security model](docs/security.md) | Trust boundaries and peer identity |
 | [Edge contract inventory](docs/edge-contract-inventory.md) | Contracts with Ferrum Edge, both implemented and proposed |
+| [AI-agent tools](docs/agent-tools.md) | Offering operations to AI agents through Ferrum Edge's OpenAPI to MCP bridge, and what is safe to expose |
 | [Compatibility](docs/compatibility.md) | The exact tested matrix |
 | [Architecture decisions](docs/adr/README.md) | ADRs |
 | [Implementation status](docs/implementation-status.md) | What is built and tested |

@@ -520,3 +520,92 @@ jobs:
             -v "$PWD/contracts/fixtures/manifests:/config:ro" \
             "$EDGE_IMAGE" \
             validate -m file -c /config/plain-http.edge.yaml
+      - name: POST /api-specs (${{ matrix.edge.release }}) accepts the exported agent-tool document
+        # contracts/fixtures/openapi/orders-api.openapi.json is what
+        # `ferrum-alloy openapi export` writes for orders-api.toml's [agents]
+        # section (the CLI test openapi_export_stamps_agent_tool_metadata keeps
+        # it current). It is submitted the way a publisher does: with an
+        # `x-ferrum-proxy` whose listen_path is the exported server URL (the
+        # manifest's public_path), and a root server base, since the listen
+        # path supplies the mount. /api-specs needs database mode, so Edge
+        # runs here with SQLite on a tmpfs and a throwaway admin secret.
+        # x-ferrum-mcp is new in Edge v0.9.9: from v0.9.9 on, the importer must
+        # generate the mcp_gateway with exactly the declared tools (the fixture's
+        # undeclared GET /orders/{id}/status must stay unpublished); an older
+        # release must accept the document and ignore the extension.
+        env:
+          EDGE_IMAGE: ${{ matrix.edge.image }}
+          EDGE_RELEASE: ${{ matrix.edge.release }}
+        run: |
+          set -euo pipefail
+          trap 'code=$?; if [ "$code" -ne 0 ]; then docker logs edge-api-specs || true; fi; docker rm -f edge-api-specs > /dev/null 2>&1 || true' EXIT
+          secret=$(openssl rand -hex 32)
+          docker run -d --name edge-api-specs \
+            -e FERRUM_MODE=database \
+            -e FERRUM_DB_TYPE=sqlite \
+            -e 'FERRUM_DB_URL=sqlite:///data/ferrum.db?mode=rwc' \
+            -e FERRUM_NAMESPACE=ferrum \
+            -e FERRUM_ADMIN_JWT_SECRET="$secret" \
+            -e FERRUM_ADMIN_BIND_ADDRESS=0.0.0.0 \
+            -e FERRUM_ALLOW_INSECURE_ADMIN_HTTP=true \
+            --tmpfs /data:rw,mode=1777 \
+            -p 127.0.0.1:9000:9000 \
+            "$EDGE_IMAGE" run -m database
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/health; then
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' edge-api-specs)" != true ]; then
+              echo "::error::Edge exited before its admin API was ready"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:9000/health
+
+          # An HS256 admin token with every claim Edge requires.
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)
+          claims=$(jq -cn --argjson now "$now" --arg jti "$(cat /proc/sys/kernel/random/uuid)" \
+            '{sub: "alloy-ci", role: "admin", ns: "ferrum", iss: "ferrum-edge",
+              iat: ($now - 5), nbf: ($now - 5), exp: ($now + 300), jti: $jti}' | b64url)
+          signature=$(printf '%s' "$header.$claims" \
+            | openssl dgst -sha256 -hmac "$secret" -binary | b64url)
+          token="$header.$claims.$signature"
+
+          spec="$RUNNER_TEMP/orders-api.spec.json"
+          jq '. + {"x-ferrum-proxy": {
+                id: "orders-api", listen_path: .servers[0].url, strip_listen_path: true,
+                backend_scheme: "http", backend_host: "orders.internal", backend_port: 8080}}
+              | .servers = [{url: "/"}]' \
+            contracts/fixtures/openapi/orders-api.openapi.json > "$spec"
+          status=$(curl -sS -o "$RUNNER_TEMP/api-specs.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:9000/api-specs \
+            -H "Authorization: Bearer $token" \
+            -H 'X-Ferrum-Namespace: ferrum' \
+            -H 'Content-Type: application/json' \
+            --data-binary "@$spec")
+          cat "$RUNNER_TEMP/api-specs.json"
+          echo
+          if [ "$status" != 201 ]; then
+            echo "::error::POST /api-specs answered $status"
+            exit 1
+          fi
+
+          generated=$(curl -fsS http://127.0.0.1:9000/plugins/config \
+            -H "Authorization: Bearer $token" \
+            -H 'X-Ferrum-Namespace: ferrum' \
+            | jq -c '[.data[] | select(.plugin_name == "mcp_gateway" and .proxy_id == "orders-api")
+                | .config | {endpoint: .endpoint.path, namespace: .servers.openapi.namespace,
+                  tools: ([.servers.openapi.openapi.operations[].name] | sort)}]')
+          echo "generated mcp_gateway: $generated"
+          if [ "$(printf '%s\n' v0.9.9 "$EDGE_RELEASE" | sort -V | head -n 1)" = v0.9.9 ]; then
+            expected='[{"endpoint":"/shop/mcp","namespace":"orders","tools":["create_order","get_order","list_orders"]}]'
+          else
+            expected='[]'
+          fi
+          if [ "$generated" != "$expected" ]; then
+            echo "::error::expected $expected from Edge $EDGE_RELEASE"
+            exit 1
+          fi

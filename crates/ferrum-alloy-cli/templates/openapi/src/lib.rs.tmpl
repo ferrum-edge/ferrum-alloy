@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
+use ferrum_alloy::agents::AgentTool;
 use ferrum_alloy::extract::{Json, Path, ValidJson, Validate, ValidationErrors};
 use ferrum_alloy::{Problem, ProblemKind};
 use serde::{Deserialize, Serialize};
@@ -91,11 +92,19 @@ async fn create_item(
 }
 
 /// Fetch an item.
+///
+/// Offered to AI agents as a read-only MCP tool: `AgentTool::expose()` writes
+/// this operation's `x-ferrum-mcp` extension, and `[agents]` in
+/// ferrum-service.toml publishes it through Ferrum Edge. Expose only what an
+/// agent may do on a user's behalf; a state-changing operation needs its own
+/// explicit `AgentTool::expose()`.
 #[utoipa::path(
     get,
     path = "/items/{id}",
     params(("id" = u64, Path, description = "Item identifier")),
-    responses((status = 404, description = "Not found (application/problem+json)"))
+    responses((status = 404, description = "Not found (application/problem+json)")),
+    extensions(("x-ferrum-mcp" = json!(AgentTool::expose()
+        .description("Fetch one item by its numeric identifier"))))
 )]
 async fn get_item(Path(id): Path<u64>) -> Result<Json<Item>, Problem> {
     if id == 0 {
