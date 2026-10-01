@@ -43,6 +43,10 @@ pub const EDGE_REQUEST_REJECTED: &str = "edge.request.rejected";
 pub const EDGE_GATEWAY_ERROR: &str = "edge.gateway_error";
 /// Edge event: the final response status the gateway returned.
 pub const EDGE_RESPONSE: &str = "edge.response";
+/// Edge event: one backend attempt, from a Ferrum Edge v0.9.9 `otel_tracing`
+/// CLIENT span. It links the service span it parents to the gateway request;
+/// its timing and attempt attributes are not interpreted.
+pub const EDGE_BACKEND_ATTEMPT: &str = "edge.backend.attempt";
 /// Alloy event: the service received and answered a request.
 pub const ALLOY_RESPONSE: &str = "alloy.response";
 /// Client event: a response header value the client observed (e.g. `X-Gateway-Error`).
@@ -117,6 +121,7 @@ pub const EVENTS: &[&str] = &[
     EDGE_REQUEST_REJECTED,
     EDGE_GATEWAY_ERROR,
     EDGE_RESPONSE,
+    EDGE_BACKEND_ATTEMPT,
     ALLOY_RESPONSE,
     CLIENT_RESPONSE_HEADER,
 ];

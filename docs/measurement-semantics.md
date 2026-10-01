@@ -39,7 +39,7 @@ Any other observation is kept in the report but never enters a subtraction, domi
 
 ## Span linkage
 
-Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
+Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Ferrum Edge v0.9.9 hands the service a CLIENT span per backend attempt as its parent, so a service span is linked to a gateway request when its parent is the Edge SERVER span or an Edge attempt span (`edge.backend.attempt`) whose parent is that SERVER span. Only one attempt hop is followed. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
 
 ## Alloy service measurements
 
@@ -77,7 +77,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.
 
-## Ferrum Edge measurements (v0.9.8 and v0.9.7)
+## Ferrum Edge measurements (v0.9.9 and v0.9.8)
 
 These come from Edge's own spans and logs. Alloy imports them without reinterpreting them. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
 
@@ -87,8 +87,8 @@ These come from Edge's own spans and logs. Alloy imports them without reinterpre
 | `edge.backend.time_to_headers` (`gateway.latency.backend_ttfb_ms`) | First backend dispatch | Response headers available | **All attempts and retry backoff** | For **buffered** responses (`gateway.response.streamed = false`), it equals the full backend exchange including the body. `-1` means unknown, and Alloy records it as `unavailable`. |
 | `edge.backend.total` (`gateway.latency.backend_total_ms`) | First backend dispatch | Body fully buffered | Buffered responses only | Omitted when streaming. |
 | `edge.plugin_execution` | — | — | Cumulative plugin time | Not an interval; never subtracted from anything. |
-| Connection acquisition / DNS / TCP / TLS setup | — | — | — | **Unsupported** in v0.9.8 and v0.9.7. |
-| Per-attempt response-header wait | — | — | — | **Unsupported** in v0.9.8 and v0.9.7. |
+| Connection acquisition / DNS / TCP / TLS setup | — | — | — | **Unsupported** in v0.9.8. v0.9.9 puts `gateway.backend.connection.*_ms` on attempt CLIENT spans from its direct HTTP/2 and gRPC pools; Alloy does not interpret them yet. |
+| Per-attempt response-header wait | — | — | — | **Unsupported** in v0.9.8. v0.9.9 attempt spans have a duration; Alloy does not interpret it yet. |
 
 HTTP/2 connection setup would be connection-scoped. If Edge ever exports it, Alloy must not charge it to each multiplexed stream; it should be linked as connection-level evidence. A pooled request has no setup phase and is `not_applicable`, not zero.
 
@@ -96,7 +96,7 @@ HTTP/2 connection setup would be connection-scoped. If Edge ever exports it, All
 
 Diagnosis rule `alloy.r003` subtracts a service measurement from a gateway measurement only when all of these hold:
 
-1. **Linkage.** The Alloy SERVER span's parent is the Edge SERVER span, in the same trace. This comes from explicit trace and span ids, never timestamps.
+1. **Linkage.** The Alloy SERVER span's parent is the Edge SERVER span (v0.9.8), or an Edge attempt span whose parent is the Edge SERVER span (v0.9.9), in the same trace. This comes from explicit trace and span ids, never timestamps.
 2. **Single attempt reached the service.** Exactly one Alloy SERVER span is linked. With more than one, Alloy reports `alloy.gateway.multiple_service_attempts` and makes no comparison.
 3. **Matching boundaries.**
    - Streamed responses: Edge `backend_ttfb` against Alloy `time_to_headers`.
@@ -112,7 +112,7 @@ The result is an **unattributed residual**, never "network latency". It can incl
 - intermediaries;
 - response header transfer (streamed) or body transfer and flow control (buffered).
 
-Because Edge v0.9.8 and v0.9.7 record no attempt identity, a residual is at most `likely`. The residual depends on both measurements, so `confirmed` requires a verified collection path, verified provenance for both the gateway and the service measurement, and a gateway attempt index. Otherwise the finding stays `likely`, and `missing_evidence` names what is missing: the attempt identity, verified gateway provenance, or verified service provenance.
+Because Alloy reads no gateway attempt identity (v0.9.8 records none, and v0.9.9's attempt spans are used only for linkage), a residual is at most `likely`. The residual depends on both measurements, so `confirmed` requires a verified collection path, verified provenance for both the gateway and the service measurement, and a gateway attempt index. Otherwise the finding stays `likely`, and `missing_evidence` names what is missing: the attempt identity, verified gateway provenance, or verified service provenance.
 
 A **negative** residual is not clamped to zero. It is reported as `conflicting_evidence` (`alloy.evidence.service_exceeds_gateway`), and the comparison is suppressed.
 

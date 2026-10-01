@@ -690,6 +690,151 @@ fn empty_resource_service_name_names_nothing() {
     }
 }
 
+const GATEWAY_SPAN: &str = "00f067aa0ba902b7";
+const FIRST_ATTEMPT: &str = "a1a1a1a1a1a1a1a1";
+const SECOND_ATTEMPT: &str = "a2a2a2a2a2a2a2a2";
+const RETRIED_SPAN: &str = "c3c3c3c3c3c3c3c3";
+
+/// One resource of Ferrum Edge spans.
+fn edge_resource(spans: Vec<Value>) -> Value {
+    json!({
+        "resource": { "attributes": [
+            str_attr("service.name", "edge-public"),
+            str_attr("telemetry.sdk.name", "ferrum-edge"),
+        ] },
+        "scopeSpans": [{
+            "scope": { "name": "ferrum-edge" },
+            "spans": spans,
+        }],
+    })
+}
+
+/// An Edge SERVER span for a streamed response.
+fn gateway_span(backend_ttfb_ms: f64) -> Value {
+    json!({
+        "traceId": PHASE_TRACE,
+        "spanId": GATEWAY_SPAN,
+        "name": "GET orders",
+        "kind": 2,
+        "startTimeUnixNano": T0.to_string(),
+        "endTimeUnixNano": (T0 + 1_000 * MS).to_string(),
+        "attributes": [
+            f64_attr("gateway.latency.total_ms", 1_000.0),
+            f64_attr("gateway.latency.backend_ttfb_ms", backend_ttfb_ms),
+            { "key": "gateway.response.streamed", "value": { "boolValue": true } },
+        ],
+    })
+}
+
+/// An Edge v0.9.9 CLIENT span for backend attempt `number`, a child of the
+/// gateway span, with a connection-setup timing Alloy does not interpret.
+fn attempt_span(span_id: &str, number: u32, start_ms: u64) -> Value {
+    let start = T0 + start_ms * MS;
+    json!({
+        "traceId": PHASE_TRACE,
+        "spanId": span_id,
+        "parentSpanId": GATEWAY_SPAN,
+        "name": "GET",
+        "kind": 3,
+        "startTimeUnixNano": start.to_string(),
+        "endTimeUnixNano": (start + 250 * MS).to_string(),
+        "attributes": [
+            { "key": "gateway.backend.attempt", "value": { "intValue": number.to_string() } },
+            f64_attr("gateway.backend.connection.setup_ms", 12.5),
+        ],
+    })
+}
+
+#[test]
+fn edge_attempt_span_links_the_service_to_the_gateway_request() {
+    let edge = vec![gateway_span(300.0), attempt_span(FIRST_ATTEMPT, 1, 10)];
+    let alloy = vec![server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20)];
+    let resources = vec![edge_resource(edge), alloy_resource("orders-api", alloy)];
+    let input = otlp(resources);
+    let imported = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+    let report = round_trip(&imported);
+    let attempt = report
+        .observation(&format!("edge:{FIRST_ATTEMPT}:attempt"))
+        .unwrap();
+    assert_eq!(attempt.name, "edge.backend.attempt");
+    assert_eq!(attempt.attr("attempt"), Some("1"));
+    assert_eq!(attempt.scope.gateway.as_deref(), Some("edge-public"));
+    assert_eq!(
+        attempt.span.as_ref().unwrap().parent_span_id.as_deref(),
+        Some(GATEWAY_SPAN)
+    );
+    // Only the link is imported: no attempt timing, setup value, or attempt scope.
+    let from_attempt = report
+        .observations
+        .iter()
+        .filter(|o| o.span.as_ref().is_some_and(|s| s.span_id == FIRST_ATTEMPT))
+        .count();
+    assert_eq!(from_attempt, 1);
+    assert_eq!(attempt.value, None);
+    assert!(
+        report
+            .observations
+            .iter()
+            .all(|o| o.scope.attempt.is_none())
+    );
+
+    let findings = analyze(&report, &Thresholds::default());
+    let found = codes(&findings);
+    assert!(
+        !found.contains(&"alloy.telemetry.service_span_missing"),
+        "the service span is linked through the attempt: {found:?}"
+    );
+    let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
+    assert_eq!(residual.confidence, Confidence::Likely);
+}
+
+#[test]
+fn edge_retry_attempt_spans_report_several_service_attempts() {
+    let edge = vec![
+        gateway_span(450.0),
+        attempt_span(FIRST_ATTEMPT, 1, 10),
+        attempt_span(SECOND_ATTEMPT, 2, 360),
+    ];
+    let alloy = vec![
+        server_span(ORDERS_SPAN, Some(FIRST_ATTEMPT), 20),
+        server_span(RETRIED_SPAN, Some(SECOND_ATTEMPT), 370),
+    ];
+    let resources = vec![edge_resource(edge), alloy_resource("orders-api", alloy)];
+    let input = otlp(resources);
+    let report = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+    let findings = analyze(&report, &Thresholds::default());
+    let found = codes(&findings);
+    let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
+    assert_eq!(multiple.confidence, Confidence::Likely);
+    for code in [
+        "alloy.gateway.unattributed_interval",
+        "alloy.gateway.timings_not_comparable",
+        "alloy.evidence.service_exceeds_gateway",
+        "alloy.telemetry.service_span_missing",
+    ] {
+        assert!(!found.contains(&code), "{code}: {found:?}");
+    }
+    assert!(
+        findings
+            .iter()
+            .flat_map(|f| &f.evidence)
+            .all(|e| e.attempt.is_none())
+    );
+}
+
+#[test]
+fn edge_attempt_span_without_a_service_child_leaves_one_request_unlinked() {
+    let edge = vec![gateway_span(5.0), attempt_span(FIRST_ATTEMPT, 1, 10)];
+    let input = otlp(vec![edge_resource(edge)]);
+    let report = import(&input, None, collector(), &ImportLimits::default()).unwrap();
+    let findings = analyze(&report, &Thresholds::default());
+    let missing = findings
+        .iter()
+        .filter(|f| f.code == "alloy.telemetry.service_span_missing")
+        .count();
+    assert_eq!(missing, 1, "{:?}", codes(&findings));
+}
+
 const SERVICES: &[&str] = &["orders-api", "billing-api", "search-api"];
 const EDGE_KEYS: [&str; 2] = [
     "gateway.latency.total_ms",
