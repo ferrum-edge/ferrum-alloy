@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Pin Ferrum Edge v0.9.10 and keep v0.9.9 as the previous supported release.
+  Re-audit Edge #5954: MCP request charset checks and fail-closed handling for
+  uninspectable or over-nested JSON-RPC batches do not change contracts Alloy
+  consumes. The `X-Gateway-Error` vocabulary remains the same eight tokens,
+  and the ferrum-contracts pin remains `contracts-edge-0.9.9`.
 - Document the central ferrum-contracts store, vendor and pin the diagnostic-ref v1 schema, and correct the shared `[agents]` schema status.
 - Interpret Ferrum Edge v0.9.9 backend attempt spans for per-attempt timing,
   connection setup, and connection reuse; preserve the v0.9.8 multiple-attempt

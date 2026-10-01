@@ -1,8 +1,8 @@
 # AI-agent tools
 
-Ferrum Edge v0.9.9 can publish the operations of an OpenAPI document as MCP tools. When `POST /api-specs` receives a document carrying the `x-ferrum-mcp` extension, it generates a proxy-scoped `mcp_gateway`. That gateway runs each `tools/call` as an ordinary HTTP request to the proxy's own backend. Ferrum Alloy lets you declare, next to each handler, which operations agents may call, and `ferrum-alloy openapi export` writes those declarations into the exported document.
+Ferrum Edge v0.9.9 and v0.9.10 can publish the operations of an OpenAPI document as MCP tools. When `POST /api-specs` receives a document carrying the `x-ferrum-mcp` extension, it generates a proxy-scoped `mcp_gateway`. That gateway runs each `tools/call` as an ordinary HTTP request to the proxy's own backend. Ferrum Alloy lets you declare, next to each handler, which operations agents may call, and `ferrum-alloy openapi export` writes those declarations into the exported document.
 
-The contract is Edge's: `docs/api_specs.md` ("`x-ferrum-mcp` (optional)") and `docs/plugins.md` ("OpenAPI bridge (generated tools)") at Edge `v0.9.9`, implemented in `src/admin/api_specs/extractor.rs` and `src/plugins/mcp_openapi_bridge.rs`. Edge v0.9.8 ignores the extension, so a document is still accepted there but publishes no tools. The manifest's `[agents]` section is an Alloy proposal (**PROPOSED**, like the rest of `ferrum.service_manifest`).
+The contract is Edge's: `docs/api_specs.md` ("`x-ferrum-mcp` (optional)") and `docs/plugins.md` ("OpenAPI bridge (generated tools)") at Edge `v0.9.9`, unchanged for this feature in v0.9.10, implemented in `src/admin/api_specs/extractor.rs` and `src/plugins/mcp_openapi_bridge.rs`. Unsupported Edge v0.9.8 ignores the extension, so a document is still accepted there but publishes no tools. The manifest's `[agents]` section is an Alloy proposal (**PROPOSED**, like the rest of `ferrum.service_manifest`).
 
 ## Safety guidance
 
