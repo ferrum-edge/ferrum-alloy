@@ -11,7 +11,8 @@
 //! [`ferrum_alloy_edge::agents`]): the manifest's `[agents]` section becomes
 //! the document-level extension, exposed operations get their method's
 //! default MCP annotations, and metadata Ferrum Edge would reject or an agent
-//! could not use fails the export and `--check` with exit 3.
+//! could not use fails the export and `--check` with exit 3. A hand-written
+//! selection that publishes every `GET` operation is a warning.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -177,8 +178,11 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
             );
         }
     }
-    ferrum_alloy_edge::agents::prepare(&mut document, manifest.as_ref())
+    let warnings = ferrum_alloy_edge::agents::prepare(&mut document, manifest.as_ref())
         .map_err(|e| CliError::Invalid(e.to_string()))?;
+    for warning in warnings {
+        crate::eprint(&format!("warning: {warning}\n"));
+    }
     let rendered = format!(
         "{}\n",
         serde_json::to_string_pretty(&document).map_err(|e| CliError::Io(e.to_string()))?

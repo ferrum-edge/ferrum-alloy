@@ -10,8 +10,8 @@ An exposed operation lets an AI agent act for whichever user or consumer is call
 
 - **Expose only what an agent should be able to do on a user's behalf.** Exposure is a product decision, made separately for each handler. Internal, administrative, and bulk operations should stay hidden.
 - **Start with read-only operations.** A `GET` that returns the caller's own data is a good first tool. Add state-changing tools once you have seen how agents use the read-only ones.
-- **State-changing and destructive operations need explicit opt-in.** Alloy never exposes an operation that nobody declared. A `POST`, `PUT`, `PATCH`, or `DELETE` operation becomes a tool only through its own `AgentTool::expose()`, or by being named in `include` by `operationId`. Being selected by a tag alone is refused.
-- **Keep annotations honest.** The export writes the method's default hints: `readOnlyHint` for `GET`, `destructiveHint` for `DELETE`, and `idempotentHint` for `PUT`. Agents may use these hints to decide whether to ask the user first, so override a default only to state more risk, never less. For example, a `POST` that deletes data should set `destructive(true)`, and nothing that changes state should claim `read_only(true)`. The hints are hints: authorization stays with the gateway and the service.
+- **State-changing and destructive operations need explicit opt-in.** When the selection comes from `[agents]` and `AgentTool`, the export never exposes an operation that nobody declared. A hand-written document-level `x-ferrum-mcp: true` (or an object without `include`) is different: Edge then publishes every `GET` operation, declared or not. The export accepts that, because it is valid for Edge, but prints a warning that names the undeclared operations. A `POST`, `PUT`, `PATCH`, or `DELETE` operation becomes a tool only through its own `AgentTool::expose()`, or by being named in `include` by `operationId`. Being selected by a tag alone is refused.
+- **Keep annotations honest.** The export writes the method's default hints: `readOnlyHint` for `GET`, `destructiveHint` for `DELETE`, and `idempotentHint` for `PUT`. Agents may use these hints to decide whether to ask the user first, so override a default only to state more risk, never less. For example, a `POST` that deletes data should set `destructive(true)`. The export refuses `read_only(true)` on a `POST`, `PUT`, `PATCH`, or `DELETE` operation, and `destructive(false)` on a `DELETE`. The hints are hints: authorization stays with the gateway and the service.
 - **Write the description for an agent.** Agents choose tools by their descriptions. An exposed operation needs one; the export refuses an operation without it.
 
 ### Policy scope
@@ -71,9 +71,9 @@ enabled = true                 # default false
 
 1. It writes the document-level `x-ferrum-mcp` extension: `enabled`, the namespace, the endpoint when one is set, and an `include` that lists exactly the operations declared with `expose: true`. Without that `include`, Edge would publish every `GET` operation; with it, only declared handlers become tools. With `enabled = false`, the export writes `x-ferrum-mcp: false`. Without an `[agents]` section, the document-level extension is whatever the code wrote, or nothing. A document that already sets one while the manifest has `[agents]` is refused, so the extension has one source.
 2. It adds the method's default annotations to each exposed operation, keeping any hint the code set, so the reviewed document shows what agents will see.
-3. It checks the result (see below). On a problem it exits with code 3 and writes nothing. `--check` runs the same checks before comparing, so a problem is reported as invalid input (exit 3), not as drift (exit 4).
+3. It checks the result (see below). On a problem it exits with code 3 and writes nothing. A selection that publishes undeclared `GET` operations is printed as a warning and does not fail. `--check` runs the same checks before comparing, so a problem is reported as invalid input (exit 3), not as drift (exit 4).
 
-`endpoint_path` must be below `api.public_path`. The publisher (Nexus, an operator) supplies `x-ferrum-proxy` with `listen_path` set to `api.public_path`, as for any exported document.
+`endpoint_path` must be below `api.public_path`. The publisher (Nexus, an operator) supplies `x-ferrum-proxy` with `listen_path` set to `api.public_path`, as for any exported document, and replaces the root `servers` with `[{"url": "/"}]`. Edge builds each tool's path from the listen path, then the server URL, then the Paths key, so keeping the exported `servers` (the public path again) would double the prefix: `/shop/shop/orders`. Nexus and CI's `edge-config` step both replace it.
 
 ## What the export checks
 
@@ -82,7 +82,8 @@ The checks mirror Edge's admission of `x-ferrum-mcp`, plus the agent-safety rule
 - have an `operationId`;
 - have a description (`x-ferrum-mcp.description`, the operation description, or its summary);
 - take a JSON request body, if it takes one (`application/json` or `+json`). Edge refuses a required non-JSON body, and it silently drops an optional one, which an agent then cannot send;
-- not be `HEAD`, `OPTIONS`, or `TRACE` when exposed explicitly;
+- not be `HEAD`, `OPTIONS`, or `TRACE`, however it is selected (`expose: true`, `include` by `operationId`, or by tag);
+- not set hints that state less risk than its method: `readOnlyHint: true` on a `POST`, `PUT`, `PATCH`, or `DELETE`, or `destructiveHint: false` on a `DELETE`;
 - if it changes state, be selected explicitly (`expose: true`, or named by `operationId` in `include`), not by a tag alone;
 - produce a valid tool name that no other operation produces.
 
@@ -90,9 +91,9 @@ Also:
 
 - At least one operation, and at most 256, must be selected.
 - `x-ferrum-mcp` cannot be combined with `x-ferrum-validate`, and the endpoint must not overlap a selected operation's path.
-- Every `x-ferrum-mcp` value must use Edge's closed keys, with the right types. This applies even when the extension is disabled, so a typo fails before it is enabled.
+- Every `x-ferrum-mcp` value must use Edge's closed keys, with the right types. An annotation `title` is at most 8 KiB, as Edge allows. This applies even when the extension is disabled, so a typo fails before it is enabled.
 
-Edge checks more at import than the export does, including reserved header parameters, cookie parameters, parameter styles, and `allowed_methods`. CI submits an exported document to the real `POST /api-specs` on every supported Edge release: the `edge-config` job submits `contracts/fixtures/openapi/orders-api.openapi.json`.
+Edge checks more at import than the export does, including reserved header parameters, cookie parameters, parameter styles, and `allowed_methods`. CI submits an exported document to the real `POST /api-specs` on every supported Edge release: the `edge-config` job submits `contracts/fixtures/openapi/orders-api.openapi.json`, which includes an undeclared `GET` that must stay unpublished.
 
 ## Template
 

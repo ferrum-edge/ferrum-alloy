@@ -5,8 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use ferrum_alloy_edge::agents::{
-    AgentToolError, MAX_TOOLS, X_FERRUM_MCP, default_annotations, fill_default_annotations, lint,
-    prepare, stamp,
+    AgentToolError, MAX_TEXT_BYTES, MAX_TOOLS, X_FERRUM_MCP, default_annotations,
+    fill_default_annotations, lint, prepare, stamp, warnings,
 };
 use ferrum_alloy_edge::manifest::ServiceManifest;
 use serde_json::{Value, json};
@@ -171,7 +171,7 @@ fn stamping_refuses_a_second_source_and_an_empty_selection() {
 fn prepare_stamps_fills_and_reports_every_problem() {
     let mut document = orders();
     let enabled = manifest_with("[agents]\nenabled = true\n");
-    prepare(&mut document, Some(&enabled)).unwrap();
+    assert!(prepare(&mut document, Some(&enabled)).unwrap().is_empty());
     assert_eq!(
         document["paths"]["/orders"]["get"][X_FERRUM_MCP],
         json!({ "expose": true, "annotations": { "readOnlyHint": true } })
@@ -247,6 +247,71 @@ fn head_options_and_trace_cannot_be_exposed() {
         &lint(&document, None),
         "paths./orders.head cannot be exposed to agents",
     );
+
+    // Selected by a tag, too.
+    let mut document = orders();
+    let mut probe = operation("probe_orders", Value::Null);
+    probe["tags"] = json!(["orders"]);
+    document["paths"]["/orders"]["options"] = probe;
+    document[X_FERRUM_MCP] = json!({ "include": { "tags": ["orders"] } });
+    assert_problem(
+        &lint(&document, None),
+        "paths./orders.options cannot be exposed to agents",
+    );
+}
+
+#[test]
+fn annotations_may_only_state_more_risk() {
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!(true);
+    let create = json!({ "expose": true, "annotations": { "readOnlyHint": true } });
+    document["paths"]["/orders"]["post"] = operation("create_order", create);
+    let cancel = json!({ "expose": true, "annotations": { "destructiveHint": false } });
+    document["paths"]["/orders/{id}"]["delete"] = operation("cancel_order", cancel);
+    let problems = lint(&document, None);
+    assert_problem(
+        &problems,
+        "paths./orders.post changes state but claims `readOnlyHint: true`",
+    );
+    assert_problem(
+        &problems,
+        "paths./orders/{id}.delete is a DELETE but claims `destructiveHint: false`",
+    );
+
+    // Stating more risk than the default is always allowed.
+    let get = json!({ "expose": true, "annotations": { "readOnlyHint": false } });
+    document["paths"]["/orders"]["get"] = operation("list_orders", get);
+    let create = json!({ "expose": true, "annotations": { "destructiveHint": true } });
+    document["paths"]["/orders"]["post"] = operation("create_order", create);
+    let cancel = json!({ "expose": true, "annotations": { "idempotentHint": true } });
+    document["paths"]["/orders/{id}"]["delete"] = operation("cancel_order", cancel);
+    assert!(lint(&document, None).is_empty());
+
+    let title = "t".repeat(MAX_TEXT_BYTES + 1);
+    let get = json!({ "expose": true, "annotations": { "title": title } });
+    document["paths"]["/orders"]["get"] = operation("list_orders", get);
+    assert_problem(&lint(&document, None), "is longer than 8192 bytes");
+}
+
+#[test]
+fn a_selection_without_include_is_a_warning() {
+    // Hand-written `x-ferrum-mcp: true` publishes every GET, including the
+    // undeclared `get_order`: valid for Edge, so a warning, not a problem.
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!(true);
+    assert!(lint(&document, None).is_empty());
+    let found = warnings(&document);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("paths./orders/{id}.get"), "{found:?}");
+    assert!(!found[0].contains("paths./orders.get"), "{found:?}");
+
+    let mut stamped = orders();
+    let enabled = manifest_with("[agents]\nenabled = true\n");
+    assert!(prepare(&mut stamped, Some(&enabled)).unwrap().is_empty());
+    document[X_FERRUM_MCP] = json!({ "include": { "tags": ["orders"] } });
+    assert!(warnings(&document).is_empty());
+    document[X_FERRUM_MCP] = json!(false);
+    assert!(warnings(&document).is_empty());
 }
 
 #[test]

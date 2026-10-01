@@ -17,7 +17,8 @@
 //!    ([`fill_default_annotations`]), so the reviewed document shows the hints
 //!    an agent will see;
 //! 3. check the result against Edge's admission rules and Alloy's agent-safety
-//!    rules ([`lint`]).
+//!    rules ([`lint`]), and point out a hand-written selection that publishes
+//!    every `GET` operation ([`warnings`]).
 //!
 //! Nothing here contacts a gateway.
 
@@ -73,6 +74,8 @@ const HTTP_METHODS: &[&str] = &[
 const UNBRIDGED_METHODS: &[&str] = &["head", "options", "trace"];
 /// Methods that change state; a tool for one needs an explicit opt-in.
 const MUTATING_METHODS: &[&str] = &["post", "put", "patch", "delete"];
+/// Most bytes in an annotation title (Edge `MAX_BRIDGE_TEXT_BYTES`).
+pub const MAX_TEXT_BYTES: usize = 8 * 1024;
 /// `$ref` hops followed before giving up.
 const MAX_REF_HOPS: usize = 16;
 
@@ -98,23 +101,49 @@ pub fn default_annotations(method: &str) -> Option<Map<String, Value>> {
     }
 }
 
-/// Stamps, fills, and checks an exported document. See the module
-/// documentation. `manifest` is the service manifest given to the export, if
-/// any.
+/// Stamps, fills, and checks an exported document, and returns its
+/// [`warnings`]. See the module documentation. `manifest` is the service
+/// manifest given to the export, if any.
 pub fn prepare(
     document: &mut Value,
     manifest: Option<&ServiceManifest>,
-) -> Result<(), AgentToolError> {
+) -> Result<Vec<String>, AgentToolError> {
     if let Some(manifest) = manifest {
         stamp(document, manifest)?;
     }
     fill_default_annotations(document);
     let problems = lint(document, manifest.map(|m| m.api.public_path.as_str()));
     if problems.is_empty() {
-        Ok(())
+        Ok(warnings(document))
     } else {
         Err(AgentToolError(problems))
     }
+}
+
+/// Selections that are valid but publish more than any handler declared: an
+/// enabled document-level `x-ferrum-mcp` without `include` publishes every
+/// `GET` operation that does not set `expose: false`. `openapi export` never
+/// writes one from `[agents]`; this catches a hand-written extension.
+pub fn warnings(document: &Value) -> Vec<String> {
+    let mut ignored = Vec::new();
+    let Some(extension) = document_extension(document.get(X_FERRUM_MCP), &mut ignored) else {
+        return Vec::new();
+    };
+    if !extension.include_operations.is_empty() || !extension.include_tags.is_empty() {
+        return Vec::new();
+    }
+    let undeclared: Vec<String> = operations(document)
+        .into_iter()
+        .filter(|(_, method, operation)| *method == "get" && explicit_expose(operation).is_none())
+        .map(|(path, method, _)| format!("paths.{path}.{method}"))
+        .collect();
+    if undeclared.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "`{X_FERRUM_MCP}` has no `include`, so Edge publishes every GET operation, including {} that no handler declared; declare tools with `AgentTool::expose()` and use the manifest's [agents] section to publish only those",
+        undeclared.join(", ")
+    )]
 }
 
 /// Writes the document-level `x-ferrum-mcp` from the manifest's `[agents]`
@@ -218,9 +247,11 @@ pub fn fill_default_annotations(document: &mut Value) {
 /// schema. When the document-level extension is enabled, Edge's selection is
 /// simulated, and each selected operation must have an `operationId` and a
 /// description, must not be `HEAD`, `OPTIONS`, or `TRACE`, must take a JSON
-/// request body if it takes one, and, when it changes state, must be selected
-/// explicitly (`expose: true` or by `operationId` in `include`, never by tag
-/// alone). At least one and at most [`MAX_TOOLS`] operations must be selected,
+/// request body if it takes one, must not set hints that state less risk than
+/// its method (`readOnlyHint: true` on a state-changing operation,
+/// `destructiveHint: false` on a `DELETE`), and, when it changes state, must
+/// be selected explicitly (`expose: true` or by `operationId` in `include`,
+/// never by tag alone). At least one and at most [`MAX_TOOLS`] operations must be selected,
 /// tool names must be unique, and the extension cannot be combined with
 /// `x-ferrum-validate`.
 ///
@@ -260,11 +291,9 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
         let named = id.is_some_and(|id| extension.include_operations.contains(id));
         let explicit = operation_extension.expose == Some(true) || named;
         if UNBRIDGED_METHODS.contains(method) {
-            if explicit {
-                problems.push(format!(
-                    "{location} cannot be exposed to agents: Edge bridges only GET, POST, PUT, PATCH, and DELETE operations"
-                ));
-            }
+            problems.push(format!(
+                "{location} cannot be exposed to agents: Edge bridges only GET, POST, PUT, PATCH, and DELETE operations"
+            ));
             continue;
         }
         selected += 1;
@@ -273,6 +302,7 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
                 "{location} changes state and is selected only by tag; set `expose: true` on it (`AgentTool::expose()`) or name its operationId in `include` to publish it to agents"
             ));
         }
+        problems.extend(understated_risk(method, operation_extension, location));
         match id {
             None => problems.push(format!(
                 "{location} is exposed to agents but has no operationId"
@@ -371,6 +401,28 @@ struct OperationExtension {
     expose: Option<bool>,
     name: Option<String>,
     description: Option<String>,
+    /// Boolean hints the operation sets.
+    hints: Map<String, Value>,
+}
+
+/// Hints may only state more risk than the method's default: a state-changing
+/// operation must not claim `readOnlyHint: true`, and a `DELETE` must not
+/// claim `destructiveHint: false`. An agent may skip asking its user before
+/// calling a tool whose hints understate what it does.
+fn understated_risk(method: &str, extension: &OperationExtension, location: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let hint = |key: &str| extension.hints.get(key).and_then(Value::as_bool);
+    if MUTATING_METHODS.contains(&method) && hint("readOnlyHint") == Some(true) {
+        problems.push(format!(
+            "{location} changes state but claims `readOnlyHint: true`; annotations may only state more risk than the method's default"
+        ));
+    }
+    if method == "delete" && hint("destructiveHint") == Some(false) {
+        problems.push(format!(
+            "{location} is a DELETE but claims `destructiveHint: false`; annotations may only state more risk than the method's default"
+        ));
+    }
+    problems
 }
 
 /// Every `(path, method, operation)` of the document, with Path Item `$ref`s
@@ -715,6 +767,7 @@ fn operation_extension(
     }
     let _title = optional_text(object, "title", &at, problems);
     let description = optional_text(object, "description", &at, problems);
+    let mut hints = Map::new();
     match object.get("annotations") {
         None | Some(Value::Null) => {}
         Some(Value::Object(annotations)) => {
@@ -722,12 +775,16 @@ fn operation_extension(
             unknown_keys(annotations, ANNOTATION_KEYS, &at, problems);
             for (key, value) in annotations {
                 let valid = if key == "title" {
-                    value.is_string()
+                    value.as_str().is_some_and(|title| title.len() <= MAX_TEXT_BYTES)
                 } else {
                     value.is_boolean()
                 };
                 if !valid {
-                    problems.push(format!("`{at}.{key}` has the wrong type"));
+                    problems.push(format!(
+                        "`{at}.{key}` has the wrong type or is longer than {MAX_TEXT_BYTES} bytes"
+                    ));
+                } else if value.is_boolean() {
+                    hints.insert(key.clone(), value.clone());
                 }
             }
         }
@@ -737,6 +794,7 @@ fn operation_extension(
         expose,
         name: name.filter(|name| is_valid_tool_name(name)),
         description,
+        hints,
     }
 }
 

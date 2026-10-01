@@ -226,6 +226,45 @@
           "expose": false
         }
       }
+    },
+    "/orders/{id}/status": {
+      "get": {
+        "operationId": "get_order_status",
+        "parameters": [
+          {
+            "description": "Order identifier",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Status"
+          }
+        },
+        "summary": "Order fulfilment status."
+      }
     }
   },
   "servers": [

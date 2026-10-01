@@ -530,7 +530,8 @@ jobs:
         # path supplies the mount. /api-specs needs database mode, so Edge
         # runs here with SQLite on a tmpfs and a throwaway admin secret.
         # x-ferrum-mcp is new in Edge v0.9.9: from v0.9.9 on, the importer must
-        # generate the mcp_gateway with exactly the declared tools; an older
+        # generate the mcp_gateway with exactly the declared tools (the fixture's
+        # undeclared GET /orders/{id}/status must stay unpublished); an older
         # release must accept the document and ignore the extension.
         env:
           EDGE_IMAGE: ${{ matrix.edge.image }}

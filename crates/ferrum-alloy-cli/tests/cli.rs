@@ -1024,11 +1024,10 @@ fn openapi_export_stamps_agent_tool_metadata() {
     let hints = serde_json::json!({ "destructiveHint": false, "readOnlyHint": false });
     assert_eq!(create, &hints);
     // Undeclared and hidden operations are not touched.
-    assert!(
-        paths["/orders/{id}"]["delete"]
-            .get("x-ferrum-mcp")
-            .is_none()
-    );
+    for path in ["/orders/{id}", "/orders/{id}/status"] {
+        let operation = paths[path].get("delete").unwrap_or(&paths[path]["get"]);
+        assert!(operation.get("x-ferrum-mcp").is_none(), "{path}");
+    }
     assert_eq!(
         paths["/orders/{id}/receipt"]["get"]["x-ferrum-mcp"],
         serde_json::json!({ "expose": false })
@@ -1047,6 +1046,31 @@ fn openapi_export_stamps_agent_tool_metadata() {
         "--check",
     ]);
     assert_eq!(code(&check), 0, "{}", stderr(&check));
+    assert!(!stderr(&check).contains("warning"), "{}", stderr(&check));
+
+    // A hand-written `x-ferrum-mcp: true` without `include` is valid for
+    // Edge but publishes the undeclared GET operations: a warning.
+    let mut document = read_json(Path::new(&input));
+    document["x-ferrum-mcp"] = true.into();
+    let input = write(dir.path(), "hand-written.json", &document.to_string());
+    let output = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let warning = stderr(&output);
+    assert!(
+        warning.contains("warning: `x-ferrum-mcp` has no `include`"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("paths./orders/{id}/status.get"),
+        "{warning}"
+    );
 }
 
 /// Breaks the agent-tool fixture in one of the ways the export refuses and
@@ -1102,6 +1126,20 @@ fn break_agent_tools(case: usize, document: &mut serde_json::Value) -> Option<&'
                 }});
             }
             Some("selects 259 operations; Edge publishes at most 256")
+        }
+        8 => {
+            let tool = &mut document["paths"]["/orders"]["post"]["x-ferrum-mcp"];
+            tool["annotations"]["readOnlyHint"] = true.into();
+            Some("paths./orders.post changes state but claims `readOnlyHint: true`")
+        }
+        9 => {
+            let cancel = &mut document["paths"]["/orders/{id}"]["delete"];
+            cancel["x-ferrum-mcp"] = serde_json::json!({
+                "expose": true,
+                "description": "Cancel one of the caller's orders",
+                "annotations": { "destructiveHint": false }
+            });
+            Some("paths./orders/{id}.delete is a DELETE but claims `destructiveHint: false`")
         }
         _ => None,
     }

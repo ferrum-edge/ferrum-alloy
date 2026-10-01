@@ -124,15 +124,17 @@ impl AgentTool {
     }
 
     /// `readOnlyHint`: the tool does not change state. Defaults to `true`
-    /// for `GET` and `false` otherwise.
+    /// for `GET` and `false` otherwise; the export refuses `true` on a
+    /// `POST`, `PUT`, `PATCH`, or `DELETE` operation.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.annotations.read_only_hint = Some(read_only);
         self
     }
 
     /// `destructiveHint`: a state change may delete or overwrite data.
-    /// Defaults to `true` for `DELETE`; MCP clients assume `true` for any
-    /// other tool that is not read-only and does not say otherwise.
+    /// Defaults to `true` for `DELETE`, where the export refuses `false`; MCP
+    /// clients assume `true` for any other tool that is not read-only and
+    /// does not say otherwise.
     pub fn destructive(mut self, destructive: bool) -> Self {
         self.annotations.destructive_hint = Some(destructive);
         self
