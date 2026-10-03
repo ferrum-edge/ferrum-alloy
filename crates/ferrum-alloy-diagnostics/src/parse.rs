@@ -658,7 +658,7 @@ mod tests {
             (0..10_000)
                 .map(|index| {
                     if index == 9_999 {
-                        json!("oversized")
+                        json!("x".repeat(2_049))
                     } else {
                         json!(0)
                     }
@@ -672,8 +672,14 @@ mod tests {
         }
 
         POINTER_SEGMENTS_VISITED.with(|visited| visited.set(0));
-        let error = check_string_lengths(&value, &mut Vec::new(), 2).unwrap_err();
-        assert!(matches!(error, ReportError::TooLarge(_)));
+        let error = check_string_lengths(&value, &mut Vec::new(), 2_048).unwrap_err();
+        let expected_path = format!("/{}/9999", [key.as_str(); 30].join("/"));
+        assert_eq!(
+            error,
+            ReportError::TooLarge(format!(
+                "string at {expected_path} is 2049 bytes (limit 2048)"
+            ))
+        );
         POINTER_SEGMENTS_VISITED.with(|visited| {
             assert_eq!(visited.get(), 31, "each ancestor segment is formatted once")
         });
@@ -681,14 +687,14 @@ mod tests {
 
     #[test]
     fn parser_locations_escape_control_characters_in_keys() {
-        let key = "x-a\nerror: forged line\u{1b}[31m";
+        let key = "\n\u{1b}";
         let mut map = Map::new();
-        map.insert(key.into(), json!("oversized"));
+        map.insert(key.into(), json!("xyz"));
         let error = check_string_lengths(&Value::Object(map), &mut Vec::new(), 2).unwrap_err();
         assert_eq!(
             error,
             ReportError::TooLarge(
-                r"string at /x-a\nerror: forged line\u{1b}[31m is 9 bytes (limit 2)".into()
+                r"string at /\n\u{1b} is 3 bytes (limit 2)".into()
             )
         );
     }
