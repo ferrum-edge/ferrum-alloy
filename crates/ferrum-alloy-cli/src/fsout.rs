@@ -176,10 +176,7 @@ pub(crate) fn create_dirs(root: &Path, path: &Path) -> Result<(), CliError> {
 /// Creates a new output file exclusively, so a pre-existing leaf (including
 /// a symlink or Windows reparse point) cannot be followed or overwritten.
 pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     if let Err(error) = file.write_all(bytes) {
         drop(file);
         let _ = std::fs::remove_file(path);
