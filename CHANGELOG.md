@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- Keep an upgraded (WebSocket) connection's slot with its socket: it now
+  counts against `server.max_connections` and in
+  `ferrum_alloy_active_connections` until the application drops it, so
+  upgraded sessions can no longer outnumber the connection limit. Shutdown
+  drains upgraded connections too: still open at `shutdown.drain_timeout_ms`,
+  every read and write on them fails and the tasks waiting on them are woken,
+  they are counted in `ferrum_alloy_force_closed_connections_total`, and
+  serving waits up to one more second for the application to drop them.
+  Services with many long-lived sessions may need a larger `max_connections`.
+  Addresses GHSA-p9fc-ggvj-g423.
+- Close HTTP/2 connections whose peer withholds `WINDOW_UPDATE` while Hyper
+  holds part of a response chunk beyond the flow-control window and the body
+  waits for the application: response data handed to Hyper now counts as
+  waiting until written, so `server.write_stall_timeout_ms` applies.
+  Addresses GHSA-8cm5-mjvm-778g.
 - Reject service manifest proxy IDs when a generated upstream or plugin ID
   would exceed Ferrum Edge's 254-character resource ID limit.
 - Correct `alloy.response.body.bytes`: it counts the data-frame payload bytes

@@ -665,7 +665,10 @@ impl AlloyParts {
     /// connections still open when `shutdown.drain_timeout_ms` runs out are
     /// force-closed and stream tasks still running are cancelled, and it
     /// also waits for those tasks to finish unwinding. Upgraded (WebSocket)
-    /// sessions are not connections here; see [`Lifecycle::shutdown_token`].
+    /// connections count against `server.max_connections` and are drained
+    /// too: still open at the budget, their reads and writes fail, and it
+    /// waits up to one more second for the application to drop them. Close
+    /// them gracefully by watching [`Lifecycle::shutdown_token`].
     pub async fn serve_on(
         mut self,
         app_listener: TcpListener,

@@ -14,9 +14,13 @@
 //! not take counts as in flight, so the write stall timeout bounds the time
 //! a connection may go without writing any response data while a response
 //! waits to be written: a peer that withholds HTTP/2 `WINDOW_UPDATE` or
-//! keeps a zero TCP receive window cannot keep its slot. An established
-//! HTTP/2 connection is sent `GOAWAY` at any of these deadlines, so a client
-//! can retry elsewhere, and is closed shortly after.
+//! keeps a zero TCP receive window cannot keep its slot. On HTTP/2, response
+//! data waits from the moment a response body hands it to Hyper until the
+//! transport has written it, including the part of a chunk that Hyper holds
+//! beyond the peer's flow-control window while the body goes back to waiting
+//! for the application. An established HTTP/2 connection is sent `GOAWAY` at
+//! any of these deadlines, so a client can retry elsewhere, and is closed
+//! shortly after.
 //!
 //! On shutdown it stops accepting, abandons unfinished TLS handshakes, asks
 //! every connection to finish (HTTP/1.1 `Connection: close` after the current
@@ -28,10 +32,14 @@
 //! task has ended, including aborted tasks that are still unwinding, so every
 //! connection socket is closed and no handler is running by then.
 //!
-//! Upgraded connections (WebSocket) leave Hyper's control after the `101`
-//! response: they are not counted against the connection limit and are not
-//! drained. Applications own them and should watch
-//! [`crate::Lifecycle::shutdown_token`].
+//! An upgraded connection (WebSocket) leaves Hyper after the `101` response,
+//! but its slot stays with its socket: it counts against the connection limit
+//! and in `active_connections` until the application drops it. The drain
+//! waits for upgraded connections as well. Applications should close them
+//! when [`crate::Lifecycle::shutdown_token`] is cancelled; those still open
+//! at the drain budget are force-closed: every read and write on them fails
+//! and the tasks waiting on them are woken, so an application that reads or
+//! writes its session ends it, and the listener waits briefly for that.
 
 use std::io;
 use std::net::SocketAddr;
@@ -44,6 +52,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
+use bytes::Buf;
 use ferrum_alloy_telemetry::PeerInfo;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -57,15 +66,21 @@ use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tower::ServiceExt;
 
 use crate::lifecycle::Lifecycle;
+
+/// How long the listener waits, after the drain budget, for applications to
+/// drop upgraded connections whose reads and writes now fail.
+const UPGRADED_CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 /// Connection-level counters.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct ServerStats {
-    /// Connections currently open (excluding upgraded sessions).
+    /// Connections currently open, including upgraded (WebSocket)
+    /// connections that the application has not dropped yet.
     pub active_connections: AtomicU64,
     /// Connections closed immediately because the limit was reached.
     pub rejected_connections: AtomicU64,
@@ -84,7 +99,8 @@ pub struct ServerStats {
     /// When the serving TLS certificate and client CRLs stop being valid.
     #[cfg(feature = "tls")]
     pub(crate) tls_expiry: std::sync::Mutex<crate::tls::Expiry>,
-    /// Connections force-closed after the drain budget.
+    /// Connections, upgraded ones included, force-closed after the drain
+    /// budget.
     pub force_closed_connections: AtomicU64,
     /// Connections closed because no request head arrived within the header
     /// read timeout.
@@ -108,7 +124,7 @@ impl ServerStats {
             (
                 "ferrum_alloy_active_connections",
                 "gauge",
-                "Open connections.",
+                "Open connections, including upgraded ones.",
                 &self.active_connections,
             ),
             (
@@ -189,19 +205,33 @@ impl ServerStats {
     }
 }
 
-/// Holds a connection slot and the `active_connections` gauge for the life of
-/// a connection task, including a task aborted at the end of the drain.
+/// Holds a connection slot, the `active_connections` gauge, and the drain's
+/// count of open sockets for as long as the connection's socket is open. The
+/// connection task holds it until its transport exists, then the transport
+/// does, so that it stays with the socket when Hyper hands the socket over to
+/// the application for an upgraded (WebSocket) connection. Dropping it, with
+/// the socket or with an aborted connection task, releases all three, once.
 struct ActiveConnection {
     stats: Arc<ServerStats>,
+    /// Fails the transport once the listener force-closes its connections.
+    close: ForceClose,
     _permit: OwnedSemaphorePermit,
+    _socket: TaskTrackerToken,
 }
 
 impl ActiveConnection {
-    fn open(stats: Arc<ServerStats>, permit: OwnedSemaphorePermit) -> Self {
+    fn open(
+        stats: Arc<ServerStats>,
+        close: ForceClose,
+        permit: OwnedSemaphorePermit,
+        socket: TaskTrackerToken,
+    ) -> Self {
         stats.active_connections.fetch_add(1, Ordering::Relaxed);
         Self {
             stats,
+            close,
             _permit: permit,
+            _socket: socket,
         }
     }
 }
@@ -230,9 +260,11 @@ pub(crate) struct ServeOptions {
     pub(crate) tls: Option<crate::tls::TlsServer>,
 }
 
-/// The HTTP/2 stream tasks of one listener. Hyper spawns one per request:
-/// it runs the handler and then sends the response body, apart from the
-/// connection task. The drain waits for them and cancels them at the budget.
+/// The HTTP/2 stream tasks of one listener, and the signal that force-closes
+/// its connections. Hyper spawns one stream task per request: it runs the
+/// handler and then sends the response body, apart from the connection task.
+/// The drain waits for them; at the budget it cancels them and fails every
+/// read and write on the listener's connections, upgraded ones included.
 #[derive(Default)]
 struct Streams {
     tracker: TaskTracker,
@@ -241,14 +273,21 @@ struct Streams {
 }
 
 impl Streams {
-    /// An executor for the stream tasks of one connection. It gets a child
-    /// token, so stream tasks on different connections never share the lock
-    /// behind a token or its wake-up list.
-    fn executor(&self) -> StreamExecutor {
-        StreamExecutor {
-            tracker: self.tracker.clone(),
+    /// The force-close signal of one connection, shared by its transport and
+    /// its stream tasks. It gets a child token, so tasks on different
+    /// connections never share the lock behind a token or its wake-up list.
+    fn connection(&self) -> ForceClose {
+        ForceClose {
             token: self.token.child_token(),
             cancelled: Arc::clone(&self.cancelled),
+        }
+    }
+
+    /// An executor for the stream tasks of the connection `close` belongs to.
+    fn executor(&self, close: &ForceClose) -> StreamExecutor {
+        StreamExecutor {
+            tracker: self.tracker.clone(),
+            close: close.clone(),
         }
     }
 
@@ -258,12 +297,77 @@ impl Streams {
     }
 }
 
+/// Tells one connection's transport and stream tasks that the listener has
+/// force-closed its connections at the end of the drain budget.
+#[derive(Clone)]
+struct ForceClose {
+    token: CancellationToken,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ForceClose {
+    /// Whether the listener has force-closed its connections. Takes no lock.
+    fn is_set(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn waiter(&self) -> CloseWaiter {
+        CloseWaiter {
+            wake: self.token.clone().cancelled_owned(),
+            cancelled: Arc::clone(&self.cancelled),
+            registered: None,
+        }
+    }
+
+    /// `true` once the listener has force-closed its connections. Otherwise
+    /// `waiter`, made on first use, wakes the task of `cx` when it does.
+    fn wait(&self, waiter: &mut Option<Pin<Box<CloseWaiter>>>, cx: &mut Context<'_>) -> bool {
+        waiter
+            .get_or_insert_with(|| Box::pin(self.waiter()))
+            .as_mut()
+            .poll_closed(cx)
+    }
+}
+
+pin_project! {
+    /// Wakes the task that polls it when its listener force-closes its
+    /// connections. It registers for the cancellation wake-up only on its
+    /// first poll or when its waker changes, and otherwise checks an atomic
+    /// flag, so a busy task takes no lock.
+    struct CloseWaiter {
+        #[pin]
+        wake: WaitForCancellationFutureOwned,
+        cancelled: Arc<AtomicBool>,
+        registered: Option<Waker>,
+    }
+}
+
+impl CloseWaiter {
+    /// `true` once the listener has force-closed its connections; otherwise
+    /// the task of `cx` is woken when it does.
+    fn poll_closed(self: Pin<&mut Self>, cx: &mut Context<'_>) -> bool {
+        let this = self.project();
+        // The flag is set before the token is cancelled, so the wake-up that
+        // cancellation sends always finds it set.
+        if this.cancelled.load(Ordering::Acquire) {
+            return true;
+        }
+        let registered = matches!(this.registered, Some(waker) if waker.will_wake(cx.waker()));
+        if !registered {
+            if this.wake.poll(cx).is_ready() {
+                return true;
+            }
+            *this.registered = Some(cx.waker().clone());
+        }
+        false
+    }
+}
+
 /// Spawns the stream tasks of one connection on its listener's [`Streams`].
 #[derive(Clone)]
 struct StreamExecutor {
     tracker: TaskTracker,
-    token: CancellationToken,
-    cancelled: Arc<AtomicBool>,
+    close: ForceClose,
 }
 
 impl<F> hyper::rt::Executor<F> for StreamExecutor
@@ -274,9 +378,7 @@ where
     fn execute(&self, future: F) {
         self.tracker.spawn(Cancellable {
             future,
-            wake_on_cancel: self.token.clone().cancelled_owned(),
-            cancelled: Arc::clone(&self.cancelled),
-            registered: None,
+            closed: self.close.waiter(),
         });
     }
 }
@@ -284,16 +386,11 @@ where
 pin_project! {
     /// A stream task that ends once its listener cancels its streams, which
     /// drops the handler and response body like aborting the task would.
-    /// It registers for the cancellation wake-up only on its first poll or
-    /// when its waker changes, and otherwise checks an atomic flag, so waking
-    /// a busy stream takes no lock.
     struct Cancellable<F> {
         #[pin]
         future: F,
         #[pin]
-        wake_on_cancel: WaitForCancellationFutureOwned,
-        cancelled: Arc<AtomicBool>,
-        registered: Option<Waker>,
+        closed: CloseWaiter,
     }
 }
 
@@ -302,17 +399,8 @@ impl<F: Future> Future for Cancellable<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.project();
-        // The flag is set before the token is cancelled, so the wake-up that
-        // cancellation sends always finds it set.
-        if this.cancelled.load(Ordering::Acquire) {
+        if this.closed.poll_closed(cx) {
             return Poll::Ready(());
-        }
-        let registered = matches!(this.registered, Some(waker) if waker.will_wake(cx.waker()));
-        if !registered {
-            if this.wake_on_cancel.poll(cx).is_ready() {
-                return Poll::Ready(());
-            }
-            *this.registered = Some(cx.waker().clone());
         }
         this.future.poll(cx).map(|_| ())
     }
@@ -339,9 +427,12 @@ fn builder(options: &ServeOptions, streams: StreamExecutor) -> Builder<StreamExe
 
 /// Serves `app` on `listener` until the lifecycle stops accepting, then
 /// drains within the budget. Returns once every connection task and HTTP/2
-/// stream task has ended: connections still open when the budget runs out
-/// are aborted and counted in `force_closed_connections`, and stream tasks
-/// still running are cancelled and counted in `force_closed_streams`.
+/// stream task has ended and every upgraded connection has been dropped:
+/// connections still open when the budget runs out are aborted, or for
+/// upgraded ones failed, and counted in `force_closed_connections`, and
+/// stream tasks still running are cancelled and counted in
+/// `force_closed_streams`. An application that keeps an upgraded connection
+/// without reading or writing it gets `UPGRADED_CLOSE_GRACE` to drop it.
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -350,6 +441,9 @@ pub(crate) async fn serve(
     stats: Arc<ServerStats>,
 ) -> io::Result<()> {
     let streams = Streams::default();
+    // Every open connection socket, whether its connection task still serves
+    // it or Hyper has handed it over to the application for an upgrade.
+    let sockets = TaskTracker::new();
     let permits = Arc::new(Semaphore::new(options.max_connections));
     let mut connections = JoinSet::new();
     let mut backoff = Duration::from_millis(5);
@@ -386,24 +480,29 @@ pub(crate) async fn serve(
             continue;
         };
         let _ = stream.set_nodelay(true);
-        let executor = streams.executor();
+        let close = streams.connection();
+        let executor = streams.executor(&close);
+        let socket = sockets.token();
         let app = app.clone();
         let lifecycle = lifecycle.clone();
         let stats = Arc::clone(&stats);
         let options = options.clone();
         connections.spawn(async move {
-            let _active = ActiveConnection::open(Arc::clone(&stats), permit);
+            let active = ActiveConnection::open(stats, close, permit, socket);
             let builder = builder(&options, executor);
-            handle(stream, remote, builder, app, &options, &lifecycle, &stats).await;
+            handle(stream, remote, active, builder, app, &options, &lifecycle).await;
         });
     }
     drop(listener);
     lifecycle.drain_connections().cancel();
     let drained = tokio::time::timeout(options.drain_timeout, async {
         while connections.join_next().await.is_some() {}
-        // Every connection task has ended, so no stream task can start now.
+        // Every connection task has ended, so no stream task can start now,
+        // and the sockets still open are upgraded connections.
         streams.tracker.close();
         streams.tracker.wait().await;
+        sockets.close();
+        sockets.wait().await;
     })
     .await
     .is_ok();
@@ -411,19 +510,25 @@ pub(crate) async fn serve(
         while connections.try_join_next().is_some() {}
         let remaining = connections.len();
         let remaining_streams = streams.tracker.len();
+        // Each connection task holds one socket; the others are upgraded.
+        let remaining_upgraded = sockets.len().saturating_sub(remaining);
         tracing::warn!(
             target: "ferrum_alloy::server",
             listener = options.name,
             remaining,
+            remaining_upgraded,
             remaining_streams,
             "drain budget exhausted; closing remaining connections"
         );
         stats
             .force_closed_connections
-            .fetch_add(remaining as u64, Ordering::Relaxed);
+            .fetch_add((remaining + remaining_upgraded) as u64, Ordering::Relaxed);
         stats
             .force_closed_streams
             .fetch_add(remaining_streams as u64, Ordering::Relaxed);
+        // This also fails every read and write on the listener's transports
+        // and wakes the tasks waiting on them, including the application
+        // tasks that own upgraded connections.
         streams.cancel();
         // Aborting a task drops its connection and socket; `shutdown` returns
         // once every task has ended, including aborted tasks still unwinding.
@@ -432,6 +537,21 @@ pub(crate) async fn serve(
         // next time it runs; `wait` returns once every one has done so.
         streams.tracker.close();
         streams.tracker.wait().await;
+        // An upgraded socket closes when the application drops it, which an
+        // application reading or writing it does once that fails. Alloy
+        // cannot drop it for the application, so the wait is bounded.
+        sockets.close();
+        if tokio::time::timeout(UPGRADED_CLOSE_GRACE, sockets.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "ferrum_alloy::server",
+                listener = options.name,
+                remaining_upgraded = sockets.len(),
+                "upgraded connections still held by the application; their reads and writes fail"
+            );
+        }
     }
     Ok(())
 }
@@ -439,11 +559,11 @@ pub(crate) async fn serve(
 async fn handle(
     stream: TcpStream,
     remote: SocketAddr,
+    active: ActiveConnection,
     builder: Builder<StreamExecutor>,
     app: Router,
     options: &ServeOptions,
     lifecycle: &Lifecycle,
-    stats: &ServerStats,
 ) {
     #[cfg(feature = "tls")]
     if let Some(tls) = &options.tls {
@@ -461,12 +581,18 @@ async fn handle(
         let stream = match handshake {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
-                stats.tls_handshake_failures.fetch_add(1, Ordering::Relaxed);
+                active
+                    .stats
+                    .tls_handshake_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(target: "ferrum_alloy::tls", %remote, %error, "TLS handshake failed");
                 return;
             }
             Err(_) => {
-                stats.tls_handshake_failures.fetch_add(1, Ordering::Relaxed);
+                active
+                    .stats
+                    .tls_handshake_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(target: "ferrum_alloy::tls", %remote, "TLS handshake timed out");
                 return;
             }
@@ -475,14 +601,14 @@ async fn handle(
             remote_addr: Some(remote),
             tls: crate::tls::peer_identity(stream.get_ref().1),
         };
-        serve_io(stream, peer, builder, app, options, lifecycle, stats).await;
+        serve_io(stream, peer, active, builder, app, options, lifecycle).await;
         return;
     }
     let peer = PeerInfo {
         remote_addr: Some(remote),
         tls: None,
     };
-    serve_io(stream, peer, builder, app, options, lifecycle, stats).await;
+    serve_io(stream, peer, active, builder, app, options, lifecycle).await;
 }
 
 /// Request activity on one connection, shared by the connection task with
@@ -502,6 +628,15 @@ struct Activity {
     written: AtomicU64,
     /// Whether the last write to the transport could not complete.
     write_blocked: AtomicBool,
+    /// HTTP/2 response data that bodies have handed to Hyper and the
+    /// transport has not written. Hyper takes a whole chunk as soon as the
+    /// peer's flow-control window has room for one byte of it, holds what
+    /// does not fit, and goes back to the body, which may then wait for the
+    /// application: only this count still shows the held data.
+    held: AtomicU64,
+    /// HTTP/2 responses that have handed data to Hyper and have not ended or
+    /// been dropped.
+    streaming: AtomicUsize,
 }
 
 impl Activity {
@@ -519,11 +654,33 @@ impl Activity {
         self.written.load(Ordering::Relaxed)
     }
 
+    /// Takes `len` bytes off `held`, never below zero: data the transport
+    /// wrote, or that a reset stream discarded.
+    fn release(&self, len: u64) {
+        if len == 0 || self.held.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let release = |held: u64| Some(held.saturating_sub(len));
+        let _ = self
+            .held
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, release);
+    }
+
+    /// Whether HTTP/2 response data handed to Hyper is still unwritten while
+    /// a response that handed data over is still running. Once none is, an
+    /// ended response's unwritten data is left to the idle timeout.
+    fn data_held(&self) -> bool {
+        self.streaming.load(Ordering::Relaxed) > 0 && self.held.load(Ordering::Relaxed) > 0
+    }
+
     /// Whether response data is waiting for the transport: the transport
-    /// cannot take a write, or a response body has produced data that the
-    /// connection cannot send yet (HTTP/2 flow control).
+    /// cannot take a write, a response body has produced data that the
+    /// connection cannot send yet, or HTTP/2 flow control holds data that a
+    /// response body handed over (see `held`).
     fn response_pending(&self) -> bool {
-        self.write_blocked.load(Ordering::Relaxed) || self.unsent.load(Ordering::Relaxed) > 0
+        self.write_blocked.load(Ordering::Relaxed)
+            || self.unsent.load(Ordering::Relaxed) > 0
+            || self.data_held()
     }
 }
 
@@ -533,15 +690,27 @@ struct InFlight {
     activity: Arc<Activity>,
     /// Whether this response is counted in `unsent`.
     unsent: bool,
+    /// Whether the response goes out on HTTP/2, whose flow control lets Hyper
+    /// hold data that the transport has not written.
+    http2: bool,
+    /// The length of the last data frame the body handed to Hyper on HTTP/2,
+    /// and the response data written on the connection before then. Once
+    /// set, this response is counted in `streaming`.
+    last_data: Option<(u64, u64)>,
+    /// Whether the body has ended, so that Hyper still sends what it holds.
+    ended: bool,
 }
 
 impl InFlight {
-    fn start(activity: &Arc<Activity>) -> Self {
+    fn start(activity: &Arc<Activity>, http2: bool) -> Self {
         activity.in_flight.fetch_add(1, Ordering::Relaxed);
         activity.started.fetch_add(1, Ordering::Relaxed);
         Self {
             activity: Arc::clone(activity),
             unsent: false,
+            http2,
+            last_data: None,
+            ended: false,
         }
     }
 
@@ -559,11 +728,37 @@ impl InFlight {
             }
         }
     }
+
+    /// Records a data frame of `len` bytes handed to Hyper. It counts as held
+    /// until the transport has written as much response data.
+    fn handed_over(&mut self, len: u64) {
+        if !self.http2 || len == 0 {
+            return;
+        }
+        if self.last_data.is_none() {
+            self.activity.streaming.fetch_add(1, Ordering::Relaxed);
+        }
+        self.activity.held.fetch_add(len, Ordering::Relaxed);
+        self.last_data = Some((len, self.activity.written()));
+    }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         self.set_unsent(false);
+        if let Some((len, written_before)) = self.last_data {
+            if !self.ended {
+                // Hyper drops a body that has not ended when its stream is
+                // reset or fails, which discards what the stream still held:
+                // at most the last frame, less the response data written
+                // since it was handed over. That is exact when no other
+                // stream was sending. Releasing more could hide another
+                // stream's held data, so an estimate may only fall short.
+                let written_since = self.activity.written().saturating_sub(written_before);
+                self.activity.release(len.saturating_sub(written_since));
+            }
+            self.activity.streaming.fetch_sub(1, Ordering::Relaxed);
+        }
         if self.activity.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.activity.idle.notify_one();
         }
@@ -579,18 +774,19 @@ struct TrackRequests<S> {
     activity: Arc<Activity>,
 }
 
-impl<S, R, B> hyper::service::Service<R> for TrackRequests<S>
+impl<S, R, B> hyper::service::Service<http::Request<R>> for TrackRequests<S>
 where
-    S: hyper::service::Service<R, Response = http::Response<B>>,
+    S: hyper::service::Service<http::Request<R>, Response = http::Response<B>>,
 {
     type Response = http::Response<TrackedBody<B>>;
     type Error = S::Error;
     type Future = TrackedResponse<S::Future>;
 
-    fn call(&self, request: R) -> Self::Future {
+    fn call(&self, request: http::Request<R>) -> Self::Future {
+        let http2 = request.version() == http::Version::HTTP_2;
         TrackedResponse {
             inner: self.inner.call(request),
-            in_flight: Some(InFlight::start(&self.activity)),
+            in_flight: Some(InFlight::start(&self.activity, http2)),
         }
     }
 }
@@ -622,7 +818,8 @@ where
 pin_project! {
     /// A response body that keeps its request in flight until it ends or is
     /// dropped. Between producing data and being polled again, it counts as
-    /// unsent: Hyper polls a body again only once it can take more data.
+    /// unsent: Hyper polls a body again only once it can take more data. On
+    /// HTTP/2, the data it produced also counts as held until written.
     struct TrackedBody<B> {
         #[pin]
         inner: B,
@@ -641,16 +838,29 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        let this = self.project();
-        let frame = this.inner.poll_frame(cx);
+        let mut this = self.project();
+        let frame = this.inner.as_mut().poll_frame(cx);
+        let Some(in_flight) = this.in_flight.as_mut() else {
+            return frame;
+        };
         match &frame {
             // The response has ended, even if Hyper holds on to the body.
-            Poll::Ready(None) => *this.in_flight = None,
-            frame => {
-                if let Some(in_flight) = this.in_flight {
-                    in_flight.set_unsent(matches!(frame, Poll::Ready(Some(Ok(_)))));
+            Poll::Ready(None) => {
+                in_flight.ended = true;
+                *this.in_flight = None;
+            }
+            Poll::Ready(Some(Ok(frame))) => {
+                in_flight.set_unsent(true);
+                if let Some(data) = frame.data_ref() {
+                    in_flight.handed_over(data.remaining() as u64);
+                }
+                // Hyper polls a body no more after trailers or once it
+                // reports its end, and still sends what it holds of it.
+                if frame.is_trailers() || this.inner.is_end_stream() {
+                    in_flight.ended = true;
                 }
             }
+            _ => in_flight.set_unsent(false),
         }
         frame
     }
@@ -747,25 +957,68 @@ impl Frames {
 
 /// The transport of one connection, which records response progress for the
 /// write stall timeout: whether the last write could not complete, and how
-/// many response data bytes have been written. It is only used from the
-/// connection task, which also reads what it records.
+/// many response data bytes have been written. The connection task uses it
+/// and reads what it records. After an upgrade (WebSocket) the application
+/// owns it, and with it the connection's slot.
+///
+/// Once the listener force-closes its connections at the end of the drain
+/// budget, every read and write fails, and a task waiting on one is woken
+/// so that it fails too. Checking for that takes no lock: a waiting task
+/// registers for the wake-up only the first time it waits, or when its
+/// waker changes.
 struct Transport<I> {
     io: I,
     activity: Arc<Activity>,
     output: Output,
     response_written: u64,
     blocked: bool,
+    /// The connection's slot, released when the socket is dropped.
+    active: ActiveConnection,
+    /// Wake the tasks waiting to read and to write at a force-close.
+    read_waiter: Option<Pin<Box<CloseWaiter>>>,
+    write_waiter: Option<Pin<Box<CloseWaiter>>>,
+}
+
+/// The error of every read and write on a force-closed transport.
+fn force_closed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "connection force-closed at the end of the drain budget",
+    )
+}
+
+/// `result`, or a force-close error if it is pending and the listener has
+/// force-closed the connection. Otherwise `waiter` wakes the task of `cx`
+/// when the listener does, so that its next attempt fails.
+fn unless_closed<T>(
+    result: Poll<io::Result<T>>,
+    close: &ForceClose,
+    waiter: &mut Option<Pin<Box<CloseWaiter>>>,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<T>> {
+    if result.is_pending() && close.wait(waiter, cx) {
+        return Poll::Ready(Err(force_closed()));
+    }
+    result
 }
 
 impl<I> Transport<I> {
-    fn new(io: I, activity: Arc<Activity>) -> Self {
+    fn new(io: I, activity: Arc<Activity>, active: ActiveConnection) -> Self {
         Self {
             io,
             activity,
             output: Output::Unknown,
             response_written: 0,
             blocked: false,
+            active,
+            read_waiter: None,
+            write_waiter: None,
         }
+    }
+
+    /// Whether the listener has force-closed the connection.
+    fn closed(&self) -> bool {
+        self.active.close.is_set()
     }
 
     /// Records whether a write, flush, or shutdown could not complete. Only
@@ -804,6 +1057,9 @@ impl<I> Transport<I> {
             self.activity
                 .written
                 .store(self.response_written, Ordering::Relaxed);
+            if let Output::Http2(_) = self.output {
+                self.activity.release(data);
+            }
         }
     }
 }
@@ -814,7 +1070,12 @@ impl<I: AsyncRead + Unpin> AsyncRead for Transport<I> {
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+        let this = self.get_mut();
+        if this.closed() {
+            return Poll::Ready(Err(force_closed()));
+        }
+        let result = Pin::new(&mut this.io).poll_read(cx, buf);
+        unless_closed(result, &this.active.close, &mut this.read_waiter, cx)
     }
 }
 
@@ -825,9 +1086,12 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        if this.closed() {
+            return Poll::Ready(Err(force_closed()));
+        }
         let result = Pin::new(&mut this.io).poll_write(cx, buf);
         this.record_write(&result, [buf]);
-        result
+        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
     }
 
     fn poll_write_vectored(
@@ -836,9 +1100,12 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        if this.closed() {
+            return Poll::Ready(Err(force_closed()));
+        }
         let result = Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
         this.record_write(&result, bufs.iter().map(|buf| &**buf));
-        result
+        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -847,16 +1114,22 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if this.closed() {
+            return Poll::Ready(Err(force_closed()));
+        }
         let result = Pin::new(&mut this.io).poll_flush(cx);
         this.set_blocked(result.is_pending());
-        result
+        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if this.closed() {
+            return Poll::Ready(Err(force_closed()));
+        }
         let result = Pin::new(&mut this.io).poll_shutdown(cx);
         this.set_blocked(result.is_pending());
-        result
+        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
     }
 }
 
@@ -879,14 +1152,15 @@ enum Phase {
 async fn serve_io<I>(
     io: I,
     peer: PeerInfo,
+    active: ActiveConnection,
     builder: Builder<StreamExecutor>,
     app: Router,
     options: &ServeOptions,
     lifecycle: &Lifecycle,
-    stats: &ServerStats,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let stats = Arc::clone(&active.stats);
     let remote = peer.remote_addr;
     let activity = Arc::new(Activity::default());
     let service = app.map_request(move |request: http::Request<Incoming>| {
@@ -901,7 +1175,9 @@ async fn serve_io<I>(
         inner: TowerToHyperService::new(service),
         activity: Arc::clone(&activity),
     };
-    let io = TokioIo::new(Transport::new(io, Arc::clone(&activity)));
+    // The transport holds the connection's slot from here on, so that the
+    // slot stays with the socket if Hyper hands it over for an upgrade.
+    let io = TokioIo::new(Transport::new(io, Arc::clone(&activity), active));
     let connection = builder.serve_connection_with_upgrades(io, service);
     tokio::pin!(connection);
     // Protocol detection waits for enough bytes to rule out the HTTP/2

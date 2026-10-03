@@ -10,8 +10,10 @@ use tokio_util::sync::CancellationToken;
 /// A handle to the service lifecycle. Cheap to clone.
 ///
 /// Applications that own long-lived work (WebSocket sessions, background
-/// tasks) should watch [`Lifecycle::shutdown_token`]: HTTP draining covers
-/// requests and response streams, not upgraded connections or detached tasks.
+/// tasks) should watch [`Lifecycle::shutdown_token`]. HTTP draining waits for
+/// requests, response streams, and upgraded connections, and at the drain
+/// budget fails every read and write on upgraded connections still open, but
+/// only the application can end a session gracefully or stop detached tasks.
 #[derive(Debug, Clone)]
 pub struct Lifecycle {
     inner: Arc<Inner>,
