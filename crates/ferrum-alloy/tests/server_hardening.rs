@@ -659,10 +659,7 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         "idle={}, write_stall={}, first_request={}",
         server.stats.idle_timeouts.load(Ordering::Relaxed),
         server.stats.write_stall_timeouts.load(Ordering::Relaxed),
-        server
-            .stats
-            .first_request_timeouts
-            .load(Ordering::Relaxed),
+        server.stats.first_request_timeouts.load(Ordering::Relaxed),
     );
     eprintln!(
         "slow-reader server close reasons: {close_reasons}; effective SO_SNDBUF={effective_send_buffer_size} bytes; transfer elapsed={elapsed:?}"
