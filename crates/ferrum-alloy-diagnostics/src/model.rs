@@ -44,8 +44,9 @@ pub struct DiagnosticReport {
     /// Collected facts. Never derived conclusions.
     #[serde(default)]
     pub observations: Vec<Observation>,
-    /// Derived conclusions. Readers recompute these; supplied findings are
-    /// preserved but never used as evidence.
+    /// Derived conclusions. Readers recompute these and never use supplied
+    /// findings as evidence: [`parse_offline`](crate::parse::parse_offline)
+    /// discards them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<Finding>,
     /// Namespaced producer extensions (keys should start with `x-`).

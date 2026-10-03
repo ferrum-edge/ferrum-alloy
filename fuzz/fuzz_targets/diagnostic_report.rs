@@ -11,6 +11,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(parsed) = parse_offline(data, &Limits::default()) else {
         return;
     };
+    assert!(parsed.report.findings.is_empty());
     let thresholds = Thresholds::default();
     let findings = analyze(&parsed.report, &thresholds);
     for finding in &findings {
