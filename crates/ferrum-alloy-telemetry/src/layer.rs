@@ -34,7 +34,7 @@ use tracing::field::Empty;
 use crate::body::InstrumentedBody;
 use crate::cache::is_shared_cacheable;
 use crate::context::{RequestContext, TraceDecision};
-use crate::evidence::{EvidenceSink, Pending, RequestEvidence, TenantTag};
+use crate::evidence::{EvidenceSink, Pending, RequestEvidence, RequestIdOrigin, TenantTag};
 use crate::metrics::{Metrics, method_label};
 use crate::peer::{PeerTrust, SharedClassifier, TrustNobody, peer_info};
 use crate::request_id::{DEFAULT_REQUEST_ID_HEADER, RequestId, RequestIdSource};
@@ -66,8 +66,11 @@ pub struct RequestIdConfig {
     /// Header carrying the id (lowercase). Defaults to `x-request-id`, the
     /// Ferrum Edge `correlation_id` default.
     pub header: String,
-    /// Whose incoming ids are kept. Defaults to `any`: ids are validated
-    /// correlation aids, not credentials.
+    /// Whose incoming ids are kept. Defaults to trusted peers: anyone else
+    /// gets a generated id, so a caller cannot choose the id under which
+    /// logs, traces, and diagnostic evidence file its request. `any` keeps
+    /// validated ids from every caller; ids are correlation aids, never
+    /// credentials.
     pub accept_incoming: AcceptPolicy,
     /// Echo the id on responses that shared caches cannot store.
     pub echo_in_response: bool,
@@ -77,7 +80,7 @@ impl Default for RequestIdConfig {
     fn default() -> Self {
         Self {
             header: DEFAULT_REQUEST_ID_HEADER.to_owned(),
-            accept_incoming: AcceptPolicy::Any,
+            accept_incoming: AcceptPolicy::TrustedPeers,
             echo_in_response: true,
         }
     }
@@ -525,6 +528,7 @@ where
             Box::new(Pending {
                 sink: Arc::clone(sink),
                 request_id: request_id.clone(),
+                request_id_origin: RequestIdOrigin::new(id_source, &peer_trust),
                 trace_id,
                 span_id,
                 tenant,
@@ -838,6 +842,7 @@ impl Finalizer {
             let Pending {
                 sink,
                 request_id,
+                request_id_origin,
                 trace_id,
                 span_id,
                 tenant,
@@ -846,6 +851,7 @@ impl Finalizer {
             } = *pending;
             sink.record(RequestEvidence {
                 request_id,
+                request_id_origin,
                 trace_id,
                 span_id,
                 tenant: tenant.shared(),

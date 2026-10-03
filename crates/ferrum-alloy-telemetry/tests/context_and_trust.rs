@@ -249,18 +249,19 @@ async fn never_policy_ignores_even_trusted_context() {
 
 #[tokio::test]
 async fn valid_request_ids_are_kept_and_echoed() {
-    let request = request_from(
-        "203.0.113.9:1",
-        None,
-        &[("x-request-id", "edge-req.42_A-b")],
-    );
+    // From a trusted gateway, such as Ferrum Edge with its correlation id.
+    let request = request_from("10.0.0.5:1", None, &[("x-request-id", "edge-req.42_A-b")]);
     let (seen, response) = run(
-        TelemetryLayer::new(TelemetryConfig::default()).unwrap(),
+        trusted_layer(TelemetryConfig::default()),
         request,
         &[("cache-control", "no-store")],
     )
     .await;
     assert_eq!(seen.context.request_id.as_str(), "edge-req.42_A-b");
+    assert_eq!(
+        seen.context.request_id_source,
+        ferrum_alloy_telemetry::request_id::RequestIdSource::Accepted
+    );
     assert_eq!(seen.headers["x-request-id"], "edge-req.42_A-b");
     assert_eq!(response.headers()["x-request-id"], "edge-req.42_A-b");
 }
@@ -295,14 +296,43 @@ async fn invalid_or_oversized_request_ids_are_replaced() {
 
 #[tokio::test]
 async fn trusted_only_request_ids_are_replaced_for_untrusted_peers() {
-    let mut config = TelemetryConfig::default();
-    config.request_id.accept_incoming = AcceptPolicy::TrustedPeers;
+    // The default, like trace context: a caller cannot choose the id its
+    // request is logged, traced, and retained under.
+    let config = TelemetryConfig::default();
+    let policy = config.request_id.accept_incoming;
+    assert_eq!(policy, AcceptPolicy::TrustedPeers);
+    let layer = trusted_layer(config.clone());
+    let metrics = layer.metrics();
     let request = request_from("203.0.113.9:1", None, &[("x-request-id", "client-chosen")]);
-    let (seen, _) = run(trusted_layer(config.clone()), request, &[]).await;
-    assert_ne!(seen.context.request_id.as_str(), "client-chosen");
+    let (seen, response) = run(layer, request, NO_STORE).await;
+    let request_id = seen.context.request_id.as_str();
+    assert_ne!(request_id, "client-chosen");
+    assert_eq!(request_id.len(), 36, "generated UUID");
+    assert_eq!(
+        seen.context.request_id_source,
+        ferrum_alloy_telemetry::request_id::RequestIdSource::ReplacedUntrusted
+    );
+    assert_eq!(seen.headers["x-request-id"], request_id);
+    assert_eq!(response.headers()["x-request-id"], request_id);
+    assert_eq!(metrics.request_id_decisions.get("replaced_untrusted"), 1);
+
     let request = request_from("10.0.0.5:1", None, &[("x-request-id", "gateway-chosen")]);
     let (seen, _) = run(trusted_layer(config), request, &[]).await;
     assert_eq!(seen.context.request_id.as_str(), "gateway-chosen");
+}
+
+#[tokio::test]
+async fn never_and_any_request_id_policies_ignore_trust() {
+    let mut config = TelemetryConfig::default();
+    config.request_id.accept_incoming = AcceptPolicy::Never;
+    let request = request_from("10.0.0.5:1", None, &[("x-request-id", "gateway-chosen")]);
+    let (seen, _) = run(trusted_layer(config.clone()), request, &[]).await;
+    assert_ne!(seen.context.request_id.as_str(), "gateway-chosen");
+
+    config.request_id.accept_incoming = AcceptPolicy::Any;
+    let request = request_from("203.0.113.9:1", None, &[("x-request-id", "client-chosen")]);
+    let (seen, _) = run(trusted_layer(config), request, &[]).await;
+    assert_eq!(seen.context.request_id.as_str(), "client-chosen");
 }
 
 #[tokio::test]
@@ -318,13 +348,14 @@ async fn request_specific_headers_are_withheld_from_shared_cacheable_responses()
     assert_eq!(metrics.header_suppressions.get("shared_cacheable"), 1);
 
     let request = request_from("203.0.113.9:1", None, &[("x-request-id", "r2")]);
-    let (_, response) = run(
+    let (seen, response) = run(
         TelemetryLayer::new(config).unwrap(),
         request,
         &[("cache-control", "no-store")],
     )
     .await;
-    assert_eq!(response.headers()["x-request-id"], "r2");
+    let request_id = seen.context.request_id.as_str();
+    assert_eq!(response.headers()["x-request-id"], request_id);
     let timing = response.headers()["server-timing"].to_str().unwrap();
     assert!(timing.starts_with("alloy;dur="), "{timing}");
 }
