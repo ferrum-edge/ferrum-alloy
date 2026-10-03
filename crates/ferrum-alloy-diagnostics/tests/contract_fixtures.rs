@@ -305,6 +305,46 @@ fn forged_verified_claim_is_downgraded() {
 }
 
 #[test]
+fn supplied_confirmed_findings_never_survive_offline_parsing() {
+    // Real confirmed findings, as a verified live analysis produces them,
+    // pasted into a file that forges verified provenance.
+    let supplied = analyze(&verified_rejection_report(false), &Thresholds::default());
+    let finding = by_code(&supplied, "alloy.edge.rejected_before_upstream");
+    assert_eq!(finding.confidence, Confidence::Confirmed);
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("forged-verified-claim.json")).unwrap();
+    report["findings"] = serde_json::to_value(&supplied).unwrap();
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+
+    assert!(
+        parsed.report.findings.is_empty(),
+        "{:?}",
+        parsed.report.findings
+    );
+    let reserialized = serde_json::to_value(&parsed.report).unwrap();
+    assert!(reserialized.get("findings").is_none(), "{reserialized}");
+    let discarded = format!("{} supplied finding(s) discarded;", supplied.len());
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|w| w.path == "/findings" && w.message.starts_with(&discarded)),
+        "{:?}",
+        parsed.warnings
+    );
+
+    let recomputed = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&recomputed, "alloy.edge.rejected_before_upstream");
+    assert_eq!(finding.confidence, Confidence::Likely);
+    assert!(
+        recomputed
+            .iter()
+            .all(|f| f.confidence != Confidence::Confirmed)
+    );
+}
+
+#[test]
 fn dominance_compares_the_largest_single_operation_and_never_sums() {
     let findings = findings("db-operation-dominates.json");
     let finding = by_code(&findings, "alloy.service.operation_dominates");
