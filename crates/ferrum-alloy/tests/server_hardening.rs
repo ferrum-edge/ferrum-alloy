@@ -1,7 +1,8 @@
 //! Connection hardening over real sockets: a peer that never sends a
 //! complete request head, goes idle after a request, or stops taking its
 //! response cannot keep a connection slot, on either listener and whatever
-//! protocol it starts, and shutdown leaves no connection or HTTP/2 handler
+//! protocol it starts, upgraded (WebSocket) connections keep theirs, and
+//! shutdown leaves no connection, upgraded connection, or HTTP/2 handler
 //! behind, including a connection stuck in a TLS handshake.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -10,6 +11,7 @@ mod support;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -20,6 +22,7 @@ use axum::routing::get;
 use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
 use ferrum_alloy::config::AlloyConfig;
+use futures_util::StreamExt;
 use http::{Request, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
@@ -45,12 +48,19 @@ const H2_PING_FRAME: &[u8] = &[0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8
 const H2_INITIAL_WINDOW: u32 = 65_535;
 const H2_DATA: u8 = 0x0;
 const H2_HEADERS: u8 = 0x1;
+const H2_RST_STREAM: u8 = 0x3;
 const H2_PING: u8 = 0x6;
 const H2_GOAWAY: u8 = 0x7;
+const H2_WINDOW_UPDATE: u8 = 0x8;
+/// The HTTP/2 `CANCEL` error code.
+const H2_CANCEL: u32 = 0x8;
 /// The size of each chunk of the endless `/flood` response.
 const FLOOD_CHUNK: usize = 16 * 1024;
 /// The size of the `/big` response, sent in one chunk.
 const BIG_BODY: usize = 2 * 1024 * 1024;
+/// The size of the one chunk of the `/burst` response, which then waits for
+/// the application forever: more than the initial HTTP/2 window.
+const BURST: usize = 128 * 1024;
 /// How much a slow reader takes at a time, and how long it waits in between.
 const BITE: usize = 16 * 1024;
 const PAUSE: Duration = Duration::from_millis(20);
@@ -92,11 +102,90 @@ fn router() -> Router {
             }),
         )
         .route("/big", get(big))
+        .route("/burst", get(burst))
+        .route("/once", get(once))
 }
 
 /// A response of [`BIG_BODY`] bytes in one chunk.
 async fn big() -> Bytes {
     Bytes::from(vec![b'x'; BIG_BODY])
+}
+
+/// A response of one [`BURST`] byte chunk that then waits for the
+/// application forever.
+async fn burst() -> Body {
+    chunk_then_wait(Bytes::from(vec![b'x'; BURST]))
+}
+
+/// A response of one short chunk that then waits for the application
+/// forever.
+async fn once() -> Body {
+    chunk_then_wait(Bytes::from_static(b"tick\n"))
+}
+
+/// A response body that produces `chunk` and then waits for the application
+/// forever.
+fn chunk_then_wait(chunk: Bytes) -> Body {
+    let chunk = futures_util::stream::once(async move { Ok::<_, Infallible>(chunk) });
+    Body::from_stream(chunk.chain(futures_util::stream::pending()))
+}
+
+/// [`router`] with `/ws`, a WebSocket echo session that ignores shutdown and
+/// sets `ended` when it ends.
+fn websocket_router(ended: Arc<AtomicBool>) -> Router {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    router().route(
+        "/ws",
+        get(move |upgrade: WebSocketUpgrade| {
+            let ended = Arc::clone(&ended);
+            async move {
+                upgrade.on_upgrade(|mut socket| async move {
+                    let _ended = SetOnDrop(ended);
+                    while let Some(Ok(message)) = socket.recv().await {
+                        if let Message::Text(text) = message {
+                            let _ = socket
+                                .send(Message::Text(format!("echo:{text}").into()))
+                                .await;
+                        }
+                    }
+                })
+            }
+        }),
+    )
+}
+
+/// Opens a WebSocket session on `/ws`.
+async fn open_websocket(addr: SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            b"GET /ws HTTP/1.1\r\nhost: t\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut head = vec![0u8; 1024];
+    let n = stream.read(&mut head).await.unwrap();
+    let text = String::from_utf8_lossy(&head[..n]);
+    assert!(text.starts_with("HTTP/1.1 101"), "{text}");
+    stream
+}
+
+/// Sends `text` (at most 125 bytes) on a WebSocket session and returns the
+/// text of the reply.
+async fn echo(session: &mut TcpStream, text: &str) -> String {
+    let mask = [1u8, 2, 3, 4];
+    let mut frame = vec![0x81, 0x80 | text.len() as u8];
+    frame.extend_from_slice(&mask);
+    let masked = text.bytes().zip(mask.iter().cycle());
+    frame.extend(masked.map(|(byte, key)| byte ^ key));
+    session.write_all(&frame).await.unwrap();
+    let mut reply = [0u8; 128];
+    let n = tokio::time::timeout(WITHIN, session.read(&mut reply))
+        .await
+        .expect("the session answers")
+        .unwrap();
+    assert!(n >= 2, "a reply frame arrived ({n} bytes)");
+    String::from_utf8_lossy(&reply[2..n]).into_owned()
 }
 
 fn hardened() -> AlloyConfig {
@@ -117,10 +206,15 @@ fn write_stall_limited() -> AlloyConfig {
     config
 }
 
-/// A HEADERS frame for `GET path` on stream 1 that ends the stream: HPACK
-/// indexed `:method: GET` and `:scheme: http`, then literal `:path` and
-/// `:authority` without indexing.
+/// A HEADERS frame for `GET path` on stream 1 that ends the stream.
 fn h2_get(path: &str) -> Vec<u8> {
+    h2_get_on(1, path)
+}
+
+/// A HEADERS frame for `GET path` on `stream` that ends the stream: HPACK
+/// indexed `:method: GET` and `:scheme: http`, then literal `:path` and
+/// `:authority` without indexing, so it needs no HPACK state.
+fn h2_get_on(stream: u32, path: &str) -> Vec<u8> {
     let mut block = vec![0x82, 0x86];
     for (index, value) in [(0x04, path), (0x01, "localhost")] {
         block.push(index);
@@ -128,9 +222,19 @@ fn h2_get(path: &str) -> Vec<u8> {
         block.extend_from_slice(value.as_bytes());
     }
     let mut frame = (block.len() as u32).to_be_bytes()[1..].to_vec();
-    // Type HEADERS, flags END_STREAM | END_HEADERS, stream 1.
-    frame.extend_from_slice(&[H2_HEADERS, 0x5, 0, 0, 0, 1]);
+    // Type HEADERS, flags END_STREAM | END_HEADERS.
+    frame.extend_from_slice(&[H2_HEADERS, 0x5]);
+    frame.extend_from_slice(&stream.to_be_bytes());
     frame.extend_from_slice(&block);
+    frame
+}
+
+/// A frame of `kind` on `stream` whose payload is `value`, as for
+/// RST_STREAM and WINDOW_UPDATE.
+fn h2_u32_frame(kind: u8, stream: u32, value: u32) -> Vec<u8> {
+    let mut frame = vec![0, 0, 4, kind, 0];
+    frame.extend_from_slice(&stream.to_be_bytes());
+    frame.extend_from_slice(&value.to_be_bytes());
     frame
 }
 
@@ -208,6 +312,64 @@ where
     };
     tokio::time::timeout(WITHIN, read_all).await.ok()?;
     Some(frames(&received))
+}
+
+/// Reads HTTP/2 frames for `period`, sending a PING every 50 ms and never a
+/// WINDOW_UPDATE, and returns each frame's type and payload length, or `None`
+/// when the server closes the connection first.
+async fn frames_for_pinging(stream: &mut TcpStream, period: Duration) -> Option<Vec<(u8, usize)>> {
+    let mut received = Vec::new();
+    let until = tokio::time::Instant::now() + period;
+    let mut buf = [0u8; 4096];
+    let mut ping = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(until) => return Some(frames(&received)),
+            read = stream.read(&mut buf) => match read {
+                Ok(0) | Err(_) => return None,
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+            },
+            _ = ping.tick() => {
+                // The server may have closed the connection already.
+                let _ = stream.write_all(H2_PING_FRAME).await;
+                let _ = stream.flush().await;
+            }
+        }
+    }
+}
+
+/// Reads from `stream` until the complete HTTP/2 DATA frames received carry
+/// `len` payload bytes in all.
+async fn read_data(stream: &mut TcpStream, len: usize) {
+    let mut received = Vec::new();
+    let mut buf = [0u8; 4096];
+    let read_all = async {
+        while complete_data(&received) < len {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the connection stays open");
+            received.extend_from_slice(&buf[..n]);
+        }
+    };
+    tokio::time::timeout(WITHIN, read_all)
+        .await
+        .expect("the response data arrived");
+}
+
+/// The DATA payload bytes of the complete HTTP/2 frames in `bytes`.
+fn complete_data(bytes: &[u8]) -> usize {
+    let mut data = 0;
+    let mut rest = bytes;
+    while rest.len() >= 9 {
+        let length = u32::from_be_bytes([0, rest[0], rest[1], rest[2]]) as usize;
+        let Some(next) = rest.get(9 + length..) else {
+            break;
+        };
+        if rest[3] == H2_DATA {
+            data += length;
+        }
+        rest = next;
+    }
+    data
 }
 
 /// The type and payload length of each HTTP/2 frame in `bytes`.
@@ -559,50 +721,179 @@ async fn long_response_streams_outlive_the_idle_timeout_on_either_protocol() {
 /// so neither the idle timeout nor the header read timeout cuts the session.
 #[tokio::test]
 async fn a_websocket_session_outlives_the_idle_timeout() {
-    use axum::extract::ws::{Message, WebSocketUpgrade};
-    let routes = router().route(
-        "/ws",
-        get(|upgrade: WebSocketUpgrade| async move {
-            upgrade.on_upgrade(|mut socket| async move {
-                while let Some(Ok(message)) = socket.recv().await {
-                    if let Message::Text(text) = message {
-                        let _ = socket
-                            .send(Message::Text(format!("echo:{text}").into()))
-                            .await;
-                    }
-                }
-            })
-        }),
-    );
+    let routes = websocket_router(Arc::new(AtomicBool::new(false)));
     let server = support::start(AlloyApp::new("hardening").router(routes), idle_limited()).await;
-    let mut stream = TcpStream::connect(server.addr).await.unwrap();
-    stream
-        .write_all(
-            b"GET /ws HTTP/1.1\r\nhost: t\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n",
-        )
-        .await
-        .unwrap();
-    let mut head = vec![0u8; 1024];
-    let n = stream.read(&mut head).await.unwrap();
-    let text = String::from_utf8_lossy(&head[..n]);
-    assert!(text.starts_with("HTTP/1.1 101"), "{text}");
+    let mut session = open_websocket(server.addr).await;
     tokio::time::sleep(IDLE_TIMEOUT * 3 + HEADER_READ_TIMEOUT).await;
-    // Masked text frame "hi".
-    let mask = [1u8, 2, 3, 4];
-    let mut frame = vec![0x81, 0x80 | 2];
-    frame.extend_from_slice(&mask);
-    frame.extend(b"hi".iter().zip(mask).map(|(byte, key)| byte ^ key));
-    stream.write_all(&frame).await.unwrap();
-    let mut reply = [0u8; 16];
-    let n = tokio::time::timeout(WITHIN, stream.read(&mut reply))
-        .await
-        .expect("the session answers")
-        .unwrap();
-    assert_eq!(&reply[..n], b"\x81\x07echo:hi");
+    assert_eq!(echo(&mut session, "hi").await, "echo:hi");
     assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
-    drop(stream);
+    drop(session);
     server.shutdown().await.unwrap();
 }
+
+/// An upgraded (WebSocket) connection keeps its connection slot after Hyper
+/// hands its socket over to the application, so sessions cannot outnumber
+/// `max_connections`, and frees the slot once the session ends.
+#[tokio::test]
+async fn an_upgraded_session_keeps_its_connection_slot_until_it_ends() {
+    let mut config = hardened();
+    config.server.max_connections = 1;
+    let ended = Arc::new(AtomicBool::new(false));
+    let routes = websocket_router(Arc::clone(&ended));
+    let server = support::start(AlloyApp::new("hardening").router(routes), config).await;
+    let stats = Arc::clone(&server.stats);
+    let mut session = open_websocket(server.addr).await;
+    // Hyper's connection task ends right after the `101`.
+    tokio::time::sleep(HEADER_READ_TIMEOUT).await;
+    assert_eq!(echo(&mut session, "hi").await, "echo:hi");
+    assert_eq!(
+        stats.active_connections.load(Ordering::Relaxed),
+        1,
+        "the session is an open connection"
+    );
+    let refused = tokio::time::timeout(WITHIN, try_get(server.addr, "/hello"))
+        .await
+        .expect("the connection is refused at once");
+    assert_eq!(refused, None, "no slot is left for another connection");
+    assert_eq!(stats.rejected_connections.load(Ordering::Relaxed), 1);
+    assert_eq!(echo(&mut session, "again").await, "echo:again");
+    drop(session);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    assert!(ended.load(Ordering::SeqCst), "the session ended");
+    server.shutdown().await.unwrap();
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
+}
+
+/// An upgraded (WebSocket) session that ignores shutdown is drained like any
+/// other connection: shutdown waits for it for the drain budget, then fails
+/// its reads and writes, which ends it, and `serve_on` returns only after
+/// the session has ended and its socket is closed.
+#[tokio::test]
+async fn an_upgraded_session_is_force_closed_at_the_drain_budget() {
+    let mut config = hardened();
+    config.shutdown.drain_timeout_ms = 300;
+    let ended = Arc::new(AtomicBool::new(false));
+    let routes = websocket_router(Arc::clone(&ended));
+    let server = support::start(AlloyApp::new("hardening").router(routes), config).await;
+    let stats = Arc::clone(&server.stats);
+    let mut session = open_websocket(server.addr).await;
+    assert_eq!(echo(&mut session, "hi").await, "echo:hi");
+    let started = Instant::now();
+    server.lifecycle.trigger_shutdown();
+    tokio::time::timeout(WITHIN, server.task)
+        .await
+        .expect("serve_on returned")
+        .unwrap()
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "waited for the drain budget ({elapsed:?})"
+    );
+    assert!(
+        ended.load(Ordering::SeqCst),
+        "the session ended before serve_on returned"
+    );
+    assert!(
+        closed_by_server(&mut session).await,
+        "the session's socket is closed"
+    );
+    assert_eq!(stats.force_closed_connections.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
+}
+
+/// Two application tasks that write to one upgraded connection both wait
+/// on it once the peer reads nothing. At the drain budget both are woken and
+/// fail, not only the last one to wait, so the session ends and its socket
+/// is closed before `serve_on` returns.
+#[tokio::test]
+async fn every_task_waiting_on_an_upgraded_connection_is_woken_at_the_drain_budget() {
+    let ended = [
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ];
+    let writers = ended.clone();
+    let handler = move |request: Request<Body>| two_writers(request, writers.clone());
+    let routes = router().route("/raw", get(handler));
+    let mut config = hardened();
+    config.shutdown.drain_timeout_ms = 300;
+    let server = support::start_on(
+        AlloyApp::new("hardening").router(routes),
+        config,
+        listener_with_small_send_buffer(),
+    )
+    .await;
+    let stats = Arc::clone(&server.stats);
+    let mut client = connect_with_small_window(server.addr).await;
+    let upgrade = b"GET /raw HTTP/1.1\r\nhost: t\r\nupgrade: raw\r\nconnection: Upgrade\r\n\r\n";
+    client.write_all(upgrade).await.unwrap();
+    let mut head = [0u8; 64];
+    let n = client.read(&mut head).await.unwrap();
+    let text = String::from_utf8_lossy(&head[..n]);
+    assert!(text.starts_with("HTTP/1.1 101"), "{text}");
+    // Read nothing more, so that both writers end up waiting.
+    tokio::time::sleep(HEADER_READ_TIMEOUT).await;
+    assert!(
+        ended.iter().all(|ended| !ended.load(Ordering::SeqCst)),
+        "both writers are still writing"
+    );
+    server.lifecycle.trigger_shutdown();
+    tokio::time::timeout(WITHIN, server.task)
+        .await
+        .expect("serve_on returned")
+        .unwrap()
+        .unwrap();
+    assert!(
+        ended.iter().all(|ended| ended.load(Ordering::SeqCst)),
+        "both writers ended before serve_on returned"
+    );
+    assert!(
+        closed_by_server(&mut client).await,
+        "the upgraded socket is closed"
+    );
+    assert_eq!(stats.force_closed_connections.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
+}
+
+/// Answers `101` and then writes to the upgraded connection from two tasks
+/// until writing fails; each sets its flag in `ended` when it ends.
+async fn two_writers(
+    mut request: Request<Body>,
+    ended: [Arc<AtomicBool>; 2],
+) -> http::Response<Body> {
+    let upgrade = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+        let upgraded = upgrade.await.unwrap();
+        let io = Arc::new(std::sync::Mutex::new(TokioIo::new(upgraded)));
+        for ended in ended {
+            tokio::spawn(write_until_it_fails(Arc::clone(&io), ended));
+        }
+    });
+    http::Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(http::header::CONNECTION, "upgrade")
+        .header(http::header::UPGRADE, "raw")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Writes to `io` until a write fails, without holding the lock while it
+/// waits, so that another task can wait on `io` as well.
+async fn write_until_it_fails(io: SharedUpgraded, ended: Arc<AtomicBool>) {
+    let _ended = SetOnDrop(ended);
+    let chunk = vec![b'x'; 64 * 1024];
+    loop {
+        let write = std::future::poll_fn(|cx| {
+            let mut io = io.lock().unwrap();
+            Pin::new(&mut *io).poll_write(cx, &chunk)
+        });
+        if !matches!(write.await, Ok(written) if written > 0) {
+            return;
+        }
+    }
+}
+
+type SharedUpgraded = Arc<std::sync::Mutex<TokioIo<hyper::upgrade::Upgraded>>>;
 
 /// Hyper lets go of a response body as soon as it has taken the last chunk,
 /// long before a slow reader has all of a large response. Idle time counts
@@ -704,6 +995,41 @@ async fn a_finished_http2_response_without_window_updates_is_closed_by_the_idle_
     server.shutdown().await.unwrap();
 }
 
+/// The same peer with a write stall timeout shorter than the idle timeout:
+/// the rest of the finished response that Hyper still holds counts as
+/// waiting to be written, so the write stall timeout closes the connection.
+#[tokio::test]
+async fn a_finished_http2_response_without_window_updates_is_closed_by_the_write_stall_timeout() {
+    let mut config = write_stall_limited();
+    config.server.max_connections = 1;
+    let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
+    let stats = Arc::clone(&server.stats);
+    let mut stalled = TcpStream::connect(server.addr).await.unwrap();
+    stalled.write_all(H2_PREFACE).await.unwrap();
+    stalled.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    stalled.write_all(&h2_get("/big")).await.unwrap();
+    let started = Instant::now();
+    let frames = frames_until_closed_pinging(&mut stalled)
+        .await
+        .expect("the HTTP/2 connection is closed");
+    let elapsed = started.elapsed();
+    let kinds: Vec<u8> = frames.iter().map(|&(kind, _)| kind).collect();
+    let response = kinds.iter().position(|&kind| kind == H2_HEADERS);
+    let goaway = kinds.iter().position(|&kind| kind == H2_GOAWAY);
+    assert!(
+        response.is_some() && goaway > response,
+        "the response starts, then GOAWAY is sent (frame types: {kinds:?})"
+    );
+    assert!(
+        elapsed >= WRITE_STALL_TIMEOUT / 2,
+        "closed by the write stall timeout, not at once ({elapsed:?})"
+    );
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    server.shutdown().await.unwrap();
+}
+
 /// A peer that asks for a response larger than the initial HTTP/2 window and
 /// never sends WINDOW_UPDATE, while sending PINGs the server must answer, is
 /// sent `GOAWAY` once no response data has been written for the write stall
@@ -761,6 +1087,157 @@ async fn an_http2_response_without_window_updates_is_sent_goaway_and_releases_it
         0,
         "the stalled stream handler ended with its connection"
     );
+}
+
+/// Hyper takes a whole response chunk once the HTTP/2 window has room for
+/// one byte of it, holds what does not fit, and goes back to the body. A
+/// peer that never sends WINDOW_UPDATE while the body then waits for the
+/// application is still sent `GOAWAY` once no response data has been written
+/// for the write stall timeout, and its slot is freed.
+#[tokio::test]
+async fn an_http2_chunk_held_beyond_the_window_is_sent_goaway_while_the_body_waits() {
+    let mut config = write_stall_limited();
+    config.server.max_connections = 1;
+    let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
+    let stats = Arc::clone(&server.stats);
+    let mut stalled = TcpStream::connect(server.addr).await.unwrap();
+    stalled.write_all(H2_PREFACE).await.unwrap();
+    stalled.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    stalled.write_all(&h2_get("/burst")).await.unwrap();
+    let started = Instant::now();
+    let frames = frames_until_closed_pinging(&mut stalled)
+        .await
+        .expect("the stalled HTTP/2 connection is closed");
+    let elapsed = started.elapsed();
+    let kinds: Vec<u8> = frames.iter().map(|&(kind, _)| kind).collect();
+    let response = kinds.iter().position(|&kind| kind == H2_HEADERS);
+    let goaway = kinds.iter().position(|&kind| kind == H2_GOAWAY);
+    assert!(
+        response.is_some() && goaway > response,
+        "the response starts, then GOAWAY is sent (frame types: {kinds:?})"
+    );
+    let data: usize = frames
+        .iter()
+        .filter(|&&(kind, _)| kind == H2_DATA)
+        .map(|&(_, length)| length)
+        .sum();
+    assert!(
+        (1..=H2_INITIAL_WINDOW as usize).contains(&data),
+        "the chunk filled the initial window and no more ({data} bytes)"
+    );
+    assert!(
+        elapsed >= WRITE_STALL_TIMEOUT / 2,
+        "closed by the write stall timeout, not at once ({elapsed:?})"
+    );
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    server.shutdown().await.unwrap();
+    assert_eq!(
+        stats.force_closed_streams.load(Ordering::Relaxed),
+        0,
+        "the stalled stream handler ended with its connection"
+    );
+}
+
+/// Once the peer has taken all of a chunk, nothing is held for it: a
+/// response stream that then waits for the application is not cut, however
+/// long it waits.
+#[tokio::test]
+async fn an_http2_stream_waiting_after_its_data_was_taken_is_not_cut() {
+    let server = support::start(
+        AlloyApp::new("hardening").router(router()),
+        write_stall_limited(),
+    )
+    .await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, connection) = http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(H2_INITIAL_WINDOW)
+        .initial_connection_window_size(H2_INITIAL_WINDOW)
+        .handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let burst = format!("http://{}/burst", server.addr);
+    let response = sender.send_request(request(&burst)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    let mut body = response.into_body();
+    let mut received = 0;
+    while received < BURST {
+        let frame = tokio::time::timeout(WITHIN, body.frame())
+            .await
+            .expect("the chunk keeps coming")
+            .expect("the stream has not ended")
+            .expect("the stream has not failed");
+        if let Ok(data) = frame.into_data() {
+            received += data.len();
+        }
+    }
+    assert_eq!(received, BURST);
+    let waiting = tokio::time::timeout(WRITE_STALL_TIMEOUT * 3, body.frame()).await;
+    assert!(waiting.is_err(), "the stream is still open and waiting");
+    assert_eq!(server.stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    drop(body);
+    server.shutdown().await.unwrap();
+}
+
+/// A stream reset while Hyper holds part of its one chunk discards that
+/// part, so it no longer counts as waiting to be written: another stream on
+/// the connection that waits for the application afterwards is not cut.
+#[tokio::test]
+async fn data_held_for_a_reset_http2_stream_does_not_stall_its_connection() {
+    a_reset_stream_leaves_nothing_held("/burst").await;
+}
+
+/// The same for an endless response with many chunks, of which Hyper holds
+/// several (and one more it has taken from the body) when the stream is
+/// reset, as when a client cancels a download.
+#[tokio::test]
+async fn data_held_for_a_reset_multi_chunk_http2_stream_does_not_stall_its_connection() {
+    a_reset_stream_leaves_nothing_held("/flood").await;
+}
+
+/// Takes the initial window's worth of `path` on stream 1, resets it, then
+/// opens `/once` on stream 3, which waits for the application after its one
+/// chunk, and checks that the connection is not closed as stalled.
+async fn a_reset_stream_leaves_nothing_held(path: &str) {
+    let server = support::start(
+        AlloyApp::new("hardening").router(router()),
+        write_stall_limited(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    stream.write_all(H2_PREFACE).await.unwrap();
+    stream.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    stream.write_all(&h2_get_on(1, path)).await.unwrap();
+    // The initial window's worth of the response; Hyper holds the rest.
+    read_data(&mut stream, H2_INITIAL_WINDOW as usize).await;
+    stream
+        .write_all(&h2_u32_frame(H2_RST_STREAM, 1, H2_CANCEL))
+        .await
+        .unwrap();
+    // Room on the connection for the next response's data.
+    stream
+        .write_all(&h2_u32_frame(H2_WINDOW_UPDATE, 0, H2_INITIAL_WINDOW))
+        .await
+        .unwrap();
+    stream.write_all(&h2_get_on(3, "/once")).await.unwrap();
+    let frames = frames_for_pinging(&mut stream, WRITE_STALL_TIMEOUT * 3)
+        .await
+        .expect("the connection stays open");
+    let kinds: Vec<u8> = frames.iter().map(|&(kind, _)| kind).collect();
+    assert!(
+        kinds.contains(&H2_DATA),
+        "the second response's data arrived (frame types: {kinds:?})"
+    );
+    assert!(
+        !kinds.contains(&H2_GOAWAY),
+        "the connection was not closed (frame types: {kinds:?})"
+    );
+    assert_eq!(server.stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    drop(stream);
+    server.shutdown().await.unwrap();
 }
 
 /// An HTTP/1.1 client that stops reading its response, so that the server's
