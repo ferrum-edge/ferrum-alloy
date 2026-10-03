@@ -389,8 +389,8 @@ async fn a_reused_request_id_neither_joins_nor_evicts_the_first_requests_evidenc
     let headers = [("x-request-id", "edge-req-1"), ("traceparent", TRACE_A)];
     let (status, _) = serve_from(&parts, ORDER_A, GATEWAY, &headers).await;
     assert_eq!(status, StatusCode::OK);
-    // Later requests reuse the id through the gateway, each in its own
-    // trace, more times than a request may have attempts.
+    // Later requests reuse the id through the gateway without its trace
+    // context, more times than a request may have attempts.
     for _ in 0..20 {
         order(&parts, "tenant-a", "edge-req-1").await;
     }
@@ -427,6 +427,30 @@ async fn ids_callers_choose_never_join_or_evict_a_generated_id() {
     let attempts = responses(&report);
     assert_eq!(attempts.len(), 1, "only the generated id's request");
     assert_eq!(attempts[0].attr("request_id_origin"), Some("generated"));
+    // The report says that records filed under the id were left out.
+    let notes = &report.collection.notes;
+    let noted = notes.iter().any(|note| note.starts_with("1 record(s)"));
+    assert!(noted, "{notes:?}");
+}
+
+#[tokio::test]
+async fn a_gateways_retries_without_trace_context_share_one_report() {
+    let parts = parts(settings());
+    // The gateway sends its correlation id but no trace context, so each
+    // attempt is rooted in a trace of its own.
+    for _ in 0..3 {
+        order(&parts, "tenant-a", "edge-retried").await;
+    }
+
+    let report = parse(&retrieve(&parts, "edge-retried", Some(TOKEN_A)).await);
+    assert_eq!(responses(&report).len(), 3, "every attempt");
+    assert_eq!(report.subject.trace_id, None, "the attempts' traces differ");
+    let notes = &report.collection.notes;
+    let noted = notes.iter().any(|note| note.contains("no trace context"));
+    assert!(noted, "{notes:?}");
+    let text = metrics(&parts).await;
+    let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
+    assert_eq!(metric(&text, conflicts), 0);
 }
 
 #[tokio::test]
@@ -457,7 +481,7 @@ async fn evicted_and_untagged_requests_are_not_found_and_counted() {
 
 #[tokio::test]
 async fn retrieval_is_rate_limited_before_the_authorizer_runs() {
-    let mut cfg = config();
+    let mut cfg = settings();
     cfg.management.rate_limit.requests_per_second = 1;
     cfg.management.rate_limit.burst = 2;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -552,7 +576,7 @@ async fn a_panicking_authorizer_denies_like_any_refusal() {
 
 #[tokio::test]
 async fn exempt_networks_never_bypass_the_retrieval_rate_limit() {
-    let mut cfg = config();
+    let mut cfg = settings();
     cfg.management.rate_limit.requests_per_second = 1;
     cfg.management.rate_limit.burst = 2;
     cfg.management.rate_limit.exempt_networks = vec!["192.0.2.0/24".parse().unwrap()];

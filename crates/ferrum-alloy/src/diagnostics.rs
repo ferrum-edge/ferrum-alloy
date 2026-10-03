@@ -79,7 +79,7 @@ use ferrum_alloy_telemetry::evidence::{
     EvidenceSink, RequestEvidence, RequestIdOrigin, valid_tenant,
 };
 use ferrum_alloy_telemetry::trace_context::{SpanId, TraceId};
-use ferrum_alloy_telemetry::{PeerInfo, RequestId};
+use ferrum_alloy_telemetry::{PeerInfo, RequestId, TraceDecision};
 use futures_util::FutureExt as _;
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
@@ -249,10 +249,22 @@ struct Stored {
     body_duration: Option<Duration>,
     duration: Duration,
     outcome: &'static str,
-    trace_decision: &'static str,
+    trace_decision: TraceDecision,
     peer_trust: &'static str,
     /// Estimated retained bytes.
     bytes: usize,
+}
+
+impl Stored {
+    /// The trace that binds the record to the others under its id: its own,
+    /// unless a trusted peer chose the id without sending trace context.
+    /// Then the gateway's retries of one request arrive in unrelated traces,
+    /// and records are grouped by the id alone.
+    fn binding(&self) -> Option<TraceId> {
+        let untraced = self.origin == RequestIdOrigin::TrustedPeer
+            && self.trace_decision != TraceDecision::AcceptedRemote;
+        (!untraced).then_some(self.trace_id)
+    }
 }
 
 /// What records are filed under: a tenant, who chose the request id, and
@@ -260,7 +272,8 @@ struct Stored {
 type Key = (Arc<str>, RequestIdOrigin, RequestId);
 
 /// The order in which a lookup tries the origins of an id: an id this
-/// process generated, which no other request can share, first.
+/// process generated, which no other request can share, first. Every
+/// origin must be listed, or its records cannot be found.
 const LOOKUP_ORDER: [RequestIdOrigin; 3] = [
     RequestIdOrigin::Generated,
     RequestIdOrigin::TrustedPeer,
@@ -270,19 +283,20 @@ const LOOKUP_ORDER: [RequestIdOrigin; 3] = [
 /// The records filed under one key.
 #[derive(Debug)]
 struct Filed {
-    /// The trace of the records. Only records of this trace, such as the
-    /// attempts of a request a gateway retried, join them.
-    trace_id: TraceId,
+    /// The binding of the records ([`Stored::binding`]). Only records with
+    /// the same binding, such as the attempts of a request a gateway
+    /// retried, join them.
+    binding: Option<TraceId>,
     /// Sequence numbers, oldest first.
     seqs: Vec<u64>,
-    /// Records of other traces that were not retained under the key.
+    /// Records with another binding that were not retained under the key.
     other_traces: u64,
 }
 
 impl Filed {
-    fn new(trace_id: TraceId) -> Self {
+    fn new(binding: Option<TraceId>) -> Self {
         Self {
-            trace_id,
+            binding,
             seqs: Vec::new(),
             other_traces: 0,
         }
@@ -374,8 +388,8 @@ impl Ring {
         holding.bytes = holding.bytes.saturating_add(record.bytes);
         self.rank(&tenant);
         self.bytes = self.bytes.saturating_add(record.bytes);
-        let trace_id = record.trace_id;
-        let filed = self.index.entry(key).or_insert(Filed::new(trace_id));
+        let binding = record.binding();
+        let filed = self.index.entry(key).or_insert(Filed::new(binding));
         filed.seqs.push(seq);
         self.records.insert(seq, record);
     }
@@ -403,23 +417,27 @@ impl Ring {
         true
     }
 
-    /// Decides whether a record of `trace_id` may be filed under `key`, and
-    /// evicts the oldest record of the key when the key holds the most it
-    /// may. A record of another trace than the key's records is refused
+    /// Decides whether a record bound to `binding` may be filed under
+    /// `key`, and evicts a record of the key when the key holds the most it
+    /// may. A record with another binding than the key's records is refused
     /// and counted, so it can neither join nor evict them.
-    fn admit(&mut self, key: &Key, trace_id: TraceId) -> Admission {
+    ///
+    /// The oldest record of a trace is evicted. Records grouped by the id
+    /// alone keep their first record, so later records that reuse the id
+    /// cannot push out the request it was first seen with.
+    fn admit(&mut self, key: &Key, binding: Option<TraceId>) -> Admission {
         let Some(filed) = self.index.get_mut(key) else {
             return Admission::Admitted;
         };
-        if filed.trace_id != trace_id {
+        if filed.binding != binding {
             filed.other_traces = filed.other_traces.saturating_add(1);
             return Admission::OtherTrace;
         }
         if filed.seqs.len() < MAX_RECORDS_PER_REQUEST_ID {
             return Admission::Admitted;
         }
-        let oldest = filed.seqs.first().copied();
-        if oldest.is_some_and(|seq| self.remove(seq)) {
+        let evicted = filed.seqs.get(usize::from(binding.is_none())).copied();
+        if evicted.is_some_and(|seq| self.remove(seq)) {
             Admission::EvictedOldest
         } else {
             Admission::Admitted
@@ -451,21 +469,25 @@ impl Ring {
     }
 
     /// The records filed under `tenant` and `request_id` by the most
-    /// trustworthy origin that has any (see [`LOOKUP_ORDER`]), oldest first.
+    /// trustworthy origin that has any (see [`LOOKUP_ORDER`]), oldest first,
+    /// and how many records less trustworthy origins filed under the id.
     fn find(&self, tenant: &Arc<str>, request_id: &RequestId) -> Found {
         let mut key = (Arc::clone(tenant), LOOKUP_ORDER[0], request_id.clone());
+        let mut found = Found::default();
         for origin in LOOKUP_ORDER {
             key.1 = origin;
             let Some(filed) = self.index.get(&key) else {
                 continue;
             };
+            if !found.records.is_empty() {
+                found.shadowed = found.shadowed.saturating_add(filed.seqs.len());
+                continue;
+            }
             let records = filed.seqs.iter().filter_map(|seq| self.records.get(seq));
-            return Found {
-                records: records.cloned().collect(),
-                other_traces: filed.other_traces,
-            };
+            found.records = records.cloned().collect();
+            found.other_traces = filed.other_traces;
         }
-        Found::default()
+        found
     }
 }
 
@@ -474,8 +496,12 @@ impl Ring {
 struct Found {
     /// The records, oldest first.
     records: Vec<Stored>,
-    /// Records of other traces under the same key that were not retained.
+    /// Records with another binding under the same key that were not
+    /// retained.
     other_traces: u64,
+    /// Records that less trustworthy origins filed under the same id, which
+    /// the lookup does not answer with.
+    shadowed: usize,
 }
 
 /// Why an eviction happened.
@@ -576,7 +602,7 @@ impl EvidenceStore {
         // The newest attempts of a request are kept, so records added under
         // its id earlier cannot keep a later one out. Records of another
         // trace never join them, and so never evict them either.
-        match ring.admit(&key, record.trace_id) {
+        match ring.admit(&key, record.binding()) {
             Admission::Admitted => {}
             Admission::EvictedOldest => evicted[Evicted::RequestIdLimit as usize] += 1,
             Admission::OtherTrace => {
@@ -729,7 +755,7 @@ impl EvidenceSink for EvidenceStore {
             body_duration: evidence.body_duration,
             duration: evidence.duration,
             outcome: evidence.outcome.as_str(),
-            trace_decision: evidence.trace_decision.as_str(),
+            trace_decision: evidence.trace_decision,
             peer_trust: evidence.peer_trust,
             bytes,
         });
@@ -832,7 +858,7 @@ impl Retrieval {
             self.store.count_retrieval(Retrieved::NotFound);
             return not_found();
         }
-        let report = report(&self.service, &found.records, found.other_traces);
+        let report = report(&self.service, &found);
         match serde_json::to_vec(&report) {
             Ok(body) => {
                 self.store.count_retrieval(Retrieved::Served);
@@ -845,16 +871,32 @@ impl Retrieval {
     }
 }
 
-/// Builds the report for the records of one tenant and request id, which
-/// `other_traces` records of other traces also used.
-fn report(service: &str, records: &[Stored], other_traces: u64) -> DiagnosticReport {
+/// The report note for records grouped by request id alone.
+const UNTRACED_NOTE: &str = "these records carry no trace context from the gateway and are \
+    grouped by request id alone: they may be attempts of one request or other requests that \
+    reused the id";
+
+/// Builds the report for what a lookup of one tenant and request id found.
+fn report(service: &str, found: &Found) -> DiagnosticReport {
+    let records = &found.records;
     let mut notes = vec![
         "assembled by the service from its own request telemetry; a reader cannot authenticate the producer".to_owned(),
         "server-level timing only; instrumented operations are not retained".to_owned(),
     ];
+    let untraced = records.iter().any(|record| record.binding().is_none());
+    if untraced && records.len() > 1 {
+        notes.push(UNTRACED_NOTE.to_owned());
+    }
+    let other_traces = found.other_traces;
     if other_traces > 0 {
         notes.push(format!(
-            "{other_traces} later request(s) of other traces used this request id and were not retained; the id does not identify one request"
+            "{other_traces} later record(s) under this request id came from other traces and were not retained, such as retries without trace context or other requests that reused the id"
+        ));
+    }
+    let shadowed = found.shadowed;
+    if shadowed > 0 {
+        notes.push(format!(
+            "{shadowed} record(s) whose request id a less trusted party chose were filed under this id and are not included"
         ));
     }
     let mut report = DiagnosticReport::new(Collection {
@@ -993,7 +1035,8 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
     if let Some(route) = &record.route {
         attributes.insert("route".to_owned(), route.to_string());
     }
-    attributes.insert("trace_parent".to_owned(), record.trace_decision.to_owned());
+    let decision = record.trace_decision.as_str().to_owned();
+    attributes.insert("trace_parent".to_owned(), decision);
     attributes.insert("peer_trust".to_owned(), record.peer_trust.to_owned());
     let origin = record.origin.as_str().to_owned();
     attributes.insert("request_id_origin".to_owned(), origin);
@@ -1004,7 +1047,7 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use ferrum_alloy_diagnostics::parse::{Limits, parse_offline};
-    use ferrum_alloy_telemetry::{BodyOutcome, TraceDecision};
+    use ferrum_alloy_telemetry::BodyOutcome;
 
     use super::*;
 
@@ -1027,11 +1070,20 @@ mod tests {
         evidence
     }
 
-    /// An attempt of a request of `trace_id` whose id a trusted gateway
-    /// chose, as when it retries the request.
+    /// An attempt of a request of `trace_id` whose id and trace context a
+    /// trusted gateway sent, as when it retries the request.
     fn attempt(tenant: &str, request_id: &str, trace_id: TraceId) -> RequestEvidence {
         let mut evidence = evidence(Some(tenant), request_id);
         evidence.trace_id = trace_id;
+        evidence.trace_decision = TraceDecision::AcceptedRemote;
+        evidence.request_id_origin = RequestIdOrigin::TrustedPeer;
+        evidence
+    }
+
+    /// A request whose id a trusted gateway sent without trace context, so
+    /// it was rooted in a trace of its own.
+    fn untraced(tenant: &str, request_id: &str) -> RequestEvidence {
+        let mut evidence = evidence(Some(tenant), request_id);
         evidence.request_id_origin = RequestIdOrigin::TrustedPeer;
         evidence
     }
@@ -1075,7 +1127,7 @@ mod tests {
             );
             let filed = &ring.index[&key];
             assert!(filed.seqs.contains(seq));
-            assert_eq!(filed.trace_id, record.trace_id);
+            assert_eq!(filed.binding, record.binding());
         }
         for (tenant, holding) in &ring.tenants {
             let count = (holding.seqs.len(), Arc::clone(tenant));
@@ -1261,8 +1313,13 @@ mod tests {
         assert_eq!(found_now.records.len(), 1, "only the generated record");
         assert_eq!(found_now.records[0].span_id, span_id);
         assert_eq!(found_now.records[0].origin, RequestIdOrigin::Generated);
-        // The forged records are filed apart, under their own bound.
+        // The forged records are filed apart, under their own bound, and the
+        // report says they are left out.
         assert_eq!(store.retained().0, 1 + MAX_RECORDS_PER_REQUEST_ID);
+        assert_eq!(found_now.shadowed, MAX_RECORDS_PER_REQUEST_ID);
+        let notes = report("orders", &found_now).collection.notes;
+        let noted = notes.iter().any(|note| note.starts_with("16 record(s)"));
+        assert!(noted, "{notes:?}");
 
         // A trusted peer's id is preferred to the same id from a caller.
         let mut caller = attempt("acme", "peer-id", TraceId::random());
@@ -1271,10 +1328,47 @@ mod tests {
         let peer = attempt("acme", "peer-id", TraceId::random());
         let span_id = peer.span_id;
         store.record(peer);
-        let records = store.find("acme", id("peer-id")).records;
+        let found_now = store.find("acme", id("peer-id"));
+        let records = &found_now.records;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].span_id, span_id);
         assert_eq!(records[0].origin, RequestIdOrigin::TrustedPeer);
+        assert_eq!(found_now.shadowed, 1, "the caller's record is left out");
+        check(&store);
+    }
+
+    #[test]
+    fn a_gateways_attempts_without_trace_context_are_grouped_and_keep_the_first() {
+        let store = EvidenceStore::new(&settings(1_000, 1024 * 1024));
+        let first = untraced("acme", "edge-1");
+        let first_span = first.span_id;
+        store.record(first);
+        // Retries, or other requests reusing the id, each in its own trace.
+        let later = 2 * MAX_RECORDS_PER_REQUEST_ID;
+        let mut last_span = first_span;
+        for _ in 0..later {
+            let next = untraced("acme", "edge-1");
+            last_span = next.span_id;
+            store.record(next);
+        }
+
+        let found_now = store.find("acme", id("edge-1"));
+        let records = &found_now.records;
+        assert_eq!(records.len(), MAX_RECORDS_PER_REQUEST_ID);
+        assert_eq!(records[0].span_id, first_span, "the first record stays");
+        let newest = records.last().unwrap();
+        assert_eq!(newest.span_id, last_span, "and the newest");
+        assert_eq!(found_now.other_traces, 0);
+        let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+        let evicted = later + 1 - MAX_RECORDS_PER_REQUEST_ID;
+        assert_eq!(metric(&store, limited), u64::try_from(evicted).unwrap());
+        let notes = report("orders", &found_now).collection.notes;
+        let noted = notes.iter().any(|note| note == UNTRACED_NOTE);
+        assert!(noted, "{notes:?}");
+
+        // A record with trace context does not join them.
+        store.record(attempt("acme", "edge-1", TraceId::random()));
+        assert_eq!(store.find("acme", id("edge-1")).other_traces, 1);
         check(&store);
     }
 
@@ -1352,6 +1446,42 @@ mod tests {
     }
 
     #[test]
+    fn a_tenant_above_its_byte_share_yields_to_others() {
+        let max_bytes = 8_192;
+        let store = EvidenceStore::new(&settings(1_000, max_bytes));
+        let long = "b".repeat(200);
+        for n in 0..10 {
+            store.record(evidence(Some("big"), &format!("{long}-{n}")));
+        }
+        let before = held(&store, "big");
+        assert!(before > 2, "{before}");
+        for n in 0..20 {
+            store.record(evidence(Some("small"), &format!("small-{n:02}")));
+            let (_, bytes) = store.retained();
+            assert!(bytes <= max_bytes, "{bytes} > {max_bytes}");
+            check(&store);
+        }
+
+        // The big tenant gave up its oldest records, and kept its newest.
+        let after = held(&store, "big");
+        assert!(after < before, "{after} >= {before}");
+        let oldest_before = format!("{long}-{}", 10 - before);
+        assert_eq!(found(&store, "big", &oldest_before), 0);
+        assert_eq!(found(&store, "big", &format!("{long}-9")), 1);
+        // Down to about the share the small tenant reached, and no further.
+        let small = estimate("small", &id("small-00"), None);
+        let big = estimate("big", &id(&format!("{long}-0")), None);
+        let (big_bytes, small_bytes) = {
+            let ring = store.ring();
+            (ring.usage("big").1, ring.usage("small").1)
+        };
+        assert!(big_bytes <= small_bytes + small, "{big_bytes}");
+        assert!(small_bytes <= big_bytes + big, "{small_bytes}");
+        let count = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, count), 0);
+    }
+
+    #[test]
     fn records_evicted_out_of_order_free_their_room_at_once() {
         let store = EvidenceStore::new(&settings(20, 1024 * 1024));
         store.record(evidence(Some("acme"), "first"));
@@ -1419,8 +1549,10 @@ mod tests {
         let store = EvidenceStore::new(&DiagnosticsSettings::default());
         store.record(first);
         store.record(second);
-        let records = store.find("acme", id("req-7")).records;
-        let json = serde_json::to_vec(&report("orders", &records, 2)).unwrap();
+        let mut found_now = store.find("acme", id("req-7"));
+        found_now.other_traces = 2;
+        let records = &found_now.records;
+        let json = serde_json::to_vec(&report("orders", &found_now)).unwrap();
         let parsed = parse_offline(&json, &Limits::default()).unwrap();
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         assert_eq!(parsed.claimed_verification, Verification::Unverified);
@@ -1465,10 +1597,10 @@ mod tests {
         assert_eq!(response.attr("status"), None);
 
         // Without reuse, no note says so.
-        let report = super::report("orders", &records, 0);
+        found_now.other_traces = 0;
+        let report = super::report("orders", &found_now);
         let notes = &report.collection.notes;
-        let noted = notes.iter().any(|note| note.contains("later"));
-        assert!(!noted, "{notes:?}");
+        assert_eq!(notes.len(), 2, "{notes:?}");
     }
 
     #[test]

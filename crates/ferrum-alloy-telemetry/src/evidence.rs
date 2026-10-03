@@ -97,6 +97,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for TenantTag {
 /// caller chose can neither join nor evict the records of a request whose id
 /// this process generated or a trusted peer supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum RequestIdOrigin {
     /// This process generated it, so no other request shares it. Includes
     /// ids that replaced an invalid or untrusted incoming one.
