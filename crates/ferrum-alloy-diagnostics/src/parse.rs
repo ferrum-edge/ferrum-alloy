@@ -693,9 +693,7 @@ mod tests {
         let error = check_string_lengths(&Value::Object(map), &mut Vec::new(), 2).unwrap_err();
         assert_eq!(
             error,
-            ReportError::TooLarge(
-                r"string at /\n\u{1b} is 3 bytes (limit 2)".into()
-            )
+            ReportError::TooLarge(r"string at /\n\u{1b} is 3 bytes (limit 2)".into())
         );
     }
 }
