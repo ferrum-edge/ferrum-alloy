@@ -1,4 +1,4 @@
-//! Untrusted report values never break a line of the human rendering.
+//! Untrusted report values cannot inject controls into the human rendering.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -10,20 +10,21 @@ use ferrum_alloy_diagnostics::render::render_text;
 use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
 use serde_json::{Value, json};
 
-/// Every line break a terminal, editor, or line-splitting reader may honour,
-/// placed so that each would start a forged warning or finding line.
-const INJECTED: &str =
-    "x\n  - /forged: injected\r\n  confidence: confirmed\u{0B}\u{0C}\u{85}\u{2028}\u{2029}end";
+/// C0, DEL, C1, and Unicode line separators, placed so line-breaking values
+/// would start forged warning or finding lines.
+const INJECTED: &str = concat!(
+    "x\0\u{1}\u{8}\t\u{0B}\u{0C}\n\u{0E}\u{1F}",
+    "\r\u{7F}\u{80}\u{85}\u{9F}\u{2028}\u{2029}end"
+);
 
 /// How [`INJECTED`] must appear in the rendering: on one line, escaped.
-const ESCAPED: &str =
-    r"x\n  - /forged: injected\r\n  confidence: confirmed\u{b}\u{c}\u{85}\u{2028}\u{2029}end";
+const ESCAPED: &str = concat!(
+    "x\\u{0}\\u{1}\\u{8}\t\\u{b}\\u{c}\\n\\u{e}\\u{1f}",
+    "\\r\\u{7f}\\u{80}\\u{85}\\u{9f}\\u{2028}\\u{2029}end"
+);
 
 fn is_break(c: char) -> bool {
-    matches!(
-        c,
-        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-    )
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 fn fixture() -> Value {
@@ -114,8 +115,9 @@ fn untrusted_values_stay_on_one_escaped_line() {
 fn renderer_structure_and_other_text_are_unchanged() {
     let text = "\t café 東京 ✓ \\n \u{1b}[31m";
     let rendered = render_with(text);
-    let collected = format!("collected by: fixture{text} (kind{text})");
-    assert!(rendered.contains(&collected), "{rendered}");
+    let collected = "collected by: fixture\t café 東京 ✓ \\n \\u{1b}[31m (kind";
+    assert!(rendered.contains(collected), "{rendered}");
+    assert!(rendered.contains(r"\u{1b}[31m"), "{rendered}");
     let header = "Ferrum Alloy diagnosis\n  report schema: ";
     assert!(rendered.starts_with(header), "{rendered}");
     for section in [

@@ -1,10 +1,12 @@
 //! Deterministic human-readable rendering.
 //!
 //! The output is line oriented, and reports read from files are untrusted,
-//! so every interpolated value is written on one line: a character that
-//! could start a new line is written as its escape sequence (`\n`, `\r`,
-//! `\u{2028}`, ...). Only the renderer's own structure breaks lines, so a
-//! report value cannot forge a warning, finding, or header line.
+//! so every interpolated value is written on one line: control characters
+//! other than tab, plus the Unicode line and paragraph separators, are
+//! written as escape sequences (`\n`, `\u{1b}`, `\u{2028}`, ...). Only the
+//! renderer's own structure breaks lines, so a report value cannot forge a
+//! warning, finding, or header line. This guarantee also applies to library
+//! callers that print the result directly.
 
 use std::fmt::{self, Write as _};
 
@@ -13,8 +15,10 @@ use crate::parse::Issue;
 
 /// Renders findings as plain text. Output depends only on the inputs.
 ///
-/// Values taken from `report`, `findings`, and `warnings` never break a
-/// line; see the module documentation.
+/// Values taken from `report`, `findings`, and `warnings` have control
+/// characters escaped (except tab), so library callers can print the result
+/// directly without a report value forging terminal control sequences or
+/// additional lines. See the module documentation.
 pub fn render_text(report: &DiagnosticReport, findings: &[Finding], warnings: &[Issue]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Ferrum Alloy diagnosis");
@@ -144,13 +148,14 @@ impl<T: fmt::Display> fmt::Display for OneLine<T> {
     }
 }
 
-/// Writes through to a formatter with line-breaking characters escaped.
+/// Writes through to a formatter with control and line-separator characters
+/// escaped.
 struct Escaped<'a, 'b>(&'a mut fmt::Formatter<'b>);
 
 impl fmt::Write for Escaped<'_, '_> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let mut rest = text;
-        while let Some(index) = rest.find(breaks_line) {
+        while let Some(index) = rest.find(should_escape) {
             let (clean, tail) = rest.split_at(index);
             self.0.write_str(clean)?;
             let mut chars = tail.chars();
@@ -163,12 +168,8 @@ impl fmt::Write for Escaped<'_, '_> {
     }
 }
 
-/// Line feed, vertical tab, form feed, carriage return, next line, and the
-/// Unicode line and paragraph separators: everything a terminal, editor, or
-/// line-splitting reader may treat as the end of a line.
-fn breaks_line(c: char) -> bool {
-    matches!(
-        c,
-        '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
-    )
+/// Escape every control character except tab, and the Unicode line and
+/// paragraph separators.
+fn should_escape(c: char) -> bool {
+    (c.is_control() && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}')
 }

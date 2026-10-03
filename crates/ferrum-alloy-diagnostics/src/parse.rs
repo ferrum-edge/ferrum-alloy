@@ -1,5 +1,7 @@
 //! Bounded parsing and validation of untrusted report files.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
@@ -314,12 +316,21 @@ enum Segment<'a> {
 /// The JSON-pointer-like location of `path`: `""` for the root, otherwise
 /// `/` before each key or index. Only built when reporting an error.
 fn pointer(path: &[Segment<'_>]) -> String {
+    #[cfg(test)]
+    POINTER_SEGMENTS_VISITED.with(|visited| visited.set(visited.get() + path.len()));
+
     let mut out = String::new();
     for segment in path {
         match segment {
             Segment::Key(key) => {
                 out.push('/');
-                out.push_str(key);
+                for c in key.chars() {
+                    if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                        let _ = write!(out, "{}", c.escape_default());
+                    } else {
+                        out.push(c);
+                    }
+                }
             }
             Segment::Index(index) => {
                 let _ = write!(out, "/{index}");
@@ -327,6 +338,11 @@ fn pointer(path: &[Segment<'_>]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    static POINTER_SEGMENTS_VISITED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Rejects any string or object key longer than `max` bytes. `path` is a
@@ -592,7 +608,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
 mod tests {
     use serde_json::{Map, Value, json};
 
-    use super::{ReportError, Segment, check_string_lengths, pointer};
+    use super::{POINTER_SEGMENTS_VISITED, ReportError, Segment, check_string_lengths, pointer};
 
     #[test]
     fn the_length_walk_only_keeps_a_stack_of_borrowed_segments() {
@@ -633,5 +649,47 @@ mod tests {
         let error = check_string_lengths(&json!("xyz"), &mut Vec::new(), 2).unwrap_err();
         let expected = "string at  is 3 bytes (limit 2)";
         assert_eq!(error, ReportError::TooLarge(expected.into()));
+    }
+
+    #[test]
+    fn long_ancestor_paths_are_formatted_only_once_after_a_wide_array() {
+        let key = "k".repeat(2_048);
+        let mut value = Value::Array(
+            (0..10_000)
+                .map(|index| {
+                    if index == 9_999 {
+                        json!("oversized")
+                    } else {
+                        json!(0)
+                    }
+                })
+                .collect(),
+        );
+        for _ in 0..30 {
+            let mut map = Map::new();
+            map.insert(key.clone(), value);
+            value = Value::Object(map);
+        }
+
+        POINTER_SEGMENTS_VISITED.with(|visited| visited.set(0));
+        let error = check_string_lengths(&value, &mut Vec::new(), 2).unwrap_err();
+        assert!(matches!(error, ReportError::TooLarge(_)));
+        POINTER_SEGMENTS_VISITED.with(|visited| {
+            assert_eq!(visited.get(), 31, "each ancestor segment is formatted once")
+        });
+    }
+
+    #[test]
+    fn parser_locations_escape_control_characters_in_keys() {
+        let key = "x-a\nerror: forged line\u{1b}[31m";
+        let mut map = Map::new();
+        map.insert(key.into(), json!("oversized"));
+        let error = check_string_lengths(&Value::Object(map), &mut Vec::new(), 2).unwrap_err();
+        assert_eq!(
+            error,
+            ReportError::TooLarge(
+                r"string at /x-a\nerror: forged line\u{1b}[31m is 9 bytes (limit 2)".into()
+            )
+        );
     }
 }
