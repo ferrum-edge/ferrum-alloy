@@ -56,7 +56,9 @@ use crate::parse::{self, Limits, ReportError};
 pub struct ImportLimits {
     /// Maximum input size in bytes.
     pub max_bytes: usize,
-    /// Maximum spans read across the whole file.
+    /// Maximum span entries read across the whole file. Every entry of a
+    /// `spans` array counts, whether or not it is a valid span, so malformed
+    /// entries cannot buy more parsing work than valid ones.
     pub max_spans: usize,
     /// Maximum JSON nesting depth per line.
     pub max_depth: usize,
@@ -329,6 +331,8 @@ fn read_spans(input: &str, limits: &ImportLimits) -> Result<Vec<RawSpan>, Import
         )));
     }
     let mut spans = Vec::new();
+    // Span entries visited across all lines, valid or not.
+    let mut visited = 0usize;
     for (line_no, line) in input.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -345,7 +349,7 @@ fn read_spans(input: &str, limits: &ImportLimits) -> Result<Vec<RawSpan>, Import
             line: line_no + 1,
             message: e.to_string(),
         })?;
-        collect_request(&value, limits, &mut spans)?;
+        collect_request(&value, limits, &mut visited, &mut spans)?;
     }
     Ok(spans)
 }
@@ -377,9 +381,14 @@ fn depth_exceeds(line: &str, max: usize) -> bool {
     false
 }
 
+/// Reads the spans of one export request into `out`. `visited` counts span
+/// entries across the whole file and is checked against
+/// [`ImportLimits::max_spans`] before an entry is parsed, so invalid entries
+/// use the same budget as the valid spans kept in `out`.
 fn collect_request(
     value: &Value,
     limits: &ImportLimits,
+    visited: &mut usize,
     out: &mut Vec<RawSpan>,
 ) -> Result<(), ImportError> {
     let Some(resource_spans) = value.get("resourceSpans").and_then(Value::as_array) else {
@@ -404,12 +413,13 @@ fn collect_request(
                 continue;
             };
             for item in items {
-                if out.len() >= limits.max_spans {
+                if *visited >= limits.max_spans {
                     return Err(ImportError::TooLarge(format!(
                         "more than {} spans",
                         limits.max_spans
                     )));
                 }
+                *visited += 1;
                 if let Some(span) = parse_span(item, &resource_attrs, scope_name) {
                     out.push(span);
                 }

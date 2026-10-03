@@ -89,6 +89,101 @@ fn long_strings_are_rejected() {
     assert!(matches!(parse(&report), Err(ReportError::TooLarge(_))));
 }
 
+/// A report whose `x-bulk` field nests `levels` objects, each under one
+/// `key_bytes`-byte key, around an array of `elements` zeros and then `tail`.
+/// Also returns the location of `tail`.
+fn nested_array(levels: usize, key_bytes: usize, elements: usize, tail: &str) -> (String, String) {
+    let key = "k".repeat(key_bytes);
+    let mut input = String::from(r#"{"schema":"ferrum.diagnostic_report","#);
+    input.push_str(r#""schema_version":"1.0","x-bulk":"#);
+    let mut location = String::from("/x-bulk");
+    for _ in 0..levels {
+        input.push_str(&format!(r#"{{"{key}":"#));
+        location.push('/');
+        location.push_str(&key);
+    }
+    input.push('[');
+    input.push_str(&"0,".repeat(elements));
+    input.push_str(tail);
+    input.push(']');
+    input.push_str(&"}".repeat(levels + 1));
+    location.push_str(&format!("/{elements}"));
+    (input, location)
+}
+
+#[test]
+fn long_key_paths_are_not_copied_for_every_element() {
+    // Thirty maximum-length keys above a million-element array, within the
+    // default byte and depth limits: copying the ~60 KiB ancestor path for
+    // every element would cost tens of gigabytes of work before the walk
+    // reached the oversized string at the end.
+    let limits = Limits::default();
+    let levels = limits.max_depth - 2;
+    let tail = format!("\"{}\"", "s".repeat(limits.max_string_bytes + 1));
+    let elements = 1_000_000;
+    let (input, location) = nested_array(levels, limits.max_string_bytes, elements, &tail);
+    assert!(input.len() <= limits.max_bytes, "{} bytes", input.len());
+
+    let error = parse_offline(input.as_bytes(), &limits).unwrap_err();
+    let expected = format!(
+        "string at {location} is {} bytes (limit {})",
+        limits.max_string_bytes + 1,
+        limits.max_string_bytes
+    );
+    assert_eq!(error, ReportError::TooLarge(expected));
+}
+
+#[test]
+fn long_key_locations_are_reported_exactly() {
+    let limits = Limits::default();
+    let long_key = format!(r#""{}":1"#, "k".repeat(limits.max_string_bytes + 1));
+    let tail = format!("{{{long_key}}}");
+    let (input, location) = nested_array(3, 16, 2, &tail);
+    let error = parse_offline(input.as_bytes(), &limits).unwrap_err();
+    let expected = format!(
+        "object key at {location} exceeds {} bytes",
+        limits.max_string_bytes
+    );
+    assert_eq!(error, ReportError::TooLarge(expected));
+}
+
+#[test]
+fn supplied_findings_are_discarded_and_still_bounded() {
+    let negative = negative_findings(&[("value", json!(-1.0))]);
+    let mut forged = serde_json::to_value(&negative[0]).unwrap();
+    forged["confidence"] = json!("confirmed");
+    forged["title"] = json!("Forged conclusion");
+    let mut report = base();
+    report["observations"] = json!([observation("o1")]);
+    report["findings"] = json!([forged.clone(), forged.clone(), forged]);
+
+    let parsed = parse(&report).unwrap();
+    assert!(parsed.report.findings.is_empty());
+    let messages: Vec<String> = parsed
+        .warnings
+        .iter()
+        .filter(|w| w.path == "/findings")
+        .map(|w| w.message.clone())
+        .collect();
+    assert_eq!(
+        messages,
+        ["3 supplied finding(s) discarded; findings are recomputed from observations"]
+    );
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    assert!(findings.iter().all(|f| f.title != "Forged conclusion"));
+
+    let limits = Limits {
+        max_findings: 2,
+        ..Limits::default()
+    };
+    let error = parse_offline(&serde_json::to_vec(&report).unwrap(), &limits).unwrap_err();
+    assert!(
+        validation_messages(error)
+            .iter()
+            .any(|m| m == "/findings 3 findings exceed the limit of 2")
+    );
+}
+
 #[test]
 fn too_many_observations_are_rejected() {
     let mut report = base();

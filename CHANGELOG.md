@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Harden the diagnostics reader against hostile reports and OTLP files.
+  `parse_offline` now discards supplied findings after checking their count
+  and shape, so `ParsedReport.report.findings` is always empty and findings
+  come only from `analyze` (behavior change for library callers; the warning
+  now says the findings were discarded). The pre-validation string-length
+  walk formats a location only for an error, so long keys above a wide array
+  no longer multiply its work. OTLP `max_spans` now counts every span entry
+  read, valid or not. `render_text` writes line breaks inside report,
+  finding, and warning values as escape sequences (`\n`, `\r`, `\u{2028}`,
+  ...), so a value cannot forge lines in human-readable output. Addresses
+  GHSA-wf6p-cw5w-h579, GHSA-65px-xjrq-gq7m, GHSA-7cjx-8mc3-p2gx, and
+  GHSA-h3m2-gxq9-62h7.
 - Reject service manifest proxy IDs when a generated upstream or plugin ID
   would exceed Ferrum Edge's 254-character resource ID limit.
 - Correct `alloy.response.body.bytes`: it counts the data-frame payload bytes

@@ -1,6 +1,7 @@
 //! Bounded parsing and validation of untrusted report files.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use serde_json::Value;
 
@@ -87,7 +88,10 @@ pub struct Issue {
 /// A successfully parsed report plus everything the reader had to adjust.
 #[derive(Debug, Clone)]
 pub struct ParsedReport {
-    /// The report, with provenance downgraded for offline reading.
+    /// The report, with provenance downgraded for offline reading. Its
+    /// `findings` are always empty: supplied findings are discarded, and
+    /// findings come only from running [`analyze`](crate::rules::analyze) on
+    /// the observations.
     pub report: DiagnosticReport,
     /// Non-fatal problems: unknown names, newer minor version, downgraded trust.
     pub warnings: Vec<Issue>,
@@ -101,6 +105,12 @@ pub struct ParsedReport {
 /// claims, its collection is treated as `unverified` and every `verified`
 /// observation is downgraded to `unverified`. The original claim is returned
 /// in [`ParsedReport::claimed_verification`] and reported as a warning.
+///
+/// Supplied findings are conclusions the file asserts, not evidence. They
+/// are still bounded by [`Limits::max_findings`] and must deserialize, but
+/// they are then discarded, with a warning that counts them: the returned
+/// report never carries them. Recompute findings with
+/// [`analyze`](crate::rules::analyze).
 pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, ReportError> {
     if input.len() > limits.max_bytes {
         return Err(ReportError::TooLarge(format!(
@@ -115,7 +125,7 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
         serde_json::from_slice(input).map_err(|e| ReportError::InvalidJson(e.to_string()))?;
     let mut warnings = Vec::new();
     check_header(&value, &mut warnings)?;
-    check_string_lengths(&value, "", limits.max_string_bytes)?;
+    check_string_lengths(&value, &mut Vec::new(), limits.max_string_bytes)?;
 
     let mut report: DiagnosticReport =
         serde_json::from_value(value).map_err(|e| ReportError::InvalidStructure(e.to_string()))?;
@@ -157,12 +167,15 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
             ),
         });
     }
-    if !report.findings.is_empty() {
+    // Supplied findings never leave the parser, so no caller can mistake
+    // them for conclusions recomputed from the downgraded observations.
+    let supplied = std::mem::take(&mut report.findings);
+    if !supplied.is_empty() {
         warnings.push(Issue {
             path: "/findings".into(),
             message: format!(
-                "{} supplied finding(s) ignored; findings are recomputed from observations",
-                report.findings.len()
+                "{} supplied finding(s) discarded; findings are recomputed from observations",
+                supplied.len()
             ),
         });
     }
@@ -290,15 +303,51 @@ fn check_depth(input: &[u8], max_depth: usize) -> Result<(), ReportError> {
     Ok(())
 }
 
-fn check_string_lengths(value: &Value, path: &str, max: usize) -> Result<(), ReportError> {
+/// One step of the location being checked. Keys are borrowed from the value,
+/// so the walk costs the same however long the ancestor keys are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Segment<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// The JSON-pointer-like location of `path`: `""` for the root, otherwise
+/// `/` before each key or index. Only built when reporting an error.
+fn pointer(path: &[Segment<'_>]) -> String {
+    let mut out = String::new();
+    for segment in path {
+        match segment {
+            Segment::Key(key) => {
+                out.push('/');
+                out.push_str(key);
+            }
+            Segment::Index(index) => {
+                let _ = write!(out, "/{index}");
+            }
+        }
+    }
+    out
+}
+
+/// Rejects any string or object key longer than `max` bytes. `path` is a
+/// stack of borrowed segments, pushed and popped on the way, so each node
+/// costs constant work and the location is formatted only for the error.
+fn check_string_lengths<'a>(
+    value: &'a Value,
+    path: &mut Vec<Segment<'a>>,
+    max: usize,
+) -> Result<(), ReportError> {
     match value {
         Value::String(s) if s.len() > max => Err(ReportError::TooLarge(format!(
-            "string at {path} is {} bytes (limit {max})",
+            "string at {} is {} bytes (limit {max})",
+            pointer(path),
             s.len()
         ))),
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                check_string_lengths(item, &format!("{path}/{index}"), max)?;
+                path.push(Segment::Index(index));
+                check_string_lengths(item, path, max)?;
+                path.pop();
             }
             Ok(())
         }
@@ -306,10 +355,13 @@ fn check_string_lengths(value: &Value, path: &str, max: usize) -> Result<(), Rep
             for (key, item) in map {
                 if key.len() > max {
                     return Err(ReportError::TooLarge(format!(
-                        "object key at {path} exceeds {max} bytes"
+                        "object key at {} exceeds {max} bytes",
+                        pointer(path)
                     )));
                 }
-                check_string_lengths(item, &format!("{path}/{key}"), max)?;
+                path.push(Segment::Key(key));
+                check_string_lengths(item, path, max)?;
+                path.pop();
             }
             Ok(())
         }
@@ -533,4 +585,53 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
         });
     }
     errors
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use serde_json::{Map, Value, json};
+
+    use super::{ReportError, Segment, check_string_lengths, pointer};
+
+    #[test]
+    fn the_length_walk_only_keeps_a_stack_of_borrowed_segments() {
+        let key = "k".repeat(2_048);
+        let mut value = Value::Array(vec![json!(0); 10_000]);
+        for _ in 0..30 {
+            let mut map = Map::new();
+            map.insert(key.clone(), value);
+            value = Value::Object(map);
+        }
+        let mut path = Vec::new();
+        check_string_lengths(&value, &mut path, 2_048).unwrap();
+        assert!(path.is_empty());
+        // One segment per level, whatever the key length or element count.
+        assert!(path.capacity() <= 64, "{}", path.capacity());
+    }
+
+    #[test]
+    fn locations_are_formatted_only_for_errors_and_unchanged() {
+        assert_eq!(pointer(&[]), "");
+        let path = [
+            Segment::Key("observations"),
+            Segment::Index(3),
+            Segment::Key("name"),
+        ];
+        assert_eq!(pointer(&path), "/observations/3/name");
+
+        let value = json!({ "a": [{ "b": "xyz" }] });
+        let error = check_string_lengths(&value, &mut Vec::new(), 2).unwrap_err();
+        let expected = "string at /a/0/b is 3 bytes (limit 2)";
+        assert_eq!(error, ReportError::TooLarge(expected.into()));
+
+        let value = json!({ "a": [1, { "long": 1 }] });
+        let error = check_string_lengths(&value, &mut Vec::new(), 2).unwrap_err();
+        let expected = "object key at /a/1 exceeds 2 bytes";
+        assert_eq!(error, ReportError::TooLarge(expected.into()));
+
+        let error = check_string_lengths(&json!("xyz"), &mut Vec::new(), 2).unwrap_err();
+        let expected = "string at  is 3 bytes (limit 2)";
+        assert_eq!(error, ReportError::TooLarge(expected.into()));
+    }
 }

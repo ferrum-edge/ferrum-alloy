@@ -179,6 +179,38 @@ fn span_limit_is_enforced() {
     ));
 }
 
+/// One export request with `spans` as its only span list.
+fn request_with(spans: Vec<Value>) -> String {
+    let scope = json!({ "scope": { "name": "test" }, "spans": spans });
+    json!({ "resourceSpans": [{ "resource": {}, "scopeSpans": [scope] }] }).to_string()
+}
+
+#[test]
+fn malformed_span_entries_count_against_the_span_limit() {
+    let mut limits = ImportLimits::default();
+    limits.max_spans = 2;
+    let too_many = ImportError::TooLarge("more than 2 spans".into());
+    let malformed = json!({ "name": "no ids" });
+    let valid = json!({ "traceId": OK_TRACE, "spanId": "00f067aa0ba902b7", "kind": 2 });
+
+    let three = request_with(vec![malformed.clone(); 3]);
+    assert_eq!(trace_ids(&three, &limits).unwrap_err(), too_many);
+    let error = import(&three, None, collector(), &limits).unwrap_err();
+    assert_eq!(error, too_many);
+    let two = request_with(vec![malformed.clone(); 2]);
+    assert!(trace_ids(&two, &limits).unwrap().is_empty());
+
+    // Valid and malformed entries share one budget, across lines.
+    let lines = [
+        request_with(vec![malformed.clone(), valid.clone()]),
+        request_with(vec![malformed.clone()]),
+    ];
+    let joined = lines.join("\n");
+    assert_eq!(trace_ids(&joined, &limits).unwrap_err(), too_many);
+    let within = request_with(vec![malformed, valid]);
+    assert_eq!(trace_ids(&within, &limits).unwrap(), [OK_TRACE]);
+}
+
 fn by_code<'a>(findings: &'a [Finding], code: &str) -> &'a Finding {
     findings
         .iter()
