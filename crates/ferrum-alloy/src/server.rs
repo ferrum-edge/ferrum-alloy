@@ -11,8 +11,9 @@
 //! written, so a peer that sends one cheap request and then only answers
 //! HTTP/2 keep-alive pings cannot keep its slot either, while a slow reader
 //! still taking the end of a response is not cut. A response the peer will
-//! not take counts as in flight, so the write stall timeout bounds the time
-//! a connection may go without writing any response data while a response
+//! not take counts as in flight, and a connection whose transport cannot
+//! take a write is never idle, so the write stall timeout bounds the time a
+//! connection may go without writing any response data while a response
 //! waits to be written: a peer that withholds HTTP/2 `WINDOW_UPDATE` or
 //! keeps a zero TCP receive window cannot keep its slot. On HTTP/2, response
 //! data waits from the moment a response body hands it to Hyper until Hyper
@@ -648,12 +649,18 @@ impl Activity {
         self.written.load(Ordering::Relaxed)
     }
 
+    /// Whether the last write to the transport could not complete: data is
+    /// on its way to a peer that takes none of it for now.
+    fn write_blocked(&self) -> bool {
+        self.write_blocked.load(Ordering::Relaxed)
+    }
+
     /// Whether response data is waiting for the transport: the transport
     /// cannot take a write, a response body has produced data that the
     /// connection cannot send yet, or Hyper holds HTTP/2 data that a response
     /// body handed over (see `held`).
     fn response_pending(&self) -> bool {
-        self.write_blocked.load(Ordering::Relaxed)
+        self.write_blocked()
             || self.unsent.load(Ordering::Relaxed) > 0
             || self.held.load(Ordering::Relaxed) > 0
     }
@@ -1346,7 +1353,12 @@ async fn serve_io<I>(
     // has been written for the idle timeout. Hyper lets go of a response body
     // as soon as it has taken the last chunk, which can still be on its way
     // to a slow reader, so the idle time counts from the last response byte
-    // written. HTTP/2 keep-alive pings do not count as activity.
+    // written, and a connection whose transport cannot take a write is never
+    // idle: the peer is not taking data that is on its way to it, which is
+    // for the write stall timeout to bound. On HTTP/1 the whole of a large
+    // response can be left in Hyper's write buffer when its body ends, and a
+    // reader that keeps taking it is not cut by a pause on its side or in
+    // the network. HTTP/2 keep-alive pings do not count as activity.
     let deadline = tokio::time::sleep(options.header_read_timeout);
     tokio::pin!(deadline);
     // The write stall check samples response progress every half period. It
@@ -1387,10 +1399,15 @@ async fn serve_io<I>(
                     let started = activity.started();
                     let busy = activity.in_flight() > 0;
                     let written = activity.written();
-                    if busy || idle_since != Some(started) || written != idle_written {
+                    // Before the first request this is the header read
+                    // deadline, which nothing defers.
+                    let sending = started > 0 && activity.write_blocked();
+                    if busy || sending || idle_since != Some(started) || written != idle_written {
                         // Not idle for the whole period: look again later.
                         // The idle notification re-arms the deadline as soon
-                        // as the last request in flight ends.
+                        // as the last request in flight ends. A blocked write
+                        // is left to the write stall check, which counts it
+                        // as response data waiting.
                         idle_since = (!busy).then_some(started);
                         idle_written = written;
                         deadline

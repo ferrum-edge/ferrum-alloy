@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Fix HTTP/1.1 responses being cut by `server.idle_timeout_ms` while the
+  client was still downloading them. Hyper lets go of a response body as soon
+  as it has taken the last chunk, so the rest of a large response could wait
+  in Hyper's write buffer with no request counted in flight, and a pause of
+  one idle timeout in the client's reading, or in the network, closed the
+  connection and truncated the response. A connection whose transport cannot
+  take a write is no longer idle on either protocol;
+  `server.write_stall_timeout_ms` still disconnects a client that stops
+  reading, now also once its response body has ended.
 - Keep an upgraded (WebSocket) connection's slot with its socket: it now
   counts against `server.max_connections` and in
   `ferrum_alloy_active_connections` until the application drops it, so
