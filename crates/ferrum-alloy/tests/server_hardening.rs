@@ -835,12 +835,9 @@ async fn every_task_waiting_on_an_upgraded_connection_is_woken_at_the_drain_budg
     let routes = router().route("/raw", get(handler));
     let mut config = hardened();
     config.shutdown.drain_timeout_ms = 300;
-    let server = support::start_on(
-        AlloyApp::new("hardening").router(routes),
-        config,
-        listener_with_small_send_buffer(),
-    )
-    .await;
+    let (listener, _) = listener_with_small_send_buffer();
+    let server =
+        support::start_on(AlloyApp::new("hardening").router(routes), config, listener).await;
     let stats = Arc::clone(&server.stats);
     let mut client = connect_with_small_window(server.addr).await;
     let upgrade = b"GET /raw HTTP/1.1\r\nhost: t\r\nupgrade: raw\r\nconnection: Upgrade\r\n\r\n";
