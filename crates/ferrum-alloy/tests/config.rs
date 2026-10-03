@@ -818,7 +818,8 @@ fn warnings_flag_risky_but_valid_choices() {
         "{text:?}"
     );
     assert!(
-        text.iter().any(|w| w.contains("request_id.accept_incoming")),
+        text.iter()
+            .any(|w| w.contains("request_id.accept_incoming")),
         "{text:?}"
     );
 }
@@ -831,7 +832,9 @@ fn incoming_request_ids_are_kept_only_from_trusted_peers_by_default() {
     let warnings = config.validate(NO_FEATURES).unwrap();
     let text: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
     assert!(
-        !text.iter().any(|w| w.contains("request_id.accept_incoming")),
+        !text
+            .iter()
+            .any(|w| w.contains("request_id.accept_incoming")),
         "{text:?}"
     );
 }
