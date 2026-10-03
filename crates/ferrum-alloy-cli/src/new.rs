@@ -7,8 +7,6 @@
 //! overwritten, and nothing is downloaded. Cargo fetches dependencies when
 //! the user builds the project.
 
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
@@ -409,8 +407,7 @@ fn prepare_target(path: &Path) -> Result<(), CliError> {
                     parent.display()
                 )));
             }
-            std::fs::create_dir(path)
-                .map_err(|e| CliError::Io(format!("create {}: {e}", path.display())))
+            crate::fsout::create_dirs(path)
         }
         Err(error) => Err(CliError::Io(format!("{}: {error}", path.display()))),
     }
@@ -611,16 +608,9 @@ pub(crate) fn run(args: NewArgs) -> Result<(), CliError> {
     for (relative, content) in &files {
         let path = target.join(relative);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CliError::Io(format!("create {}: {e}", parent.display())))?;
+            crate::fsout::create_dirs(parent)?;
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| CliError::Io(format!("create {}: {e}", path.display())))?;
-        file.write_all(content.as_bytes())
-            .map_err(|e| CliError::Io(format!("write {}: {e}", path.display())))?;
+        crate::fsout::write_new(&path, content.as_bytes())?;
     }
     crate::print(&format!(
         "Created {} in {}\n\nNext:\n  cd {}\n  cargo test\n  cargo run\n",
