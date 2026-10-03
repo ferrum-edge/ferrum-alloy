@@ -139,7 +139,9 @@ fn diagnose_sanitizes_errors_from_hostile_report_keys_in_both_formats() {
         assert_eq!(code(&output), 3);
         let error = stderr(&output);
         assert!(!error.contains('\u{1b}'));
-        assert!(error.contains("?[2J"));
+        // The parser escapes control characters in key paths (`\u{1b}`), so the
+        // CLI never sees a raw ESC; JSON output may escape the backslash again.
+        assert!(error.contains("u{1b}[2J"), "{error}");
     }
 }
 
