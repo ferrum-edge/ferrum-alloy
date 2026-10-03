@@ -896,7 +896,10 @@ fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
     assert_eq!(code(&output), 3, "{}", stderr(&output));
     assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
 
-    for root in [format!("{}/", tree.display()), format!("{}/.", tree.display())] {
+    for root in [
+        format!("{}/", tree.display()),
+        format!("{}/.", tree.display()),
+    ] {
         let output = run(&[
             "edge",
             "export",
