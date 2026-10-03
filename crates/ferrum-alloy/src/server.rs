@@ -15,12 +15,12 @@
 //! a connection may go without writing any response data while a response
 //! waits to be written: a peer that withholds HTTP/2 `WINDOW_UPDATE` or
 //! keeps a zero TCP receive window cannot keep its slot. On HTTP/2, response
-//! data waits from the moment a response body hands it to Hyper until the
-//! transport has written it, including the part of a chunk that Hyper holds
-//! beyond the peer's flow-control window while the body goes back to waiting
-//! for the application. An established HTTP/2 connection is sent `GOAWAY` at
-//! any of these deadlines, so a client can retry elsewhere, and is closed
-//! shortly after.
+//! data waits from the moment a response body hands it to Hyper until Hyper
+//! takes it for writing or drops it, including the part of a chunk that Hyper
+//! holds beyond the peer's flow-control window while the body goes back to
+//! waiting for the application. An established HTTP/2 connection is sent
+//! `GOAWAY` at any of these deadlines, so a client can retry elsewhere, and is
+//! closed shortly after.
 //!
 //! On shutdown it stops accepting, abandons unfinished TLS handshakes, asks
 //! every connection to finish (HTTP/1.1 `Connection: close` after the current
@@ -30,7 +30,8 @@
 //! connection task, are tracked by the drain as well and cancelled at the
 //! budget. The listener returns only after every connection task and stream
 //! task has ended, including aborted tasks that are still unwinding, so every
-//! connection socket is closed and no handler is running by then.
+//! socket a connection task served is closed and no handler is running by
+//! then.
 //!
 //! An upgraded connection (WebSocket) leaves Hyper after the `101` response,
 //! but its slot stays with its socket: it counts against the connection limit
@@ -38,15 +39,18 @@
 //! waits for upgraded connections as well. Applications should close them
 //! when [`crate::Lifecycle::shutdown_token`] is cancelled; those still open
 //! at the drain budget are force-closed: every read and write on them fails
-//! and the tasks waiting on them are woken, so an application that reads or
-//! writes its session ends it, and the listener waits briefly for that.
+//! and all the tasks waiting on them are woken, so an application that reads
+//! or writes its session ends it, and the listener waits briefly for that.
+//! Alloy cannot drop an upgraded connection for the application: one that the
+//! application keeps without reading or writing it stays open after the
+//! listener returns, until the application drops it.
 
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker, ready};
+use std::sync::{Arc, PoisonError};
+use std::task::{Context, Poll, Wake, Waker, ready};
 use std::time::Duration;
 
 use axum::Router;
@@ -318,15 +322,6 @@ impl ForceClose {
             registered: None,
         }
     }
-
-    /// `true` once the listener has force-closed its connections. Otherwise
-    /// `waiter`, made on first use, wakes the task of `cx` when it does.
-    fn wait(&self, waiter: &mut Option<Pin<Box<CloseWaiter>>>, cx: &mut Context<'_>) -> bool {
-        waiter
-            .get_or_insert_with(|| Box::pin(self.waiter()))
-            .as_mut()
-            .poll_closed(cx)
-    }
 }
 
 pin_project! {
@@ -507,22 +502,21 @@ pub(crate) async fn serve(
     .await
     .is_ok();
     if !drained {
-        while connections.try_join_next().is_some() {}
-        let remaining = connections.len();
+        // Every open socket holds one token, in its connection task or in an
+        // upgraded connection, so this counts each connection still open at
+        // the budget once.
+        let remaining = sockets.len();
         let remaining_streams = streams.tracker.len();
-        // Each connection task holds one socket; the others are upgraded.
-        let remaining_upgraded = sockets.len().saturating_sub(remaining);
         tracing::warn!(
             target: "ferrum_alloy::server",
             listener = options.name,
             remaining,
-            remaining_upgraded,
             remaining_streams,
             "drain budget exhausted; closing remaining connections"
         );
         stats
             .force_closed_connections
-            .fetch_add((remaining + remaining_upgraded) as u64, Ordering::Relaxed);
+            .fetch_add(remaining as u64, Ordering::Relaxed);
         stats
             .force_closed_streams
             .fetch_add(remaining_streams as u64, Ordering::Relaxed);
@@ -539,7 +533,8 @@ pub(crate) async fn serve(
         streams.tracker.wait().await;
         // An upgraded socket closes when the application drops it, which an
         // application reading or writing it does once that fails. Alloy
-        // cannot drop it for the application, so the wait is bounded.
+        // cannot drop it for the application, so the wait is bounded: one
+        // the application keeps without reading or writing stays open.
         sockets.close();
         if tokio::time::timeout(UPGRADED_CLOSE_GRACE, sockets.wait())
             .await
@@ -628,15 +623,13 @@ struct Activity {
     written: AtomicU64,
     /// Whether the last write to the transport could not complete.
     write_blocked: AtomicBool,
-    /// HTTP/2 response data that bodies have handed to Hyper and the
-    /// transport has not written. Hyper takes a whole chunk as soon as the
-    /// peer's flow-control window has room for one byte of it, holds what
-    /// does not fit, and goes back to the body, which may then wait for the
-    /// application: only this count still shows the held data.
+    /// HTTP/2 response data that bodies have handed to Hyper and that Hyper
+    /// has neither taken for writing nor dropped (see [`HeldData`]). Hyper
+    /// takes a whole chunk as soon as the peer's flow-control window has
+    /// room for one byte of it, holds what does not fit, and goes back to the
+    /// body, which may then wait for the application: only this count still
+    /// shows the held data.
     held: AtomicU64,
-    /// HTTP/2 responses that have handed data to Hyper and have not ended or
-    /// been dropped.
-    streaming: AtomicUsize,
 }
 
 impl Activity {
@@ -654,33 +647,14 @@ impl Activity {
         self.written.load(Ordering::Relaxed)
     }
 
-    /// Takes `len` bytes off `held`, never below zero: data the transport
-    /// wrote, or that a reset stream discarded.
-    fn release(&self, len: u64) {
-        if len == 0 || self.held.load(Ordering::Relaxed) == 0 {
-            return;
-        }
-        let release = |held: u64| Some(held.saturating_sub(len));
-        let _ = self
-            .held
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, release);
-    }
-
-    /// Whether HTTP/2 response data handed to Hyper is still unwritten while
-    /// a response that handed data over is still running. Once none is, an
-    /// ended response's unwritten data is left to the idle timeout.
-    fn data_held(&self) -> bool {
-        self.streaming.load(Ordering::Relaxed) > 0 && self.held.load(Ordering::Relaxed) > 0
-    }
-
     /// Whether response data is waiting for the transport: the transport
     /// cannot take a write, a response body has produced data that the
-    /// connection cannot send yet, or HTTP/2 flow control holds data that a
-    /// response body handed over (see `held`).
+    /// connection cannot send yet, or Hyper holds HTTP/2 data that a response
+    /// body handed over (see `held`).
     fn response_pending(&self) -> bool {
         self.write_blocked.load(Ordering::Relaxed)
             || self.unsent.load(Ordering::Relaxed) > 0
-            || self.data_held()
+            || self.held.load(Ordering::Relaxed) > 0
     }
 }
 
@@ -693,12 +667,6 @@ struct InFlight {
     /// Whether the response goes out on HTTP/2, whose flow control lets Hyper
     /// hold data that the transport has not written.
     http2: bool,
-    /// The length of the last data frame the body handed to Hyper on HTTP/2,
-    /// and the response data written on the connection before then. Once
-    /// set, this response is counted in `streaming`.
-    last_data: Option<(u64, u64)>,
-    /// Whether the body has ended, so that Hyper still sends what it holds.
-    ended: bool,
 }
 
 impl InFlight {
@@ -709,8 +677,6 @@ impl InFlight {
             activity: Arc::clone(activity),
             unsent: false,
             http2,
-            last_data: None,
-            ended: false,
         }
     }
 
@@ -729,38 +695,92 @@ impl InFlight {
         }
     }
 
-    /// Records a data frame of `len` bytes handed to Hyper. It counts as held
-    /// until the transport has written as much response data.
-    fn handed_over(&mut self, len: u64) {
-        if !self.http2 || len == 0 {
-            return;
-        }
-        if self.last_data.is_none() {
-            self.activity.streaming.fetch_add(1, Ordering::Relaxed);
-        }
-        self.activity.held.fetch_add(len, Ordering::Relaxed);
-        self.last_data = Some((len, self.activity.written()));
+    /// Where data this response hands to Hyper counts as held: only on
+    /// HTTP/2.
+    fn held_in(&self) -> Option<Arc<Activity>> {
+        self.http2.then(|| Arc::clone(&self.activity))
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         self.set_unsent(false);
-        if let Some((len, written_before)) = self.last_data {
-            if !self.ended {
-                // Hyper drops a body that has not ended when its stream is
-                // reset or fails, which discards what the stream still held:
-                // at most the last frame, less the response data written
-                // since it was handed over. That is exact when no other
-                // stream was sending. Releasing more could hide another
-                // stream's held data, so an estimate may only fall short.
-                let written_since = self.activity.written().saturating_sub(written_before);
-                self.activity.release(len.saturating_sub(written_since));
-            }
-            self.activity.streaming.fetch_sub(1, Ordering::Relaxed);
-        }
         if self.activity.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.activity.idle.notify_one();
+        }
+    }
+}
+
+/// A chunk of response data handed to Hyper, counted in its connection's
+/// `held` until Hyper has taken it for writing or dropped it. Hyper and h2
+/// advance a chunk as they write it, keep what flow control does not let
+/// through, and drop it when its stream is reset or its connection closes,
+/// so the count is exact for every stream, whatever the others do. h2
+/// copies small frames into its write buffer before the transport writes
+/// them; the transport's own blocked state covers that buffer.
+struct HeldData<D> {
+    inner: D,
+    /// The connection's activity on HTTP/2, `None` otherwise.
+    activity: Option<Arc<Activity>>,
+    /// The bytes of this chunk still counted in `held`.
+    held: u64,
+}
+
+impl<D: Buf> HeldData<D> {
+    fn new(inner: D, activity: Option<Arc<Activity>>) -> Self {
+        let mut held = 0;
+        if let Some(activity) = &activity {
+            held = inner.remaining() as u64;
+            activity.held.fetch_add(held, Ordering::Relaxed);
+        }
+        Self {
+            inner,
+            activity,
+            held,
+        }
+    }
+
+    /// Takes up to `len` bytes of this chunk off `held`.
+    fn release(&mut self, len: u64) {
+        let len = len.min(self.held);
+        if let Some(activity) = &self.activity
+            && len > 0
+        {
+            self.held -= len;
+            activity.held.fetch_sub(len, Ordering::Relaxed);
+        }
+    }
+}
+
+impl<D: Buf> Buf for HeldData<D> {
+    fn remaining(&self) -> usize {
+        self.inner.remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.inner.chunk()
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [io::IoSlice<'a>]) -> usize {
+        self.inner.chunks_vectored(dst)
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.inner.advance(cnt);
+        self.release(cnt as u64);
+    }
+
+    fn copy_to_bytes(&mut self, len: usize) -> bytes::Bytes {
+        let bytes = self.inner.copy_to_bytes(len);
+        self.release(len as u64);
+        bytes
+    }
+}
+
+impl<D> Drop for HeldData<D> {
+    fn drop(&mut self) {
+        if let Some(activity) = &self.activity {
+            activity.held.fetch_sub(self.held, Ordering::Relaxed);
         }
     }
 }
@@ -819,7 +839,7 @@ pin_project! {
     /// A response body that keeps its request in flight until it ends or is
     /// dropped. Between producing data and being polled again, it counts as
     /// unsent: Hyper polls a body again only once it can take more data. On
-    /// HTTP/2, the data it produced also counts as held until written.
+    /// HTTP/2, each chunk it produces also counts as held (see [`HeldData`]).
     struct TrackedBody<B> {
         #[pin]
         inner: B,
@@ -831,38 +851,29 @@ impl<B> http_body::Body for TrackedBody<B>
 where
     B: http_body::Body,
 {
-    type Data = B::Data;
+    type Data = HeldData<B::Data>;
     type Error = B::Error;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        let mut this = self.project();
-        let frame = this.inner.as_mut().poll_frame(cx);
-        let Some(in_flight) = this.in_flight.as_mut() else {
-            return frame;
-        };
+        let this = self.project();
+        let frame = this.inner.poll_frame(cx);
         match &frame {
             // The response has ended, even if Hyper holds on to the body.
-            Poll::Ready(None) => {
-                in_flight.ended = true;
-                *this.in_flight = None;
-            }
-            Poll::Ready(Some(Ok(frame))) => {
-                in_flight.set_unsent(true);
-                if let Some(data) = frame.data_ref() {
-                    in_flight.handed_over(data.remaining() as u64);
-                }
-                // Hyper polls a body no more after trailers or once it
-                // reports its end, and still sends what it holds of it.
-                if frame.is_trailers() || this.inner.is_end_stream() {
-                    in_flight.ended = true;
+            Poll::Ready(None) => *this.in_flight = None,
+            frame => {
+                if let Some(in_flight) = this.in_flight.as_mut() {
+                    in_flight.set_unsent(matches!(frame, Poll::Ready(Some(Ok(_)))));
                 }
             }
-            _ => in_flight.set_unsent(false),
         }
-        frame
+        let held_in = this.in_flight.as_ref().and_then(InFlight::held_in);
+        let hold = move |frame: http_body::Frame<B::Data>| {
+            frame.map_data(|data| HeldData::new(data, held_in))
+        };
+        frame.map(|frame| frame.map(|frame| frame.map(hold)))
     }
 
     fn is_end_stream(&self) -> bool {
@@ -962,10 +973,10 @@ impl Frames {
 /// owns it, and with it the connection's slot.
 ///
 /// Once the listener force-closes its connections at the end of the drain
-/// budget, every read and write fails, and a task waiting on one is woken
-/// so that it fails too. Checking for that takes no lock: a waiting task
-/// registers for the wake-up only the first time it waits, or when its
-/// waker changes.
+/// budget, every read and write fails, and every task waiting on one is
+/// woken so that it fails too. Checking for that is an atomic load; a task
+/// takes this connection's own lock only when it waits in a direction where
+/// another task waited last.
 struct Transport<I> {
     io: I,
     activity: Arc<Activity>,
@@ -974,9 +985,7 @@ struct Transport<I> {
     blocked: bool,
     /// The connection's slot, released when the socket is dropped.
     active: ActiveConnection,
-    /// Wake the tasks waiting to read and to write at a force-close.
-    read_waiter: Option<Pin<Box<CloseWaiter>>>,
-    write_waiter: Option<Pin<Box<CloseWaiter>>>,
+    watch: CloseWatch,
 }
 
 /// The error of every read and write on a force-closed transport.
@@ -987,19 +996,130 @@ fn force_closed() -> io::Error {
     )
 }
 
+/// Wakes the tasks waiting to read or write on one transport when the
+/// listener force-closes its connections: every such task, not only the last
+/// one to wait, so that tasks sharing an upgraded connection all fail.
+#[derive(Default)]
+struct CloseWatch {
+    /// Made the first time a task waits.
+    waiters: Option<Waiters>,
+    /// The waker each direction last added, so that a task waiting again
+    /// takes no lock.
+    read: Option<Waker>,
+    write: Option<Waker>,
+}
+
+impl CloseWatch {
+    /// `result` of a read, or a force-close error (see [`unless_closed`]).
+    fn reading<T>(
+        &mut self,
+        close: &ForceClose,
+        result: Poll<io::Result<T>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<T>> {
+        unless_closed(result, close, &mut self.waiters, &mut self.read, cx)
+    }
+
+    /// `result` of a write, flush, or shutdown, or a force-close error (see
+    /// [`unless_closed`]).
+    fn writing<T>(
+        &mut self,
+        close: &ForceClose,
+        result: Poll<io::Result<T>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<T>> {
+        unless_closed(result, close, &mut self.waiters, &mut self.write, cx)
+    }
+}
+
 /// `result`, or a force-close error if it is pending and the listener has
-/// force-closed the connection. Otherwise `waiter` wakes the task of `cx`
-/// when the listener does, so that its next attempt fails.
+/// force-closed the connection. Otherwise the task of `cx` is added to
+/// `waiters`, which wake it when the listener does, so that its next attempt
+/// fails. `last` is the waker this direction last added: a task that waits
+/// again with it takes no lock.
 fn unless_closed<T>(
     result: Poll<io::Result<T>>,
     close: &ForceClose,
-    waiter: &mut Option<Pin<Box<CloseWaiter>>>,
+    waiters: &mut Option<Waiters>,
+    last: &mut Option<Waker>,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<T>> {
-    if result.is_pending() && close.wait(waiter, cx) {
+    if result.is_ready() {
+        return result;
+    }
+    let closed = if matches!(last, Some(waker) if waker.will_wake(cx.waker())) {
+        close.is_set()
+    } else {
+        let waiters = waiters.get_or_insert_with(|| Waiters::new(close));
+        waiters.tasks.add(cx.waker());
+        *last = Some(cx.waker().clone());
+        waiters.poll_closed()
+    };
+    if closed {
         return Poll::Ready(Err(force_closed()));
     }
     result
+}
+
+/// The tasks waiting on one transport, and the single registration that
+/// wakes them all when the listener force-closes its connections.
+struct Waiters {
+    tasks: Arc<WakeAll>,
+    closed: Pin<Box<CloseWaiter>>,
+}
+
+impl Waiters {
+    fn new(close: &ForceClose) -> Self {
+        Self {
+            tasks: Arc::default(),
+            closed: Box::pin(close.waiter()),
+        }
+    }
+
+    /// `true` once the listener has force-closed its connections. Registers
+    /// [`WakeAll`] for the wake-up the first time; its waker never changes,
+    /// so later calls only check the flag.
+    fn poll_closed(&mut self) -> bool {
+        let waker = Waker::from(Arc::clone(&self.tasks));
+        let mut cx = Context::from_waker(&waker);
+        self.closed.as_mut().poll_closed(&mut cx)
+    }
+}
+
+/// The wakers of the tasks waiting on one transport. Waking it wakes them
+/// all, once.
+#[derive(Default)]
+struct WakeAll(std::sync::Mutex<Vec<Waker>>);
+
+impl WakeAll {
+    /// How many distinct tasks it remembers; beyond that the oldest is
+    /// forgotten.
+    const MAX_TASKS: usize = 16;
+
+    /// Adds the task of `waker`, unless it is already there.
+    fn add(&self, waker: &Waker) {
+        let mut wakers = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if wakers.iter().any(|known| known.will_wake(waker)) {
+            return;
+        }
+        if wakers.len() == Self::MAX_TASKS {
+            wakers.remove(0);
+        }
+        wakers.push(waker.clone());
+    }
+}
+
+impl Wake for WakeAll {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let wakers = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        for waker in wakers {
+            waker.wake();
+        }
+    }
 }
 
 impl<I> Transport<I> {
@@ -1011,8 +1131,7 @@ impl<I> Transport<I> {
             response_written: 0,
             blocked: false,
             active,
-            read_waiter: None,
-            write_waiter: None,
+            watch: CloseWatch::default(),
         }
     }
 
@@ -1057,9 +1176,6 @@ impl<I> Transport<I> {
             self.activity
                 .written
                 .store(self.response_written, Ordering::Relaxed);
-            if let Output::Http2(_) = self.output {
-                self.activity.release(data);
-            }
         }
     }
 }
@@ -1075,7 +1191,7 @@ impl<I: AsyncRead + Unpin> AsyncRead for Transport<I> {
             return Poll::Ready(Err(force_closed()));
         }
         let result = Pin::new(&mut this.io).poll_read(cx, buf);
-        unless_closed(result, &this.active.close, &mut this.read_waiter, cx)
+        this.watch.reading(&this.active.close, result, cx)
     }
 }
 
@@ -1091,7 +1207,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
         }
         let result = Pin::new(&mut this.io).poll_write(cx, buf);
         this.record_write(&result, [buf]);
-        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
+        this.watch.writing(&this.active.close, result, cx)
     }
 
     fn poll_write_vectored(
@@ -1105,7 +1221,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
         }
         let result = Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
         this.record_write(&result, bufs.iter().map(|buf| &**buf));
-        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
+        this.watch.writing(&this.active.close, result, cx)
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -1119,7 +1235,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
         }
         let result = Pin::new(&mut this.io).poll_flush(cx);
         this.set_blocked(result.is_pending());
-        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
+        this.watch.writing(&this.active.close, result, cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -1129,7 +1245,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Transport<I> {
         }
         let result = Pin::new(&mut this.io).poll_shutdown(cx);
         this.set_blocked(result.is_pending());
-        unless_closed(result, &this.active.close, &mut this.write_waiter, cx)
+        this.watch.writing(&this.active.close, result, cx)
     }
 }
 

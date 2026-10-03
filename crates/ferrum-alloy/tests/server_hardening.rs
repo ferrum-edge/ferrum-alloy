@@ -11,6 +11,7 @@ mod support;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -801,6 +802,99 @@ async fn an_upgraded_session_is_force_closed_at_the_drain_budget() {
     assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
 }
 
+/// Two application tasks that write to one upgraded connection both wait
+/// on it once the peer reads nothing. At the drain budget both are woken and
+/// fail, not only the last one to wait, so the session ends and its socket
+/// is closed before `serve_on` returns.
+#[tokio::test]
+async fn every_task_waiting_on_an_upgraded_connection_is_woken_at_the_drain_budget() {
+    let ended = [
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ];
+    let writers = ended.clone();
+    let handler = move |request: Request<Body>| two_writers(request, writers.clone());
+    let routes = router().route("/raw", get(handler));
+    let mut config = hardened();
+    config.shutdown.drain_timeout_ms = 300;
+    let server = support::start_on(
+        AlloyApp::new("hardening").router(routes),
+        config,
+        listener_with_small_send_buffer(),
+    )
+    .await;
+    let stats = Arc::clone(&server.stats);
+    let mut client = connect_with_small_window(server.addr).await;
+    let upgrade = b"GET /raw HTTP/1.1\r\nhost: t\r\nupgrade: raw\r\nconnection: Upgrade\r\n\r\n";
+    client.write_all(upgrade).await.unwrap();
+    let mut head = [0u8; 64];
+    let n = client.read(&mut head).await.unwrap();
+    let text = String::from_utf8_lossy(&head[..n]);
+    assert!(text.starts_with("HTTP/1.1 101"), "{text}");
+    // Read nothing more, so that both writers end up waiting.
+    tokio::time::sleep(HEADER_READ_TIMEOUT).await;
+    assert!(
+        ended.iter().all(|ended| !ended.load(Ordering::SeqCst)),
+        "both writers are still writing"
+    );
+    server.lifecycle.trigger_shutdown();
+    tokio::time::timeout(WITHIN, server.task)
+        .await
+        .expect("serve_on returned")
+        .unwrap()
+        .unwrap();
+    assert!(
+        ended.iter().all(|ended| ended.load(Ordering::SeqCst)),
+        "both writers ended before serve_on returned"
+    );
+    assert!(
+        closed_by_server(&mut client).await,
+        "the upgraded socket is closed"
+    );
+    assert_eq!(stats.force_closed_connections.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
+}
+
+/// Answers `101` and then writes to the upgraded connection from two tasks
+/// until writing fails; each sets its flag in `ended` when it ends.
+async fn two_writers(
+    mut request: Request<Body>,
+    ended: [Arc<AtomicBool>; 2],
+) -> http::Response<Body> {
+    let upgrade = hyper::upgrade::on(&mut request);
+    tokio::spawn(async move {
+        let upgraded = upgrade.await.unwrap();
+        let io = Arc::new(std::sync::Mutex::new(TokioIo::new(upgraded)));
+        for ended in ended {
+            tokio::spawn(write_until_it_fails(Arc::clone(&io), ended));
+        }
+    });
+    http::Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(http::header::CONNECTION, "upgrade")
+        .header(http::header::UPGRADE, "raw")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Writes to `io` until a write fails, without holding the lock while it
+/// waits, so that another task can wait on `io` as well.
+async fn write_until_it_fails(io: SharedUpgraded, ended: Arc<AtomicBool>) {
+    let _ended = SetOnDrop(ended);
+    let chunk = vec![b'x'; 64 * 1024];
+    loop {
+        let write = std::future::poll_fn(|cx| {
+            let mut io = io.lock().unwrap();
+            Pin::new(&mut *io).poll_write(cx, &chunk)
+        });
+        if !matches!(write.await, Ok(written) if written > 0) {
+            return;
+        }
+    }
+}
+
+type SharedUpgraded = Arc<std::sync::Mutex<TokioIo<hyper::upgrade::Upgraded>>>;
+
 /// Hyper lets go of a response body as soon as it has taken the last chunk,
 /// long before a slow reader has all of a large response. Idle time counts
 /// from the last response data written, so a reader that keeps taking data
@@ -1053,11 +1147,26 @@ async fn an_http2_stream_waiting_after_its_data_was_taken_is_not_cut() {
     server.shutdown().await.unwrap();
 }
 
-/// A stream reset while Hyper holds part of its chunk discards that part, so
-/// it no longer counts as waiting to be written: another stream on the
-/// connection that waits for the application afterwards is not cut.
+/// A stream reset while Hyper holds part of its one chunk discards that
+/// part, so it no longer counts as waiting to be written: another stream on
+/// the connection that waits for the application afterwards is not cut.
 #[tokio::test]
 async fn data_held_for_a_reset_http2_stream_does_not_stall_its_connection() {
+    a_reset_stream_leaves_nothing_held("/burst").await;
+}
+
+/// The same for an endless response with many chunks, of which Hyper holds
+/// several (and one more it has taken from the body) when the stream is
+/// reset, as when a client cancels a download.
+#[tokio::test]
+async fn data_held_for_a_reset_multi_chunk_http2_stream_does_not_stall_its_connection() {
+    a_reset_stream_leaves_nothing_held("/flood").await;
+}
+
+/// Takes the initial window's worth of `path` on stream 1, resets it, then
+/// opens `/once` on stream 3, which waits for the application after its one
+/// chunk, and checks that the connection is not closed as stalled.
+async fn a_reset_stream_leaves_nothing_held(path: &str) {
     let server = support::start(
         AlloyApp::new("hardening").router(router()),
         write_stall_limited(),
@@ -1066,8 +1175,8 @@ async fn data_held_for_a_reset_http2_stream_does_not_stall_its_connection() {
     let mut stream = TcpStream::connect(server.addr).await.unwrap();
     stream.write_all(H2_PREFACE).await.unwrap();
     stream.write_all(H2_EMPTY_SETTINGS).await.unwrap();
-    stream.write_all(&h2_get_on(1, "/burst")).await.unwrap();
-    // The initial window's worth of the chunk; Hyper holds the rest.
+    stream.write_all(&h2_get_on(1, path)).await.unwrap();
+    // The initial window's worth of the response; Hyper holds the rest.
     read_data(&mut stream, H2_INITIAL_WINDOW as usize).await;
     stream
         .write_all(&h2_u32_frame(H2_RST_STREAM, 1, H2_CANCEL))
