@@ -90,7 +90,7 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
                                     path.display()
                                 ))
                             } else {
-                                CliError::Io(format!("create {}: {error}", path.display()))
+                                CliError::Io(error.to_string())
                             }
                         })?;
                     }
@@ -108,6 +108,7 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             let root = args.output.ok_or_else(|| {
                 CliError::Invalid("--output DIR is required for --format gitforgeops".into())
             })?;
+            let root = crate::fsout::normalize_output_root(&root)?;
             if let Ok(metadata) = std::fs::symlink_metadata(&root) {
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     return Err(CliError::Invalid(format!(
@@ -126,11 +127,20 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             }
             for file in export::gitforgeops_files(&resources, &manifest.gateway.namespace) {
                 let path = root.join(&file.path);
-                if let Some(parent) = path.parent() {
-                    crate::fsout::create_dirs(&root, parent)?;
-                }
-                crate::fsout::write_new(&path, file.content.as_bytes())
-                    .map_err(|error| CliError::Io(format!("create {}: {error}", path.display())))?;
+                let result = (|| {
+                    if let Some(parent) = path.parent() {
+                        crate::fsout::create_dirs(&root, parent)?;
+                    }
+                    crate::fsout::write_new(&path, file.content.as_bytes())
+                        .map_err(|error| CliError::Io(error.to_string()))?;
+                    Ok::<(), CliError>(())
+                })();
+                result.map_err(|error| {
+                    CliError::Io(format!(
+                        "{error}; a partial output tree may remain at {}; remove it before re-running",
+                        root.display()
+                    ))
+                })?;
                 crate::eprint(&format!("wrote {}\n", path.display()));
             }
             Ok(())

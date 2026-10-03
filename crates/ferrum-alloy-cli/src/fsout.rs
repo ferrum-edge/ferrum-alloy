@@ -118,7 +118,8 @@ fn replace_by_rename(temp: &Path, path: &Path) -> std::io::Result<()> {
 /// Creates an output root and its descendants. Ancestors of `root` are user
 /// path context; only `root` and components beneath it are checked for links.
 pub(crate) fn create_dirs(root: &Path, path: &Path) -> Result<(), CliError> {
-    let relative = path.strip_prefix(root).map_err(|_| {
+    let root = normalize_output_root(root)?;
+    let relative = path.strip_prefix(&root).map_err(|_| {
         CliError::Invalid(format!(
             "{} is outside output root {}",
             path.display(),
@@ -173,14 +174,72 @@ pub(crate) fn create_dirs(root: &Path, path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Removes trailing separators and `.` components from a directory output
+/// root while refusing roots whose final component is `..` or absent.
+pub(crate) fn normalize_output_root(path: &Path) -> Result<std::path::PathBuf, CliError> {
+    let Some(name) = path.file_name() else {
+        return Err(CliError::Invalid(format!(
+            "{} must name an output directory",
+            path.display()
+        )));
+    };
+    if name == ".." {
+        return Err(CliError::Invalid(format!(
+            "{} must not end in ..",
+            path.display()
+        )));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(parent.join(name))
+}
+
 /// Creates a new output file exclusively, so a pre-existing leaf (including
 /// a symlink or Windows reparse point) cannot be followed or overwritten.
-pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+pub(crate) struct WriteNewError {
+    operation: &'static str,
+    path: std::path::PathBuf,
+    source: std::io::Error,
+}
+
+impl WriteNewError {
+    pub(crate) fn kind(&self) -> ErrorKind {
+        self.source.kind()
+    }
+}
+
+impl std::fmt::Display for WriteNewError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} {}: {}",
+            self.operation,
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), WriteNewError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|source| WriteNewError {
+            operation: "create",
+            path: path.to_path_buf(),
+            source,
+        })?;
     if let Err(error) = file.write_all(bytes) {
         drop(file);
         let _ = std::fs::remove_file(path);
-        return Err(error);
+        return Err(WriteNewError {
+            operation: "write",
+            path: path.to_path_buf(),
+            source: error,
+        });
     }
     Ok(())
 }

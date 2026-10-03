@@ -873,12 +873,14 @@ fn output_writers_replace_or_refuse_symlinks_without_following_them() {
 #[cfg(unix)]
 #[test]
 fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     let dir = tempfile::tempdir().unwrap();
     let manifest = fixture("manifests/orders-api.toml");
     let outside = dir.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
+    let symlink_target = dir.path().join("symlink-target");
+    std::fs::create_dir(&symlink_target).unwrap();
     let tree = dir.path().join("tree");
     symlink(&outside, &tree).unwrap();
     let output = run(&[
@@ -894,6 +896,52 @@ fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
     assert_eq!(code(&output), 3, "{}", stderr(&output));
     assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
 
+    for root in [format!("{}/", tree.display()), format!("{}/.", tree.display())] {
+        let output = run(&[
+            "edge",
+            "export",
+            "--manifest",
+            &manifest,
+            "--format",
+            "gitforgeops",
+            "--output",
+            &root,
+        ]);
+        assert_eq!(code(&output), 3, "{}", stderr(&output));
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+    }
+    let parent_root = format!("{}/..", tree.display());
+    let output = run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--format",
+        "gitforgeops",
+        "--output",
+        &parent_root,
+    ]);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+
+    let baseline = dir.path().join("umask-baseline");
+    std::fs::File::create(&baseline).unwrap();
+    let expected_mode = baseline.metadata().unwrap().permissions().mode() & 0o777;
+    let umask_output = dir.path().join("edge-output.yaml");
+    let edge = run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--output",
+        umask_output.to_str().unwrap(),
+        "--force",
+    ]);
+    assert_eq!(code(&edge), 0, "{}", stderr(&edge));
+    assert_eq!(
+        umask_output.metadata().unwrap().permissions().mode() & 0o777,
+        expected_mode
+    );
+
     let linked_parent = dir.path().join("linked-parent");
     symlink(&outside, &linked_parent).unwrap();
     let target = linked_parent.join("new-target");
@@ -907,6 +955,33 @@ fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
     ]);
     assert_eq!(code(&new_output), 0, "{}", stderr(&new_output));
     assert!(target.join("Cargo.toml").is_file());
+
+    for (index, suffix) in ["", "."].into_iter().enumerate() {
+        let link = dir.path().join(format!("new-link-{index}"));
+        symlink(&symlink_target, &link).unwrap();
+        let path = format!("{}/{suffix}", link.display());
+        let new_output = run(&[
+            "new",
+            "svc",
+            "--path",
+            &path,
+            "--alloy-path",
+            repo().join("crates/ferrum-alloy").to_str().unwrap(),
+        ]);
+        assert_eq!(code(&new_output), 3, "{}", stderr(&new_output));
+        assert!(std::fs::read_dir(&symlink_target).unwrap().next().is_none());
+    }
+
+    let parent_root = format!("{}/..", tree.display());
+    let new_output = run(&[
+        "new",
+        "svc",
+        "--path",
+        &parent_root,
+        "--alloy-path",
+        repo().join("crates/ferrum-alloy").to_str().unwrap(),
+    ]);
+    assert_eq!(code(&new_output), 3, "{}", stderr(&new_output));
 }
 
 #[test]

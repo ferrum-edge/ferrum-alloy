@@ -4,8 +4,10 @@
 
 - Protect CLI output files from symlink redirection with exclusive creation or
   same-directory atomic replacement, and reject pre-existing symlink
-  components at or beneath generated output roots. Ancestor symlinks are allowed;
-  a concurrent writer in a shared writable parent can still race (see
+  components at or beneath generated output roots, including roots written with
+  trailing slashes or `/.`. Missing ancestors are created with
+  `create_dir_all`, which follows ancestor symlinks; a concurrent writer in a
+  shared writable parent can also race (see
   [security notes](docs/security.md#known-gaps)).
 - Reject service manifest proxy IDs when a generated upstream or plugin ID
   would exceed Ferrum Edge's 254-character resource ID limit.
