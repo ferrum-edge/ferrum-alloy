@@ -319,7 +319,8 @@ async fn request_context_and_trace_policy_reach_handlers() {
     .await;
     let text = reply.text();
     let parts: Vec<&str> = text.split('|').collect();
-    assert_eq!(parts[0], "req-abc");
+    assert_ne!(parts[0], "req-abc", "an untrusted peer's id is replaced");
+    assert_eq!(parts[0].len(), 36, "generated UUID");
     assert_ne!(
         parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
         "untrusted peer is re-rooted"
@@ -335,15 +336,18 @@ async fn trusted_network_peers_propagate_trace_context() {
     let server = start(AlloyApp::new("core-test").router(router()), cfg).await;
     let reply = fetch_with(
         &server.url("/context"),
-        &[(
-            "traceparent",
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        )],
+        &[
+            ("x-request-id", "req-abc"),
+            (
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+        ],
     )
     .await;
     let text = reply.text();
     assert!(
-        text.contains("|4bf92f3577b34da6a3ce929d0e0e4736|accepted_remote"),
+        text.contains("req-abc|4bf92f3577b34da6a3ce929d0e0e4736|accepted_remote"),
         "{text}"
     );
     server.shutdown().await.unwrap();

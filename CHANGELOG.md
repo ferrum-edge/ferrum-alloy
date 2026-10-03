@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- **Changed default:** `telemetry.request_id.accept_incoming`
+  (`RequestIdConfig::accept_incoming`) now defaults to `trusted_peers`, like
+  `trace_context.accept_incoming`, instead of `any`. A request id sent by a
+  peer the trust classifier does not trust is replaced by a generated one,
+  which handlers see and responses echo, so a caller can no longer choose the
+  id its request is logged, traced, and retained for diagnostics under.
+  Ferrum Edge as a trusted peer keeps its correlation ids. Set `any` to keep
+  every caller's id; configuration validation now warns about it.
+- Diagnostic evidence retention is shared fairly between tenants: under the
+  count or byte bound, a tenant evicts another tenant's oldest record only
+  while that tenant holds more than it, and otherwise its own, so one
+  tenant's traffic can no longer evict other tenants' evidence. The store no
+  longer keeps the slots of records evicted out of order, and its per-record
+  byte estimate is now roughly 800 bytes on 64-bit targets.
+- Retained diagnostic evidence is filed by who chose the request id
+  (`RequestEvidence::request_id_origin`, `evidence::RequestIdOrigin`:
+  `generated`, `trusted_peer`, `untrusted_caller`), and a lookup prefers a
+  generated id, so an id a caller sends back cannot join or evict a generated
+  id's records. Under one id only records of the first record's trace are
+  kept; a later request of another trace that reuses the id is not retained,
+  is counted as `ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}`,
+  and is noted in the report. Reports carry a `request_id_origin` attribute
+  on each `alloy.response` event.
 - Reject service manifest proxy IDs when a generated upstream or plugin ID
   would exceed Ferrum Edge's 254-character resource ID limit.
 - Correct `alloy.response.body.bytes`: it counts the data-frame payload bytes

@@ -15,7 +15,9 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use ferrum_alloy_telemetry::{RecordRouteLayer, RequestContext, TelemetryConfig, TelemetryLayer};
+use ferrum_alloy_telemetry::{
+    AcceptPolicy, RecordRouteLayer, RequestContext, TelemetryConfig, TelemetryLayer,
+};
 use http_body_util::BodyExt;
 use tower::{Layer, ServiceExt, service_fn};
 
@@ -74,12 +76,20 @@ async fn send(
     (status, String::from_utf8(body.to_vec()).unwrap(), headers)
 }
 
+/// A layer that keeps every caller's request id, so handlers see the id the
+/// test chose. By default only trusted peers' ids are kept.
+fn keeping_request_ids() -> TelemetryLayer {
+    let mut config = TelemetryConfig::default();
+    config.request_id.accept_incoming = AcceptPolicy::Any;
+    TelemetryLayer::new(config).unwrap()
+}
+
 #[tokio::test]
 async fn matched_unmatched_and_method_not_allowed_routes_use_bounded_labels() {
     let state = AppState {
         hits: Arc::new(AtomicUsize::new(0)),
     };
-    let telemetry = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let telemetry = keeping_request_ids();
     let metrics = telemetry.metrics();
     let service = telemetry.layer(app(state.clone()));
 
@@ -183,7 +193,7 @@ async fn duplicate_layers_do_not_double_count() {
 
 #[tokio::test]
 async fn concurrent_requests_never_share_context() {
-    let telemetry = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let telemetry = keeping_request_ids();
     let metrics = telemetry.metrics();
     let router = Router::new().route(
         "/echo/{n}",

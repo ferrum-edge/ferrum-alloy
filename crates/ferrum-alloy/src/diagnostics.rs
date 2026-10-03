@@ -8,7 +8,7 @@
 //!
 //! * the telemetry layer hands every finalized request to a bounded
 //!   in-memory store, which keeps the requests the application tagged with a
-//!   tenant through their [`TenantTag`];
+//!   tenant through their [`TenantTag`], shared fairly between tenants;
 //! * `GET /diagnostics/v1/requests/{request_id}` on the management listener
 //!   asks the authorizer which tenant the caller may read, and answers with
 //!   that tenant's evidence for the id as a `ferrum.diagnostic_report` v1
@@ -56,7 +56,7 @@
 //! }
 //! ```
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -75,7 +75,9 @@ use ferrum_alloy_diagnostics::model::{
     Observation, ObservationKind, Producer, ProducerKind, Scope, SpanRef, Trust, Unit,
     Verification,
 };
-use ferrum_alloy_telemetry::evidence::{EvidenceSink, RequestEvidence, valid_tenant};
+use ferrum_alloy_telemetry::evidence::{
+    EvidenceSink, RequestEvidence, RequestIdOrigin, valid_tenant,
+};
 use ferrum_alloy_telemetry::trace_context::{SpanId, TraceId};
 use ferrum_alloy_telemetry::{PeerInfo, RequestId};
 use futures_util::FutureExt as _;
@@ -93,7 +95,8 @@ pub const ROUTE: &str = "/diagnostics/v1/requests/{request_id}";
 pub const AUTHORIZER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Records kept for one tenant and request id, such as the attempts of a
-/// retried request. A further one evicts the oldest of them.
+/// retried request, which share its trace. A further one evicts the oldest
+/// of them.
 pub const MAX_RECORDS_PER_REQUEST_ID: usize = 16;
 
 /// Longest route template kept. A longer one is dropped from the record.
@@ -103,15 +106,20 @@ pub const MAX_ROUTE_BYTES: usize = 512;
 /// counts.
 const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
 
-/// Estimated fixed cost of one record besides its strings: its queue slot;
-/// an index entry and its hash table control byte, at the table's 7/8
-/// maximum load; the smallest sequence number list; and the reference-count
-/// headers of its tenant and route. It is an estimate, not a measurement:
-/// allocator overhead and the spare capacity of the queue and the index,
-/// which never shrink, are not counted, while an index entry that several
-/// records share is counted for each of them.
-const RECORD_OVERHEAD_BYTES: usize = size_of::<Option<Stored>>()
-    + (size_of::<(Key, Vec<u64>)>() + 1) * 8 / 7
+/// Estimated fixed cost of one record besides its strings: its entries in
+/// the record map and in its tenant's sequence set, with B-tree nodes at
+/// their minimum occupancy of 5 of 11 entries; an index entry and a tenant
+/// entry with their hash table control bytes, at the tables' 7/8 maximum
+/// load; the smallest sequence number list; the tenant's entries in both
+/// tenant orderings; and the reference-count headers of its tenant and
+/// route. It is an estimate, not a measurement: allocator overhead and the
+/// spare capacity of the hash tables, which never shrink, are not counted,
+/// while an index, tenant, or ordering entry that several records share is
+/// counted for each of them.
+const RECORD_OVERHEAD_BYTES: usize = (2 * size_of::<u64>() + size_of::<Stored>()) * 11 / 5
+    + (size_of::<(Key, Filed)>() + 1) * 8 / 7
+    + (size_of::<(Arc<str>, Holding)>() + 1) * 8 / 7
+    + 2 * size_of::<(usize, Arc<str>)>() * 11 / 5
     + 4 * size_of::<u64>()
     + 2 * ARC_HEADER_BYTES;
 
@@ -232,6 +240,7 @@ where
 struct Stored {
     tenant: Arc<str>,
     request_id: RequestId,
+    origin: RequestIdOrigin,
     trace_id: TraceId,
     span_id: SpanId,
     route: Option<Arc<str>>,
@@ -246,86 +255,227 @@ struct Stored {
     bytes: usize,
 }
 
-type Key = (Arc<str>, RequestId);
+/// What records are filed under: a tenant, who chose the request id, and
+/// the id. Ids that different parties chose are never filed together.
+type Key = (Arc<str>, RequestIdOrigin, RequestId);
 
-/// Retained records, oldest first, with an index by tenant and request id.
+/// The order in which a lookup tries the origins of an id: an id this
+/// process generated, which no other request can share, first.
+const LOOKUP_ORDER: [RequestIdOrigin; 3] = [
+    RequestIdOrigin::Generated,
+    RequestIdOrigin::TrustedPeer,
+    RequestIdOrigin::UntrustedCaller,
+];
+
+/// The records filed under one key.
+#[derive(Debug)]
+struct Filed {
+    /// The trace of the records. Only records of this trace, such as the
+    /// attempts of a request a gateway retried, join them.
+    trace_id: TraceId,
+    /// Sequence numbers, oldest first.
+    seqs: Vec<u64>,
+    /// Records of other traces that were not retained under the key.
+    other_traces: u64,
+}
+
+impl Filed {
+    fn new(trace_id: TraceId) -> Self {
+        Self {
+            trace_id,
+            seqs: Vec::new(),
+            other_traces: 0,
+        }
+    }
+}
+
+/// What one tenant holds.
+#[derive(Debug, Default)]
+struct Holding {
+    /// Sequence numbers of the tenant's records; lower is older.
+    seqs: BTreeSet<u64>,
+    /// Estimated bytes of the tenant's records.
+    bytes: usize,
+}
+
+/// Whether a record may be filed under its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// It may.
+    Admitted,
+    /// It may, and the oldest record of the key was evicted to make room.
+    EvictedOldest,
+    /// The key holds records of another trace, which it must not join.
+    OtherTrace,
+}
+
+/// Retained records, indexed by key and by tenant.
 #[derive(Debug, Default)]
 struct Ring {
-    /// `records[i]` has sequence number `first_seq + i`. `None` is the slot
-    /// of a record evicted out of order; it is never first, and counts
-    /// toward the count bound until it is.
-    records: VecDeque<Option<Stored>>,
-    first_seq: u64,
-    /// Sequence numbers of each key's records, oldest first.
-    index: HashMap<Key, Vec<u64>>,
-    /// Records present.
-    live: usize,
+    /// Every record by sequence number; lower is older.
+    records: BTreeMap<u64, Stored>,
+    /// The next sequence number. A `u64` does not wrap in practice.
+    next_seq: u64,
+    index: HashMap<Key, Filed>,
+    tenants: HashMap<Arc<str>, Holding>,
+    /// Tenants by the records they hold, then by name.
+    by_count: BTreeSet<(usize, Arc<str>)>,
+    /// Tenants by the estimated bytes they hold, then by name.
+    by_bytes: BTreeSet<(usize, Arc<str>)>,
+    /// Estimated bytes of every record.
     bytes: usize,
 }
 
 impl Ring {
-    /// Removes the empty slots at the front.
-    fn trim(&mut self) {
-        while matches!(self.records.front(), Some(None)) {
-            self.records.pop_front();
-            self.first_seq = self.first_seq.wrapping_add(1);
-        }
+    /// Records present.
+    fn live(&self) -> usize {
+        self.records.len()
     }
 
-    /// Removes the oldest record. Returns `false` when there is none.
-    fn evict_oldest(&mut self) -> bool {
-        // An empty slot is never first, but skipping any keeps `first_seq`
-        // in step with the queue if that ever stops holding.
-        self.trim();
-        let Some(Some(oldest)) = self.records.pop_front() else {
+    /// Records and estimated bytes `tenant` holds.
+    fn usage(&self, tenant: &str) -> (usize, usize) {
+        self.tenants
+            .get(tenant)
+            .map_or((0, 0), |holding| (holding.seqs.len(), holding.bytes))
+    }
+
+    /// Takes `tenant` out of the orderings before its holding changes.
+    fn unrank(&mut self, tenant: &Arc<str>) {
+        let (count, bytes) = self.usage(tenant);
+        self.by_count.remove(&(count, Arc::clone(tenant)));
+        self.by_bytes.remove(&(bytes, Arc::clone(tenant)));
+    }
+
+    /// Puts `tenant` back into the orderings after its holding changed, or
+    /// forgets it once it holds nothing.
+    fn rank(&mut self, tenant: &Arc<str>) {
+        let (count, bytes) = self.usage(tenant);
+        if count == 0 {
+            self.tenants.remove(tenant);
+            return;
+        }
+        self.by_count.insert((count, Arc::clone(tenant)));
+        self.by_bytes.insert((bytes, Arc::clone(tenant)));
+    }
+
+    /// The oldest record of `tenant`.
+    fn oldest_of(&self, tenant: &str) -> Option<u64> {
+        self.tenants.get(tenant)?.seqs.first().copied()
+    }
+
+    /// Files `record` under `key` as the newest record.
+    fn push(&mut self, key: Key, record: Stored) {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        let tenant = Arc::clone(&record.tenant);
+        self.unrank(&tenant);
+        let holding = self.tenants.entry(Arc::clone(&tenant)).or_default();
+        holding.seqs.insert(seq);
+        holding.bytes = holding.bytes.saturating_add(record.bytes);
+        self.rank(&tenant);
+        self.bytes = self.bytes.saturating_add(record.bytes);
+        let trace_id = record.trace_id;
+        let filed = self.index.entry(key).or_insert(Filed::new(trace_id));
+        filed.seqs.push(seq);
+        self.records.insert(seq, record);
+    }
+
+    /// Removes the record numbered `seq`. Returns whether there was one.
+    fn remove(&mut self, seq: u64) -> bool {
+        let Some(record) = self.records.remove(&seq) else {
             return false;
         };
-        let seq = self.first_seq;
-        self.first_seq = self.first_seq.wrapping_add(1);
-        self.live = self.live.saturating_sub(1);
-        self.bytes = self.bytes.saturating_sub(oldest.bytes);
-        let key = (oldest.tenant, oldest.request_id);
-        if let Some(seqs) = self.index.get_mut(&key) {
-            seqs.retain(|s| *s != seq);
-            if seqs.is_empty() {
+        self.bytes = self.bytes.saturating_sub(record.bytes);
+        let tenant = Arc::clone(&record.tenant);
+        self.unrank(&tenant);
+        if let Some(holding) = self.tenants.get_mut(&tenant) {
+            holding.seqs.remove(&seq);
+            holding.bytes = holding.bytes.saturating_sub(record.bytes);
+        }
+        self.rank(&tenant);
+        let key = (tenant, record.origin, record.request_id);
+        if let Some(filed) = self.index.get_mut(&key) {
+            filed.seqs.retain(|s| *s != seq);
+            if filed.seqs.is_empty() {
                 self.index.remove(&key);
             }
         }
-        self.trim();
         true
     }
 
-    /// Removes the oldest record of `key` when it has the most a key may
-    /// have. Returns whether it did.
-    fn evict_oldest_of(&mut self, key: &Key) -> bool {
-        let Some(seqs) = self.index.get_mut(key) else {
-            return false;
+    /// Decides whether a record of `trace_id` may be filed under `key`, and
+    /// evicts the oldest record of the key when the key holds the most it
+    /// may. A record of another trace than the key's records is refused
+    /// and counted, so it can neither join nor evict them.
+    fn admit(&mut self, key: &Key, trace_id: TraceId) -> Admission {
+        let Some(filed) = self.index.get_mut(key) else {
+            return Admission::Admitted;
         };
-        if seqs.len() < MAX_RECORDS_PER_REQUEST_ID {
-            return false;
+        if filed.trace_id != trace_id {
+            filed.other_traces = filed.other_traces.saturating_add(1);
+            return Admission::OtherTrace;
         }
-        let seq = seqs.remove(0);
-        let offset = usize::try_from(seq.wrapping_sub(self.first_seq)).ok();
-        let slot = offset.and_then(|offset| self.records.get_mut(offset));
-        if let Some(oldest) = slot.and_then(Option::take) {
-            self.live = self.live.saturating_sub(1);
-            self.bytes = self.bytes.saturating_sub(oldest.bytes);
+        if filed.seqs.len() < MAX_RECORDS_PER_REQUEST_ID {
+            return Admission::Admitted;
         }
-        self.trim();
-        true
+        let oldest = filed.seqs.first().copied();
+        if oldest.is_some_and(|seq| self.remove(seq)) {
+            Admission::EvictedOldest
+        } else {
+            Admission::Admitted
+        }
     }
 
-    fn find(&self, key: &Key) -> Vec<Stored> {
-        let Some(seqs) = self.index.get(key) else {
-            return Vec::new();
+    /// The record to evict so that `tenant` can add a record of `bytes`
+    /// estimated bytes while `reason`, the count or the byte bound, is
+    /// exceeded.
+    ///
+    /// Another tenant's record is chosen only when that tenant holds more
+    /// than `tenant` will once the record is added, in records under the
+    /// count bound and in bytes under the byte bound; it is then the oldest
+    /// record of the tenant that holds the most. Otherwise `tenant` gives up
+    /// its own oldest record, so a tenant that holds its share of the store
+    /// evicts only its own evidence. A tenant that holds nothing, when no
+    /// other holds more, takes the oldest record of all.
+    fn victim(&self, tenant: &str, bytes: usize, reason: Evicted) -> Option<u64> {
+        let (count, held_bytes) = self.usage(tenant);
+        let (will_hold, heaviest) = match reason {
+            Evicted::Bytes => (held_bytes.saturating_add(bytes), self.by_bytes.last()),
+            _ => (count.saturating_add(1), self.by_count.last()),
         };
-        seqs.iter()
-            .filter_map(|seq| {
-                let offset = usize::try_from(seq.wrapping_sub(self.first_seq)).ok()?;
-                self.records.get(offset)?.clone()
-            })
-            .collect()
+        if let Some((_, other)) = heaviest.filter(|(holds, _)| *holds > will_hold) {
+            return self.oldest_of(other);
+        }
+        let oldest = self.records.first_key_value().map(|(seq, _)| *seq);
+        self.oldest_of(tenant).or(oldest)
     }
+
+    /// The records filed under `tenant` and `request_id` by the most
+    /// trustworthy origin that has any (see [`LOOKUP_ORDER`]), oldest first.
+    fn find(&self, tenant: &Arc<str>, request_id: &RequestId) -> Found {
+        let mut key = (Arc::clone(tenant), LOOKUP_ORDER[0], request_id.clone());
+        for origin in LOOKUP_ORDER {
+            key.1 = origin;
+            let Some(filed) = self.index.get(&key) else {
+                continue;
+            };
+            let records = filed.seqs.iter().filter_map(|seq| self.records.get(seq));
+            return Found {
+                records: records.cloned().collect(),
+                other_traces: filed.other_traces,
+            };
+        }
+        Found::default()
+    }
+}
+
+/// What a lookup found.
+#[derive(Debug, Default)]
+struct Found {
+    /// The records, oldest first.
+    records: Vec<Stored>,
+    /// Records of other traces under the same key that were not retained.
+    other_traces: u64,
 }
 
 /// Why an eviction happened.
@@ -341,6 +491,7 @@ enum Evicted {
 enum Skipped {
     Untagged,
     TooLarge,
+    RequestIdConflict,
 }
 
 /// How a retrieval ended. A denial is counted as not found, like the
@@ -372,7 +523,7 @@ pub(crate) struct EvidenceStore {
     ring: Mutex<Ring>,
     stored: AtomicU64,
     evicted: [AtomicU64; 3],
-    skipped: [AtomicU64; 2],
+    skipped: [AtomicU64; 3],
     retrievals: [AtomicU64; 2],
     authorizer_failures: [AtomicU64; 2],
 }
@@ -415,33 +566,40 @@ impl EvidenceStore {
             self.count_skipped(Skipped::TooLarge);
             return;
         }
-        let key = (Arc::clone(&record.tenant), record.request_id.clone());
+        let key = (
+            Arc::clone(&record.tenant),
+            record.origin,
+            record.request_id.clone(),
+        );
         let mut ring = self.ring();
         let mut evicted = [0u64; 3];
-        // The newest records of a request id are kept, so records added
-        // under it earlier cannot keep a later one out.
-        if ring.evict_oldest_of(&key) {
-            evicted[Evicted::RequestIdLimit as usize] += 1;
+        // The newest attempts of a request are kept, so records added under
+        // its id earlier cannot keep a later one out. Records of another
+        // trace never join them, and so never evict them either.
+        match ring.admit(&key, record.trace_id) {
+            Admission::Admitted => {}
+            Admission::EvictedOldest => evicted[Evicted::RequestIdLimit as usize] += 1,
+            Admission::OtherTrace => {
+                drop(ring);
+                self.count_skipped(Skipped::RequestIdConflict);
+                return;
+            }
         }
         loop {
-            let reason = if ring.records.len() >= self.max_records {
+            let reason = if ring.live() >= self.max_records {
                 Evicted::Count
             } else if ring.bytes.saturating_add(record.bytes) > self.max_bytes {
                 Evicted::Bytes
             } else {
                 break;
             };
-            if !ring.evict_oldest() {
+            let victim = ring.victim(&record.tenant, record.bytes, reason);
+            if !victim.is_some_and(|seq| ring.remove(seq)) {
                 break;
             }
             evicted[reason as usize] += 1;
         }
-        let offset = u64::try_from(ring.records.len()).unwrap_or(u64::MAX);
-        let seq = ring.first_seq.wrapping_add(offset);
-        ring.live = ring.live.saturating_add(1);
-        ring.bytes = ring.bytes.saturating_add(record.bytes);
-        ring.index.entry(key).or_default().push(seq);
-        ring.records.push_back(Some(record));
+        ring.push(key, record);
         drop(ring);
         self.stored.fetch_add(1, Ordering::Relaxed);
         for (counter, count) in self.evicted.iter().zip(evicted) {
@@ -451,15 +609,15 @@ impl EvidenceStore {
         }
     }
 
-    /// The records of `tenant` for `request_id`, oldest first.
-    fn find(&self, tenant: &str, request_id: RequestId) -> Vec<Stored> {
-        self.ring().find(&(Arc::from(tenant), request_id))
+    /// What `tenant` has under `request_id`.
+    fn find(&self, tenant: &str, request_id: RequestId) -> Found {
+        self.ring().find(&Arc::from(tenant), &request_id)
     }
 
     /// Records and estimated bytes currently retained.
     pub(crate) fn retained(&self) -> (usize, usize) {
         let ring = self.ring();
-        (ring.live, ring.bytes)
+        (ring.live(), ring.bytes)
     }
 
     /// Prometheus text for retention and retrievals.
@@ -508,6 +666,7 @@ impl EvidenceStore {
                 &[
                     ("untagged", &self.skipped[0]),
                     ("too_large", &self.skipped[1]),
+                    ("request_id_conflict", &self.skipped[2]),
                 ][..],
             ),
             (
@@ -561,6 +720,7 @@ impl EvidenceSink for EvidenceStore {
         self.insert(Stored {
             tenant,
             request_id: evidence.request_id,
+            origin: evidence.request_id_origin,
             trace_id: evidence.trace_id,
             span_id: evidence.span_id,
             route,
@@ -663,16 +823,17 @@ impl Retrieval {
                 return not_found();
             }
         };
-        let records = request_id
+        let found = request_id
             .ok()
             .and_then(|Path(id)| RequestId::parse(&id))
             .map(|id| self.store.find(&tenant, id))
             .unwrap_or_default();
-        if records.is_empty() {
+        if found.records.is_empty() {
             self.store.count_retrieval(Retrieved::NotFound);
             return not_found();
         }
-        match serde_json::to_vec(&report(&self.service, &records)) {
+        let report = report(&self.service, &found.records, found.other_traces);
+        match serde_json::to_vec(&report) {
             Ok(body) => {
                 self.store.count_retrieval(Retrieved::Served);
                 no_store_json(body)
@@ -684,8 +845,18 @@ impl Retrieval {
     }
 }
 
-/// Builds the report for the records of one tenant and request id.
-fn report(service: &str, records: &[Stored]) -> DiagnosticReport {
+/// Builds the report for the records of one tenant and request id, which
+/// `other_traces` records of other traces also used.
+fn report(service: &str, records: &[Stored], other_traces: u64) -> DiagnosticReport {
+    let mut notes = vec![
+        "assembled by the service from its own request telemetry; a reader cannot authenticate the producer".to_owned(),
+        "server-level timing only; instrumented operations are not retained".to_owned(),
+    ];
+    if other_traces > 0 {
+        notes.push(format!(
+            "{other_traces} later request(s) of other traces used this request id and were not retained; the id does not identify one request"
+        ));
+    }
     let mut report = DiagnosticReport::new(Collection {
         collector: Producer {
             kind: ProducerKind::Alloy,
@@ -695,17 +866,14 @@ fn report(service: &str, records: &[Stored]) -> DiagnosticReport {
         },
         method: CollectionMethod::LiveExport,
         verification: Verification::Unverified,
-        notes: vec![
-            "assembled by the service from its own request telemetry; a reader cannot authenticate the producer".to_owned(),
-            "server-level timing only; instrumented operations are not retained".to_owned(),
-        ],
+        notes,
     });
     let first = records.first();
     report.subject.request_id = first.map(|record| record.request_id.as_str().to_owned());
     report.subject.service = Some(service.to_owned());
     if let Some(first) = first {
         let trace_id = first.trace_id;
-        // Attempts that share a request id may belong to different traces.
+        // The records filed under one id share a trace; check anyway.
         if records.iter().all(|record| record.trace_id == trace_id) {
             report.subject.trace_id = Some(trace_id.to_hex());
         }
@@ -827,6 +995,8 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
     }
     attributes.insert("trace_parent".to_owned(), record.trace_decision.to_owned());
     attributes.insert("peer_trust".to_owned(), record.peer_trust.to_owned());
+    let origin = record.origin.as_str().to_owned();
+    attributes.insert("request_id_origin".to_owned(), origin);
     out.push(response);
 }
 
@@ -849,6 +1019,7 @@ mod tests {
         RequestId::parse(text).unwrap()
     }
 
+    /// A request whose id this process generated.
     fn evidence(tenant: Option<&str>, request_id: &str) -> RequestEvidence {
         let trace_id = TraceId::random();
         let mut evidence = RequestEvidence::new(id(request_id), trace_id, SpanId::random());
@@ -856,9 +1027,23 @@ mod tests {
         evidence
     }
 
+    /// An attempt of a request of `trace_id` whose id a trusted gateway
+    /// chose, as when it retries the request.
+    fn attempt(tenant: &str, request_id: &str, trace_id: TraceId) -> RequestEvidence {
+        let mut evidence = evidence(Some(tenant), request_id);
+        evidence.trace_id = trace_id;
+        evidence.request_id_origin = RequestIdOrigin::TrustedPeer;
+        evidence
+    }
+
     /// Records of `tenant` for `request_id`.
     fn found(store: &EvidenceStore, tenant: &str, request_id: &str) -> usize {
-        store.find(tenant, id(request_id)).len()
+        store.find(tenant, id(request_id)).records.len()
+    }
+
+    /// Records `tenant` holds.
+    fn held(store: &EvidenceStore, tenant: &str) -> usize {
+        store.ring().usage(tenant).0
     }
 
     /// The value of an exact Prometheus series.
@@ -867,6 +1052,39 @@ mod tests {
         text.lines()
             .find_map(|line| line.strip_prefix(series)?.strip_prefix(' ')?.parse().ok())
             .unwrap_or_else(|| panic!("{series} is missing from:\n{text}"))
+    }
+
+    /// Checks that the indexes, orderings, and totals agree with the
+    /// records.
+    fn check(store: &EvidenceStore) {
+        let ring = store.ring();
+        let bytes: usize = ring.records.values().map(|record| record.bytes).sum();
+        assert_eq!(ring.bytes, bytes);
+        let filed: usize = ring.index.values().map(|filed| filed.seqs.len()).sum();
+        assert_eq!(filed, ring.live());
+        let holdings: usize = ring.tenants.values().map(|held| held.seqs.len()).sum();
+        assert_eq!(holdings, ring.live());
+        assert_eq!(ring.by_count.len(), ring.tenants.len());
+        assert_eq!(ring.by_bytes.len(), ring.tenants.len());
+        for (seq, record) in &ring.records {
+            assert!(ring.tenants[&record.tenant].seqs.contains(seq));
+            let key = (
+                Arc::clone(&record.tenant),
+                record.origin,
+                record.request_id.clone(),
+            );
+            let filed = &ring.index[&key];
+            assert!(filed.seqs.contains(seq));
+            assert_eq!(filed.trace_id, record.trace_id);
+        }
+        for (tenant, holding) in &ring.tenants {
+            let count = (holding.seqs.len(), Arc::clone(tenant));
+            assert!(ring.by_count.contains(&count));
+            let size = (holding.bytes, Arc::clone(tenant));
+            assert!(ring.by_bytes.contains(&size));
+            let bytes: usize = holding.seqs.iter().map(|s| ring.records[s].bytes).sum();
+            assert_eq!(holding.bytes, bytes);
+        }
     }
 
     fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -889,8 +1107,8 @@ mod tests {
         assert_eq!(metric(&store, evicted), 7);
         assert_eq!(metric(&store, "ferrum_alloy_diagnostics_records"), 3);
         assert_eq!(metric(&store, "ferrum_alloy_diagnostics_stored_total"), 10);
-        let ring = store.ring();
-        let indexed: usize = ring.index.values().map(Vec::len).sum();
+        check(&store);
+        let indexed = store.ring().index.len();
         assert_eq!(indexed, 3, "evicted records leave the index");
     }
 
@@ -914,6 +1132,7 @@ mod tests {
         let expected = u64::try_from(bytes).unwrap();
         assert_eq!(metric(&store, "ferrum_alloy_diagnostics_bytes"), expected);
         assert_eq!(store.ring().index.len(), records);
+        check(&store);
     }
 
     #[test]
@@ -928,35 +1147,39 @@ mod tests {
     #[test]
     fn records_are_scoped_to_their_tenant_and_capped_per_request_id() {
         let store = EvidenceStore::new(&DiagnosticsSettings::default());
-        store.record(evidence(Some("acme"), "shared-id"));
-        store.record(evidence(Some("globex"), "shared-id"));
+        let trace = TraceId::random();
+        store.record(attempt("acme", "shared-id", trace));
+        store.record(attempt("globex", "shared-id", TraceId::random()));
         assert_eq!(found(&store, "acme", "shared-id"), 1);
         assert_eq!(found(&store, "globex", "shared-id"), 1);
         assert_eq!(found(&store, "initech", "shared-id"), 0);
 
+        let trace = TraceId::random();
         for _ in 0..40 {
-            store.record(evidence(Some("acme"), "retried"));
+            store.record(attempt("acme", "retried", trace));
         }
         assert_eq!(found(&store, "acme", "retried"), MAX_RECORDS_PER_REQUEST_ID);
         let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
         assert_eq!(metric(&store, limited), 24);
         assert_eq!(store.retained().0, 2 + MAX_RECORDS_PER_REQUEST_ID);
+        check(&store);
     }
 
     #[test]
-    fn records_already_under_a_request_id_cannot_keep_a_later_one_out() {
+    fn records_already_under_a_request_id_cannot_keep_a_later_attempt_out() {
         let store = EvidenceStore::new(&settings(1_000, 1024 * 1024));
+        let trace = TraceId::random();
         store.record(evidence(Some("acme"), "before"));
-        // Records added first under a request id someone else will use.
+        // Earlier attempts of the request fill its id.
         for _ in 0..MAX_RECORDS_PER_REQUEST_ID {
-            store.record(evidence(Some("acme"), "predicted"));
+            store.record(attempt("acme", "retried", trace));
         }
         store.record(evidence(Some("acme"), "after"));
-        let genuine = evidence(Some("acme"), "predicted");
-        let span_id = genuine.span_id;
-        store.record(genuine);
+        let latest = attempt("acme", "retried", trace);
+        let span_id = latest.span_id;
+        store.record(latest);
 
-        let records = store.find("acme", id("predicted"));
+        let records = store.find("acme", id("retried")).records;
         assert_eq!(records.len(), MAX_RECORDS_PER_REQUEST_ID);
         let newest = records.last().unwrap();
         assert_eq!(newest.span_id, span_id, "the newest record is kept");
@@ -964,63 +1187,209 @@ mod tests {
         assert_eq!(found(&store, "acme", "after"), 1);
         let (records, bytes) = store.retained();
         assert_eq!(records, 2 + MAX_RECORDS_PER_REQUEST_ID);
-        let each = estimate("acme", &id("predicted"), None);
+        let each = estimate("acme", &id("retried"), None);
         let before = estimate("acme", &id("before"), None);
         let after = estimate("acme", &id("after"), None);
         assert_eq!(bytes, each * MAX_RECORDS_PER_REQUEST_ID + before + after);
+        check(&store);
     }
 
     #[test]
-    fn slots_of_records_evicted_out_of_order_count_until_they_are_oldest() {
+    fn records_of_another_trace_neither_join_nor_evict_a_request_ids_records() {
+        let store = EvidenceStore::new(&settings(1_000, 1024 * 1024));
+        let trace = TraceId::random();
+        let genuine = attempt("acme", "edge-1", trace);
+        let span_id = genuine.span_id;
+        store.record(genuine);
+        // Other requests reuse the id after it, as many times as a retried
+        // request may have attempts and more.
+        let reused = 2 * MAX_RECORDS_PER_REQUEST_ID;
+        for _ in 0..reused {
+            store.record(attempt("acme", "edge-1", TraceId::random()));
+        }
+
+        let found_now = store.find("acme", id("edge-1"));
+        assert_eq!(found_now.records.len(), 1);
+        assert_eq!(found_now.records[0].span_id, span_id);
+        assert_eq!(found_now.records[0].trace_id, trace);
+        assert_eq!(found_now.other_traces, u64::try_from(reused).unwrap());
+        assert_eq!(store.retained().0, 1, "the reused id retained nothing");
+        let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
+        assert_eq!(metric(&store, conflicts), u64::try_from(reused).unwrap());
+        let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+        assert_eq!(metric(&store, limited), 0);
+
+        // Another tenant's use of the id is its own.
+        store.record(attempt("globex", "edge-1", TraceId::random()));
+        assert_eq!(found(&store, "globex", "edge-1"), 1);
+        assert_eq!(found(&store, "acme", "edge-1"), 1);
+        check(&store);
+    }
+
+    #[test]
+    fn a_request_id_is_free_again_once_its_records_are_evicted() {
+        let store = EvidenceStore::new(&settings(2, 1024 * 1024));
+        store.record(attempt("acme", "edge-1", TraceId::random()));
+        store.record(attempt("acme", "edge-1", TraceId::random()));
+        for n in 0..2 {
+            store.record(evidence(Some("acme"), &format!("other-{n}")));
+        }
+        assert_eq!(found(&store, "acme", "edge-1"), 0, "evicted");
+        let later = TraceId::random();
+        store.record(attempt("acme", "edge-1", later));
+        let records = store.find("acme", id("edge-1")).records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].trace_id, later);
+        check(&store);
+    }
+
+    #[test]
+    fn ids_chosen_by_callers_never_join_or_evict_ids_this_process_generated() {
+        let store = EvidenceStore::new(&settings(1_000, 1024 * 1024));
+        let genuine = evidence(Some("acme"), "victim-id");
+        let (span_id, trace_id) = (genuine.span_id, genuine.trace_id);
+        store.record(genuine);
+        // Callers send the generated id back, even under its trace.
+        for _ in 0..(2 * MAX_RECORDS_PER_REQUEST_ID) {
+            let mut forged = evidence(Some("acme"), "victim-id");
+            forged.trace_id = trace_id;
+            forged.request_id_origin = RequestIdOrigin::UntrustedCaller;
+            store.record(forged);
+        }
+
+        let found_now = store.find("acme", id("victim-id"));
+        assert_eq!(found_now.records.len(), 1, "only the generated record");
+        assert_eq!(found_now.records[0].span_id, span_id);
+        assert_eq!(found_now.records[0].origin, RequestIdOrigin::Generated);
+        // The forged records are filed apart, under their own bound.
+        assert_eq!(store.retained().0, 1 + MAX_RECORDS_PER_REQUEST_ID);
+
+        // A trusted peer's id is preferred to the same id from a caller.
+        let mut caller = attempt("acme", "peer-id", TraceId::random());
+        caller.request_id_origin = RequestIdOrigin::UntrustedCaller;
+        store.record(caller);
+        let peer = attempt("acme", "peer-id", TraceId::random());
+        let span_id = peer.span_id;
+        store.record(peer);
+        let records = store.find("acme", id("peer-id")).records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].span_id, span_id);
+        assert_eq!(records[0].origin, RequestIdOrigin::TrustedPeer);
+        check(&store);
+    }
+
+    #[test]
+    fn a_tenant_at_its_share_evicts_only_its_own_records() {
+        let store = EvidenceStore::new(&settings(10, 1024 * 1024));
+        for n in 0..3 {
+            store.record(evidence(Some("quiet"), &format!("quiet-{n}")));
+        }
+        for n in 0..100 {
+            store.record(evidence(Some("noisy"), &format!("noisy-{n}")));
+            assert!(store.retained().0 <= 10);
+        }
+        for n in 0..3 {
+            assert_eq!(found(&store, "quiet", &format!("quiet-{n}")), 1, "{n}");
+        }
+        assert_eq!(held(&store, "noisy"), 7);
+        assert_eq!(found(&store, "noisy", "noisy-92"), 0, "evicted");
+        assert_eq!(found(&store, "noisy", "noisy-93"), 1);
+        let evicted = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, evicted), 93);
+        check(&store);
+    }
+
+    #[test]
+    fn a_tenant_above_its_share_yields_to_others_down_to_an_equal_share() {
+        let store = EvidenceStore::new(&settings(10, 1024 * 1024));
+        for n in 0..10 {
+            store.record(evidence(Some("big"), &format!("big-{n}")));
+        }
+        for n in 0..10 {
+            store.record(evidence(Some("small"), &format!("small-{n}")));
+            check(&store);
+        }
+        assert_eq!(held(&store, "big"), 5);
+        assert_eq!(held(&store, "small"), 5);
+        // Each lost its oldest records.
+        assert_eq!(found(&store, "big", "big-4"), 0);
+        assert_eq!(found(&store, "big", "big-5"), 1);
+        assert_eq!(found(&store, "small", "small-4"), 0);
+        assert_eq!(found(&store, "small", "small-5"), 1);
+
+        // At an equal share, each evicts only its own.
+        store.record(evidence(Some("big"), "big-10"));
+        assert_eq!(held(&store, "big"), 5);
+        assert_eq!(held(&store, "small"), 5);
+        assert_eq!(found(&store, "big", "big-5"), 0);
+        assert_eq!(found(&store, "small", "small-5"), 1);
+        check(&store);
+    }
+
+    #[test]
+    fn a_tenant_at_its_byte_share_evicts_only_its_own_records() {
+        let max_bytes = 8_192;
+        let store = EvidenceStore::new(&settings(1_000, max_bytes));
+        for n in 0..2 {
+            store.record(evidence(Some("quiet"), &format!("quiet-{n}")));
+        }
+        let long = "n".repeat(200);
+        for n in 0..100 {
+            store.record(evidence(Some("noisy"), &format!("{long}-{n:03}")));
+            let (_, bytes) = store.retained();
+            assert!(bytes <= max_bytes, "{bytes} > {max_bytes}");
+        }
+        for n in 0..2 {
+            assert_eq!(found(&store, "quiet", &format!("quiet-{n}")), 1, "{n}");
+        }
+        assert!(held(&store, "noisy") > 0);
+        assert_eq!(found(&store, "noisy", &format!("{long}-099")), 1);
+        let bytes = r#"ferrum_alloy_diagnostics_evicted_total{reason="bytes"}"#;
+        assert!(metric(&store, bytes) > 0);
+        let count = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, count), 0);
+        check(&store);
+    }
+
+    #[test]
+    fn records_evicted_out_of_order_free_their_room_at_once() {
         let store = EvidenceStore::new(&settings(20, 1024 * 1024));
         store.record(evidence(Some("acme"), "first"));
+        let trace = TraceId::random();
         for _ in 0..=MAX_RECORDS_PER_REQUEST_ID {
-            store.record(evidence(Some("acme"), "retried"));
+            store.record(attempt("acme", "retried", trace));
         }
-        // The oldest "retried" record left its slot behind "first", and the
-        // slot counts toward the count bound.
-        assert_eq!(store.ring().records.len(), MAX_RECORDS_PER_REQUEST_ID + 2);
+        // The oldest attempt was evicted from behind "first", and its room
+        // is free at once.
         assert_eq!(store.retained().0, MAX_RECORDS_PER_REQUEST_ID + 1);
-
-        // Evicting "first" frees the slot after it too.
         for n in 0..3 {
             store.record(evidence(Some("acme"), &format!("other-{n}")));
         }
-        assert_eq!(store.ring().records.len(), MAX_RECORDS_PER_REQUEST_ID + 3);
-        assert_eq!(store.retained().0, MAX_RECORDS_PER_REQUEST_ID + 3);
-        assert_eq!(found(&store, "acme", "first"), 0);
-        assert_eq!(found(&store, "acme", "other-2"), 1);
+        assert_eq!(store.retained().0, MAX_RECORDS_PER_REQUEST_ID + 4);
         let count = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, count), 0);
+        assert_eq!(found(&store, "acme", "first"), 1);
+
+        // The count bound evicts the oldest record left.
+        store.record(evidence(Some("acme"), "other-3"));
+        assert_eq!(store.retained().0, 20);
         assert_eq!(metric(&store, count), 1);
+        assert_eq!(found(&store, "acme", "first"), 0);
         let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
         assert_eq!(metric(&store, limited), 1);
-        let ring = store.ring();
-        assert!(matches!(ring.records.front(), Some(Some(_))));
-        let indexed: usize = ring.index.values().map(Vec::len).sum();
-        assert_eq!(indexed, ring.live);
-        let present = ring.records.iter().filter(|slot| slot.is_some()).count();
-        assert_eq!(present, ring.live);
+        check(&store);
     }
 
     #[test]
-    fn eviction_skips_empty_slots_at_the_front() {
-        let store = EvidenceStore::new(&settings(20, 1024 * 1024));
-        store.record(evidence(Some("acme"), "first"));
-        store.record(evidence(Some("acme"), "second"));
-        let mut ring = store.ring();
-        // An empty slot at the front, which `trim` normally prevents.
-        ring.records.push_front(None);
-        ring.first_seq = ring.first_seq.wrapping_sub(1);
-
-        assert!(ring.evict_oldest());
-        assert_eq!(ring.live, 1);
-        assert_eq!(ring.records.len(), 1);
-        let second = (Arc::from("acme"), id("second"));
-        assert_eq!(ring.find(&second).len(), 1);
-        assert!(ring.find(&(Arc::from("acme"), id("first"))).is_empty());
-        assert!(ring.evict_oldest());
-        assert!(!ring.evict_oldest());
-        assert!(ring.index.is_empty());
+    fn a_tenant_with_nothing_evicts_the_oldest_record_when_nobody_holds_more() {
+        let store = EvidenceStore::new(&settings(2, 1024 * 1024));
+        store.record(evidence(Some("a"), "a-1"));
+        store.record(evidence(Some("b"), "b-1"));
+        store.record(evidence(Some("c"), "c-1"));
+        assert_eq!(found(&store, "a", "a-1"), 0, "the oldest record");
+        assert_eq!(found(&store, "b", "b-1"), 1);
+        assert_eq!(found(&store, "c", "c-1"), 1);
+        check(&store);
     }
 
     #[test]
@@ -1029,14 +1398,15 @@ mod tests {
         let mut long = evidence(Some("acme"), "req-long");
         long.route = Some(Arc::from(format!("/{}", "x".repeat(MAX_ROUTE_BYTES))));
         store.record(long);
-        let records = store.find("acme", id("req-long"));
+        let records = store.find("acme", id("req-long")).records;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].route, None);
     }
 
     #[test]
     fn reports_round_trip_through_the_offline_parser() {
-        let mut first = evidence(Some("acme"), "req-7");
+        let trace = TraceId::random();
+        let mut first = attempt("acme", "req-7", trace);
         first.route = Some(Arc::from("/orders/{id}"));
         first.status = Some(503);
         first.time_to_headers = Some(Duration::from_millis(12));
@@ -1044,21 +1414,25 @@ mod tests {
         first.duration = Duration::from_millis(15);
         first.outcome = BodyOutcome::Completed;
         first.trace_decision = TraceDecision::AcceptedRemote;
-        // A second attempt with the same id that never produced headers.
-        let second = evidence(Some("acme"), "req-7");
+        // A second attempt of the request that never produced headers.
+        let second = attempt("acme", "req-7", trace);
         let store = EvidenceStore::new(&DiagnosticsSettings::default());
         store.record(first);
         store.record(second);
-        let records = store.find("acme", id("req-7"));
-        let json = serde_json::to_vec(&report("orders", &records)).unwrap();
+        let records = store.find("acme", id("req-7")).records;
+        let json = serde_json::to_vec(&report("orders", &records, 2)).unwrap();
         let parsed = parse_offline(&json, &Limits::default()).unwrap();
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         assert_eq!(parsed.claimed_verification, Verification::Unverified);
         let report = parsed.report;
         assert_eq!(report.collection.method, CollectionMethod::LiveExport);
+        let notes = &report.collection.notes;
+        let noted = notes.iter().any(|note| note.starts_with("2 later"));
+        assert!(noted, "{notes:?}");
         assert_eq!(report.subject.request_id.as_deref(), Some("req-7"));
         assert_eq!(report.subject.route.as_deref(), Some("/orders/{id}"));
-        assert_eq!(report.subject.trace_id, None, "two traces share the id");
+        let (trace_id, expected) = (report.subject.trace_id.as_deref(), trace.to_hex());
+        assert_eq!(trace_id, Some(expected.as_str()), "the attempts' trace");
         assert_eq!(report.observations.len(), 8);
         for observation in &report.observations {
             assert!(catalog::is_known(&observation.name), "{}", observation.name);
@@ -1078,6 +1452,7 @@ mod tests {
         assert_eq!(response.attr("route"), Some("/orders/{id}"));
         assert_eq!(response.attr("trace_parent"), Some("accepted_remote"));
         assert_eq!(response.attr("peer_trust"), Some("untrusted"));
+        assert_eq!(response.attr("request_id_origin"), Some("trusted_peer"));
 
         let head = get(1, "time_to_headers");
         assert_eq!(head.availability, Availability::Unavailable);
@@ -1088,6 +1463,12 @@ mod tests {
         assert_eq!(outcome, Some("cancelled_before_headers"));
         let response = get(1, "response");
         assert_eq!(response.attr("status"), None);
+
+        // Without reuse, no note says so.
+        let report = super::report("orders", &records, 0);
+        let notes = &report.collection.notes;
+        let noted = notes.iter().any(|note| note.contains("later"));
+        assert!(!noted, "{notes:?}");
     }
 
     #[test]
