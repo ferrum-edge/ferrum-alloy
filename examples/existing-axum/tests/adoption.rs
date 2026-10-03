@@ -20,9 +20,14 @@ async fn existing_router_state_and_middleware_keep_working() {
         .unwrap();
     assert_eq!(response.headers()["x-powered-by"], "existing-app");
     assert_eq!(response.headers()["cache-control"], "private");
-    assert_eq!(response.headers()["x-request-id"], "abc");
+    // The caller is not a trusted peer, so its id is replaced by a generated
+    // one, which the handler sees and the response echoes.
+    let request_id = response.headers()["x-request-id"].to_str().unwrap();
+    let request_id = request_id.to_owned();
+    assert_ne!(request_id, "abc");
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body, "hello ada (visit 1, request abc)");
+    let expected = format!("hello ada (visit 1, request {request_id})");
+    assert_eq!(body, expected.as_bytes());
     assert_eq!(metrics.request_count("GET", "/hello/{name}", 200), 1);
 
     let response = service

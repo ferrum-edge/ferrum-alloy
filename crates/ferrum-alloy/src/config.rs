@@ -823,7 +823,8 @@ pub const DIAGNOSTICS_BYTES: std::ops::RangeInclusive<usize> = 4_096..=64 * 1024
 /// It applies only when the application installs a
 /// `diagnostics::DiagnosticsAuthorizer`; otherwise nothing is retained. The
 /// evidence lives in memory in this process. When either bound would be
-/// exceeded, the oldest records are evicted first.
+/// exceeded, a tenant evicts another tenant's oldest record only while that
+/// tenant holds more than it, and otherwise its own oldest record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -1694,6 +1695,9 @@ impl AlloyConfig {
         if self.telemetry.trace_context.accept_incoming == ferrum_alloy_telemetry::AcceptPolicy::Any
         {
             warn("telemetry.trace_context.accept_incoming = any lets every caller choose trace ids and force sampling".into());
+        }
+        if self.telemetry.request_id.accept_incoming == ferrum_alloy_telemetry::AcceptPolicy::Any {
+            warn("telemetry.request_id.accept_incoming = any lets every caller choose the request id its request is logged, traced, and retained for diagnostics under".into());
         }
         if !server.bind.ip().is_loopback() {
             warn(format!(

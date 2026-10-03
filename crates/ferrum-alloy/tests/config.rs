@@ -809,11 +809,32 @@ fn warnings_flag_risky_but_valid_choices() {
     let mut config = AlloyConfig::default();
     config.server.bind = "0.0.0.0:8080".parse().unwrap();
     config.telemetry.trace_context.accept_incoming = ferrum_alloy::telemetry::AcceptPolicy::Any;
+    config.telemetry.request_id.accept_incoming = ferrum_alloy::telemetry::AcceptPolicy::Any;
     let warnings = config.validate(NO_FEATURES).unwrap();
     let text: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
     assert!(text.iter().any(|w| w.contains("non-loopback")), "{text:?}");
     assert!(
         text.iter().any(|w| w.contains("force sampling")),
+        "{text:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|w| w.contains("request_id.accept_incoming")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn incoming_request_ids_are_kept_only_from_trusted_peers_by_default() {
+    let config = AlloyConfig::default();
+    let policy = config.telemetry.request_id.accept_incoming;
+    assert_eq!(policy, ferrum_alloy::telemetry::AcceptPolicy::TrustedPeers);
+    let warnings = config.validate(NO_FEATURES).unwrap();
+    let text: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(
+        !text
+            .iter()
+            .any(|w| w.contains("request_id.accept_incoming")),
         "{text:?}"
     );
 }

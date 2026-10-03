@@ -28,7 +28,7 @@ use std::time::Duration;
 use crate::context::TraceDecision;
 use crate::layer::BodyOutcome;
 use crate::peer::PeerTrust;
-use crate::request_id::RequestId;
+use crate::request_id::{RequestId, RequestIdSource};
 use crate::trace_context::{SpanId, TraceId};
 
 /// Maximum length of a tenant tag in bytes.
@@ -91,12 +91,56 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for TenantTag {
     }
 }
 
+/// Who chose a request's id, from most to least trustworthy.
+///
+/// An evidence store keeps the records of each origin apart, so an id a
+/// caller chose can neither join nor evict the records of a request whose id
+/// this process generated or a trusted peer supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum RequestIdOrigin {
+    /// This process generated it, so no other request shares it. Includes
+    /// ids that replaced an invalid or untrusted incoming one.
+    Generated,
+    /// A peer the trust classifier trusts supplied it, such as Ferrum Edge.
+    /// The peer may have kept a value its own client chose.
+    TrustedPeer,
+    /// A caller the trust classifier does not trust supplied it, which only
+    /// `request_id.accept_incoming = any` allows.
+    UntrustedCaller,
+}
+
+impl RequestIdOrigin {
+    /// The origin of an id chosen as `source` for a request from a peer
+    /// classified as `trust`.
+    pub fn new(source: RequestIdSource, trust: &PeerTrust) -> Self {
+        match source {
+            RequestIdSource::Accepted if trust.is_trusted() => Self::TrustedPeer,
+            RequestIdSource::Accepted => Self::UntrustedCaller,
+            RequestIdSource::Generated
+            | RequestIdSource::ReplacedInvalid
+            | RequestIdSource::ReplacedUntrusted => Self::Generated,
+        }
+    }
+
+    /// Stable label.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generated => "generated",
+            Self::TrustedPeer => "trusted_peer",
+            Self::UntrustedCaller => "untrusted_caller",
+        }
+    }
+}
+
 /// What the telemetry layer measured about one finalized request.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RequestEvidence {
     /// The request id the layer chose.
     pub request_id: RequestId,
+    /// Who chose the request id.
+    pub request_id_origin: RequestIdOrigin,
     /// Trace id of the request's trace.
     pub trace_id: TraceId,
     /// Span id of Alloy's server span.
@@ -125,15 +169,16 @@ pub struct RequestEvidence {
 
 impl RequestEvidence {
     /// Evidence of a request that finalized before it produced response
-    /// headers: no tenant, route, or status, zero duration, outcome
-    /// [`BodyOutcome::CancelledBeforeHeaders`], a root trace, and an
-    /// untrusted peer.
+    /// headers: a generated request id, no tenant, route, or status, zero
+    /// duration, outcome [`BodyOutcome::CancelledBeforeHeaders`], a root
+    /// trace, and an untrusted peer.
     ///
     /// Intended for testing a sink. Fields may be added in any release, so
     /// set any other field on the returned value.
     pub fn new(request_id: RequestId, trace_id: TraceId, span_id: SpanId) -> Self {
         Self {
             request_id,
+            request_id_origin: RequestIdOrigin::Generated,
             trace_id,
             span_id,
             tenant: None,
@@ -161,6 +206,7 @@ pub trait EvidenceSink: Send + Sync + fmt::Debug + 'static {
 pub(crate) struct Pending {
     pub(crate) sink: Arc<dyn EvidenceSink>,
     pub(crate) request_id: RequestId,
+    pub(crate) request_id_origin: RequestIdOrigin,
     pub(crate) trace_id: TraceId,
     pub(crate) span_id: SpanId,
     pub(crate) tenant: TenantTag,
@@ -190,5 +236,28 @@ mod tests {
         assert!(!tag.set("other"));
         assert_eq!(tag.get(), Some("acme"));
         assert_eq!(format!("{tag:?}"), "TenantTag(Some(\"acme\"))");
+    }
+
+    #[test]
+    fn only_an_accepted_id_has_its_peer_as_its_origin() {
+        let trusted = PeerTrust::NetworkBoundary([10, 0, 0, 5].into());
+        let untrusted = PeerTrust::Untrusted;
+        for trust in [&trusted, &untrusted] {
+            for source in [
+                RequestIdSource::Generated,
+                RequestIdSource::ReplacedInvalid,
+                RequestIdSource::ReplacedUntrusted,
+            ] {
+                let origin = RequestIdOrigin::new(source, trust);
+                assert_eq!(origin, RequestIdOrigin::Generated, "{source:?}");
+            }
+        }
+        let origin = RequestIdOrigin::new(RequestIdSource::Accepted, &trusted);
+        assert_eq!(origin, RequestIdOrigin::TrustedPeer);
+        assert_eq!(origin.as_str(), "trusted_peer");
+        let origin = RequestIdOrigin::new(RequestIdSource::Accepted, &untrusted);
+        assert_eq!(origin, RequestIdOrigin::UntrustedCaller);
+        assert_eq!(origin.as_str(), "untrusted_caller");
+        assert_eq!(RequestIdOrigin::Generated.as_str(), "generated");
     }
 }
