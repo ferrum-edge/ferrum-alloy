@@ -77,15 +77,20 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             match &args.output {
                 Some(path) => {
                     if args.force {
-                        crate::fsout::write_atomically(path, yaml.as_bytes())?;
+                        crate::fsout::write_atomically(
+                            path,
+                            yaml.as_bytes(),
+                            crate::fsout::NewFileMode::Umask,
+                        )?;
                     } else {
                         crate::fsout::write_new(path, yaml.as_bytes()).map_err(|error| {
-                            match std::fs::symlink_metadata(path) {
-                                Ok(_) => CliError::Invalid(format!(
+                            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                                CliError::Invalid(format!(
                                     "{} exists; pass --force to replace it",
                                     path.display()
-                                )),
-                                Err(_) => error,
+                                ))
+                            } else {
+                                CliError::Io(format!("create {}: {error}", path.display()))
                             }
                         })?;
                     }
@@ -122,9 +127,10 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             for file in export::gitforgeops_files(&resources, &manifest.gateway.namespace) {
                 let path = root.join(&file.path);
                 if let Some(parent) = path.parent() {
-                    crate::fsout::create_dirs(parent)?;
+                    crate::fsout::create_dirs(&root, parent)?;
                 }
-                crate::fsout::write_new(&path, file.content.as_bytes())?;
+                crate::fsout::write_new(&path, file.content.as_bytes())
+                    .map_err(|error| CliError::Io(format!("create {}: {error}", path.display())))?;
                 crate::eprint(&format!("wrote {}\n", path.display()));
             }
             Ok(())

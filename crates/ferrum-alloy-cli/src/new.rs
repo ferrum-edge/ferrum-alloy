@@ -407,7 +407,7 @@ fn prepare_target(path: &Path) -> Result<(), CliError> {
                     parent.display()
                 )));
             }
-            crate::fsout::create_dirs(path)
+            crate::fsout::create_dirs(path, path)
         }
         Err(error) => Err(CliError::Io(format!("{}: {error}", path.display()))),
     }
@@ -608,9 +608,10 @@ pub(crate) fn run(args: NewArgs) -> Result<(), CliError> {
     for (relative, content) in &files {
         let path = target.join(relative);
         if let Some(parent) = path.parent() {
-            crate::fsout::create_dirs(parent)?;
+            crate::fsout::create_dirs(&target, parent)?;
         }
-        crate::fsout::write_new(&path, content.as_bytes())?;
+        crate::fsout::write_new(&path, content.as_bytes())
+            .map_err(|error| CliError::Io(format!("create {}: {error}", path.display())))?;
     }
     crate::print(&format!(
         "Created {} in {}\n\nNext:\n  cd {}\n  cargo test\n  cargo run\n",

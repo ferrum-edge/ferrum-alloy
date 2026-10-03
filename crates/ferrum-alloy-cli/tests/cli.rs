@@ -829,10 +829,12 @@ fn output_writers_replace_or_refuse_symlinks_without_following_them() {
         "--force",
     ]);
     assert_eq!(code(&edge), 0, "{}", stderr(&edge));
-    assert!(std::fs::symlink_metadata(&edge_link)
-        .unwrap()
-        .file_type()
-        .is_file());
+    assert!(
+        std::fs::symlink_metadata(&edge_link)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
     assert_eq!(
         std::fs::read_to_string(&edge_target).unwrap(),
         "preserve edge target"
@@ -856,10 +858,12 @@ fn output_writers_replace_or_refuse_symlinks_without_following_them() {
         openapi_link.to_str().unwrap(),
     ]);
     assert_eq!(code(&openapi), 0, "{}", stderr(&openapi));
-    assert!(std::fs::symlink_metadata(&openapi_link)
-        .unwrap()
-        .file_type()
-        .is_file());
+    assert!(
+        std::fs::symlink_metadata(&openapi_link)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
     assert_eq!(
         std::fs::read_to_string(&openapi_target).unwrap(),
         "preserve OpenAPI target"
@@ -868,7 +872,7 @@ fn output_writers_replace_or_refuse_symlinks_without_following_them() {
 
 #[cfg(unix)]
 #[test]
-fn directory_output_writers_reject_symlinked_roots_and_parents() {
+fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
     use std::os::unix::fs::symlink;
 
     let dir = tempfile::tempdir().unwrap();
@@ -901,8 +905,8 @@ fn directory_output_writers_reject_symlinked_roots_and_parents() {
         "--alloy-path",
         repo().join("crates/ferrum-alloy").to_str().unwrap(),
     ]);
-    assert_eq!(code(&new_output), 3, "{}", stderr(&new_output));
-    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+    assert_eq!(code(&new_output), 0, "{}", stderr(&new_output));
+    assert!(target.join("Cargo.toml").is_file());
 }
 
 #[test]

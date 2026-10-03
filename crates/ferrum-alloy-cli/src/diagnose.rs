@@ -9,7 +9,6 @@
 //! `--write-report`: rules only ever run on reports the parser accepts, so
 //! a trace the parser would refuse fails instead of being analyzed.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -158,7 +157,7 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
                 path.display()
             )));
         }
-        crate::fsout::write_atomically(path, &json)?;
+        crate::fsout::write_atomically(path, &json, crate::fsout::NewFileMode::Private)?;
     }
     match args.format {
         Format::Human => {
@@ -183,13 +182,6 @@ mod tests {
     use ferrum_alloy_diagnostics::model::{Collection, CollectionMethod, Verification};
 
     use super::*;
-
-    #[test]
-    fn temporary_names_differ_between_attempts() {
-        let (first, second) = (temp_suffix(), temp_suffix());
-        assert_ne!(first, second);
-        assert!(first.ends_with(".tmp"), "{first}");
-    }
 
     #[test]
     fn written_reports_fall_back_to_compact_json_to_fit_the_limit() {

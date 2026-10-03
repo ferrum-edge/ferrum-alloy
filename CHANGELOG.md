@@ -4,7 +4,9 @@
 
 - Protect CLI output files from symlink redirection with exclusive creation or
   same-directory atomic replacement, and reject pre-existing symlink
-  components when creating generated directory trees.
+  components at or beneath generated output roots. Ancestor symlinks are allowed;
+  a concurrent writer in a shared writable parent can still race (see
+  [security notes](docs/security.md#known-gaps)).
 - Reject service manifest proxy IDs when a generated upstream or plugin ID
   would exceed Ferrum Edge's 254-character resource ID limit.
 - Correct `alloy.response.body.bytes`: it counts the data-frame payload bytes

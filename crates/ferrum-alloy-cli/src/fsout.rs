@@ -6,7 +6,7 @@ use std::fs::OpenOptions;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{ErrorKind, Write};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path};
 
 use crate::error::CliError;
@@ -26,20 +26,41 @@ fn preserved_permissions(path: &Path) -> Option<std::fs::Permissions> {
         .map(|metadata| std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o777))
 }
 
+/// Permissions for a newly created atomic output file.
+#[derive(Clone, Copy)]
+pub(crate) enum NewFileMode {
+    /// Respect the process umask, as for ordinary generated artifacts.
+    Umask,
+    /// Restrict the file to its owner, for potentially sensitive reports.
+    Private,
+}
+
 /// Atomically writes a file in its parent directory. A symlink at the final
-/// path is replaced rather than followed. New files use mode 0600 on Unix;
-/// replacements preserve only the permission bits of an existing regular file.
-pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+/// path is replaced rather than followed. New files use the selected mode on
+/// Unix; replacements preserve only the permission bits of an existing regular file.
+pub(crate) fn write_atomically(
+    path: &Path,
+    bytes: &[u8],
+    new_file_mode: NewFileMode,
+) -> Result<(), CliError> {
+    #[cfg(not(unix))]
+    let _ = new_file_mode;
     let failed = |error: std::io::Error| CliError::Io(format!("write {}: {error}", path.display()));
     let Some(name) = path.file_name() else {
-        return Err(CliError::Invalid(format!("{} names no file", path.display())));
+        return Err(CliError::Invalid(format!(
+            "{} names no file",
+            path.display()
+        )));
     };
     #[cfg(unix)]
     let permissions = preserved_permissions(path);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(0o600);
+    options.mode(match new_file_mode {
+        NewFileMode::Umask => 0o666,
+        NewFileMode::Private => 0o600,
+    });
     let mut attempts = 1;
     let (temp, mut file) = loop {
         let mut temp_name = OsString::from(".");
@@ -48,9 +69,7 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError
         let temp = path.with_file_name(temp_name);
         match options.open(&temp) {
             Ok(file) => break (temp, file),
-            Err(error)
-                if error.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS =>
-            {
+            Err(error) if error.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS => {
                 attempts += 1;
             }
             Err(error) => return Err(failed(error)),
@@ -96,18 +115,35 @@ fn replace_by_rename(temp: &Path, path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Creates each missing directory separately and rejects symlinks and
-/// non-directory components. This avoids create_dir_all traversing a link that
-/// was already present when the component is checked.
-pub(crate) fn create_dirs(path: &Path) -> Result<(), CliError> {
-    let mut current = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::CurDir => {
-                current.push(component.as_os_str());
-            }
-            Component::ParentDir | Component::Normal(_) => current.push(component.as_os_str()),
-        }
+/// Creates an output root and its descendants. Ancestors of `root` are user
+/// path context; only `root` and components beneath it are checked for links.
+pub(crate) fn create_dirs(root: &Path, path: &Path) -> Result<(), CliError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        CliError::Invalid(format!(
+            "{} is outside output root {}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| CliError::Io(format!("create {}: {error}", parent.display())))?;
+    let mut directories = vec![root.to_path_buf()];
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(CliError::Invalid(format!(
+                "{} contains an invalid output path component",
+                path.display()
+            )));
+        };
+        current.push(name);
+        directories.push(current.clone());
+    }
+    for current in directories {
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(CliError::Invalid(format!(
@@ -120,9 +156,8 @@ pub(crate) fn create_dirs(path: &Path) -> Result<(), CliError> {
                 std::fs::create_dir(&current).map_err(|error| {
                     CliError::Io(format!("create {}: {error}", current.display()))
                 })?;
-                let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
-                    CliError::Io(format!("{}: {error}", current.display()))
-                })?;
+                let metadata = std::fs::symlink_metadata(&current)
+                    .map_err(|error| CliError::Io(format!("{}: {error}", current.display())))?;
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     return Err(CliError::Invalid(format!(
                         "{} must be a real directory",
@@ -140,12 +175,50 @@ pub(crate) fn create_dirs(path: &Path) -> Result<(), CliError> {
 
 /// Creates a new output file exclusively, so a pre-existing leaf (including
 /// a symlink or Windows reparse point) cannot be followed or overwritten.
-pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
-        .map_err(|error| CliError::Io(format!("create {}: {error}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(|error| CliError::Io(format!("write {}: {error}", path.display())))
+        .open(path)?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_names_differ_between_attempts() {
+        let (first, second) = (temp_suffix(), temp_suffix());
+        assert_ne!(first, second);
+        assert!(first.ends_with(".tmp"), "{first}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_dirs_checks_symlinks_beneath_the_output_root_only() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let linked_parent = dir.path().join("linked-parent");
+        symlink(&outside, &linked_parent).unwrap();
+        let root = linked_parent.join("not-yet-created-root");
+        create_dirs(&root, &root).unwrap();
+        assert!(root.is_dir());
+
+        let output_root = dir.path().join("output-root");
+        std::fs::create_dir(&output_root).unwrap();
+        let linked_child = output_root.join("linked-child");
+        symlink(&outside, &linked_child).unwrap();
+        assert!(create_dirs(&output_root, &linked_child.join("nested")).is_err());
+        assert!(!outside.join("nested").exists());
+    }
 }
