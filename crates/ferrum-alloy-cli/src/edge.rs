@@ -2,8 +2,6 @@
 //!
 //! Produces files only. It never contacts a gateway or admin API.
 
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -68,35 +66,6 @@ pub(crate) fn read_manifest(path: &Path) -> Result<ServiceManifest, CliError> {
     ServiceManifest::from_toml(&text).map_err(|e| CliError::Invalid(e.to_string()))
 }
 
-fn write_new(path: &Path, content: &str, replace: bool) -> Result<(), CliError> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(CliError::Invalid(format!(
-                "{} is a symbolic link; refusing to write",
-                path.display()
-            )));
-        }
-        if !replace {
-            return Err(CliError::Invalid(format!(
-                "{} exists; pass --force to replace it",
-                path.display()
-            )));
-        }
-    }
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if replace {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|e| CliError::Io(format!("create {}: {e}", path.display())))?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| CliError::Io(format!("write {}: {e}", path.display())))
-}
-
 /// Runs an `edge` subcommand.
 pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
     let EdgeCommand::Export(args) = command;
@@ -107,7 +76,24 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             let yaml = export::file_mode_yaml(&resources);
             match &args.output {
                 Some(path) => {
-                    write_new(path, &yaml, args.force)?;
+                    if args.force {
+                        crate::fsout::write_atomically(
+                            path,
+                            yaml.as_bytes(),
+                            crate::fsout::NewFileMode::Umask,
+                        )?;
+                    } else {
+                        crate::fsout::write_new(path, yaml.as_bytes()).map_err(|error| {
+                            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                                CliError::Invalid(format!(
+                                    "{} exists; pass --force to replace it",
+                                    path.display()
+                                ))
+                            } else {
+                                CliError::Io(error.to_string())
+                            }
+                        })?;
+                    }
                     crate::eprint(&format!(
                         "wrote {} (validate with: ferrum-edge validate -m file -c {})\n",
                         path.display(),
@@ -122,6 +108,7 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             let root = args.output.ok_or_else(|| {
                 CliError::Invalid("--output DIR is required for --format gitforgeops".into())
             })?;
+            let root = crate::fsout::normalize_output_root(&root)?;
             if let Ok(metadata) = std::fs::symlink_metadata(&root) {
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     return Err(CliError::Invalid(format!(
@@ -140,11 +127,20 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             }
             for file in export::gitforgeops_files(&resources, &manifest.gateway.namespace) {
                 let path = root.join(&file.path);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| CliError::Io(format!("create {}: {e}", parent.display())))?;
-                }
-                write_new(&path, &file.content, false)?;
+                let result = (|| {
+                    if let Some(parent) = path.parent() {
+                        crate::fsout::create_dirs(&root, parent)?;
+                    }
+                    crate::fsout::write_new(&path, file.content.as_bytes())
+                        .map_err(|error| CliError::Io(error.to_string()))?;
+                    Ok::<(), CliError>(())
+                })();
+                result.map_err(|error| {
+                    CliError::Io(format!(
+                        "{error}; a partial output tree may remain at {}; remove it before re-running",
+                        root.display()
+                    ))
+                })?;
                 crate::eprint(&format!("wrote {}\n", path.display()));
             }
             Ok(())

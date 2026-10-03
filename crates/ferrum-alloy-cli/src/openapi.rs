@@ -212,8 +212,11 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
         crate::print(&format!("{} is up to date\n", args.output.display()))?;
         return Ok(ExitCode::SUCCESS);
     }
-    std::fs::write(&args.output, rendered)
-        .map_err(|e| CliError::Io(format!("write {}: {e}", args.output.display())))?;
+    crate::fsout::write_atomically(
+        &args.output,
+        rendered.as_bytes(),
+        crate::fsout::NewFileMode::Umask,
+    )?;
     crate::eprint(&format!("wrote {}\n", args.output.display()));
     Ok(ExitCode::SUCCESS)
 }
