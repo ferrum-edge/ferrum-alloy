@@ -41,6 +41,12 @@ pub(crate) fn printable(text: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
+    use ferrum_alloy_diagnostics::model::{
+        Collection, CollectionMethod, DiagnosticReport, Producer, ProducerKind, Verification,
+    };
+    use ferrum_alloy_diagnostics::parse::Issue;
+    use ferrum_alloy_diagnostics::render::render_text;
+
     use super::printable;
 
     #[test]
@@ -53,5 +59,36 @@ mod tests {
         assert_eq!(printable("\u{1b}[31mred\u{7}\r\u{9b}"), "?[31mred???");
         let kept = "route /orders/{id}\n\tstatus 503 · 12.5 ms, café 東京 ✓\n";
         assert_eq!(printable(kept), kept.replace('\t', "?"));
+    }
+
+    /// `printable` keeps newlines, so the renderer must not emit a report
+    /// value's line breaks: only its own structure may end a line.
+    #[test]
+    fn report_values_cannot_add_lines_to_printed_diagnoses() {
+        let render = |value: &str| {
+            let mut report = DiagnosticReport::new(Collection {
+                collector: Producer {
+                    kind: ProducerKind::Collector,
+                    name: value.into(),
+                    version: None,
+                    instance: None,
+                },
+                method: CollectionMethod::Fixture,
+                verification: Verification::Unverified,
+                notes: vec![],
+            });
+            report.subject.request_id = Some(value.into());
+            let warning = Issue {
+                path: format!("/{value}"),
+                message: value.into(),
+            };
+            printable(&render_text(&report, &[], &[warning]))
+        };
+        let plain = render("plain");
+        let hostile = render("x\n  - /forged: injected\r\n\u{85}\u{2028}end");
+        assert_eq!(hostile.lines().count(), plain.lines().count(), "{hostile}");
+        let escaped = r"x\n  - /forged: injected\r\n\u{85}\u{2028}end";
+        assert_eq!(hostile.matches(escaped).count(), 4, "{hostile}");
+        assert!(!hostile.contains("\n  - /forged"), "{hostile}");
     }
 }
