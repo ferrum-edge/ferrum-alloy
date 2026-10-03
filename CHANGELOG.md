@@ -11,10 +11,14 @@
   `any` to keep every caller's id; configuration validation now warns about
   it. **Upgrading behind Ferrum Edge:** Edge's correlation ids are kept only
   when Edge is a trusted peer. List it in `[trust]` (`trust.identities`,
-  preferred, or `trust.networks`), or set `accept_incoming = "any"`;
-  otherwise Alloy logs, traces, and retains Edge's requests under generated
-  ids that differ from the id Edge echoes to its client, and retrieval by
-  that id finds nothing.
+  preferred, or `trust.networks`); retries group by id only when Edge is a
+  trusted peer. Setting `accept_incoming = "any"` keeps Edge's ids but files
+  them as `untrusted_caller`, bound to their own traces, so Edge's untraced
+  retries are split and later attempts are refused as
+  `request_id_conflict`, and those records rank below any `trusted_peer` or
+  `generated` records under the same id. Otherwise Alloy logs, traces, and
+  retains Edge's requests under generated ids that differ from the id Edge
+  echoes to its client, and retrieval by that id finds nothing.
 - Diagnostic evidence retention is shared fairly between tenants: under the
   count or byte bound, a tenant evicts another tenant's oldest record only
   while that tenant holds more than it, and otherwise its own. One tenant's
@@ -23,7 +27,7 @@
   the slots of records evicted out of order. Its fixed per-record byte
   estimate rises from about 330 to about 770 bytes on 64-bit targets, so a
   `diagnostics.max_bytes` sized for a number of small records now holds
-  about half as many (roughly 2.2 times fewer); a record with the longest
+  about half as many (roughly 2.0–2.3 times fewer); a record with the longest
   tenant, id, and route is charged about 2 KiB.
 - Retained diagnostic evidence is filed by who chose the request id
   (`RequestEvidence::request_id_origin`, `evidence::RequestIdOrigin`:
@@ -37,10 +41,11 @@
   `ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}`,
   and is noted in the report. Records whose id a trusted gateway sent without
   trace context, as Ferrum Edge's retries arrive unless its `otel_tracing`
-  plugin is attached, are grouped by the id alone: the first record is
-  always kept, and the report notes that they may include other requests
-  that reused the id. Reports carry a `request_id_origin` attribute on each
-  `alloy.response` event.
+  plugin is attached, are grouped by the id alone: the first record is never
+  evicted by later records under the id, though the store's count, byte and
+  fair-share bounds can still remove it; the report notes that the records
+  may include other requests that reused the id. Reports carry a
+  `request_id_origin` attribute on each `alloy.response` event.
 - Harden the diagnostics reader against hostile reports and OTLP files.
   `parse_offline` now discards supplied findings after checking their count
   and shape, so `ParsedReport.report.findings` is always empty and findings

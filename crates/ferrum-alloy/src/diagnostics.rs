@@ -95,8 +95,9 @@ pub const ROUTE: &str = "/diagnostics/v1/requests/{request_id}";
 pub const AUTHORIZER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Records kept for one tenant and request id, such as the attempts of a
-/// retried request, which share its trace. A further one evicts the oldest
-/// of them.
+/// retried request. Records under one id may not share a trace; when they
+/// do not, the first is pinned and a further one evicts the oldest after
+/// it. Otherwise a further one evicts the oldest.
 pub const MAX_RECORDS_PER_REQUEST_ID: usize = 16;
 
 /// Longest route template kept. A longer one is dropped from the record.
@@ -317,7 +318,9 @@ struct Holding {
 enum Admission {
     /// It may.
     Admitted,
-    /// It may, and the oldest record of the key was evicted to make room.
+    /// It may, and a record of the key was evicted to make room: the oldest
+    /// of them, except that records grouped by the id alone evict the oldest
+    /// after the first.
     EvictedOldest,
     /// The key holds records of another trace, which it must not join.
     OtherTrace,
@@ -599,9 +602,10 @@ impl EvidenceStore {
         );
         let mut ring = self.ring();
         let mut evicted = [0u64; 3];
-        // The newest attempts of a request are kept, so records added under
-        // its id earlier cannot keep a later one out. Records of another
-        // trace never join them, and so never evict them either.
+        // Newer attempts are kept, so records added under the id earlier
+        // cannot keep a later one out, except that a group keyed by the id
+        // alone pins its first record and evicts the oldest after it. Records
+        // of another trace never join them, and so never evict them either.
         match ring.admit(&key, record.binding()) {
             Admission::Admitted => {}
             Admission::EvictedOldest => evicted[Evicted::RequestIdLimit as usize] += 1,
@@ -915,7 +919,9 @@ fn report(service: &str, found: &Found) -> DiagnosticReport {
     report.subject.service = Some(service.to_owned());
     if let Some(first) = first {
         let trace_id = first.trace_id;
-        // The records filed under one id share a trace; check anyway.
+        // The records filed under one id may not share a trace, as when a
+        // trusted peer's untraced attempts are grouped by the id. Report a
+        // trace id only when every record agrees, so a mixed group has none.
         if records.iter().all(|record| record.trace_id == trace_id) {
             report.subject.trace_id = Some(trace_id.to_hex());
         }
