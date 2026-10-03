@@ -666,9 +666,9 @@ impl AlloyParts {
     /// force-closed and stream tasks still running are cancelled, and it
     /// also waits for those tasks to finish unwinding. Upgraded (WebSocket)
     /// connections count against `server.max_connections` and are drained
-    /// too: still open at the budget, their reads and writes fail and every
-    /// task waiting on them is woken, and it waits up to one more second for
-    /// the application to drop them. One that the application holds without
+    /// too: still open at the budget, their reads and writes fail and up to
+    /// 16 tasks waiting on them are woken, and it waits up to one more second
+    /// for the application to drop them. One that the application holds without
     /// reading or writing it stays open after this returns, until the
     /// application drops it. Close them gracefully by watching
     /// [`Lifecycle::shutdown_token`].

@@ -39,7 +39,7 @@
 //! waits for upgraded connections as well. Applications should close them
 //! when [`crate::Lifecycle::shutdown_token`] is cancelled; those still open
 //! at the drain budget are force-closed: every read and write on them fails
-//! and all the tasks waiting on them are woken, so an application that reads
+//! and up to 16 tasks waiting on them are woken, so an application that reads
 //! or writes its session ends it, and the listener waits briefly for that.
 //! Alloy cannot drop an upgraded connection for the application: one that the
 //! application keeps without reading or writing it stays open after the
@@ -422,12 +422,13 @@ fn builder(options: &ServeOptions, streams: StreamExecutor) -> Builder<StreamExe
 
 /// Serves `app` on `listener` until the lifecycle stops accepting, then
 /// drains within the budget. Returns once every connection task and HTTP/2
-/// stream task has ended and every upgraded connection has been dropped:
-/// connections still open when the budget runs out are aborted, or for
-/// upgraded ones failed, and counted in `force_closed_connections`, and
-/// stream tasks still running are cancelled and counted in
-/// `force_closed_streams`. An application that keeps an upgraded connection
-/// without reading or writing it gets `UPGRADED_CLOSE_GRACE` to drop it.
+/// stream task has ended, and once every upgraded connection has been
+/// dropped or `UPGRADED_CLOSE_GRACE` has passed after the budget: connections
+/// still open when the budget runs out are aborted, or for upgraded ones
+/// failed, and counted in `force_closed_connections`, and stream tasks still
+/// running are cancelled and counted in `force_closed_streams`. An upgraded
+/// connection that the application keeps without reading or writing it is
+/// still open when this returns.
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -779,7 +780,9 @@ impl<D: Buf> Buf for HeldData<D> {
 
 impl<D> Drop for HeldData<D> {
     fn drop(&mut self) {
-        if let Some(activity) = &self.activity {
+        if let Some(activity) = &self.activity
+            && self.held > 0
+        {
             activity.held.fetch_sub(self.held, Ordering::Relaxed);
         }
     }
@@ -973,10 +976,11 @@ impl Frames {
 /// owns it, and with it the connection's slot.
 ///
 /// Once the listener force-closes its connections at the end of the drain
-/// budget, every read and write fails, and every task waiting on one is
-/// woken so that it fails too. Checking for that is an atomic load; a task
-/// takes this connection's own lock only when it waits in a direction where
-/// another task waited last.
+/// budget, every read and write fails, and the tasks waiting on one are
+/// woken so that they fail too (see [`CloseWatch`]). Checking for that is an
+/// atomic load; a task other than the connection task takes this
+/// connection's own lock only when it waits in a direction where another
+/// task waited last.
 struct Transport<I> {
     io: I,
     activity: Arc<Activity>,
@@ -997,68 +1001,99 @@ fn force_closed() -> io::Error {
 }
 
 /// Wakes the tasks waiting to read or write on one transport when the
-/// listener force-closes its connections: every such task, not only the last
-/// one to wait, so that tasks sharing an upgraded connection all fail.
-#[derive(Default)]
+/// listener force-closes its connections: up to [`WakeAll::MAX_TASKS`] of
+/// them, not only the last one to wait, so that tasks sharing an upgraded
+/// connection all fail.
+///
+/// The connection task is left out: the drain aborts it at the budget, so it
+/// needs no wake-up, and leaving it out takes no lock while it serves and
+/// keeps its allocation from outliving it in an upgraded connection.
 struct CloseWatch {
-    /// Made the first time a task waits.
+    /// The connection task's waker.
+    owner: Waker,
+    /// Made the first time another task waits.
     waiters: Option<Waiters>,
-    /// The waker each direction last added, so that a task waiting again
-    /// takes no lock.
+    /// The waker each direction last saw, so that a task waiting again takes
+    /// no lock.
     read: Option<Waker>,
     write: Option<Waker>,
 }
 
 impl CloseWatch {
-    /// `result` of a read, or a force-close error (see [`unless_closed`]).
+    fn new(owner: Waker) -> Self {
+        Self {
+            owner,
+            waiters: None,
+            read: None,
+            write: None,
+        }
+    }
+
+    /// `result` of a read, or a force-close error (see [`Self::unless_closed`]).
     fn reading<T>(
         &mut self,
         close: &ForceClose,
         result: Poll<io::Result<T>>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<T>> {
-        unless_closed(result, close, &mut self.waiters, &mut self.read, cx)
+        self.unless_closed(close, result, cx, false)
     }
 
     /// `result` of a write, flush, or shutdown, or a force-close error (see
-    /// [`unless_closed`]).
+    /// [`Self::unless_closed`]).
     fn writing<T>(
         &mut self,
         close: &ForceClose,
         result: Poll<io::Result<T>>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<T>> {
-        unless_closed(result, close, &mut self.waiters, &mut self.write, cx)
+        self.unless_closed(close, result, cx, true)
     }
-}
 
-/// `result`, or a force-close error if it is pending and the listener has
-/// force-closed the connection. Otherwise the task of `cx` is added to
-/// `waiters`, which wake it when the listener does, so that its next attempt
-/// fails. `last` is the waker this direction last added: a task that waits
-/// again with it takes no lock.
-fn unless_closed<T>(
-    result: Poll<io::Result<T>>,
-    close: &ForceClose,
-    waiters: &mut Option<Waiters>,
-    last: &mut Option<Waker>,
-    cx: &mut Context<'_>,
-) -> Poll<io::Result<T>> {
-    if result.is_ready() {
-        return result;
+    /// `result`, or a force-close error if it is pending and the listener has
+    /// force-closed the connection. Otherwise the task of `cx`, unless it is
+    /// the connection task, is added to the waiters, which wake it when the
+    /// listener does, so that its next attempt fails.
+    fn unless_closed<T>(
+        &mut self,
+        close: &ForceClose,
+        result: Poll<io::Result<T>>,
+        cx: &mut Context<'_>,
+        writing: bool,
+    ) -> Poll<io::Result<T>> {
+        if result.is_pending() && self.closed_while_waiting(close, cx.waker(), writing) {
+            return Poll::Ready(Err(force_closed()));
+        }
+        result
     }
-    let closed = if matches!(last, Some(waker) if waker.will_wake(cx.waker())) {
-        close.is_set()
-    } else {
-        let waiters = waiters.get_or_insert_with(|| Waiters::new(close));
-        waiters.tasks.add(cx.waker());
-        *last = Some(cx.waker().clone());
+
+    /// `true` once the listener has force-closed its connections; otherwise
+    /// the task of `waker` will be woken when it does, if it needs to be.
+    fn closed_while_waiting(&mut self, close: &ForceClose, waker: &Waker, writing: bool) -> bool {
+        let last = if writing {
+            &mut self.write
+        } else {
+            &mut self.read
+        };
+        if matches!(last, Some(known) if known.will_wake(waker)) {
+            return close.is_set();
+        }
+        *last = Some(waker.clone());
+        if self.owner.will_wake(waker) {
+            return close.is_set();
+        }
+        let waiters = self.waiters.get_or_insert_with(|| Waiters::new(close));
+        if waiters.tasks.add(waker) {
+            // The forgotten task may be the one the other direction saw last:
+            // make that task add itself again the next time it waits.
+            if writing {
+                self.read = None;
+            } else {
+                self.write = None;
+            }
+        }
         waiters.poll_closed()
-    };
-    if closed {
-        return Poll::Ready(Err(force_closed()));
     }
-    result
 }
 
 /// The tasks waiting on one transport, and the single registration that
@@ -1096,16 +1131,19 @@ impl WakeAll {
     /// forgotten.
     const MAX_TASKS: usize = 16;
 
-    /// Adds the task of `waker`, unless it is already there.
-    fn add(&self, waker: &Waker) {
+    /// Adds the task of `waker`, unless it is already there. Returns whether
+    /// the oldest task was forgotten to make room.
+    fn add(&self, waker: &Waker) -> bool {
         let mut wakers = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if wakers.iter().any(|known| known.will_wake(waker)) {
-            return;
+            return false;
         }
-        if wakers.len() == Self::MAX_TASKS {
+        let full = wakers.len() == Self::MAX_TASKS;
+        if full {
             wakers.remove(0);
         }
         wakers.push(waker.clone());
+        full
     }
 }
 
@@ -1123,7 +1161,9 @@ impl Wake for WakeAll {
 }
 
 impl<I> Transport<I> {
-    fn new(io: I, activity: Arc<Activity>, active: ActiveConnection) -> Self {
+    /// A transport for `io`, served by the connection task whose waker is
+    /// `owner`.
+    fn new(io: I, activity: Arc<Activity>, active: ActiveConnection, owner: Waker) -> Self {
         Self {
             io,
             activity,
@@ -1131,7 +1171,7 @@ impl<I> Transport<I> {
             response_written: 0,
             blocked: false,
             active,
-            watch: CloseWatch::default(),
+            watch: CloseWatch::new(owner),
         }
     }
 
@@ -1293,7 +1333,8 @@ async fn serve_io<I>(
     };
     // The transport holds the connection's slot from here on, so that the
     // slot stays with the socket if Hyper hands it over for an upgrade.
-    let io = TokioIo::new(Transport::new(io, Arc::clone(&activity), active));
+    let owner = std::future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+    let io = TokioIo::new(Transport::new(io, Arc::clone(&activity), active, owner));
     let connection = builder.serve_connection_with_upgrades(io, service);
     tokio::pin!(connection);
     // Protocol detection waits for enough bytes to rule out the HTTP/2

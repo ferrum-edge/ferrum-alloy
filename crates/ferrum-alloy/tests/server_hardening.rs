@@ -995,6 +995,41 @@ async fn a_finished_http2_response_without_window_updates_is_closed_by_the_idle_
     server.shutdown().await.unwrap();
 }
 
+/// The same peer with a write stall timeout shorter than the idle timeout:
+/// the rest of the finished response that Hyper still holds counts as
+/// waiting to be written, so the write stall timeout closes the connection.
+#[tokio::test]
+async fn a_finished_http2_response_without_window_updates_is_closed_by_the_write_stall_timeout() {
+    let mut config = write_stall_limited();
+    config.server.max_connections = 1;
+    let server = support::start(AlloyApp::new("hardening").router(router()), config).await;
+    let stats = Arc::clone(&server.stats);
+    let mut stalled = TcpStream::connect(server.addr).await.unwrap();
+    stalled.write_all(H2_PREFACE).await.unwrap();
+    stalled.write_all(H2_EMPTY_SETTINGS).await.unwrap();
+    stalled.write_all(&h2_get("/big")).await.unwrap();
+    let started = Instant::now();
+    let frames = frames_until_closed_pinging(&mut stalled)
+        .await
+        .expect("the HTTP/2 connection is closed");
+    let elapsed = started.elapsed();
+    let kinds: Vec<u8> = frames.iter().map(|&(kind, _)| kind).collect();
+    let response = kinds.iter().position(|&kind| kind == H2_HEADERS);
+    let goaway = kinds.iter().position(|&kind| kind == H2_GOAWAY);
+    assert!(
+        response.is_some() && goaway > response,
+        "the response starts, then GOAWAY is sent (frame types: {kinds:?})"
+    );
+    assert!(
+        elapsed >= WRITE_STALL_TIMEOUT / 2,
+        "closed by the write stall timeout, not at once ({elapsed:?})"
+    );
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
+    server.shutdown().await.unwrap();
+}
+
 /// A peer that asks for a response larger than the initial HTTP/2 window and
 /// never sends WINDOW_UPDATE, while sending PINGs the server must answer, is
 /// sent `GOAWAY` once no response data has been written for the write stall

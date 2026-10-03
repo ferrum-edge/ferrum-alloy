@@ -7,7 +7,7 @@
   `ferrum_alloy_active_connections` until the application drops it, so
   upgraded sessions can no longer outnumber the connection limit. Shutdown
   drains upgraded connections too: still open at `shutdown.drain_timeout_ms`,
-  every read and write on them fails and every task waiting on them is
+  every read and write on them fails and up to 16 tasks waiting on them are
   woken, they are counted in `ferrum_alloy_force_closed_connections_total`,
   and serving waits up to one more second for the application to drop them.
   An upgraded connection the application holds without reading or writing it
