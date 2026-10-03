@@ -63,7 +63,9 @@ const BIG_BODY: usize = 2 * 1024 * 1024;
 const BURST: usize = 128 * 1024;
 /// How much a slow reader takes at a time, and how long it waits in between.
 const BITE: usize = 16 * 1024;
-const PAUSE: Duration = Duration::from_millis(20);
+/// Keep each pause well below the configured idle timeout, with room for CI
+/// scheduling delays, while making the complete body take several timeouts.
+const PAUSE: Duration = Duration::from_millis(IDLE_TIMEOUT.as_millis() as u64 / 8);
 
 fn router() -> Router {
     Router::new()
@@ -404,20 +406,30 @@ async fn connect_with_small_window(addr: SocketAddr) -> TcpStream {
 /// Binds a loopback listener whose connections have a small send buffer, so
 /// that a large response waits in the server rather than in the kernel, and
 /// the server keeps writing it for as long as the client reads it.
-fn listener_with_small_send_buffer() -> TcpListener {
+fn listener_with_small_send_buffer() -> (TcpListener, u32) {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.set_send_buffer_size(16 * 1024).unwrap();
+    let effective_send_buffer_size = socket.send_buffer_size().unwrap();
     socket.bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-    socket.listen(1024).unwrap()
+    (socket.listen(1024).unwrap(), effective_send_buffer_size)
 }
 
 /// Reads the HTTP/1.1 response to `GET /big` from `stream`, [`BITE`] bytes
 /// at most at a time and [`PAUSE`] apart, and returns how much of its body
 /// arrived before it was complete or the connection ended.
 async fn read_big_http1_slowly(stream: &mut TcpStream) -> usize {
+    read_big_http1(stream, |_| PAUSE).await
+}
+
+/// Reads the HTTP/1.1 response to `GET /big` from `stream`, [`BITE`] bytes
+/// at most at a time, waiting `pause(reads)` after each read, where `reads`
+/// counts the reads so far, and returns how much of its body arrived before
+/// it was complete or the connection ended.
+async fn read_big_http1(stream: &mut TcpStream, pause: impl Fn(usize) -> Duration) -> usize {
     let mut head = Vec::new();
     let mut body = None;
     let mut buf = vec![0u8; BITE];
+    let mut reads = 0;
     loop {
         let n = tokio::time::timeout(WITHIN, stream.read(&mut buf))
             .await
@@ -434,13 +446,17 @@ async fn read_big_http1_slowly(stream: &mut TcpStream) -> usize {
         if n == 0 || body >= Some(BIG_BODY) {
             return body.unwrap_or_default();
         }
-        tokio::time::sleep(PAUSE).await;
+        reads += 1;
+        tokio::time::sleep(pause(reads)).await;
     }
 }
 
 /// Reads the HTTP/2 response body of `GET /big`, one DATA frame (at most
 /// [`BITE`] bytes) at a time and [`PAUSE`] apart, and returns how much of it
-/// arrived before it ended or failed.
+/// arrived before it ended or failed. Once the rest of the body fits in the
+/// flow-control window, the server may have written all of it and has
+/// nothing left to do, so the reader takes the rest without pausing: the
+/// connection is then rightly idle, and is closed after the idle timeout.
 async fn read_big_http2_slowly(body: &mut Incoming) -> usize {
     let mut received = 0;
     loop {
@@ -453,7 +469,9 @@ async fn read_big_http2_slowly(body: &mut Incoming) -> usize {
         if let Ok(data) = frame.into_data() {
             received += data.len();
         }
-        tokio::time::sleep(PAUSE).await;
+        if BIG_BODY.saturating_sub(received) > H2_INITIAL_WINDOW as usize {
+            tokio::time::sleep(PAUSE).await;
+        }
     }
 }
 
@@ -817,12 +835,9 @@ async fn every_task_waiting_on_an_upgraded_connection_is_woken_at_the_drain_budg
     let routes = router().route("/raw", get(handler));
     let mut config = hardened();
     config.shutdown.drain_timeout_ms = 300;
-    let server = support::start_on(
-        AlloyApp::new("hardening").router(routes),
-        config,
-        listener_with_small_send_buffer(),
-    )
-    .await;
+    let (listener, _) = listener_with_small_send_buffer();
+    let server =
+        support::start_on(AlloyApp::new("hardening").router(routes), config, listener).await;
     let stats = Arc::clone(&server.stats);
     let mut client = connect_with_small_window(server.addr).await;
     let upgrade = b"GET /raw HTTP/1.1\r\nhost: t\r\nupgrade: raw\r\nconnection: Upgrade\r\n\r\n";
@@ -897,16 +912,27 @@ type SharedUpgraded = Arc<std::sync::Mutex<TokioIo<hyper::upgrade::Upgraded>>>;
 
 /// Hyper lets go of a response body as soon as it has taken the last chunk,
 /// long before a slow reader has all of a large response. Idle time counts
-/// from the last response data written, so a reader that keeps taking data
-/// gets the whole response however long it takes, on either protocol.
+/// from the last response data written, and a transport that cannot take a
+/// write is not idle, so a reader that keeps taking data gets the whole
+/// response however long it takes, on either protocol.
 #[tokio::test]
 async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
+    let (listener, effective_send_buffer_size) = listener_with_small_send_buffer();
     let server = support::start_on(
         AlloyApp::new("hardening").router(router()),
         idle_limited(),
-        listener_with_small_send_buffer(),
+        listener,
     )
     .await;
+    assert!(
+        BIG_BODY > effective_send_buffer_size as usize * 4,
+        "response ({BIG_BODY} bytes) must exceed the effective listener send buffer ({effective_send_buffer_size} bytes) by at least four times"
+    );
+    let minimum_transfer_time = PAUSE * (BIG_BODY / BITE) as u32;
+    assert!(
+        minimum_transfer_time > IDLE_TIMEOUT * 3,
+        "the configured pacing must keep the download slower than three idle timeouts ({minimum_transfer_time:?})"
+    );
     let mut http1 = connect_with_small_window(server.addr).await;
     http1
         .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
@@ -933,20 +959,130 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         read_big_http2_slowly(&mut http2_body),
     );
     let elapsed = started.elapsed();
+    let close_reasons = format!(
+        "idle={}, write_stall={}, first_request={}",
+        server.stats.idle_timeouts.load(Ordering::Relaxed),
+        server.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        server.stats.first_request_timeouts.load(Ordering::Relaxed),
+    );
     assert_eq!(
         http1_received, BIG_BODY,
-        "the whole HTTP/1.1 response arrived"
+        "the whole HTTP/1.1 response arrived (server close reasons: {close_reasons}; effective SO_SNDBUF {effective_send_buffer_size} bytes; elapsed {elapsed:?})"
     );
     assert_eq!(
         http2_received, BIG_BODY,
-        "the whole HTTP/2 response arrived"
+        "the whole HTTP/2 response arrived (server close reasons: {close_reasons}; effective SO_SNDBUF {effective_send_buffer_size} bytes; elapsed {elapsed:?})"
     );
     assert!(
         elapsed > IDLE_TIMEOUT * 3,
         "the downloads outlasted the idle timeout several times ({elapsed:?})"
     );
-    assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        server.stats.idle_timeouts.load(Ordering::Relaxed),
+        0,
+        "the slow-reader connections must not close by timeout (server close reasons: {close_reasons})"
+    );
+    assert_eq!(
+        server.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        0,
+        "the slow-reader connections must not close by write stall (server close reasons: {close_reasons})"
+    );
     drop((http1, http2_body));
+    server.shutdown().await.unwrap();
+}
+
+/// The rest of a finished HTTP/1.1 response that waits in Hyper's write
+/// buffer for a reader that pauses keeps the connection from being idle: the
+/// transport cannot take a write, so only the write stall timeout applies,
+/// and the reader gets the whole response once it reads again, although no
+/// response data was written for several idle timeouts.
+#[tokio::test]
+async fn a_finished_http1_response_waiting_on_a_full_transport_is_not_idle() {
+    let (listener, _) = listener_with_small_send_buffer();
+    let server = support::start_on(
+        AlloyApp::new("hardening").router(router()),
+        idle_limited(),
+        listener,
+    )
+    .await;
+    let mut stream = connect_with_small_window(server.addr).await;
+    stream
+        .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
+        .await
+        .unwrap();
+    // Stop reading after the first read for several idle timeouts, then
+    // take the rest at once.
+    let pause = |reads: usize| match reads {
+        1 => IDLE_TIMEOUT * 4,
+        _ => Duration::ZERO,
+    };
+    let received = read_big_http1(&mut stream, pause).await;
+    let close_reasons = format!(
+        "idle={}, write_stall={}",
+        server.stats.idle_timeouts.load(Ordering::Relaxed),
+        server.stats.write_stall_timeouts.load(Ordering::Relaxed),
+    );
+    assert_eq!(
+        received, BIG_BODY,
+        "the whole response arrived (server close reasons: {close_reasons})"
+    );
+    assert_eq!(
+        server.stats.idle_timeouts.load(Ordering::Relaxed),
+        0,
+        "the connection was not closed as idle (server close reasons: {close_reasons})"
+    );
+    assert_eq!(
+        server.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        0,
+        "the pause was shorter than the write stall timeout (server close reasons: {close_reasons})"
+    );
+    drop(stream);
+    server.shutdown().await.unwrap();
+}
+
+/// An HTTP/1.1 client that stops reading a finished response, which then
+/// waits in Hyper's write buffer, is disconnected by the write stall
+/// timeout, not the shorter idle timeout, and its slot is freed.
+#[tokio::test]
+async fn an_unread_finished_http1_response_is_closed_by_the_write_stall_timeout() {
+    let mut config = write_stall_limited();
+    config.server.idle_timeout_ms = IDLE_TIMEOUT.as_millis() as u64;
+    config.server.max_connections = 1;
+    let (listener, _) = listener_with_small_send_buffer();
+    let server = support::start_on(
+        AlloyApp::new("hardening").router(router()),
+        config,
+        listener,
+    )
+    .await;
+    let mut stream = connect_with_small_window(server.addr).await;
+    stream
+        .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let started = Instant::now();
+    let mut head = [0u8; 64];
+    let n = stream.read(&mut head).await.unwrap();
+    assert!(
+        head[..n].starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&head[..n])
+    );
+    // Stop reading until the server gives up on the response.
+    counted(&server.stats.write_stall_timeouts).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= WRITE_STALL_TIMEOUT / 2,
+        "closed by the write stall timeout, not at once ({elapsed:?})"
+    );
+    assert!(
+        closed_by_server(&mut stream).await,
+        "the connection is closed"
+    );
+    let stats = &server.stats;
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
     server.shutdown().await.unwrap();
 }
 
