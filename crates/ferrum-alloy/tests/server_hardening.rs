@@ -53,7 +53,9 @@ const FLOOD_CHUNK: usize = 16 * 1024;
 const BIG_BODY: usize = 2 * 1024 * 1024;
 /// How much a slow reader takes at a time, and how long it waits in between.
 const BITE: usize = 16 * 1024;
-const PAUSE: Duration = Duration::from_millis(20);
+/// Keep each pause well below the configured idle timeout, with room for CI
+/// scheduling delays, while making the complete body take several timeouts.
+const PAUSE: Duration = IDLE_TIMEOUT / 8;
 
 fn router() -> Router {
     Router::new()
@@ -242,11 +244,12 @@ async fn connect_with_small_window(addr: SocketAddr) -> TcpStream {
 /// Binds a loopback listener whose connections have a small send buffer, so
 /// that a large response waits in the server rather than in the kernel, and
 /// the server keeps writing it for as long as the client reads it.
-fn listener_with_small_send_buffer() -> TcpListener {
+fn listener_with_small_send_buffer() -> (TcpListener, u32) {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.set_send_buffer_size(16 * 1024).unwrap();
+    let effective_send_buffer_size = socket.send_buffer_size().unwrap();
     socket.bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-    socket.listen(1024).unwrap()
+    (socket.listen(1024).unwrap(), effective_send_buffer_size)
 }
 
 /// Reads the HTTP/1.1 response to `GET /big` from `stream`, [`BITE`] bytes
@@ -610,12 +613,22 @@ async fn a_websocket_session_outlives_the_idle_timeout() {
 /// gets the whole response however long it takes, on either protocol.
 #[tokio::test]
 async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
+    let (listener, effective_send_buffer_size) = listener_with_small_send_buffer();
     let server = support::start_on(
         AlloyApp::new("hardening").router(router()),
         idle_limited(),
-        listener_with_small_send_buffer(),
+        listener,
     )
     .await;
+    assert!(
+        BIG_BODY > effective_send_buffer_size as usize * 4,
+        "response ({BIG_BODY} bytes) must exceed the effective listener send buffer ({effective_send_buffer_size} bytes) by at least four times"
+    );
+    let minimum_transfer_time = PAUSE * (BIG_BODY / BITE) as u32;
+    assert!(
+        minimum_transfer_time > IDLE_TIMEOUT * 3,
+        "the configured pacing must keep the download slower than three idle timeouts ({minimum_transfer_time:?})"
+    );
     let mut http1 = connect_with_small_window(server.addr).await;
     http1
         .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
@@ -642,6 +655,18 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         read_big_http2_slowly(&mut http2_body),
     );
     let elapsed = started.elapsed();
+    let close_reasons = format!(
+        "idle={}, write_stall={}, first_request={}",
+        server.stats.idle_timeouts.load(Ordering::Relaxed),
+        server.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        server
+            .stats
+            .first_request_timeouts
+            .load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "slow-reader server close reasons: {close_reasons}; effective SO_SNDBUF={effective_send_buffer_size} bytes; transfer elapsed={elapsed:?}"
+    );
     assert_eq!(
         http1_received, BIG_BODY,
         "the whole HTTP/1.1 response arrived"
@@ -654,7 +679,16 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         elapsed > IDLE_TIMEOUT * 3,
         "the downloads outlasted the idle timeout several times ({elapsed:?})"
     );
-    assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        server.stats.idle_timeouts.load(Ordering::Relaxed),
+        0,
+        "the slow-reader connections must not close by timeout (server close reasons: {close_reasons})"
+    );
+    assert_eq!(
+        server.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        0,
+        "the slow-reader connections must not close by write stall (server close reasons: {close_reasons})"
+    );
     drop((http1, http2_body));
     server.shutdown().await.unwrap();
 }
