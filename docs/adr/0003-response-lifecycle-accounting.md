@@ -25,5 +25,5 @@ A Tower service future resolving with a response proves only that headers exist.
 ## Consequences
 
 - In-flight gauges include streaming responses.
-- Upgraded sessions are explicitly out of scope and are labeled `upgraded`.
+- Upgraded sessions are explicitly out of scope of request accounting and are labeled `upgraded`. Connection accounting still covers them: the server keeps their connection slot and drains them (ADR 0004).
 - Tested in `crates/ferrum-alloy-telemetry/tests/lifecycle.rs` (every outcome, and exactly-once under concurrency), in `otel_export.rs` (span end after the body), and in the e2e stream check.
