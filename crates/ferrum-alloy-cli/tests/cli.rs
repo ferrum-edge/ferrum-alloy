@@ -810,6 +810,185 @@ fn edge_export_writes_reviewable_artifacts_without_overwriting() {
     assert_eq!(code(&run(&["edge", "export", "--manifest", &bad])), 3);
 }
 
+#[cfg(unix)]
+#[test]
+fn output_writers_replace_or_refuse_symlinks_without_following_them() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = fixture("manifests/orders-api.toml");
+    let edge_target = dir.path().join("edge-target.yaml");
+    let edge_link = dir.path().join("edge-link.yaml");
+    std::fs::write(&edge_target, "preserve edge target").unwrap();
+    symlink(&edge_target, &edge_link).unwrap();
+    let edge = run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--output",
+        edge_link.to_str().unwrap(),
+        "--force",
+    ]);
+    assert_eq!(code(&edge), 0, "{}", stderr(&edge));
+    assert!(
+        std::fs::symlink_metadata(&edge_link)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&edge_target).unwrap(),
+        "preserve edge target"
+    );
+
+    let input = write(
+        dir.path(),
+        "openapi-input.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    let openapi_target = dir.path().join("openapi-target.json");
+    let openapi_link = dir.path().join("openapi-link.json");
+    std::fs::write(&openapi_target, "preserve OpenAPI target").unwrap();
+    symlink(&openapi_target, &openapi_link).unwrap();
+    let openapi = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--output",
+        openapi_link.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&openapi), 0, "{}", stderr(&openapi));
+    assert!(
+        std::fs::symlink_metadata(&openapi_link)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&openapi_target).unwrap(),
+        "preserve OpenAPI target"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = fixture("manifests/orders-api.toml");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let symlink_target = dir.path().join("symlink-target");
+    std::fs::create_dir(&symlink_target).unwrap();
+    let tree = dir.path().join("tree");
+    symlink(&outside, &tree).unwrap();
+    let output = run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--format",
+        "gitforgeops",
+        "--output",
+        tree.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+
+    for root in [
+        format!("{}/", tree.display()),
+        format!("{}/.", tree.display()),
+    ] {
+        let output = run(&[
+            "edge",
+            "export",
+            "--manifest",
+            &manifest,
+            "--format",
+            "gitforgeops",
+            "--output",
+            &root,
+        ]);
+        assert_eq!(code(&output), 3, "{}", stderr(&output));
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+    }
+    let parent_root = format!("{}/..", tree.display());
+    let output = run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--format",
+        "gitforgeops",
+        "--output",
+        &parent_root,
+    ]);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+
+    let baseline = dir.path().join("umask-baseline");
+    std::fs::File::create(&baseline).unwrap();
+    let expected_mode = baseline.metadata().unwrap().permissions().mode() & 0o777;
+    let umask_output = dir.path().join("edge-output.yaml");
+    let edge = run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--output",
+        umask_output.to_str().unwrap(),
+        "--force",
+    ]);
+    assert_eq!(code(&edge), 0, "{}", stderr(&edge));
+    assert_eq!(
+        umask_output.metadata().unwrap().permissions().mode() & 0o777,
+        expected_mode
+    );
+
+    let linked_parent = dir.path().join("linked-parent");
+    symlink(&outside, &linked_parent).unwrap();
+    let target = linked_parent.join("new-target");
+    let new_output = run(&[
+        "new",
+        "svc",
+        "--path",
+        target.to_str().unwrap(),
+        "--alloy-path",
+        repo().join("crates/ferrum-alloy").to_str().unwrap(),
+    ]);
+    assert_eq!(code(&new_output), 0, "{}", stderr(&new_output));
+    assert!(target.join("Cargo.toml").is_file());
+
+    for (index, suffix) in ["", "."].into_iter().enumerate() {
+        let link = dir.path().join(format!("new-link-{index}"));
+        symlink(&symlink_target, &link).unwrap();
+        let path = format!("{}/{suffix}", link.display());
+        let new_output = run(&[
+            "new",
+            "svc",
+            "--path",
+            &path,
+            "--alloy-path",
+            repo().join("crates/ferrum-alloy").to_str().unwrap(),
+        ]);
+        assert_eq!(code(&new_output), 3, "{}", stderr(&new_output));
+        assert!(std::fs::read_dir(&symlink_target).unwrap().next().is_none());
+    }
+
+    let parent_root = format!("{}/..", tree.display());
+    let new_output = run(&[
+        "new",
+        "svc",
+        "--path",
+        &parent_root,
+        "--alloy-path",
+        repo().join("crates/ferrum-alloy").to_str().unwrap(),
+    ]);
+    assert_eq!(code(&new_output), 3, "{}", stderr(&new_output));
+}
+
 #[test]
 fn manifest_errors_are_terminal_safe_for_both_manifest_consumers() {
     let dir = tempfile::tempdir().unwrap();

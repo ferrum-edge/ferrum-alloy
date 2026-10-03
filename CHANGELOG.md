@@ -11,6 +11,13 @@
   take a write is no longer idle on either protocol;
   `server.write_stall_timeout_ms` still disconnects a client that stops
   reading, now also once its response body has ended.
+- Protect CLI output files from symlink redirection with exclusive creation or
+  same-directory atomic replacement, and reject pre-existing symlink
+  components at or beneath generated output roots, including roots written with
+  trailing slashes or `/.`. Missing ancestors are created with
+  `create_dir_all`, which follows ancestor symlinks; a concurrent writer in a
+  shared writable parent can also race (see
+  [security notes](docs/security.md#known-gaps)).
 - Keep an upgraded (WebSocket) connection's slot with its socket: it now
   counts against `server.max_connections` and in
   `ferrum_alloy_active_connections` until the application drops it, so

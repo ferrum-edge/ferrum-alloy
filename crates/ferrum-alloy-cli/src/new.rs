@@ -7,8 +7,6 @@
 //! overwritten, and nothing is downloaded. Cargo fetches dependencies when
 //! the user builds the project.
 
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
@@ -373,8 +371,9 @@ pub(crate) fn validate_name(name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn prepare_target(path: &Path) -> Result<(), CliError> {
-    match std::fs::symlink_metadata(path) {
+fn prepare_target(path: &Path) -> Result<PathBuf, CliError> {
+    let path = crate::fsout::normalize_output_root(path)?;
+    match std::fs::symlink_metadata(&path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
                 return Err(CliError::Invalid(format!(
@@ -388,7 +387,7 @@ fn prepare_target(path: &Path) -> Result<(), CliError> {
                     path.display()
                 )));
             }
-            let mut entries = std::fs::read_dir(path)
+            let mut entries = std::fs::read_dir(&path)
                 .map_err(|e| CliError::Io(format!("{}: {e}", path.display())))?;
             if entries.next().is_some() {
                 return Err(CliError::Invalid(format!(
@@ -396,7 +395,7 @@ fn prepare_target(path: &Path) -> Result<(), CliError> {
                     path.display()
                 )));
             }
-            Ok(())
+            Ok(path)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let parent = path
@@ -409,8 +408,8 @@ fn prepare_target(path: &Path) -> Result<(), CliError> {
                     parent.display()
                 )));
             }
-            std::fs::create_dir(path)
-                .map_err(|e| CliError::Io(format!("create {}: {e}", path.display())))
+            crate::fsout::create_dirs(&path, &path)?;
+            Ok(path)
         }
         Err(error) => Err(CliError::Io(format!("{}: {error}", path.display()))),
     }
@@ -607,20 +606,23 @@ pub(crate) fn run(args: NewArgs) -> Result<(), CliError> {
             .clone()
             .unwrap_or_else(|| PathBuf::from(&args.name)),
     )?;
-    prepare_target(&target)?;
+    let target = prepare_target(&target)?;
     for (relative, content) in &files {
         let path = target.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CliError::Io(format!("create {}: {e}", parent.display())))?;
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| CliError::Io(format!("create {}: {e}", path.display())))?;
-        file.write_all(content.as_bytes())
-            .map_err(|e| CliError::Io(format!("write {}: {e}", path.display())))?;
+        let result = (|| {
+            if let Some(parent) = path.parent() {
+                crate::fsout::create_dirs(&target, parent)?;
+            }
+            crate::fsout::write_new(&path, content.as_bytes())
+                .map_err(|error| CliError::Io(error.to_string()))?;
+            Ok::<(), CliError>(())
+        })();
+        result.map_err(|error| {
+            CliError::Io(format!(
+                "{error}; a partial project tree may remain at {}; remove it before re-running",
+                target.display()
+            ))
+        })?;
     }
     crate::print(&format!(
         "Created {} in {}\n\nNext:\n  cd {}\n  cargo test\n  cargo run\n",
