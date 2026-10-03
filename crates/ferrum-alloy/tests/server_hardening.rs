@@ -55,7 +55,7 @@ const BIG_BODY: usize = 2 * 1024 * 1024;
 const BITE: usize = 16 * 1024;
 /// Keep each pause well below the configured idle timeout, with room for CI
 /// scheduling delays, while making the complete body take several timeouts.
-const PAUSE: Duration = IDLE_TIMEOUT / 8;
+const PAUSE: Duration = Duration::from_millis(IDLE_TIMEOUT.as_millis() as u64 / 8);
 
 fn router() -> Router {
     Router::new()
