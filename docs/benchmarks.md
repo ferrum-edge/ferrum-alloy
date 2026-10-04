@@ -2,7 +2,7 @@
 
 The harness in `examples/bench` measures the relative cost of Alloy's layers against a plain hyper server, across server stacks, workloads, and transports. It writes one machine-readable JSON line per run, so that regression budgets can later be computed from committed raw data.
 
-The only results recorded so far are local, same-host measurements from one shared machine on one day (see [Results](#results-2026-09-26-previous-harness)). They are not capacity numbers. **No regression budget exists, and nothing is enforced in CI**; see [Regression budgets](#regression-budgets-not-yet-enforced).
+The only results recorded so far are local, same-host measurements from one shared machine on one day (see [Results](#results-2026-09-26-previous-harness)). They are not capacity numbers. **No performance regression budget exists.** The [hosted qualification workflow](#hosted-qualification-preparation) checks evidence completeness and collects experimental profiles and comparisons; it does not fulfill the dedicated-host acceptance criteria in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15).
 
 ## The matrix
 
@@ -43,7 +43,7 @@ Not in the matrix yet:
 
 ## Running it
 
-Build in release mode, then either measure one cell or run a matrix:
+The commands below describe the harness interface for a GitHub-hosted CI step. Qualification, profiling, formatting, builds, and tests for this work run only in hosted CI. The automated workflow builds the release binary once before collecting evidence:
 
 ```bash
 cargo build --release -p example-bench
@@ -51,9 +51,9 @@ cargo build --release -p example-bench
 # One cell, one JSON line on stdout.
 target/release/alloy-bench run --scenario alloy --workload small --transport h2c
 
-# Every cell, 5 interleaved repetitions, appended to a file.
-target/release/alloy-bench matrix --reps 5 --label "$(hostname) $(git rev-parse --short HEAD)" \
-  --out examples/bench/results/$(date +%F)-<host>.jsonl
+# Every cell, 5 interleaved repetitions, appended to a hosted artifact.
+target/release/alloy-bench matrix --reps 5 --label "shared hosted experimental" \
+  --out "$RUNNER_TEMP/full-matrix.jsonl"
 
 # A subset; --dry-run prints the order and a lower bound on the duration.
 target/release/alloy-bench matrix --scenarios plain,alloy,otel-collector \
@@ -73,7 +73,7 @@ Options for both commands:
 | `--run-id ID` | random | Recorded as `run_id`. `matrix` generates one (a version 4 UUID) and passes it to every run, so the lines of one matrix share it |
 | `--collector-endpoint URL` | stub | OTLP/HTTP traces URL for `otel-collector` |
 
-`matrix` takes `--scenarios`, `--workloads`, and `--transports` (each `all` or a comma-separated list, default `all`), `--reps` (default 5), and `--out` (default stdout). The full matrix has 8 × 4 × 6 = 192 cells, so 5 repetitions at the defaults take about 96 minutes.
+`matrix` takes `--scenarios`, `--workloads`, and `--transports` (each `all` or a comma-separated list, default `all`), `--reps` (default 5), and `--out` (default stdout). `Scenario::ALL` lists nine scenarios: the full matrix has 9 × 4 × 6 = 216 cells and 1,080 runs at five repetitions. The default 1-second warm-up plus 5-second window therefore takes **at least 108 minutes**, excluding process startup, connection preparation, draining, probes, and teardown.
 
 How a run is made:
 
@@ -123,15 +123,46 @@ What these measure, and what they do not:
 
 Budgets are the goal of #15, but they need a dedicated host first. Same-host numbers from a shared machine move with background load by more than the regressions a budget should catch. In the [discarded run](#discarded-run), `plain` fell from 178k to 77k requests/s between repetitions on unchanged code. Hosted CI runners are shared virtual machines with variable neighbors and CPU frequency, so a budget checked there would either fail at random or have to be too loose to mean anything.
 
-The plan, which stays open in #15:
+The plan, which stays open in #15 and requires the [external unblock checklist](#external-unblock-checklist):
 
-1. Run the full matrix on a dedicated or isolated Linux host, with pinned CPU frequency (the `performance` governor, which `environment.cpu_governor` records), at least 5 interleaved repetitions, and commit the raw JSON lines under `examples/bench/results/`.
+1. Run the full matrix on an owner-provided dedicated or isolated **GitHub-hosted** Linux environment, with verified CPU isolation and frequency controls, at least 5 interleaved repetitions, and commit the raw JSON lines under `examples/bench/results/`. A reported `performance` governor alone does not prove a pinned frequency or isolated physical CPU.
 2. From that baseline, derive each cell's budget as a ratio to `plain` in the same cell and repetition, not as absolute requests per second, with the noise floor measured on `plain` itself.
 3. Add a scheduled job on that host that runs the matrix and fails when a ratio moves by more than the noise floor.
 
 A budget computed from result lines must use only lines with `errors == 0`, because a run with errors measured something other than the cell (fast failures inflate throughput), and must group lines by `run_id` before pairing a cell with `plain`, so that ratios never mix repetitions from different invocations, hosts, or commits. Only compare lines with the same `alloc_counting`.
 
-Until then, no number is quoted without its environment and repetition count, and the harness has no CI job. Its code compiles in the workspace build, and its unit tests and end-to-end tests (every scenario as a separate `alloy-bench run` process, and a one-cell `matrix` whose output is parsed) run in the `test` job with windows of 0.2 seconds. They check that the harness works, not how fast anything is.
+Until then, no number is quoted without its artifact, source commit, environment, and repetition count. The harness compiles in the workspace build, and its unit tests and end-to-end tests (every scenario as a separate `alloy-bench run` process, and a one-cell `matrix` whose output is parsed) run in the `test` job with windows of 0.2 seconds. They check that the harness works, not how fast anything is.
+
+## Hosted qualification preparation
+
+[Hosted benchmark qualification](../.github/workflows/newbenchmark-only.yml) runs automatically on pull requests affecting the harness, logging, service stack, or qualification configuration. It checks out the PR's immutable **head SHA**, rather than its synthetic merge commit, and builds one optimized binary with debug symbols using the pinned toolchain and `Cargo.lock`. That binary supplies every profile and comparison in the artifact. Existing workspace CI still checks formatting, linting, and tests; qualification additionally runs the harness tests and the compiled `json_log` schema/snapshot tests without updating snapshots.
+
+The fixed PR workload is bounded by a 60-minute job timeout and a 15-minute collection step:
+
+- Callgrind profiles of `alloy-logs-fmt` and `alloy-logs`, each bounded to 90 seconds of wall time, with a 1-second measurement window, 0.2-second warm-up, eight concurrent HTTP/1.1 requests, and the `small` workload. Raw per-thread instruction/call graph dumps and function annotations are retained. These are one profile per formatter, including startup, preparation, warm-up, client work, and teardown. They locate candidate costs in unchanged code before any future optimization; they do not establish native elapsed-time costs or statistically repeated improvements. Callgrind changes scheduling and simulates instructions; see its [manual](https://valgrind.org/docs/manual/cl-manual.html).
+- Five interleaved repetitions of `plain`, `alloy`, `alloy-logs`, and `alloy-logs-fmt`, with `small`, `h1`, 32 concurrent requests, the default 1-second warm-up and 5-second window: 20 runs. The existing matrix driver rotates by one cell per repetition. Neighbors remain correlated, so this ordering does not eliminate drift or constitute a measured noise floor.
+- The same 20 runs in a separate allocation-counting pass. Only ratios within that pass are paired; its throughput is never compared with the ordinary pass.
+- One smoke run of each OTEL scenario with the same load/window. Sampled exporters must make progress; unsampled must export/drop no spans; the unreachable exporter must report `export_failed`; the accepting stub must receive requests and bytes without export failures. Queue/byte-budget/shutdown losses remain raw facts, with no invented drop rate or performance threshold. These single runs check exercised behavior, not stability or real Collector health.
+
+The Linux probes capture service/client on-CPU time, process RSS (including the client and warm-up peak), and allocation counts only in the counting pass. Span counters cover the measurement window, excluding spans still queued at its end; their totals need not equal completed requests. The stub returns an empty successful OTLP response without decoding spans. Its receipt checks establish only stub/exporter progress. The harness currently records no real Collector receiver/processor health, external Collector CPU/RSS, end-of-run queue backlog, or complete delivery accounting.
+
+`examples/bench/hosted/qualify.py` validates all expected cells and repetitions, source/run identifiers, release environment, allocation mode, offered load, nonzero requests, zero client errors, and supported CPU/RSS counters. Missing or zero CPU probes, missing RSS, missing/empty profiles, profiler incompatibility, timeout, nonzero subprocess exits, and validation failures fail qualification. There is no `continue-on-error` and no waived gate. Commands run in process groups; timeout/cancellation terminates the group, including matrix children, and joins the directly owned child. Cleanup errors also fail. Runner termination can prevent final artifact upload; a missing artifact or `running` stage is incomplete evidence.
+
+The run artifact `alloy-benchmark-<head SHA>-<run ID>-<attempt>` contains raw JSONL, stdout/stderr, exact commands and limits, stage status, source and lock/toolchain hashes, binary hash, runner image/OS/kernel/CPU/load/tool versions, raw profiles, summaries, and a `SHA256SUMS` manifest. Artifacts expire after 30 days; preserve them before citing results. Summaries pair throughput with `plain` and typed logs with fmt logs in the same repetition, invocation, workload, transport, commit, and allocation mode. They report median/range and `plain`'s observed spread, explicitly **not a noise floor**, budget, significance test, historical before/after comparison, or claimed improvement. Interpret them together with every raw row's environment.
+
+After this workflow lands on `main`, its input-free `workflow_dispatch` can collect the full 216-cell matrix with five repetitions (1,080 runs), plus the preparation passes above. Both the workflow and driver reject full execution from other refs. The full job is bounded to 210 minutes; full collection to 180 minutes, and the full matrix subprocess to 150 minutes. Dispatch is an owner/root action; this implementation does not launch it. It still uses a standard shared GitHub-hosted runner and an accepting stub, so its artifact is **experimental**, even when complete. It cannot satisfy #15's dedicated baseline, committed raw data, derived budgets, or regression enforcement, or #16's demonstrated improvement beyond measured noise. No performance result is asserted by adding this workflow.
+
+The workflow has only `contents: read`, SHA-pinned actions, no persisted checkout credentials, caches, secrets, `pull_request_target`, or reusable untrusted workflow calls. It neither provisions infrastructure nor changes account settings. Do not move PR head execution to a privileged or owner-provided isolated runner. A dedicated acceptance workflow must be a separately reviewed main-only change.
+
+## External unblock checklist
+
+The owner/root must provide these concrete inputs and evidence before dedicated baseline acceptance or a budget can be proposed. All execution remains in GitHub-hosted CI; no local or self-hosted repository execution is an alternative:
+
+1. **Hosted execution environment:** an already provisioned GitHub-hosted Linux runner label/group, image/version, x86_64 CPU model/count and memory, execution allowance for the full matrix, and provider evidence of exclusive/isolated CPU allocation and frequency controls. Record affinity, governor, frequency/turbo policy, competing load, and how controls are verified throughout each run. Standard `ubuntu-24.04`, a larger VM label, or a `performance` governor alone is insufficient. If GitHub cannot supply these controls, record the acceptance criterion as blocked; do not label shared-VM observations dedicated or invent an isolation guarantee. This change does not provision paid runners or modify runner/account settings.
+2. **Real Collector:** an owner-approved OTLP/HTTP `/v1/traces` URL reachable from that hosted environment, without embedding credentials in PRs/artifacts; a release-tagged, digest-pinned Collector image; the exact receiver/processor/exporter configuration and resource limits; and a durable output or receiver metrics proving accepted spans. The existing demo pin is `otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1`, a candidate to verify in hosted CI, not a provisioned qualification endpoint. Readiness alone is insufficient: retain before/after accepted/refused counts, logs, export responses/partial-success facts, backlog/drain behavior, and health observations during all repetitions. The benchmark's external-Collector request/byte fields are currently `null`; do not substitute stub counters for real evidence.
+3. **Main-only workflow review:** pin the runner and Collector configuration in a new reviewed change with fixed source selection, no arbitrary ref/endpoint dispatch input, finite timeouts, complete cleanup, raw artifact hashes, and minimum permissions. Keep untrusted PR execution on the standard ephemeral runner. The full matrix must pass `--collector-endpoint` to the approved real endpoint; the current experimental dispatch deliberately uses the stub.
+4. **Baseline and noise evidence:** archive and commit the complete raw results under `examples/bench/results/` with immutable source and binary/lock hashes, environment/control evidence, all 216 cells, at least five interleaved repetitions, zero client errors, and Collector health/drop facts. Collect repeated unchanged-code controls to derive the noise model; the five observed `plain` values on a shared runner are insufficient. Record allocation passes separately. Derive per-cell ratios and proposed budgets from that evidence, then review a failing regression gate against that baseline; do not choose arbitrary hard limits.
+5. **Logging follow-up:** inspect both hosted profiles, identify a supported cost hypothesis, preserve the existing compiled JSON schema snapshot, and only then propose a production change. A same-binary typed/fmt comparison evaluates the existing implementation; any future before/after claim requires immutable before and after sources, a dedicated environment, paired interleaved repetitions, and measured unchanged-code noise. Keep [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16) open until that evidence supports an improvement.
 
 ## Results (2026-09-26, previous harness)
 
@@ -201,7 +232,7 @@ The results table above predates this change, and its `alloy-logs` row used trac
 
 **Expected effect:** a smaller gap between `alloy-logs` and `alloy`. This is an expectation from the removed work, **not a measurement**. No profile or benchmark was run for this change.
 
-**How to measure it:** both formatters are in the same binary, so one build is enough. Interleave `alloy-logs-fmt` (before) with `alloy-logs` (after) within each repetition, and include `plain` as the noise floor, with the method used under *Record batching*. Profile both scenarios before quoting where the remaining time goes.
+**How to measure it:** both formatters are in the same binary, so one build is enough. The hosted preparation above interleaves `alloy-logs-fmt` and `alloy-logs` within each repetition, with `plain` and `alloy` controls, and profiles both formatters. This compares the existing implementations at one immutable head; it is not a historical before/after experiment. `plain`'s observed variation on the shared runner is not a qualified noise floor. Inspect the profile artifacts before attributing remaining costs or making any further logging change.
 
 ## Discarded run
 
