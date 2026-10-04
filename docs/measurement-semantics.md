@@ -11,6 +11,25 @@ Every timing Alloy exposes, whether as a span attribute, metric, log field, `Ser
 5. **Nested and concurrent intervals are never summed.** A database call inside a handler is already inside the handler's elapsed time. Exclusive time is computed only from validated same-clock nested intervals. Otherwise Alloy reports the hierarchy and the enclosing durations.
 6. **Unknown is not zero.** Missing values carry an availability state instead of `0`.
 
+## Connection timeout boundaries
+
+Response body finalization, transport progress, and client receipt are separate
+boundaries. Hyper can release a finished body while its final bytes still wait in
+Hyper's write buffer. On HTTP/1.1, a blocked transport write keeps that connection
+from being idle; the write stall timeout bounds the wait instead. On HTTP/2,
+only response DATA writes count as progress; blocked control writes, including
+PING and SETTINGS acknowledgements, do not defer idle closure after the response
+body has ended.
+
+A completed transport write means the transport accepted those bytes, which can
+still be buffered in the kernel or on the client. Once the body has ended and
+every write has completed, the connection can legitimately close by the idle
+timeout while the client is still consuming buffered response data. An idle close
+counter alone therefore does not prove truncation. Compare the body actually
+received with its declared length, and distinguish time spent with a blocked
+server write from time spent reading data the server has already written. These
+boundaries do not add a client-delivery timing to Alloy's measurements.
+
 ## Availability states
 
 | State | Meaning |

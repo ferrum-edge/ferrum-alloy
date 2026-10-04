@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Fix HTTP/1.1 responses being cut by `server.idle_timeout_ms` while the
+  client was still downloading them. Hyper lets go of a response body as soon
+  as it has taken the last chunk, so the rest of a large response could wait
+  in Hyper's write buffer with no request counted in flight, and a pause of
+  one idle timeout in the client's reading, or in the network, closed the
+  connection and truncated the response. An HTTP/1.1 connection whose transport
+  cannot take a write is no longer idle; HTTP/2 control writes, including blocked
+  PING and SETTINGS acknowledgements, do not defer idle closure;
+  `server.write_stall_timeout_ms` still disconnects a client that stops
+  reading, now also once its response body has ended. Once the transport has
+  accepted the complete response, an idle close can still occur while the
+  client reads buffered bytes; that close does not truncate the response.
 - Protect CLI output files from symlink redirection with exclusive creation or
   same-directory atomic replacement, and reject pre-existing symlink
   components at or beneath generated output roots, including roots written with
