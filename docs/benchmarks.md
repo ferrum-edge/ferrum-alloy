@@ -79,7 +79,7 @@ How a run is made:
 
 - **Process.** Server and client run in one process, on separate 4-worker Tokio runtimes, over loopback. `matrix` starts a fresh process for every run, because a process installs one global subscriber and a fresh heap keeps runs independent.
 - **Ordering.** Every repetition runs every cell once, and each repetition rotates the order by one position, so no cell always runs first or last. Neighbors stay the same, so a slow cell affects the same next cell in every repetition.
-- **Load.** The client is closed-loop: each worker sends its next request when the previous one finishes. Connections are opened before the warm-up, and a run fails if they cannot be.
+- **Load.** The client is closed-loop: each worker sends its next request when the previous one finishes. Before the requested warm-up starts, every worker completes one exchange of the selected workload (including reading the first data frame and dropping the response for `cancel`). This preparation proves that the worker, connection, and server can serve the workload; a bound listener or an H2 dispatcher reporting `ready` alone does not. Preparation failures fail the run. Preparation requests, bytes, and latencies are excluded from measurement; `connects` still includes every connection opened, including the replacements after HTTP/1.1 preparation cancellations.
 - **Window.** Only requests that start and finish inside the measurement window count. Throughput is those requests divided by the window.
 
 ## Result format
