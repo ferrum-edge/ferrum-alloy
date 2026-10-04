@@ -8,6 +8,8 @@ Every integration is an optional Cargo feature, and none is on by default: `otel
 
 See the [workspace README](https://github.com/ferrum-edge/ferrum-alloy/blob/main/README.md) and [configuration](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/configuration.md).
 
+Diagnostic retention uses `RequestContext::diagnostic_id()`, an immutable local request id independent of accepted remote correlation. Repeated remote id/trace pairs keep separate local records; external aliases are usable only while they name one retained owner. HTTP correlation headers and trace propagation retain their existing behavior. See [diagnostic policy](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/configuration.md#diagnostics-feature-diagnostics) for non-destructive count/byte admission and bounded alias lookup.
+
 ## Status
 
 Pre-release. This crate is not published to any registry (`publish = false`); depend on it by git revision or path, as [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md) describes. [Release readiness](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/release.md) lists what must happen before any release.

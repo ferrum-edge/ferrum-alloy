@@ -413,7 +413,9 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
 
     use super::*;
-    use crate::dims::{FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload};
+    use crate::dims::{
+        CANCEL_FRAMES, FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload,
+    };
 
     fn options(seconds: f64) -> RunOptions {
         RunOptions {
@@ -446,7 +448,14 @@ mod tests {
         assert_eq!(result["schema"], SCHEMA, "{result}");
         assert!(result["requests"].as_u64().unwrap() > 0, "{result}");
         assert_eq!(result["errors"], 0, "{result}");
-        assert!(result["latency_us"]["p50"].is_u64(), "{result}");
+        assert_eq!(result["error_samples"], json!([]), "{result}");
+        for percentile in ["p50", "p90", "p99", "p999", "max"] {
+            assert!(
+                result["latency_us"][percentile].as_u64().unwrap() > 0,
+                "{result}"
+            );
+        }
+        assert_eq!(result["seconds"], 0.2, "{result}");
     }
 
     #[test]
@@ -472,10 +481,47 @@ mod tests {
 
     #[test]
     fn http1_cancellation_reconnects_and_http2_does_not() {
-        let h1 = run(Scenario::Plain, Workload::Cancel, Transport::H1);
-        assert!(h1["connects"].as_u64().unwrap() > 4, "{h1}");
-        let h2 = run(Scenario::Plain, Workload::Cancel, Transport::H2c);
-        assert_eq!(h2["connects"], h2["connections"], "{h2}");
+        for transport in Transport::ALL {
+            let result = run(Scenario::Plain, Workload::Cancel, *transport);
+            assert_healthy(&result);
+            assert_cancellation(&result, *transport);
+        }
+    }
+
+    fn assert_cancellation(result: &Value, transport: Transport) {
+        let requests = result["requests"].as_u64().unwrap();
+        let bytes = result["body_bytes"].as_u64().unwrap();
+        assert!(bytes >= requests * FRAME_BYTES as u64, "{result}");
+        assert!(
+            bytes < requests * (CANCEL_FRAMES * FRAME_BYTES) as u64,
+            "{result}"
+        );
+        if transport.http2() {
+            assert_eq!(result["connects"], result["connections"], "{result}");
+        } else {
+            let connections = result["connections"].as_u64().unwrap();
+            let connects = result["connects"].as_u64().unwrap();
+            assert!(connects >= connections + requests, "{result}");
+        }
+    }
+
+    #[test]
+    fn cancellation_remains_healthy_after_normal_warmup() {
+        for transport in [Transport::H2c, Transport::H2Mtls, Transport::H1Mtls] {
+            let cell = Cell {
+                scenario: Scenario::Plain,
+                workload: Workload::Cancel,
+                transport,
+            };
+            let mut options = options(0.2);
+            options.load.warmup = Duration::from_millis(100);
+            let metrics = Metrics::default();
+            let environment = probe::environment(None);
+            let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
+            assert_healthy(&result);
+            assert_cancellation(&result, transport);
+            assert_eq!(result["warmup_seconds"], 0.1, "{result}");
+        }
     }
 
     #[test]

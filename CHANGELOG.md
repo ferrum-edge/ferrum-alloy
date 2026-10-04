@@ -17,15 +17,33 @@
 - Require a configured management bearer token for detailed health, metrics,
   and management OpenAPI/UI even on loopback. Tokenless defaults expose only
   minimal liveness/readiness probes and separately authorized diagnostics.
-- Bind every diagnostic group to tenant, request-id origin and value, trace
-  identity, and local/accepted-remote provenance. Retries group only when they
-  share the same logical request id and accepted remote trace identity; a
-  trusted transport alone is insufficient. Untraced retries do not aggregate.
-  A caller-chosen external id can still preclaim a predictable id until
-  eviction, and a trusted gateway that forwards caller-chosen trace context
-  does not make that context an authenticated identity. `accept_incoming =
-  "never"` supplies authoritative generated request ids. Tenant fair sharing
-  and G01 authority are unchanged.
+- Reserve diagnostic count/byte evictions before commit; reject as `fair_share`
+  without losing any previous records when the candidate cannot fit admissible
+  capacity. Reclaim another tenant's oldest record only if its remaining holding
+  still covers the candidate tenant's projected holding; remove the global
+  fallback and preserve sole records. Add variable-size, donor, replacement,
+  exact-limit, mixed-pressure and concurrent/index regressions (#136).
+- Compact depleted diagnostic alias owner tables geometrically, tracking
+  allocation capacity across deletion tombstones. Aggregate owner-table
+  capacity stays within four slots per live owner, hence per retained record,
+  with constant table rounding/control overhead. Charge that owner allowance
+  in the byte estimate; keep configured limits and admission policy unchanged.
+  Add grow/drain/pair-refresh capacity regressions against the former index
+  and variable-length owner/alias stress with bounded compaction scans
+  (PR #138 / #136 / #137). The byte estimate remains distinct from process
+  memory; individual rebuilds scan one alias allocation under the store lock.
+- Give each frontend request immutable locally generated diagnostic ownership.
+  Remote request ids and accepted traces remain correlation hints, preserving
+  HTTP response ids and trace propagation; matching remote pairs and preclaims
+  cannot join another local request or exhaust its 16-attempt cap. Unique local
+  lookups stay tenant-scoped; reused external aliases return uniform `404` and
+  expire with retained records. Gateway retries have separate reports linked
+  by their real traces. Add real trusted-transport and within-request backend
+  retry regressions to the existing hosted OS matrix (#137). Shared report
+  schema/provenance, Edge pins and G01 are unchanged. These corrections address
+  accepted residuals of GHSA-5hmr-6xjc-cpm9 and GHSA-7976-x2f2-r8fc; advisory
+  disposition remains pending independent review and hosted CI. Alloy remains
+  unreleased, `publish = false`, MSRV 1.94; no patched semver is asserted.
 - Shut down all remaining accepted TCP connections at the drain budget through
   owned `socket2` duplicate handles, including TLS, unawaited `OnUpgrade`, and
   unpolled upgrades. Retain permits/counts until application drop, with a bounded

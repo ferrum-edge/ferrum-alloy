@@ -14,6 +14,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc, watch};
+use tokio::task::{JoinError, JoinSet};
 use tokio_rustls::TlsConnector;
 
 use crate::Failure;
@@ -118,6 +120,14 @@ enum Sender {
 }
 
 impl Sender {
+    async fn ready(&mut self) -> Result<(), Failure> {
+        match self {
+            Self::H1(sender) => sender.ready().await?,
+            Self::H2(sender) => sender.ready().await?,
+        }
+        Ok(())
+    }
+
     fn is_closed(&self) -> bool {
         match self {
             Self::H1(sender) => sender.is_closed(),
@@ -203,37 +213,112 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
     Ok(bytes)
 }
 
+/// Preparation is outside both warm-up and measurement. A successful
+/// workload exchange proves more than a bound listener or H2's `ready()`,
+/// which only checks whether its dispatcher is closed.
+async fn prepare(
+    target: &Target,
+    mut sender: Sender,
+    totals: &mut Totals,
+) -> Result<Sender, Failure> {
+    exchange(&mut sender, target).await?;
+    if target.workload == Workload::Cancel && !target.transport.http2() {
+        drop(sender);
+        sender = dial(target).await?;
+        totals.connects += 1;
+    }
+    sender.ready().await?;
+    Ok(sender)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    Preparing,
+    Warmup,
+    Draining,
+    Measuring { start: Instant, end: Instant },
+}
+
+impl Phase {
+    fn contains(self, begin: Instant, finish: Instant) -> bool {
+        match self {
+            Self::Measuring { start, end } => begin >= start && finish <= end,
+            Self::Preparing | Self::Warmup | Self::Draining => false,
+        }
+    }
+}
+
+/// Restore a usable connection before sending another request. At the
+/// warm-up boundary this also keeps HTTP/1 cancellation reconnects outside
+/// the measurement window.
+async fn connected(
+    target: &Target,
+    sender: Option<Sender>,
+    totals: &mut Totals,
+) -> Result<Sender, Failure> {
+    match sender {
+        Some(sender) if !sender.is_closed() => Ok(sender),
+        _ => {
+            let sender = dial(target).await?;
+            totals.connects += 1;
+            Ok(sender)
+        }
+    }
+}
+
 /// One closed-loop worker. It re-dials when its connection closes, and on
 /// HTTP/1.1 after every cancelled request, since a connection whose
 /// response was abandoned cannot be reused.
 async fn worker(
     target: Arc<Target>,
-    mut sender: Option<Sender>,
-    window_start: Instant,
-    window_end: Instant,
-) -> Totals {
+    sender: Sender,
+    mut phase: watch::Receiver<Phase>,
+    ready: mpsc::UnboundedSender<Result<(), String>>,
+) -> Result<Totals, Failure> {
     let mut totals = Totals::default();
+    let prepared = prepare(&target, sender, &mut totals).await;
+    ready.send(prepared.as_ref().map(|_| ()).map_err(ToString::to_string))?;
+    let mut sender = Some(prepared?);
     let reuse = !(target.workload == Workload::Cancel && !target.transport.http2());
-    while Instant::now() < window_end {
-        let mut current = match sender.take() {
-            Some(current) if !current.is_closed() => current,
-            _ => match dial(&target).await {
-                Ok(dialed) => {
-                    totals.connects += 1;
-                    dialed
+    loop {
+        let current_phase = *phase.borrow_and_update();
+        match current_phase {
+            Phase::Preparing => {
+                phase.changed().await?;
+                continue;
+            }
+            Phase::Draining => {
+                // The previous exchange has finished and its response body
+                // has been dropped. Park every worker here before the
+                // coordinator takes the baseline or starts the clock.
+                let connection = async {
+                    let mut connection = connected(&target, sender.take(), &mut totals).await?;
+                    connection.ready().await?;
+                    Ok::<_, Failure>(connection)
                 }
-                Err(error) => {
-                    if Instant::now() >= window_start {
-                        totals.error(&error);
-                    }
-                    continue;
+                .await;
+                ready.send(connection.as_ref().map(|_| ()).map_err(ToString::to_string))?;
+                sender = Some(connection?);
+                phase.changed().await?;
+                continue;
+            }
+            Phase::Measuring { end, .. } if Instant::now() >= end => break,
+            Phase::Warmup | Phase::Measuring { .. } => {}
+        }
+        let mut current = match connected(&target, sender.take(), &mut totals).await {
+            Ok(current) => current,
+            Err(error) => {
+                let now = Instant::now();
+                if phase.borrow().contains(now, now) {
+                    totals.error(&error);
                 }
-            },
+                continue;
+            }
         };
         let begin = Instant::now();
         let result = exchange(&mut current, &target).await;
         let end = Instant::now();
-        if begin >= window_start && end <= window_end {
+        if phase.borrow().contains(begin, end) {
             match result {
                 Ok(bytes) => {
                     let micros = end.duration_since(begin).as_micros();
@@ -248,11 +333,121 @@ async fn worker(
             sender = Some(current);
         }
     }
-    totals
+    Ok(totals)
 }
 
-/// Opens the connections, runs the workers through warm-up and the
-/// measurement window, and calls `probe` at the window's start and end.
+fn premature_worker_exit(
+    worker: Option<Result<Result<Totals, Failure>, JoinError>>,
+    stage: &str,
+) -> Failure {
+    let cause = match worker {
+        Some(Err(error)) => error.to_string(),
+        Some(Ok(Err(error))) => error.to_string(),
+        Some(Ok(Ok(_))) => "worker exited before becoming ready".to_owned(),
+        None => "all workers exited before becoming ready".to_owned(),
+    };
+    format!("worker {stage}: {cause}").into()
+}
+
+/// A parked peer retains its readiness sender, so channel closure alone
+/// cannot reveal a worker that panicked before acknowledging admission.
+async fn await_readiness(
+    count: usize,
+    stage: &str,
+    readiness: &mut mpsc::UnboundedReceiver<Result<(), String>>,
+    workers: &mut JoinSet<Result<Totals, Failure>>,
+) -> Result<(), Failure> {
+    for _ in 0..count {
+        tokio::select! {
+            biased;
+            worker = workers.join_next() => {
+                return Err(premature_worker_exit(worker, stage));
+            }
+            ready = readiness.recv() => {
+                match ready {
+                    Some(ready) => ready.map_err(|error| format!("worker {stage}: {error}"))?,
+                    None => {
+                        return Err(premature_worker_exit(workers.join_next().await, stage));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stop warm-up load and rendezvous between exchanges. A watch update alone
+/// cannot release measured load: every worker may still be awaiting a warm-up
+/// response's first frame for the entire requested measurement duration.
+async fn measurement_window<S>(
+    load: Load,
+    phase: &watch::Sender<Phase>,
+    readiness: &mut mpsc::UnboundedReceiver<Result<(), String>>,
+    workers: &mut JoinSet<Result<Totals, Failure>>,
+    probe: impl Fn() -> S,
+) -> Result<(S, S), Failure> {
+    if !load.warmup.is_zero() {
+        phase.send_replace(Phase::Warmup);
+        tokio::select! {
+            biased;
+            worker = workers.join_next() => {
+                return Err(premature_worker_exit(worker, "warm-up"));
+            }
+            () = tokio::time::sleep(load.warmup) => {}
+        }
+    }
+    phase.send_replace(Phase::Draining);
+    await_readiness(load.concurrency, "measurement boundary", readiness, workers).await?;
+    // Baseline probes and unfinished warm-up exchanges cannot consume the
+    // requested window. All workers start their next exchange after release.
+    let start = probe();
+    let window_start = Instant::now();
+    let window_end = window_start + load.duration;
+    phase.send_replace(Phase::Measuring {
+        start: window_start,
+        end: window_end,
+    });
+    tokio::time::sleep_until(window_end.into()).await;
+    Ok((start, probe()))
+}
+
+async fn measure_workers<S>(
+    load: Load,
+    phase: &watch::Sender<Phase>,
+    readiness: &mut mpsc::UnboundedReceiver<Result<(), String>>,
+    workers: &mut JoinSet<Result<Totals, Failure>>,
+    connects: u64,
+    probe: impl Fn() -> S,
+) -> Result<Measured<S>, Failure> {
+    let result = async {
+        await_readiness(load.concurrency, "startup", readiness, workers).await?;
+        let (start, end) = measurement_window(load, phase, readiness, workers, probe).await?;
+        let mut totals = Totals {
+            connects,
+            ..Totals::default()
+        };
+        while let Some(worker) = workers.join_next().await {
+            totals.merge(worker??);
+        }
+        Ok(Measured {
+            totals,
+            window: load.duration,
+            start,
+            end,
+        })
+    }
+    .await;
+    if result.is_err() {
+        // Await cancellation so parked peers have released their senders and
+        // connections before the failed run returns.
+        workers.shutdown().await;
+    }
+    result
+}
+
+/// Opens the connections and waits for every worker to complete a workload
+/// exchange, then runs the requested warm-up and measurement window.
+/// Calls `probe` at the window's start and end.
 /// Only requests that start and finish inside the window are counted.
 pub(crate) async fn drive<S>(
     target: Target,
@@ -268,48 +463,450 @@ pub(crate) async fn drive<S>(
         let sender = dial(&target).await?;
         if let Sender::H2(shared) = &sender {
             for _ in 1..streams {
-                senders.push(Some(Sender::H2(shared.clone())));
+                senders.push(Sender::H2(shared.clone()));
             }
         }
-        senders.push(Some(sender));
+        senders.push(sender);
     }
     let connects = u64::try_from(load.connections(target.transport)).unwrap_or(u64::MAX);
 
-    let window_start = Instant::now() + load.warmup;
-    let window_end = window_start + load.duration;
-    let workers: Vec<_> = senders
-        .into_iter()
-        .map(|sender| {
-            let target = Arc::clone(&target);
-            tokio::spawn(worker(target, sender, window_start, window_end))
-        })
-        .collect();
-
-    tokio::time::sleep_until(window_start.into()).await;
-    let start = probe();
-    tokio::time::sleep_until(window_end.into()).await;
-    let end = probe();
-
-    let mut totals = Totals {
-        connects,
-        ..Totals::default()
-    };
-    for worker in workers {
-        totals.merge(worker.await?);
+    let (phase, receiver) = watch::channel(Phase::Preparing);
+    let (ready, mut readiness) = mpsc::unbounded_channel();
+    // Dropping the set also aborts workers if the coordinator is cancelled.
+    let mut workers = JoinSet::new();
+    for sender in senders {
+        workers.spawn(worker(
+            Arc::clone(&target),
+            sender,
+            receiver.clone(),
+            ready.clone(),
+        ));
     }
-    Ok(Measured {
-        totals,
-        window: load.duration,
-        start,
-        end,
-    })
+    drop(ready);
+    drop(receiver);
+    measure_workers(load, &phase, &mut readiness, &mut workers, connects, probe).await
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, reason = "tests")]
+    #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
+
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    use hyper::Response;
+    use hyper::body::Frame;
+    use hyper::service::service_fn;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     use super::*;
+    use crate::dims::FRAME_BYTES;
+
+    /// A first frame controlled by the test, followed by a body that never
+    /// ends. Dropping it acknowledges that the client cancelled the stream.
+    struct GatedBody {
+        release: Option<oneshot::Receiver<()>>,
+        cancelled: Option<oneshot::Sender<()>>,
+        data: Bytes,
+        sent: bool,
+    }
+
+    impl hyper::body::Body for GatedBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            if self.sent {
+                return Poll::Pending;
+            }
+            if let Some(release) = &mut self.release
+                && Pin::new(release).poll(cx).is_pending()
+            {
+                return Poll::Pending;
+            }
+            self.sent = true;
+            Poll::Ready(Some(Ok(Frame::data(self.data.clone()))))
+        }
+    }
+
+    impl Drop for GatedBody {
+        fn drop(&mut self) {
+            if let Some(cancelled) = self.cancelled.take() {
+                let _ = cancelled.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn measurement_waits_for_every_workers_first_cancelled_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            addr: listener.local_addr().unwrap(),
+            transport: Transport::H2c,
+            workload: Workload::Cancel,
+            tls: None,
+        };
+        let mut load = load(4, 2);
+        load.duration = Duration::from_millis(200);
+        let (gates, mut startup) = mpsc::unbounded_channel();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let gates = gates.clone();
+                let requests = Arc::clone(&requests);
+                let service = service_fn(move |_| {
+                    let (release, cancelled) = if requests.fetch_add(1, Ordering::SeqCst) < 4 {
+                        let (release, receiver) = oneshot::channel();
+                        let (cancelled, acknowledgement) = oneshot::channel();
+                        gates.send((release, acknowledgement)).unwrap();
+                        (Some(receiver), Some(cancelled))
+                    } else {
+                        (None, None)
+                    };
+                    std::future::ready(Ok::<_, Infallible>(Response::new(GatedBody {
+                        release,
+                        cancelled,
+                        data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
+                        sent: false,
+                    })))
+                });
+                connections.spawn(async move {
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let probes = Arc::new(AtomicUsize::new(0));
+        let samples = Arc::clone(&probes);
+        let measured = tokio::spawn(async move {
+            drive(target, load, || samples.fetch_add(1, Ordering::SeqCst)).await
+        });
+        let mut blocked = Vec::new();
+        for _ in 0..load.concurrency {
+            blocked.push(startup.recv().await.unwrap());
+        }
+        // All workers reached response headers, but none read their first
+        // frame. The old deadline-before-spawn code already took its baseline.
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        let (last, cancelled) = blocked.pop().unwrap();
+        for (release, cancelled) in blocked {
+            release.send(()).unwrap();
+            cancelled.await.unwrap();
+        }
+        // One unready worker must keep the entire measurement behind the gate.
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(!measured.is_finished());
+        last.send(()).unwrap();
+        cancelled.await.unwrap();
+        let measured = measured.await.unwrap().unwrap();
+        assert_eq!((measured.start, measured.end), (0, 1));
+        assert_eq!(measured.window, Duration::from_millis(200));
+        assert!(!measured.totals.latencies_us.is_empty());
+        assert_eq!(measured.totals.errors, 0);
+        assert!(measured.totals.error_samples.is_empty());
+        assert_eq!(measured.totals.connects, 2);
+        // Preparation bytes must not be counted as measured cancellations.
+        let requests = measured.totals.latencies_us.len() as u64;
+        assert_eq!(measured.totals.body_bytes, requests * FRAME_BYTES as u64);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn measurement_drains_every_warmup_cancellation_before_starting_the_clock() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Arc::new(Target {
+            addr: listener.local_addr().unwrap(),
+            transport: Transport::H2c,
+            workload: Workload::Cancel,
+            tls: None,
+        });
+        let mut load = load(4, 2);
+        load.warmup = Duration::from_millis(100);
+        load.duration = Duration::from_millis(200);
+        let (gates, mut warmup) = mpsc::unbounded_channel();
+        let (arrivals, mut measured_requests) = mpsc::unbounded_channel();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let gates = gates.clone();
+                let arrivals = arrivals.clone();
+                let requests = Arc::clone(&requests);
+                let service = service_fn(move |_| {
+                    let index = requests.fetch_add(1, Ordering::SeqCst);
+                    let (release, cancelled, bytes) = if index < 4 {
+                        (None, None, 3 * FRAME_BYTES)
+                    } else if index < 8 {
+                        let (release, receiver) = oneshot::channel();
+                        let (cancelled, acknowledgement) = oneshot::channel();
+                        gates.send((release, acknowledgement)).unwrap();
+                        (Some(receiver), Some(cancelled), 2 * FRAME_BYTES)
+                    } else {
+                        let _ = arrivals.send(Instant::now());
+                        (None, None, FRAME_BYTES)
+                    };
+                    std::future::ready(Ok::<_, Infallible>(Response::new(GatedBody {
+                        release,
+                        cancelled,
+                        data: Bytes::from(vec![b'x'; bytes]),
+                        sent: false,
+                    })))
+                });
+                connections.spawn(async move {
+                    let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let (phase, receiver) = watch::channel(Phase::Preparing);
+        let mut observed = receiver.clone();
+        let (ready, mut readiness) = mpsc::unbounded_channel();
+        let mut workers = JoinSet::new();
+        for _ in 0..load.connections(target.transport) {
+            let Sender::H2(sender) = dial(&target).await.unwrap() else {
+                unreachable!("the fixture uses HTTP/2");
+            };
+            for _ in 0..load.streams {
+                workers.spawn(worker(
+                    Arc::clone(&target),
+                    Sender::H2(sender.clone()),
+                    receiver.clone(),
+                    ready.clone(),
+                ));
+            }
+        }
+        drop(ready);
+        drop(receiver);
+        for _ in 0..load.concurrency {
+            readiness.recv().await.unwrap().unwrap();
+        }
+        // Prime all four warm-up streams behind first-frame gates before
+        // running the real coordinator's 100 ms warm-up timer. This fixture
+        // depends on workload progress, rather than a scheduling delay.
+        phase.send_replace(Phase::Warmup);
+        let mut blocked = Vec::new();
+        for _ in 0..load.concurrency {
+            blocked.push(warmup.recv().await.unwrap());
+        }
+        observed.borrow_and_update();
+        let probes = Arc::new(AtomicUsize::new(0));
+        let samples = Arc::clone(&probes);
+        let warmup_start = Instant::now();
+        let measured = tokio::spawn(async move {
+            let probe = || samples.fetch_add(1, Ordering::SeqCst);
+            let samples = measurement_window(load, &phase, &mut readiness, &mut workers, probe)
+                .await
+                .unwrap();
+            let mut totals = Totals {
+                connects: 2,
+                ..Totals::default()
+            };
+            while let Some(worker) = workers.join_next().await {
+                totals.merge(worker.unwrap().unwrap());
+            }
+            (samples, totals)
+        });
+        let boundary = loop {
+            observed.changed().await.unwrap();
+            let current = *observed.borrow_and_update();
+            if !matches!(current, Phase::Warmup) {
+                break current;
+            }
+        };
+        // An immediate Warmup -> Measuring transition fails here even though
+        // all connections and startup exchanges succeeded.
+        assert!(matches!(boundary, Phase::Draining));
+        assert!(warmup_start.elapsed() >= load.warmup);
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        let (last, cancelled) = blocked.pop().unwrap();
+        for (release, cancelled) in blocked {
+            release.send(()).unwrap();
+            cancelled.await.unwrap();
+        }
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(!measured.is_finished());
+        assert!(matches!(*observed.borrow(), Phase::Draining));
+        last.send(()).unwrap();
+        cancelled.await.unwrap();
+        observed.changed().await.unwrap();
+        let window = *observed.borrow_and_update();
+        let Phase::Measuring { start, end } = window else {
+            unreachable!("the drained workers must be released into measurement");
+        };
+        assert_eq!(end.duration_since(start), Duration::from_millis(200));
+        let arrival = measured_requests.recv().await.unwrap();
+        assert!(arrival > start && arrival < end);
+        let ((start, end), totals) = measured.await.unwrap();
+        assert_eq!((start, end), (0, 1));
+        assert_eq!(load.warmup, Duration::from_millis(100));
+        assert!(!totals.latencies_us.is_empty());
+        assert!(totals.latencies_us.iter().all(|latency| *latency > 0));
+        assert_eq!(totals.errors, 0);
+        assert!(totals.error_samples.is_empty());
+        assert_eq!(totals.connects, 2);
+        // Preparation and warm-up frames had different sizes. Counting even
+        // one of them as a measured success breaks this exact byte invariant.
+        let requests = totals.latencies_us.len() as u64;
+        assert_eq!(totals.body_bytes, requests * FRAME_BYTES as u64);
+        server.abort();
+    }
+
+    /// The lost worker cannot exit until every peer has acknowledged the
+    /// chosen stage and parked while retaining its readiness sender.
+    async fn interrupted_admission(stage: Phase, reported_error: Option<&'static str>) -> String {
+        let mut load = load(4, 2);
+        load.duration = Duration::from_millis(200);
+        let (phase, receiver) = watch::channel(Phase::Preparing);
+        let observed = receiver.clone();
+        let (ready, mut readiness) = mpsc::unbounded_channel();
+        let (parked, mut arrivals) = mpsc::unbounded_channel();
+        let (release, loss) = oneshot::channel();
+        let mut workers = JoinSet::<Result<Totals, Failure>>::new();
+        for _ in 1..load.concurrency {
+            let mut phase = receiver.clone();
+            let ready = ready.clone();
+            let parked = parked.clone();
+            workers.spawn(async move {
+                ready.send(Ok(())).unwrap();
+                if matches!(stage, Phase::Preparing) {
+                    parked.send(()).unwrap();
+                }
+                loop {
+                    phase.changed().await.unwrap();
+                    let current = *phase.borrow_and_update();
+                    if matches!(current, Phase::Draining) {
+                        ready.send(Ok(())).unwrap();
+                        if matches!(stage, Phase::Draining) {
+                            parked.send(()).unwrap();
+                        }
+                    }
+                }
+            });
+        }
+        let mut lost_phase = receiver.clone();
+        let lost_ready = ready.clone();
+        workers.spawn(async move {
+            if matches!(stage, Phase::Draining) {
+                lost_ready.send(Ok(())).unwrap();
+                loop {
+                    lost_phase.changed().await.unwrap();
+                    if matches!(*lost_phase.borrow_and_update(), Phase::Draining) {
+                        break;
+                    }
+                }
+            }
+            parked.send(()).unwrap();
+            loss.await.unwrap();
+            match reported_error {
+                Some(error) => {
+                    lost_ready.send(Err(error.to_owned())).unwrap();
+                    // Keep the task alive so this case must propagate the
+                    // reported error through readiness, rather than a join.
+                    std::future::pending::<Result<Totals, Failure>>().await
+                }
+                None => panic!("injected worker panic"),
+            }
+        });
+        drop(ready);
+        drop(receiver);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let samples = Arc::clone(&probes);
+        let measured = tokio::spawn(async move {
+            let result = measure_workers(load, &phase, &mut readiness, &mut workers, 2, || {
+                samples.fetch_add(1, Ordering::SeqCst)
+            })
+            .await;
+            // Returning the error includes joining every aborted peer, not
+            // merely dropping the set and requesting their cancellation.
+            assert!(workers.is_empty());
+            assert!(readiness.is_closed());
+            result.err().unwrap().to_string()
+        });
+        for _ in 0..load.concurrency {
+            arrivals.recv().await.unwrap();
+        }
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(!measured.is_finished());
+        release.send(()).unwrap();
+        let error = measured.await.unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(!matches!(*observed.borrow(), Phase::Measuring { .. }));
+        error
+    }
+
+    #[tokio::test]
+    async fn startup_worker_panic_aborts_parked_peers_before_measurement() {
+        let error = interrupted_admission(Phase::Preparing, None).await;
+        assert!(error.starts_with("worker startup: "));
+        assert!(error.contains("panicked"));
+        assert!(error.contains("injected worker panic"));
+    }
+
+    #[tokio::test]
+    async fn boundary_worker_panic_aborts_parked_peers_before_measurement() {
+        let error = interrupted_admission(Phase::Draining, None).await;
+        assert!(error.starts_with("worker measurement boundary: "));
+        assert!(error.contains("panicked"));
+        assert!(error.contains("injected worker panic"));
+    }
+
+    #[tokio::test]
+    async fn reported_startup_error_aborts_parked_peers_and_preserves_the_cause() {
+        let error =
+            interrupted_admission(Phase::Preparing, Some("injected admission failure")).await;
+        assert_eq!(error, "worker startup: injected admission failure");
+    }
+
+    #[tokio::test]
+    async fn reported_boundary_error_aborts_parked_peers_and_preserves_the_cause() {
+        let error =
+            interrupted_admission(Phase::Draining, Some("injected admission failure")).await;
+        assert_eq!(
+            error,
+            "worker measurement boundary: injected admission failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_startup_cancellation_returns_the_cause_without_probing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            addr: listener.local_addr().unwrap(),
+            transport: Transport::H2c,
+            workload: Workload::Cancel,
+            tls: None,
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|_| {
+                std::future::ready(Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())))
+            });
+            let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        });
+        let probes = AtomicUsize::new(0);
+        let result = drive(target, load(2, 2), || probes.fetch_add(1, Ordering::SeqCst)).await;
+        let error = result.err().unwrap().to_string();
+        assert_eq!(
+            error,
+            "worker startup: the response ended before the client cancelled it"
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
 
     fn load(concurrency: usize, streams: usize) -> Load {
         Load {
@@ -318,6 +915,20 @@ mod tests {
             warmup: Duration::ZERO,
             duration: Duration::from_secs(1),
         }
+    }
+
+    #[test]
+    fn measurement_excludes_preparation_warmup_and_boundary_crossing_requests() {
+        let start = Instant::now();
+        let end = start + Duration::from_millis(200);
+        let phase = Phase::Measuring { start, end };
+        let tick = Duration::from_nanos(1);
+        assert!(!Phase::Preparing.contains(start, end));
+        assert!(!Phase::Warmup.contains(start, end));
+        assert!(!Phase::Draining.contains(start, end));
+        assert!(!phase.contains(start - tick, start + tick));
+        assert!(!phase.contains(end - tick, end + tick));
+        assert!(phase.contains(start, end));
     }
 
     #[test]

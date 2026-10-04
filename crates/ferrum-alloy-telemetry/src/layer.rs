@@ -402,6 +402,11 @@ where
             &peer_trust,
         );
         shared.metrics.request_id_decisions.inc(id_source.as_str());
+        let diagnostic_id = if id_source == RequestIdSource::Accepted {
+            RequestId::generate()
+        } else {
+            request_id.clone()
+        };
         if let Ok(value) = HeaderValue::from_str(request_id.as_str()) {
             request
                 .headers_mut()
@@ -447,6 +452,7 @@ where
             trace_id = Empty,
             span_id = Empty,
             alloy.request_id = %request_id,
+            alloy.diagnostic_id = %diagnostic_id,
             alloy.trace.parent = trace.decision.as_str(),
             alloy.peer.trust = peer_trust.label(),
             alloy.server.time_to_headers_ms = Empty,
@@ -527,6 +533,7 @@ where
             request.extensions_mut().insert(tenant.clone());
             Box::new(Pending {
                 sink: Arc::clone(sink),
+                diagnostic_id: diagnostic_id.clone(),
                 request_id: request_id.clone(),
                 request_id_origin: RequestIdOrigin::new(id_source, &peer_trust),
                 trace_id,
@@ -537,6 +544,7 @@ where
             })
         });
         request.extensions_mut().insert(RequestContext {
+            diagnostic_id,
             request_id,
             request_id_source: id_source,
             trace_id,
@@ -841,6 +849,7 @@ impl Finalizer {
                 .map(|at| at.saturating_duration_since(self.start));
             let Pending {
                 sink,
+                diagnostic_id,
                 request_id,
                 request_id_origin,
                 trace_id,
@@ -850,6 +859,7 @@ impl Finalizer {
                 peer_trust,
             } = *pending;
             sink.record(RequestEvidence {
+                diagnostic_id,
                 request_id,
                 request_id_origin,
                 trace_id,

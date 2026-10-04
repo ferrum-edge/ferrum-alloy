@@ -140,7 +140,7 @@ let app = Router::new().fallback_service(telemetry.layer(router)); // outermost
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 ```
 
-Handlers can take `ferrum_alloy_telemetry::RequestContext` (request id, trace id, span id, trust, trace decision). Tests that call handlers without the telemetry layer build one with `RequestContext::new(trace_id, span_id, sampled)`, an untrusted root context, rather than a struct literal: new fields may be added. Nothing installs a global subscriber. To export traces, compose `ferrum_alloy_telemetry::otel::OtelPipeline::layer()` into your own subscriber (feature `otel`).
+Handlers can take `ferrum_alloy_telemetry::RequestContext` (correlation request id, immutable local diagnostic id via `diagnostic_id()`, trace id, span id, trust, trace decision). Tests that call handlers without the telemetry layer build one with `RequestContext::new(trace_id, span_id, sampled)`, an untrusted root context, rather than a struct literal: new fields may be added. Nothing installs a global subscriber. To export traces, compose `ferrum_alloy_telemetry::otel::OtelPipeline::layer()` into your own subscriber (feature `otel`).
 
 To trust a gateway's trace context, pass a classifier:
 
@@ -249,7 +249,9 @@ FERRUM_ALLOY_DIAGNOSTICS_TOKEN=... ferrum-alloy diagnose --url http://127.0.0.1:
 ferrum-alloy diagnose --url https://ops.example/orders --request-id <id> --token-file token.txt
 ```
 
-Every refusal is the same `404`: a denied caller, another tenant's request, and an unknown or evicted id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
+Use `RequestContext::diagnostic_id()` or the `alloy.diagnostic_id` server-span field for an independent local lookup. An accepted gateway id remains a convenience alias only while it names one retained local request; reuse makes that alias ambiguous, even for matching remote traces. Separate gateway retries have separate reports linked by their actual trace ids. Reports keep the actual correlation id in `subject.request_id` and the local lookup id in collection notes; Alloy adds no diagnostic-id response header.
+
+Every refusal is the same `404`: a denied caller, another tenant's request, an ambiguous alias, and an unknown or evicted id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
 
 ### From an authenticated Edge diagnostic reference
 

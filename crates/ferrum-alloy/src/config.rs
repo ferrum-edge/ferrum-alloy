@@ -1703,7 +1703,7 @@ impl AlloyConfig {
             warn("telemetry.trace_context.accept_incoming = any lets every caller choose trace ids and force sampling".into());
         }
         if self.telemetry.request_id.accept_incoming == ferrum_alloy_telemetry::AcceptPolicy::Any {
-            warn("telemetry.request_id.accept_incoming = any lets every caller choose the request id its request is logged, traced, and retained for diagnostics under".into());
+            warn("telemetry.request_id.accept_incoming = any lets every caller choose the correlation id its request is logged and traced under; diagnostic retention still uses independent local ownership".into());
         }
         if !server.bind.ip().is_loopback() {
             warn(format!(

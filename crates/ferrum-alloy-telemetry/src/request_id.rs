@@ -45,6 +45,12 @@ impl RequestId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Allocated text capacity, for conservative retention accounting.
+    /// This excludes the `String` itself and allocator bookkeeping.
+    pub fn allocation_bytes(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl fmt::Debug for RequestId {
