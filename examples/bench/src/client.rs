@@ -1062,13 +1062,15 @@ pub(crate) mod tests {
                 let mut connection = None;
                 diagnostics.worker(*index, |state| connection = state.connection.clone());
                 connection.map(|connection| {
-                    Dispatch::new(registry().with(
-                        WireLayer {
-                            diagnostics: Arc::clone(diagnostics),
-                            connection,
-                        }
-                        .with_filter(filter_fn(wire_metadata)),
-                    ))
+                    Dispatch::new(
+                        registry().with(
+                            WireLayer {
+                                diagnostics: Arc::clone(diagnostics),
+                                connection,
+                            }
+                            .with_filter(filter_fn(wire_metadata)),
+                        ),
+                    )
                 })
             })
             .ok()
@@ -1516,7 +1518,12 @@ pub(crate) mod tests {
             assert_eq!(state.error_samples.len(), ERROR_SAMPLES);
             for sample in &state.error_samples {
                 assert_eq!(sample.chain.len(), DIAGNOSTIC_CHAIN_DEPTH);
-                assert!(sample.chain.iter().all(|s| s.len() <= DIAGNOSTIC_TEXT_BYTES));
+                assert!(
+                    sample
+                        .chain
+                        .iter()
+                        .all(|s| s.len() <= DIAGNOSTIC_TEXT_BYTES)
+                );
                 assert!(sample.source_end.starts_with("depth-limit"));
             }
         });
@@ -1542,9 +1549,10 @@ pub(crate) mod tests {
                             let (stream, _) = listener.accept().await.unwrap();
                             servers.spawn(async move {
                                 let service = service_fn(|_| {
-                                    std::future::ready(Ok::<_, Infallible>(Response::new(
-                                        Empty::<Bytes>::new(),
-                                    )))
+                                    std::future::ready(Ok::<_, Infallible>(Response::new(Empty::<
+                                        Bytes,
+                                    >::new(
+                                    ))))
                                 });
                                 let builder =
                                     hyper::server::conn::http2::Builder::new(TokioExecutor::new());
@@ -1561,12 +1569,7 @@ pub(crate) mod tests {
                 }
                 tokio::time::timeout(
                     Duration::from_secs(10),
-                    cancellation_health(
-                        target,
-                        load(4, 2),
-                        || (),
-                        Arc::clone(&diagnostics),
-                    ),
+                    cancellation_health(target, load(4, 2), || (), Arc::clone(&diagnostics)),
                 )
                 .await
             });
@@ -1666,7 +1669,9 @@ pub(crate) mod tests {
         runtime.shutdown();
         result.unwrap();
         let mut address = None;
-        left.worker(0, |state| address = state.connection.as_ref().unwrap().local_addr);
+        left.worker(0, |state| {
+            address = state.connection.as_ref().unwrap().local_addr
+        });
         right.worker(0, |state| {
             assert_ne!(address, state.connection.as_ref().unwrap().local_addr);
         });
