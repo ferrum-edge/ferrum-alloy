@@ -434,23 +434,61 @@ async fn ids_callers_choose_never_join_or_evict_a_generated_id() {
 }
 
 #[tokio::test]
-async fn a_gateways_retries_without_trace_context_share_one_report() {
+async fn untraced_ids_forwarded_by_a_gateway_never_mix_unrelated_requests() {
     let parts = parts(settings());
-    // The gateway sends its correlation id but no trace context, so each
-    // attempt is rooted in a trace of its own.
-    for _ in 0..3 {
-        order(&parts, "tenant-a", "edge-retried").await;
+    order(&parts, "tenant-a", "edge-reused").await;
+    let first = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await);
+    let trace = first.subject.trace_id.clone().unwrap();
+    let first_span = first.observations[0].span.clone();
+    // A shared-netns/trusted gateway can forward a client's chosen id.
+    // More than the per-id cap of unrelated requests must retain nothing.
+    for _ in 0..32 {
+        order(&parts, "tenant-a", "edge-reused").await;
     }
-
-    let report = parse(&retrieve(&parts, "edge-retried", Some(TOKEN_A)).await);
-    assert_eq!(responses(&report).len(), 3, "every attempt");
-    assert_eq!(report.subject.trace_id, None, "the attempts' traces differ");
-    let notes = &report.collection.notes;
-    let noted = notes.iter().any(|note| note.contains("no trace context"));
-    assert!(noted, "{notes:?}");
+    // Nor may forwarding the service's generated trace confer provenance.
+    let copied_trace = format!("00-{trace}-00f067aa0ba902b7-01");
+    let headers = [
+        ("x-request-id", "edge-reused"),
+        ("traceparent", copied_trace.as_str()),
+    ];
+    assert_eq!(
+        serve_from(&parts, ORDER_A, GATEWAY, &headers).await.0,
+        StatusCode::OK
+    );
+    let report = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await);
+    assert_eq!(responses(&report).len(), 1);
+    assert_eq!(report.subject.trace_id.as_deref(), Some(trace.as_str()));
+    assert_eq!(report.observations[0].span, first_span);
+    assert!(report.collection.notes.iter().any(|n| n.starts_with("33 later")));
     let text = metrics(&parts).await;
     let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
-    assert_eq!(metric(&text, conflicts), 0);
+    assert_eq!(metric(&text, conflicts), 33);
+    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 1);
+    let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+    assert_eq!(metric(&text, limited), 0);
+
+    order(&parts, "tenant-b", "edge-reused").await;
+    let other = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_B)).await);
+    assert_eq!(responses(&other).len(), 1);
+    assert_ne!(other.subject.trace_id, report.subject.trace_id);
+    assert_eq!(parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await), report);
+}
+
+#[tokio::test]
+async fn tokenless_management_keeps_diagnostic_authorization_separate() {
+    let mut cfg = settings();
+    cfg.management.token = None;
+    let parts = parts(cfg);
+    order(&parts, "tenant-a", "req-private").await;
+    assert_eq!(
+        manage(&parts, operator(), "/health", Some(TOKEN_A)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_not_found(&retrieve(&parts, "req-private", None).await);
+    assert_not_found(&retrieve(&parts, "req-private", Some(TOKEN)).await);
+    assert_not_found(&retrieve(&parts, "req-private", Some(TOKEN_B)).await);
+    let report = parse(&retrieve(&parts, "req-private", Some(TOKEN_A)).await);
+    assert_eq!(responses(&report).len(), 1);
 }
 
 #[tokio::test]
@@ -752,5 +790,55 @@ async fn retrieval_works_over_real_connections() {
     let bearer = format!("Bearer {TOKEN_B}");
     let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    server.shutdown().await.unwrap();
+}
+
+async fn live_shared_report(server: &support::TestServer, token: &str) -> DiagnosticReport {
+    let url = server.management_url("/diagnostics/v1/requests/live-shared");
+    let bearer = format!("Bearer {token}");
+    let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.headers["cache-control"], "no-store");
+    parse_offline(&reply.body, &Limits::default())
+        .unwrap()
+        .report
+}
+
+#[tokio::test]
+async fn real_trusted_transport_shared_ids_keep_tenant_evidence_separate() {
+    let mut cfg = settings();
+    cfg.trust.networks = vec!["127.0.0.1/32".parse().unwrap()];
+    let server = start(app().diagnostics_authorizer(authorize), cfg).await;
+    let url = server.url(ORDER_A);
+    let headers = [("x-request-id", "live-shared")];
+    assert_eq!(fetch_with(&url, &headers).await.status, StatusCode::OK);
+    let first = live_shared_report(&server, TOKEN_A).await;
+    assert_eq!(responses(&first).len(), 1);
+    assert!(first.subject.trace_id.is_some());
+    for _ in 0..32 {
+        assert_eq!(fetch_with(&url, &headers).await.status, StatusCode::OK);
+    }
+    let retained = live_shared_report(&server, TOKEN_A).await;
+    assert_eq!(retained.subject.trace_id, first.subject.trace_id);
+    assert_eq!(retained.observations, first.observations);
+    assert_eq!(responses(&retained).len(), 1);
+
+    let url = server.url("/tenants/tenant-b/orders/7");
+    assert_eq!(fetch_with(&url, &headers).await.status, StatusCode::OK);
+    let other = live_shared_report(&server, TOKEN_B).await;
+    assert_eq!(responses(&other).len(), 1);
+    assert_ne!(other.subject.trace_id, retained.subject.trace_id);
+    assert_eq!(live_shared_report(&server, TOKEN_A).await, retained);
+
+    let url = server.management_url("/metrics");
+    let bearer = format!("Bearer {TOKEN}");
+    let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let text = reply.text();
+    let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
+    assert_eq!(metric(&text, conflicts), 32);
+    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 2);
+    let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+    assert_eq!(metric(&text, limited), 0);
     server.shutdown().await.unwrap();
 }

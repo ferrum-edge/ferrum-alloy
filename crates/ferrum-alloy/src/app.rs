@@ -545,8 +545,9 @@ pub struct AlloyParts {
     /// The management router, when enabled. [`AlloyParts::serve`] and
     /// [`AlloyParts::serve_on`] refuse to serve it on a listener that
     /// [`AlloyParts::check_management_listener`] refuses. Without a
-    /// management token its handlers admit every request, so when you serve
-    /// it yourself, call [`AlloyParts::check_management_listener`] on your
+    /// management token only minimal probes and separately authorized
+    /// diagnostics are accessible. When you serve it yourself, call
+    /// [`AlloyParts::check_management_listener`] on your
     /// listener first and do not serve it if that fails; nothing else checks
     /// where it is served. Serve it with a listener that
     /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):

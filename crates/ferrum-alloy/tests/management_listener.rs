@@ -19,10 +19,23 @@ use ferrum_alloy::{AlloyApp, AlloyError, AlloyParts, TelemetryInit};
 use support::{TOKEN, fetch, fetch_with};
 use tokio::net::TcpListener;
 
-fn parts(mut config: AlloyConfig) -> AlloyParts {
+fn parts(config: AlloyConfig) -> AlloyParts {
+    parts_with_check(config, false)
+}
+
+fn parts_with_check(mut config: AlloyConfig, private_failure: bool) -> AlloyParts {
     config.shutdown.drain_timeout_ms = 2_000;
     let router = Router::new().route("/hello", get(|| async { "hello" }));
     let app = AlloyApp::new("management-listener").router(router);
+    let app = if private_failure {
+        app.readiness_check("private-database-check", || async {
+            Err(ferrum_alloy::health::CheckError::new(
+                "private-dependency-error",
+            ))
+        })
+    } else {
+        app
+    };
     #[cfg(feature = "openapi")]
     let app = app.openapi(&document());
     app.config(config)
@@ -121,19 +134,85 @@ async fn a_listener_off_loopback_with_a_token_requires_it() {
 }
 
 #[tokio::test]
-async fn a_loopback_listener_on_another_port_serves_without_a_token() {
+async fn tokenless_loopback_exposes_only_minimal_probes() {
     // `management.bind` says port 9090; the listener's port does not
     // matter, only whether its address is loopback.
-    let parts = parts(AlloyConfig::default());
+    #[allow(unused_mut, reason = "the UI needs its feature")]
+    let mut config = AlloyConfig::default();
+    #[cfg(feature = "openapi-ui")]
+    {
+        config.openapi.ui = true;
+    }
+    let parts = parts_with_check(config, true);
     let lifecycle = parts.lifecycle.clone();
     let (app, _) = on_loopback().await;
     let (management, management_addr) = on_loopback().await;
     assert_ne!(management_addr.port(), 9090);
     let task = tokio::spawn(parts.serve_on(app, Some(management)));
 
-    let reply = fetch(&format!("http://{management_addr}/health")).await;
-    assert_eq!(reply.status, 200);
+    let url = |path: &str| format!("http://{management_addr}{path}");
+    for (path, status, label) in [("/livez", 200, "ok"), ("/readyz", 503, "not_ready")] {
+        let reply = fetch(&url(path)).await;
+        assert_eq!(reply.status, status, "{path}");
+        assert_eq!(reply.headers["cache-control"], "no-store");
+        assert_eq!(reply.json(), serde_json::json!({ "status": label }));
+    }
+    let paths: &[&str] = if cfg!(feature = "openapi") {
+        &["/health", "/metrics", "/openapi.json"]
+    } else {
+        &["/health", "/metrics"]
+    };
+    for &path in paths {
+        // This is exactly the transport a same-netns sidecar uses. Even a
+        // spoofed operator header cannot authenticate it without a token.
+        let reply = fetch_with(
+            &url(path),
+            &[("authorization", "Bearer attacker-token")],
+        )
+        .await;
+        assert_eq!(reply.status, 401, "{path}");
+        assert_eq!(reply.headers["www-authenticate"], "Bearer");
+        assert_eq!(reply.headers["cache-control"], "no-store");
+        for private in [
+            "management-listener",
+            "private-database-check",
+            "private-dependency-error",
+            "active_connections",
+            "openapi",
+        ] {
+            assert!(!reply.text().contains(private), "{path}: {private}");
+        }
+    }
+    #[cfg(feature = "openapi-ui")]
+    for path in ["/docs", "/docs/swagger-ui.css"] {
+        assert_eq!(fetch(&url(path)).await.status, 401, "{path}");
+    }
 
+    lifecycle.trigger_shutdown();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("server stopped in time")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_loopback_management_serves_private_details() {
+    let mut config = AlloyConfig::default();
+    config.management.token = Some(Secret::new(TOKEN));
+    let parts = parts_with_check(config, true);
+    let lifecycle = parts.lifecycle.clone();
+    let (app, _) = on_loopback().await;
+    let (management, addr) = on_loopback().await;
+    let task = tokio::spawn(parts.serve_on(app, Some(management)));
+    let url = format!("http://{addr}/health");
+    assert_eq!(fetch(&url).await.status, 401);
+    let bearer = format!("Bearer {TOKEN}");
+    let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
+    assert_eq!(reply.status, 503, "the configured readiness check fails");
+    assert!(reply.text().contains("private-database-check"));
+    assert!(reply.text().contains("private-dependency-error"));
+    assert!(reply.text().contains("management-listener"));
     lifecycle.trigger_shutdown();
     tokio::time::timeout(Duration::from_secs(10), task)
         .await

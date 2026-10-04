@@ -22,6 +22,42 @@ const IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_millis(400);
 const WITHIN: Duration = Duration::from_secs(5);
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn socket_shutdown_and_drop_cannot_target_a_later_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let registry = Arc::new(SocketShutdown::default());
+    for _ in 0..32 {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let registration = registry.register(&stream).unwrap();
+        let closing = Arc::clone(&registry);
+        let task = tokio::task::spawn_blocking(move || closing.close_all());
+        // Race transport/drop against shutdown holding its owned duplicate.
+        drop(stream);
+        drop(registration);
+        task.await.unwrap().unwrap();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(WITHIN, client.read(&mut byte))
+            .await
+            .expect("old connection closed");
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+
+        let mut fresh_client = TcpStream::connect(addr).await.unwrap();
+        let (mut fresh_server, _) = listener.accept().await.unwrap();
+        // A stale registration would shut down a reused descriptor here.
+        registry.close_all().unwrap();
+        fresh_server.write_all(b"alive").await.unwrap();
+        let mut bytes = [0u8; 5];
+        tokio::time::timeout(WITHIN, fresh_client.read_exact(&mut bytes))
+            .await
+            .expect("later connection is unaffected")
+            .unwrap();
+        assert_eq!(&bytes, b"alive");
+        assert!(registry.state.lock().unwrap().sockets.is_empty());
+    }
+}
+
 /// One final frame, with notification only after Hyper drops the body that
 /// yielded it. Its request guard is also released before the task yields.
 struct FinishedBody {
@@ -147,6 +183,7 @@ async fn finished_connection(body_size: usize, write_stall_timeout: Duration) ->
         close,
         Arc::clone(&slots).acquire_owned().await.unwrap(),
         sockets.token(),
+        None,
     );
     let finished = Arc::new(Notify::new());
     let body_finished = Arc::clone(&finished);
@@ -432,6 +469,7 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
         close,
         Arc::clone(&slots).acquire_owned().await.unwrap(),
         sockets.token(),
+        None,
     );
     let finished = Arc::new(Notify::new());
     let (release_body, release_body_rx) = tokio::sync::oneshot::channel();
