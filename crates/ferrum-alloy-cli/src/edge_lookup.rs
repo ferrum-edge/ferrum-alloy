@@ -79,16 +79,22 @@ fn lookup_url(base: &str, reference: &str) -> Result<Url, CliError> {
         return Err(invalid("--edge-admin-url must not contain credentials"));
     }
     if url.query().is_some() || url.fragment().is_some() {
-        return Err(invalid("--edge-admin-url must not contain a query or fragment"));
+        return Err(invalid(
+            "--edge-admin-url must not contain a query or fragment",
+        ));
     }
     if url.host_str().is_none() || !matches!(url.scheme(), "https" | "http") {
-        return Err(invalid("--edge-admin-url must use https or literal-loopback http"));
+        return Err(invalid(
+            "--edge-admin-url must use https or literal-loopback http",
+        ));
     }
     if url.scheme() == "http" {
         let host = url.host_str().unwrap_or_default();
         let host = host.trim_start_matches('[').trim_end_matches(']');
         if !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
-            return Err(invalid("plain HTTP Edge lookup requires a literal loopback IP; use https"));
+            return Err(invalid(
+                "plain HTTP Edge lookup requires a literal loopback IP; use https",
+            ));
         }
         // URL parsing normalizes shorthand, octal and integer IPv4 hosts.
         // Require the original authority to contain the canonical literal.
@@ -104,7 +110,9 @@ fn lookup_url(base: &str, reference: &str) -> Result<Url, CliError> {
         };
         let suffix = authority.strip_prefix(&canonical);
         if !suffix.is_some_and(|s| s.is_empty() || s.starts_with(':')) {
-            return Err(invalid("plain HTTP Edge lookup requires a canonical literal loopback IP"));
+            return Err(invalid(
+                "plain HTTP Edge lookup requires a canonical literal loopback IP",
+            ));
         }
     }
     let path = url.path().trim_end_matches('/').to_owned();
@@ -127,7 +135,9 @@ fn credential() -> Result<String, CliError> {
             b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'+' | b'/' | b'=')
         })
     {
-        return Err(CliError::Invalid("invalid Edge diagnostics credential".into()));
+        return Err(CliError::Invalid(
+            "invalid Edge diagnostics credential".into(),
+        ));
     }
     Ok(token.to_owned())
 }

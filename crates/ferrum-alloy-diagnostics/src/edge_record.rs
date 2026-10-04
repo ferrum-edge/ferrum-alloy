@@ -51,12 +51,7 @@ pub const DISPATCH: &[&str] = &[
 ];
 /// Coarse duration labels, never converted into measurements.
 pub const DURATION_BUCKETS: &[&str] = &[
-    "lt_10ms",
-    "lt_100ms",
-    "lt_1s",
-    "lt_10s",
-    "ge_10s",
-    "unknown",
+    "lt_10ms", "lt_100ms", "lt_1s", "lt_10s", "ge_10s", "unknown",
 ];
 /// Granular classes from the pinned gateway-errors vocabulary.
 pub const ERROR_CLASSES: &[&str] = &[
@@ -139,7 +134,9 @@ impl ClientObservation {
         let end = timestamp(&self.response_received_at).ok_or(RecordError("invalid end time"))?;
         // Explicitly bounded capture window; no automatic clock-skew expansion.
         if end < start || end - start > 300_000_000_000 {
-            return Err(RecordError("observation window must be within 0..=300 seconds"));
+            return Err(RecordError(
+                "observation window must be within 0..=300 seconds",
+            ));
         }
         Ok((start, end))
     }
@@ -156,7 +153,10 @@ pub fn parse_observation(bytes: &[u8]) -> Result<ClientObservation> {
         || !text_ok(&observation.namespace)
         || !(100..=599).contains(&observation.status)
         || !PROTOCOLS.contains(&observation.protocol.as_str())
-        || observation.gateway_error.as_deref().is_some_and(|v| !label_ok(v))
+        || observation
+            .gateway_error
+            .as_deref()
+            .is_some_and(|v| !label_ok(v))
     {
         return Err(RecordError("invalid client observation fields"));
     }
@@ -277,8 +277,8 @@ pub fn bind_record(bytes: &[u8], observation: &ClientObservation) -> Result<Boun
     }
     let created = timestamp(string(root, "created_at")?)
         .ok_or(RecordError("invalid record creation time"))?;
-    let expires = timestamp(string(root, "expires_at")?)
-        .ok_or(RecordError("invalid record expiry time"))?;
+    let expires =
+        timestamp(string(root, "expires_at")?).ok_or(RecordError("invalid record expiry time"))?;
     if expires < created {
         return Err(RecordError("record expires before creation"));
     }
@@ -309,7 +309,9 @@ pub fn bind_record(bytes: &[u8], observation: &ClientObservation) -> Result<Boun
         || created > end
         || expires < end
     {
-        return Err(RecordError("Edge record does not bind to the observed response"));
+        return Err(RecordError(
+            "Edge record does not bind to the observed response",
+        ));
     }
     Ok(BoundRecord { value, known })
 }
@@ -382,7 +384,8 @@ fn validate_detail(detail: &Map<String, Value>) -> Result<bool> {
         }
     }
     if detail.get("attempts_omitted").is_some_and(|v| {
-        !v.as_u64().is_some_and(|n| (1..=u64::from(u32::MAX)).contains(&n))
+        !v.as_u64()
+            .is_some_and(|n| (1..=u64::from(u32::MAX)).contains(&n))
     }) {
         return Err(RecordError("invalid omitted attempt count"));
     }
@@ -451,7 +454,9 @@ fn text_ok(value: &str) -> bool {
 fn label_ok(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
 }
 
 fn label(value: &str) -> Result<()> {
@@ -468,7 +473,12 @@ fn timestamp(value: &str) -> Option<i128> {
     if !(20..=35).contains(&b.len()) || !value.is_ascii() {
         return None;
     }
-    if b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't') || b[13] != b':' || b[16] != b':' {
+    if b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b'T' | b't')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
     let digits = |start: usize, end: usize| -> Option<i128> {

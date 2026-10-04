@@ -16,9 +16,8 @@ const TOKEN: &str = "private-edge-lookup-credential";
 
 fn record() -> Value {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let path = root.join(
-        "contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/connection-failure.json",
-    );
+    let path = root
+        .join("contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/connection-failure.json");
     let bytes = std::fs::read(path).unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
@@ -70,6 +69,7 @@ fn serve(
     headers: &str,
     body: String,
     delay: Duration,
+    client_may_stop_reading: bool,
 ) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -89,6 +89,7 @@ fn serve(
                 Err(e) => panic!("request did not arrive: {e}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -101,9 +102,15 @@ fn serve(
             request.push(byte[0]);
             assert!(request.len() < 32 * 1024);
         }
-        let _ = stream.write_all(head.as_bytes());
+        stream.write_all(head.as_bytes()).unwrap();
         std::thread::sleep(delay);
-        let _ = stream.write_all(body.as_bytes());
+        if let Err(error) = stream.write_all(body.as_bytes()) {
+            assert!(client_may_stop_reading);
+            assert!(
+                matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset),
+                "unexpected fixture body write error: {error}"
+            );
+        }
         String::from_utf8(request).unwrap()
     });
     (url, server)
@@ -122,7 +129,7 @@ fn assert_private(output: &Output) {
 fn an_authenticated_bound_record_confirms_only_the_new_record_finding() {
     let record = record();
     let observation = capture(&record);
-    let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO);
+    let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO, false);
     let dir = tempfile::tempdir().unwrap();
     let saved = dir.path().join("report.json");
     let report_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -194,7 +201,7 @@ fn an_authenticated_bound_record_confirms_only_the_new_record_finding() {
 #[test]
 fn plaintext_lookup_bypasses_all_environment_proxies() {
     let record = record();
-    let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO);
+    let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO, false);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("capture.json");
     std::fs::write(&path, capture(&record).to_string()).unwrap();
@@ -227,10 +234,7 @@ fn plaintext_lookup_bypasses_all_environment_proxies() {
 fn redirects_never_forward_the_credential_and_refusals_disclose_no_server_text() {
     let trap = TcpListener::bind("127.0.0.1:0").unwrap();
     trap.set_nonblocking(true).unwrap();
-    let headers = format!(
-        "location: http://{}/secret\r\n",
-        trap.local_addr().unwrap()
-    );
+    let headers = format!("location: http://{}/secret\r\n", trap.local_addr().unwrap());
     for status in [
         "302 Found",
         "307 Temporary Redirect",
@@ -239,7 +243,7 @@ fn redirects_never_forward_the_credential_and_refusals_disclose_no_server_text()
         "404 Not Found",
         "429 Too Many Requests",
     ] {
-        let (url, server) = serve(status, &headers, TOKEN.into(), Duration::ZERO);
+        let (url, server) = serve(status, &headers, TOKEN.into(), Duration::ZERO, false);
         let output = diagnose(&url, &capture(&record()), &[]);
         server.join().unwrap();
         assert!(!output.status.success(), "{status}");
@@ -250,18 +254,29 @@ fn redirects_never_forward_the_credential_and_refusals_disclose_no_server_text()
 
 #[test]
 fn response_bounds_and_timeout_are_enforced() {
-    for (body, delay, extra) in [
-        (" ".repeat(64 * 1024 + 1), Duration::ZERO, vec![]),
+    for (body, delay, extra, expected_error) in [
+        (
+            format!("{TOKEN}{}", " ".repeat(64 * 1024 + 1)),
+            Duration::ZERO,
+            vec![],
+            "Edge input exceeds 64 KiB",
+        ),
         (
             record().to_string(),
             Duration::from_millis(600),
             vec!["--timeout-ms", "100"],
+            "Edge record read failed or timed out",
         ),
     ] {
-        let (url, server) = serve("200 OK", "", body, delay);
+        let (url, server) = serve("200 OK", "", body, delay, true);
         let output = diagnose(&url, &capture(&record()), &extra);
         server.join().unwrap();
         assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected_error),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_private(&output);
     }
 }
@@ -334,7 +349,7 @@ fn mismatches_and_forged_success_claims_cannot_confirm() {
         let mut record = original.clone();
         record[key] = value;
         record["authenticated"] = json!(true);
-        let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO);
+        let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO, false);
         let output = diagnose(&url, &capture(&original), &[]);
         server.join().unwrap();
         assert!(!output.status.success(), "{key}");
@@ -343,7 +358,7 @@ fn mismatches_and_forged_success_claims_cannot_confirm() {
     let mut unknown = original.clone();
     unknown["detail"]["error_class"] = json!("future_sensitive_class");
     unknown["detail"]["proxy_id"] = json!(TOKEN);
-    let (url, server) = serve("200 OK", "", unknown.to_string(), Duration::ZERO);
+    let (url, server) = serve("200 OK", "", unknown.to_string(), Duration::ZERO, false);
     let output = diagnose(&url, &capture(&original), &[]);
     server.join().unwrap();
     assert!(output.status.success());
@@ -358,7 +373,11 @@ fn explicit_observation_and_environment_credential_are_required_before_io() {
     let record = record();
     let mut forged = capture(&record);
     forged["authenticated"] = json!(true);
-    assert!(!diagnose("http://127.0.0.1:9", &forged, &[]).status.success());
+    assert!(
+        !diagnose("http://127.0.0.1:9", &forged, &[])
+            .status
+            .success()
+    );
     for url in [
         "http://localhost:9",
         "http://192.0.2.1:9",

@@ -197,7 +197,8 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     report.findings.clone_from(&findings);
     if let Some(path) = &args.write_report {
         let json = if let Some(lookup) = &lookup {
-            let mut value = serde_json::to_value(&report).map_err(|e| CliError::Io(e.to_string()))?;
+            let mut value =
+                serde_json::to_value(&report).map_err(|e| CliError::Io(e.to_string()))?;
             lookup.redact_json(&mut value);
             report_bytes(&value, &limits)?
         } else {
