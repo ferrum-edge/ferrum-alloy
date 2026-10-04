@@ -695,14 +695,9 @@ pub(crate) mod tests {
             drop(receiver);
             let preparation = cancellations(&mut arrivals, load.concurrency).await;
             let preparation = release_cancellations(preparation).await;
-            await_readiness(
-                load.concurrency,
-                "startup",
-                &mut readiness,
-                &mut workers,
-            )
-            .await
-            .unwrap();
+            await_readiness(load.concurrency, "startup", &mut readiness, &mut workers)
+                .await
+                .unwrap();
             phase.send_replace(Phase::Draining);
             await_readiness(
                 load.concurrency,

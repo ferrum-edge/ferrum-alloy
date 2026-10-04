@@ -2,7 +2,7 @@
 
 Nothing is published. Every crate is `publish = false`, and stays so until the owner explicitly approves a release. This page records what CI already checks, the checklist a release commit must satisfy, and the owner decisions that must be made before the first publish.
 
-The [implementation ledger](implementation-status.md#release-candidate-tracker) records the current #28 status. Packaging and the checklist shipped in #59; #24 remains open for owner decisions. Shared hosted benchmark preparation does not fulfill #15/#16's dedicated acceptance, and #27's Nexus qualification/canonical contract record remains pending. These require separate evidence or decisions before declaring release readiness.
+The [implementation ledger](implementation-status.md#release-candidate-tracker) records the current #28 status. Packaging and the checklist shipped in #59; #24 remains open for owner decisions. Shared hosted benchmark preparation does not fulfill #15/#16's dedicated acceptance. As of 2026-10-04, Nexus #519 is merged and qualified at [`77fdb767`](https://github.com/ferrum-edge/ferrum-nexus/tree/77fdb767ec8ef04e88f13df9fb291bc77fbd0344); #27's canonical contract record and coordinated freeze remain pending. The [owner qualification/freeze proposal](shared-contract-qualification.md) requires root review, a matching qualified owner commit and canonical documentation/metadata with hosted CI before the next canonical release. No freeze or publication is claimed here. These require separate evidence or decisions before declaring release readiness.
 
 ## What CI checks now
 

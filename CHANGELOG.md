@@ -10,13 +10,18 @@
   round only after the deadline and exclude its bytes and completions. The
   hosted failure at PR #141 head `5d528ce` remains failed evidence. Production
   fixed-window timing, zero-request rejection and qualification gates are
-  unchanged; the causal coordinator is compiled only for tests. Correct the
-  contracts guide's stale Anvil/Foundry consumer claims and retain Nexus's
-  failed `61348980` formatting gates and pending repair qualification.
+  unchanged; the causal coordinator is compiled only for tests. Apply the exact
+  hosted rustfmt correction to its startup readiness call; the generated-project
+  job reported the same parent-workspace formatting failure, not a template bug.
 - Refresh the authoritative implementation ledger for #28 with current issue
   states, immutable consumer heads and hosted evidence. Record merged Anvil,
-  Foundry and GitForgeOps qualification; keep Nexus #519 and the canonical
-  diagnostic-report/service-manifest record and freeze pending. Document #140's
+  Foundry, Nexus #519 and GitForgeOps qualification as of 2026-10-04. Record
+  Nexus's final `77fdb767` head, all 11 passing checks, merge and completed merge
+  push CI; earlier failed/cancelled heads remain historical failed evidence.
+  Propose the owner diagnostic-report/service-manifest v1 qualification and
+  coordinated freeze for root review as the next canonical release step, pending
+  a matching qualified owner commit and canonical documentation/metadata with
+  hosted CI. Retain released r2 annotations, pins and schema parity. Document #140's
   shared hosted benchmark preparation separately from #15/#16's external
   dedicated acceptance and #24's owner publishing decisions. Correct stale
   rule coverage, manifest agents, test-count and changelog claims; retain the
