@@ -413,7 +413,9 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests")]
 
     use super::*;
-    use crate::dims::{CANCEL_FRAMES, FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload};
+    use crate::dims::{
+        CANCEL_FRAMES, FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload,
+    };
 
     fn options(seconds: f64) -> RunOptions {
         RunOptions {
