@@ -91,11 +91,11 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for TenantTag {
     }
 }
 
-/// Who chose a request's id, from most to least trustworthy.
+/// How a correlation id entered this process, in alias lookup preference
+/// order. This does not authenticate who originally chose an external value.
 ///
-/// An evidence store keeps the records of each origin apart, so an id a
-/// caller chose can neither join nor evict the records of a request whose id
-/// this process generated or a trusted peer supplied.
+/// This is correlation provenance, not ownership of retained evidence.
+/// A trusted peer can forward values its own caller chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum RequestIdOrigin {
@@ -137,9 +137,10 @@ impl RequestIdOrigin {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RequestEvidence {
+    pub(crate) diagnostic_id: RequestId,
     /// The request id the layer chose.
     pub request_id: RequestId,
-    /// Who chose the request id.
+    /// How the correlation id entered this process.
     pub request_id_origin: RequestIdOrigin,
     /// Trace id of the request's trace.
     pub trace_id: TraceId,
@@ -177,6 +178,7 @@ impl RequestEvidence {
     /// set any other field on the returned value.
     pub fn new(request_id: RequestId, trace_id: TraceId, span_id: SpanId) -> Self {
         Self {
+            diagnostic_id: RequestId::generate(),
             request_id,
             request_id_origin: RequestIdOrigin::Generated,
             trace_id,
@@ -192,6 +194,13 @@ impl RequestEvidence {
             peer_trust: PeerTrust::Untrusted.label(),
         }
     }
+
+    /// Immutable local ownership and lookup id. Cloned evidence represents
+    /// another attempt within the same local request; constructing new
+    /// evidence creates a fresh owner, even for the same remote id and trace.
+    pub fn diagnostic_id(&self) -> &RequestId {
+        &self.diagnostic_id
+    }
 }
 
 /// Receives the evidence of every finalized request.
@@ -205,6 +214,7 @@ pub trait EvidenceSink: Send + Sync + fmt::Debug + 'static {
 #[derive(Debug)]
 pub(crate) struct Pending {
     pub(crate) sink: Arc<dyn EvidenceSink>,
+    pub(crate) diagnostic_id: RequestId,
     pub(crate) request_id: RequestId,
     pub(crate) request_id_origin: RequestIdOrigin,
     pub(crate) trace_id: TraceId,

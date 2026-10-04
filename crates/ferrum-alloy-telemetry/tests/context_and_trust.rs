@@ -664,3 +664,36 @@ fn a_constructed_context_is_an_untrusted_root() {
     let parent = unsampled.child_traceparent(SpanId::random());
     assert!(parent.to_header_value().ends_with("-00"));
 }
+
+#[tokio::test]
+async fn matching_accepted_remote_pairs_have_fresh_immutable_local_owners() {
+    let layer = trusted_layer(TelemetryConfig::default());
+    let headers = [
+        ("x-request-id", "predictable"),
+        ("traceparent", INCOMING),
+        ("authorization", "Bearer test-user"),
+    ];
+    let (first, response) = run(
+        layer.clone(),
+        request_from("10.1.2.3:4000", None, &headers),
+        &[],
+    )
+    .await;
+    let (second, _) = run(
+        layer,
+        request_from("10.1.2.3:4000", None, &headers),
+        &[],
+    )
+    .await;
+    assert_eq!(first.context.request_id, second.context.request_id);
+    assert_eq!(first.context.trace_id, second.context.trace_id);
+    assert_ne!(first.context.span_id, second.context.span_id);
+    assert_ne!(first.context.diagnostic_id(), second.context.diagnostic_id());
+    assert_eq!(response.headers()["x-request-id"], "predictable");
+    let owner = first.context.diagnostic_id().clone();
+    let mut cloned = first.context.clone();
+    cloned.request_id = ferrum_alloy_telemetry::RequestId::generate();
+    cloned.trace_id = TraceId::random();
+    cloned.span_id = SpanId::random();
+    assert_eq!(cloned.diagnostic_id(), &owner);
+}

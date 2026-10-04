@@ -23,7 +23,7 @@ use ferrum_alloy::config::AlloyConfig;
 use ferrum_alloy::diagnostics::{
     DiagnosticsAccess, DiagnosticsAuthorizer, DiagnosticsRequest, TenantTag,
 };
-use ferrum_alloy::telemetry::{AcceptPolicy, PeerInfo};
+use ferrum_alloy::telemetry::{AcceptPolicy, PeerInfo, RequestContext};
 use ferrum_alloy::{AlloyApp, AlloyParts, TelemetryInit};
 use ferrum_alloy_diagnostics::model::{
     Availability, CollectionMethod, Confidence, DiagnosticReport, Observation,
@@ -68,9 +68,11 @@ fn app() -> AlloyApp {
         .route(
             "/tenants/{tenant}/orders/{id}",
             get(
-                |Path((tenant, _)): Path<(String, u32)>, tag: TenantTag| async move {
+                |Path((tenant, _)): Path<(String, u32)>,
+                 tag: TenantTag,
+                 context: RequestContext| async move {
                     assert!(tag.set(&tenant));
-                    "ok"
+                    context.diagnostic_id().as_str().to_owned()
                 },
             ),
         )
@@ -106,6 +108,16 @@ async fn serve_from(
     peer: &str,
     headers: &[(&str, &str)],
 ) -> (StatusCode, String) {
+    let (status, request_id, _) = serve_owned_from(parts, uri, peer, headers).await;
+    (status, request_id)
+}
+
+async fn serve_owned_from(
+    parts: &AlloyParts,
+    uri: &str,
+    peer: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, String) {
     let mut builder = Request::get(uri)
         .header("authorization", "Bearer app-user-secret")
         .header("cookie", "session=cookie-secret");
@@ -124,8 +136,9 @@ async fn serve_from(
     // echoed.
     let request_id = response.headers()["x-request-id"].to_str().unwrap();
     let request_id = request_id.to_owned();
-    response.into_body().collect().await.unwrap();
-    (status, request_id)
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let diagnostic_id = String::from_utf8(body.to_vec()).unwrap();
+    (status, request_id, diagnostic_id)
 }
 
 /// Serves one application request from the gateway, with `request_id`.
@@ -323,21 +336,29 @@ async fn a_request_id_shared_by_two_tenants_discloses_only_the_callers_own() {
     // A gateway keeps ids its clients choose, so two tenants can use the
     // same one.
     order(&parts, "tenant-a", "shared-id").await;
-    // Two attempts of one tenant-b request, which share its trace.
+    // Two frontend requests share remote correlation, but have distinct owners.
     let uri = "/tenants/tenant-b/orders/7";
     let headers = [("x-request-id", "shared-id"), ("traceparent", TRACE_B)];
+    let mut owners = Vec::new();
     for _ in 0..2 {
-        let (status, _) = serve_from(&parts, uri, GATEWAY, &headers).await;
+        let (status, _, owner) = serve_owned_from(&parts, uri, GATEWAY, &headers).await;
         assert_eq!(status, StatusCode::OK);
+        owners.push(owner);
     }
 
     let report = parse(&retrieve(&parts, "shared-id", Some(TOKEN_A)).await);
     assert_eq!(responses(&report).len(), 1, "only tenant-a's request");
 
-    let report = parse(&retrieve(&parts, "shared-id", Some(TOKEN_B)).await);
-    assert_eq!(responses(&report).len(), 2, "both of tenant-b's attempts");
-    let trace_id = report.subject.trace_id.as_deref();
-    assert_eq!(trace_id, Some("0af7651916cd43dd8448eb211c80319c"));
+    assert_not_found(&retrieve(&parts, "shared-id", Some(TOKEN_B)).await);
+    assert_ne!(owners[0], owners[1]);
+    for owner in owners {
+        let report = parse(&retrieve(&parts, &owner, Some(TOKEN_B)).await);
+        assert_eq!(responses(&report).len(), 1);
+        assert_eq!(report.subject.request_id.as_deref(), Some("shared-id"));
+        let trace_id = report.subject.trace_id.as_deref();
+        assert_eq!(trace_id, Some("0af7651916cd43dd8448eb211c80319c"));
+        assert_not_found(&retrieve(&parts, &owner, Some(TOKEN_A)).await);
+    }
 }
 
 #[tokio::test]
@@ -384,29 +405,35 @@ async fn an_untrusted_callers_request_id_is_replaced_by_a_generated_one() {
 }
 
 #[tokio::test]
-async fn a_reused_request_id_neither_joins_nor_evicts_the_first_requests_evidence() {
+async fn repeated_remote_ids_and_traces_keep_independent_local_evidence() {
     let parts = parts(settings());
     let headers = [("x-request-id", "edge-req-1"), ("traceparent", TRACE_A)];
-    let (status, _) = serve_from(&parts, ORDER_A, GATEWAY, &headers).await;
-    assert_eq!(status, StatusCode::OK);
-    // Later requests reuse the id through the gateway without its trace
-    // context, more times than a request may have attempts.
-    for _ in 0..20 {
-        order(&parts, "tenant-a", "edge-req-1").await;
+    let (_, _, first_owner) = serve_owned_from(&parts, ORDER_A, GATEWAY, &headers).await;
+    let first = parse(&retrieve(&parts, &first_owner, Some(TOKEN_A)).await);
+    let mut owners = Vec::new();
+    for _ in 0..32 {
+        let (_, kept, owner) = serve_owned_from(&parts, ORDER_A, GATEWAY, &headers).await;
+        assert_eq!(kept, "edge-req-1");
+        assert_ne!(owner, first_owner);
+        owners.push(owner);
     }
-
-    let report = parse(&retrieve(&parts, "edge-req-1", Some(TOKEN_A)).await);
-    assert_eq!(responses(&report).len(), 1, "only the first request");
-    let trace_id = report.subject.trace_id.as_deref();
-    assert_eq!(trace_id, Some("4bf92f3577b34da6a3ce929d0e0e4736"));
-    let notes = &report.collection.notes;
-    let noted = notes.iter().any(|note| note.starts_with("20 later"));
-    assert!(noted, "{notes:?}");
-
+    assert_not_found(&retrieve(&parts, "edge-req-1", Some(TOKEN_A)).await);
+    assert_eq!(
+        parse(&retrieve(&parts, &first_owner, Some(TOKEN_A)).await),
+        first
+    );
+    for owner in owners {
+        let report = parse(&retrieve(&parts, &owner, Some(TOKEN_A)).await);
+        assert_eq!(responses(&report).len(), 1);
+        assert_eq!(report.subject.trace_id, first.subject.trace_id);
+        assert_ne!(report.observations[0].span, first.observations[0].span);
+    }
     let text = metrics(&parts).await;
     let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
-    assert_eq!(metric(&text, conflicts), 20);
-    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 1);
+    let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+    assert_eq!(metric(&text, conflicts), 0);
+    assert_eq!(metric(&text, limited), 0);
+    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 33);
 }
 
 #[tokio::test]
@@ -414,72 +441,72 @@ async fn ids_callers_choose_never_join_or_evict_a_generated_id() {
     let mut cfg = settings();
     cfg.telemetry.request_id.accept_incoming = AcceptPolicy::Any;
     let parts = parts(cfg);
-    let (status, generated) = serve_from(&parts, ORDER_A, CALLER, &[]).await;
-    assert_eq!(status, StatusCode::OK);
-    // Under `any`, callers can send the generated id back as their own.
+    let (_, generated, owner) = serve_owned_from(&parts, ORDER_A, CALLER, &[]).await;
+    assert_eq!(generated, owner);
+    let first = parse(&retrieve(&parts, &generated, Some(TOKEN_A)).await);
     let headers = [("x-request-id", generated.as_str())];
     for _ in 0..20 {
-        let (_, request_id) = serve_from(&parts, ORDER_A, CALLER, &headers).await;
-        assert_eq!(request_id, generated, "kept under accept_incoming = any");
+        let (_, kept, remote_owner) = serve_owned_from(&parts, ORDER_A, CALLER, &headers).await;
+        assert_eq!(kept, generated, "kept under accept_incoming = any");
+        assert_ne!(remote_owner, generated);
+        let report = parse(&retrieve(&parts, &remote_owner, Some(TOKEN_A)).await);
+        assert_eq!(
+            responses(&report)[0].attr("request_id_origin"),
+            Some("untrusted_caller")
+        );
     }
-
-    let report = parse(&retrieve(&parts, &generated, Some(TOKEN_A)).await);
-    let attempts = responses(&report);
-    assert_eq!(attempts.len(), 1, "only the generated id's request");
-    assert_eq!(attempts[0].attr("request_id_origin"), Some("generated"));
-    // The report says that records filed under the id were left out.
-    let notes = &report.collection.notes;
-    let noted = notes.iter().any(|note| note.starts_with("1 record(s)"));
-    assert!(noted, "{notes:?}");
+    assert_eq!(
+        parse(&retrieve(&parts, &generated, Some(TOKEN_A)).await),
+        first
+    );
+    assert_eq!(responses(&first).len(), 1);
+    assert_eq!(
+        responses(&first)[0].attr("request_id_origin"),
+        Some("generated")
+    );
 }
 
 #[tokio::test]
-async fn untraced_ids_forwarded_by_a_gateway_never_mix_unrelated_requests() {
+async fn untraced_gateway_aliases_and_copied_local_traces_do_not_confer_ownership() {
     let parts = parts(settings());
-    order(&parts, "tenant-a", "edge-reused").await;
-    let first = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await);
+    let (_, _, owner) = serve_owned_from(
+        &parts,
+        ORDER_A,
+        GATEWAY,
+        &[("x-request-id", "edge-reused")],
+    )
+    .await;
+    let first = parse(&retrieve(&parts, &owner, Some(TOKEN_A)).await);
     let trace = first.subject.trace_id.clone().unwrap();
-    let first_span = first.observations[0].span.clone();
-    // A shared-netns/trusted gateway can forward a client's chosen id.
-    // More than the per-id cap of unrelated requests must retain nothing.
     for _ in 0..32 {
         order(&parts, "tenant-a", "edge-reused").await;
     }
-    // Nor may forwarding the service's generated trace confer provenance.
     let copied_trace = format!("00-{trace}-00f067aa0ba902b7-01");
     let headers = [
         ("x-request-id", "edge-reused"),
         ("traceparent", copied_trace.as_str()),
     ];
+    let (_, _, next_owner) = serve_owned_from(&parts, ORDER_A, GATEWAY, &headers).await;
+    let next = parse(&retrieve(&parts, &next_owner, Some(TOKEN_A)).await);
+    assert_eq!(next.subject.trace_id, first.subject.trace_id);
     assert_eq!(
-        serve_from(&parts, ORDER_A, GATEWAY, &headers).await.0,
-        StatusCode::OK
+        responses(&next)[0].attr("trace_parent"),
+        Some("accepted_remote")
     );
-    let report = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await);
-    assert_eq!(responses(&report).len(), 1);
-    assert_eq!(report.subject.trace_id.as_deref(), Some(trace.as_str()));
-    assert_eq!(report.observations[0].span, first_span);
-    assert!(
-        report
-            .collection
-            .notes
-            .iter()
-            .any(|n| n.starts_with("33 later"))
+    assert_eq!(responses(&first)[0].attr("trace_parent"), Some("root"));
+    assert_eq!(responses(&next).len(), 1);
+    assert_not_found(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await);
+    assert_eq!(
+        parse(&retrieve(&parts, &owner, Some(TOKEN_A)).await),
+        first
     );
-    let text = metrics(&parts).await;
-    let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
-    assert_eq!(metric(&text, conflicts), 33);
-    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 1);
-    let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
-    assert_eq!(metric(&text, limited), 0);
-
     order(&parts, "tenant-b", "edge-reused").await;
     let other = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_B)).await);
     assert_eq!(responses(&other).len(), 1);
-    assert_ne!(other.subject.trace_id, report.subject.trace_id);
+    assert_not_found(&retrieve(&parts, &owner, Some(TOKEN_B)).await);
     assert_eq!(
-        parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await),
-        report
+        metric(&metrics(&parts).await, "ferrum_alloy_diagnostics_records"),
+        35
     );
 }
 
@@ -804,8 +831,13 @@ async fn retrieval_works_over_real_connections() {
     server.shutdown().await.unwrap();
 }
 
-async fn live_shared_report(server: &support::TestServer, token: &str) -> DiagnosticReport {
-    let url = server.management_url("/diagnostics/v1/requests/live-shared");
+async fn live_report(
+    server: &support::TestServer,
+    owner: &str,
+    token: &str,
+) -> DiagnosticReport {
+    let path = format!("/diagnostics/v1/requests/{owner}");
+    let url = server.management_url(&path);
     let bearer = format!("Bearer {token}");
     let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
@@ -816,40 +848,268 @@ async fn live_shared_report(server: &support::TestServer, token: &str) -> Diagno
 }
 
 #[tokio::test]
-async fn real_trusted_transport_shared_ids_keep_tenant_evidence_separate() {
+async fn real_trusted_transport_preclaims_and_matching_pairs_do_not_own_retention() {
     let mut cfg = settings();
     cfg.trust.networks = vec!["127.0.0.1/32".parse().unwrap()];
     let server = start(app().diagnostics_authorizer(authorize), cfg).await;
     let url = server.url(ORDER_A);
-    let headers = [("x-request-id", "live-shared")];
-    assert_eq!(fetch_with(&url, &headers).await.status, StatusCode::OK);
-    let first = live_shared_report(&server, TOKEN_A).await;
-    assert_eq!(responses(&first).len(), 1);
-    assert!(first.subject.trace_id.is_some());
+    let headers = [
+        ("x-request-id", "live-shared"),
+        ("traceparent", TRACE_A),
+        ("authorization", "Bearer app-credential"),
+    ];
+    // The first request preclaims every external bit the later request uses.
+    let reply = fetch_with(&url, &headers).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["x-request-id"], "live-shared");
+    let first_owner = reply.text();
+    assert_ne!(first_owner, "live-shared");
+    let first = live_report(&server, &first_owner, TOKEN_A).await;
+    let mut owners = Vec::new();
     for _ in 0..32 {
-        assert_eq!(fetch_with(&url, &headers).await.status, StatusCode::OK);
+        let reply = fetch_with(&url, &headers).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.headers["x-request-id"], "live-shared");
+        let owner = reply.text();
+        assert_ne!(owner, first_owner);
+        owners.push(owner);
     }
-    let retained = live_shared_report(&server, TOKEN_A).await;
-    assert_eq!(retained.subject.trace_id, first.subject.trace_id);
-    assert_eq!(retained.observations, first.observations);
-    assert_eq!(responses(&retained).len(), 1);
-
+    assert_eq!(live_report(&server, &first_owner, TOKEN_A).await, first);
+    for owner in owners {
+        let report = live_report(&server, &owner, TOKEN_A).await;
+        assert_eq!(report.subject.request_id.as_deref(), Some("live-shared"));
+        assert_eq!(report.subject.trace_id, first.subject.trace_id);
+        assert_eq!(responses(&report).len(), 1);
+        assert_ne!(report.observations[0].span, first.observations[0].span);
+        assert_eq!(
+            responses(&report)[0].attr("trace_parent"),
+            Some("accepted_remote")
+        );
+        assert_eq!(
+            responses(&report)[0].attr("request_id_origin"),
+            Some("trusted_peer")
+        );
+        assert_eq!(
+            responses(&report)[0].attr("peer_trust"),
+            Some("network_boundary")
+        );
+    }
+    let bearer = format!("Bearer {TOKEN_A}");
+    let alias = server.management_url("/diagnostics/v1/requests/live-shared");
+    let miss = fetch_with(&alias, &[("authorization", &bearer)]).await;
+    assert_eq!(miss.status, StatusCode::NOT_FOUND);
+    let denied = server.management_url(&format!("/diagnostics/v1/requests/{first_owner}"));
+    let other_bearer = format!("Bearer {TOKEN_B}");
+    let denied = fetch_with(&denied, &[("authorization", &other_bearer)]).await;
+    assert_eq!(denied.status, miss.status);
+    assert_eq!(denied.body, miss.body);
     let url = server.url("/tenants/tenant-b/orders/7");
-    assert_eq!(fetch_with(&url, &headers).await.status, StatusCode::OK);
-    let other = live_shared_report(&server, TOKEN_B).await;
+    let reply = fetch_with(&url, &headers).await;
+    let other = live_report(&server, &reply.text(), TOKEN_B).await;
     assert_eq!(responses(&other).len(), 1);
-    assert_ne!(other.subject.trace_id, retained.subject.trace_id);
-    assert_eq!(live_shared_report(&server, TOKEN_A).await, retained);
+    assert_eq!(other.subject.trace_id, first.subject.trace_id);
+    assert_eq!(
+        responses(&live_report(&server, "live-shared", TOKEN_B).await).len(),
+        1
+    );
+    assert_eq!(live_report(&server, &first_owner, TOKEN_A).await, first);
 
     let url = server.management_url("/metrics");
     let bearer = format!("Bearer {TOKEN}");
     let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
-    assert_eq!(reply.status, StatusCode::OK);
     let text = reply.text();
     let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
-    assert_eq!(metric(&text, conflicts), 32);
-    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 2);
     let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+    assert_eq!(metric(&text, conflicts), 0);
     assert_eq!(metric(&text, limited), 0);
+    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 34);
     server.shutdown().await.unwrap();
+}
+
+const LONG_BYTE_ROUTE: &str =
+    "/tenants/{tenant}/long/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+async fn byte_tagged_id(
+    Path(tenant): Path<String>,
+    tag: TenantTag,
+    context: RequestContext,
+) -> String {
+    assert!(tag.set(&tenant));
+    context.diagnostic_id().as_str().to_owned()
+}
+
+fn byte_app() -> AlloyApp {
+    let router = Router::new()
+        .route("/tenants/{tenant}/short", get(byte_tagged_id))
+        .route(LONG_BYTE_ROUTE, get(byte_tagged_id));
+    AlloyApp::new("bytes")
+        .router(router)
+        .diagnostics_authorizer(|request: DiagnosticsRequest| async move {
+            match request
+                .bearer_token()
+                .and_then(|token| token.strip_prefix("test-credential-"))
+            {
+                Some(tenant) => DiagnosticsAccess::tenant(tenant),
+                None => DiagnosticsAccess::Deny,
+            }
+        })
+}
+
+async fn live_metrics(server: &support::TestServer) -> String {
+    let url = server.management_url("/metrics");
+    let bearer = format!("Bearer {TOKEN}");
+    let reply = fetch_with(&url, &[("authorization", &bearer)]).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    reply.text()
+}
+
+#[tokio::test]
+async fn real_http_variable_byte_admission_is_non_destructive() {
+    let mut cfg = settings();
+    cfg.trust.networks = vec!["127.0.0.1/32".parse().unwrap()];
+    // Derive the exact budget from the real producer on this target, without
+    // assuming pointer widths or weakening the byte limit for the candidate.
+    let calibration = start(byte_app(), cfg.clone()).await;
+    let headers = [
+        ("x-request-id", "short"),
+        ("authorization", "Bearer app-user"),
+    ];
+    let reply = fetch_with(
+        &calibration.url("/tenants/t0/short"),
+        &headers,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let each = metric(
+        &live_metrics(&calibration).await,
+        "ferrum_alloy_diagnostics_bytes",
+    );
+    calibration.shutdown().await.unwrap();
+    cfg.diagnostics.max_records = 32;
+    cfg.diagnostics.max_bytes = usize::try_from(6 * each).unwrap();
+    let server = start(byte_app(), cfg).await;
+    let mut originals = Vec::new();
+    for n in 0..6 {
+        let path = format!("/tenants/t{n}/short");
+        let reply = fetch_with(&server.url(&path), &headers).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let owner = reply.text();
+        let token = format!("test-credential-t{n}");
+        let report = live_report(&server, &owner, &token).await;
+        originals.push((owner, token, report));
+    }
+    assert_eq!(
+        metric(&live_metrics(&server).await, "ferrum_alloy_diagnostics_bytes"),
+        6 * each
+    );
+    let longer_id = "l".repeat(100);
+    let headers = [
+        ("x-request-id", longer_id.as_str()),
+        ("authorization", "Bearer app-user"),
+    ];
+    let path = LONG_BYTE_ROUTE.replace("{tenant}", "t0");
+    let reply = fetch_with(&server.url(&path), &headers).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let rejected_owner = reply.text();
+    let path = format!("/diagnostics/v1/requests/{rejected_owner}");
+    let url = server.management_url(&path);
+    let reply = fetch_with(&url, &[("authorization", "Bearer test-credential-t0")]).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    for (owner, token, expected) in originals {
+        assert_eq!(live_report(&server, &owner, &token).await, expected);
+    }
+    let text = live_metrics(&server).await;
+    let dropped = r#"ferrum_alloy_diagnostics_skipped_total{reason="fair_share"}"#;
+    let evicted = r#"ferrum_alloy_diagnostics_evicted_total{reason="bytes"}"#;
+    assert_eq!(metric(&text, dropped), 1);
+    assert_eq!(metric(&text, evicted), 0);
+    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_records"), 6);
+    assert_eq!(metric(&text, "ferrum_alloy_diagnostics_bytes"), 6 * each);
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "http-client")]
+#[tokio::test]
+async fn real_backend_retries_within_one_local_request_preserve_trace_correlation() {
+    use ferrum_alloy::http_client::AlloyClient;
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let backend = Router::new().route(
+        "/attempt",
+        get(move |headers: HeaderMap| {
+            let seen = Arc::clone(&seen);
+            async move {
+                assert!(!headers.contains_key("x-diagnostic-id"));
+                let status = if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                };
+                let trace = headers["traceparent"].to_str().unwrap().to_owned();
+                (status, trace)
+            }
+        }),
+    );
+    let mut cfg = settings();
+    cfg.trust.networks = vec!["127.0.0.1/32".parse().unwrap()];
+    let backend = start(
+        AlloyApp::new("backend").router(backend),
+        cfg.clone(),
+    )
+    .await;
+    let backend_url = backend.url("/attempt");
+    let mut client_settings = ferrum_alloy::config::HttpClientSettings::default();
+    client_settings.propagate_trace_context_to = vec!["127.0.0.1".to_owned()];
+    let client = AlloyClient::new(&client_settings).unwrap();
+    let frontend = Router::new().route(
+        "/retry",
+        get(move |context: RequestContext, tag: TenantTag| {
+            let client = client.clone();
+            let url = backend_url.clone();
+            async move {
+                assert!(tag.set("tenant-a"));
+                let cloned = context.clone();
+                assert_eq!(context.diagnostic_id(), cloned.diagnostic_id());
+                let mut parents = Vec::new();
+                for (index, ctx) in [&context, &cloned].into_iter().enumerate() {
+                    let request = client
+                        .request(reqwest::Method::GET, &url)
+                        .build()
+                        .unwrap();
+                    let response = client.execute(Some(ctx), request).await.unwrap();
+                    let expected = if index == 0 { 503 } else { 200 };
+                    assert_eq!(response.status().as_u16(), expected);
+                    let parent = response.text().await.unwrap();
+                    let prefix = format!("00-{}-", context.trace_id.to_hex());
+                    assert!(parent.starts_with(&prefix));
+                    parents.push(parent);
+                }
+                assert_ne!(parents[0], parents[1], "distinct client spans in one trace");
+                context.diagnostic_id().as_str().to_owned()
+            }
+        }),
+    );
+    let app = AlloyApp::new("frontend")
+        .router(frontend)
+        .diagnostics_authorizer(authorize);
+    let server = start(app, cfg).await;
+    let headers = [
+        ("x-request-id", "retry-external"),
+        ("traceparent", TRACE_A),
+        ("authorization", "Bearer app-user"),
+    ];
+    let reply = fetch_with(&server.url("/retry"), &headers).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["x-request-id"], "retry-external");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let report = live_report(&server, &reply.text(), TOKEN_A).await;
+    assert_eq!(responses(&report).len(), 1, "one finalized frontend request");
+    assert_eq!(
+        report.subject.trace_id.as_deref(),
+        Some("4bf92f3577b34da6a3ce929d0e0e4736")
+    );
+    assert_eq!(report.subject.request_id.as_deref(), Some("retry-external"));
+    server.shutdown().await.unwrap();
+    backend.shutdown().await.unwrap();
 }

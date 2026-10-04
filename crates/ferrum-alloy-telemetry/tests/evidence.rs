@@ -112,6 +112,7 @@ async fn every_finalized_request_is_handed_over_once_with_its_tenant() {
     // The caller is not trusted, so its id was replaced.
     assert_ne!(tagged.request_id.as_str(), "req-a");
     assert_eq!(tagged.request_id_origin, RequestIdOrigin::Generated);
+    assert_eq!(tagged.diagnostic_id(), &tagged.request_id);
     assert_eq!(tagged.tenant.as_deref(), Some("acme"));
     assert_eq!(tagged.route.as_deref(), Some("/tenants/acme/orders/{id}"));
     assert_eq!(tagged.status, Some(200));
@@ -173,6 +174,10 @@ async fn the_evidence_says_who_chose_the_request_id() {
     assert_ne!(chosen[1].0, "caller-id", "replaced");
     assert_eq!(chosen[1].1, RequestIdOrigin::Generated);
     assert_eq!(chosen[2], ("chosen-id", RequestIdOrigin::UntrustedCaller));
+    assert_ne!(records[0].diagnostic_id(), &records[0].request_id);
+    assert_eq!(records[1].diagnostic_id(), &records[1].request_id);
+    assert_ne!(records[2].diagnostic_id(), &records[2].request_id);
+    assert_eq!(records[0].clone().diagnostic_id(), records[0].diagnostic_id());
 }
 
 /// Without a sink the extractor yields a detached tag, which nothing reads.

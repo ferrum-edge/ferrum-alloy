@@ -42,6 +42,9 @@ impl TraceDecision {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RequestContext {
+    /// Immutable local ownership of retained evidence, independent of
+    /// accepted correlation headers. Clones belong to the same request.
+    pub(crate) diagnostic_id: RequestId,
     /// The validated request id (also written back to the request header).
     pub request_id: RequestId,
     /// How the request id was chosen.
@@ -77,8 +80,10 @@ impl RequestContext {
     /// Intended for tests and for driving handlers outside the telemetry
     /// layer. Set any other field on the returned value.
     pub fn new(trace_id: TraceId, span_id: SpanId, sampled: bool) -> Self {
+        let request_id = RequestId::generate();
         Self {
-            request_id: RequestId::generate(),
+            diagnostic_id: request_id.clone(),
+            request_id,
             request_id_source: RequestIdSource::Generated,
             trace_id,
             span_id,
@@ -90,6 +95,14 @@ impl RequestContext {
             peer_trust: PeerTrust::Untrusted,
             span: tracing::Span::none(),
         }
+    }
+
+    /// The locally generated lookup id for this server request's retained
+    /// diagnostics. It is also the correlation id when that id was generated
+    /// locally. Accepted remote ids remain separate correlation aliases.
+    /// This value is not added to HTTP headers or propagated to other services.
+    pub fn diagnostic_id(&self) -> &RequestId {
+        &self.diagnostic_id
     }
 
     /// The `traceparent` value to send on an outbound request made on behalf
