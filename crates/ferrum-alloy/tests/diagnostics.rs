@@ -469,13 +469,8 @@ async fn ids_callers_choose_never_join_or_evict_a_generated_id() {
 #[tokio::test]
 async fn untraced_gateway_aliases_and_copied_local_traces_do_not_confer_ownership() {
     let parts = parts(settings());
-    let (_, _, owner) = serve_owned_from(
-        &parts,
-        ORDER_A,
-        GATEWAY,
-        &[("x-request-id", "edge-reused")],
-    )
-    .await;
+    let (_, _, owner) =
+        serve_owned_from(&parts, ORDER_A, GATEWAY, &[("x-request-id", "edge-reused")]).await;
     let first = parse(&retrieve(&parts, &owner, Some(TOKEN_A)).await);
     let trace = first.subject.trace_id.clone().unwrap();
     for _ in 0..32 {
@@ -496,10 +491,7 @@ async fn untraced_gateway_aliases_and_copied_local_traces_do_not_confer_ownershi
     assert_eq!(responses(&first)[0].attr("trace_parent"), Some("root"));
     assert_eq!(responses(&next).len(), 1);
     assert_not_found(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await);
-    assert_eq!(
-        parse(&retrieve(&parts, &owner, Some(TOKEN_A)).await),
-        first
-    );
+    assert_eq!(parse(&retrieve(&parts, &owner, Some(TOKEN_A)).await), first);
     order(&parts, "tenant-b", "edge-reused").await;
     let other = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_B)).await);
     assert_eq!(responses(&other).len(), 1);
@@ -831,11 +823,7 @@ async fn retrieval_works_over_real_connections() {
     server.shutdown().await.unwrap();
 }
 
-async fn live_report(
-    server: &support::TestServer,
-    owner: &str,
-    token: &str,
-) -> DiagnosticReport {
+async fn live_report(server: &support::TestServer, owner: &str, token: &str) -> DiagnosticReport {
     let path = format!("/diagnostics/v1/requests/{owner}");
     let url = server.management_url(&path);
     let bearer = format!("Bearer {token}");
@@ -974,11 +962,7 @@ async fn real_http_variable_byte_admission_is_non_destructive() {
         ("x-request-id", "short"),
         ("authorization", "Bearer app-user"),
     ];
-    let reply = fetch_with(
-        &calibration.url("/tenants/t0/short"),
-        &headers,
-    )
-    .await;
+    let reply = fetch_with(&calibration.url("/tenants/t0/short"), &headers).await;
     assert_eq!(reply.status, StatusCode::OK);
     let each = metric(
         &live_metrics(&calibration).await,
@@ -999,7 +983,10 @@ async fn real_http_variable_byte_admission_is_non_destructive() {
         originals.push((owner, token, report));
     }
     assert_eq!(
-        metric(&live_metrics(&server).await, "ferrum_alloy_diagnostics_bytes"),
+        metric(
+            &live_metrics(&server).await,
+            "ferrum_alloy_diagnostics_bytes"
+        ),
         6 * each
     );
     let longer_id = "l".repeat(100);
@@ -1053,11 +1040,7 @@ async fn real_backend_retries_within_one_local_request_preserve_trace_correlatio
     );
     let mut cfg = settings();
     cfg.trust.networks = vec!["127.0.0.1/32".parse().unwrap()];
-    let backend = start(
-        AlloyApp::new("backend").router(backend),
-        cfg.clone(),
-    )
-    .await;
+    let backend = start(AlloyApp::new("backend").router(backend), cfg.clone()).await;
     let backend_url = backend.url("/attempt");
     let mut client_settings = ferrum_alloy::config::HttpClientSettings::default();
     client_settings.propagate_trace_context_to = vec!["127.0.0.1".to_owned()];
@@ -1073,10 +1056,7 @@ async fn real_backend_retries_within_one_local_request_preserve_trace_correlatio
                 assert_eq!(context.diagnostic_id(), cloned.diagnostic_id());
                 let mut parents = Vec::new();
                 for (index, ctx) in [&context, &cloned].into_iter().enumerate() {
-                    let request = client
-                        .request(reqwest::Method::GET, &url)
-                        .build()
-                        .unwrap();
+                    let request = client.request(reqwest::Method::GET, &url).build().unwrap();
                     let response = client.execute(Some(ctx), request).await.unwrap();
                     let expected = if index == 0 { 503 } else { 200 };
                     assert_eq!(response.status().as_u16(), expected);
@@ -1104,7 +1084,11 @@ async fn real_backend_retries_within_one_local_request_preserve_trace_correlatio
     assert_eq!(reply.headers["x-request-id"], "retry-external");
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     let report = live_report(&server, &reply.text(), TOKEN_A).await;
-    assert_eq!(responses(&report).len(), 1, "one finalized frontend request");
+    assert_eq!(
+        responses(&report).len(),
+        1,
+        "one finalized frontend request"
+    );
     assert_eq!(
         report.subject.trace_id.as_deref(),
         Some("4bf92f3577b34da6a3ce929d0e0e4736")

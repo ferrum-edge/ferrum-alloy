@@ -177,7 +177,10 @@ async fn the_evidence_says_who_chose_the_request_id() {
     assert_ne!(records[0].diagnostic_id(), &records[0].request_id);
     assert_eq!(records[1].diagnostic_id(), &records[1].request_id);
     assert_ne!(records[2].diagnostic_id(), &records[2].request_id);
-    assert_eq!(records[0].clone().diagnostic_id(), records[0].diagnostic_id());
+    assert_eq!(
+        records[0].clone().diagnostic_id(),
+        records[0].diagnostic_id()
+    );
 }
 
 /// Without a sink the extractor yields a detached tag, which nothing reads.

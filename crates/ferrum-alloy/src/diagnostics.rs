@@ -370,7 +370,10 @@ impl Ring {
         self.bytes = self.bytes.saturating_add(record.bytes);
         let alias = (tenant, record.origin, record.request_id.clone());
         let aliased = self.aliases.entry(alias).or_default();
-        *aliased.owners.entry(record.diagnostic_id.clone()).or_default() += 1;
+        *aliased
+            .owners
+            .entry(record.diagnostic_id.clone())
+            .or_default() += 1;
         aliased.records += 1;
         self.index.entry(key).or_default().seqs.push(seq);
         self.records.insert(seq, record);
@@ -431,7 +434,11 @@ impl Ring {
     }
 
     fn owned(&self, key: &Key) -> Found {
-        let records = self.index.get(key).into_iter().flat_map(|filed| &filed.seqs);
+        let records = self
+            .index
+            .get(key)
+            .into_iter()
+            .flat_map(|filed| &filed.seqs);
         Found {
             records: records
                 .filter_map(|seq| self.records.get(seq))
@@ -471,11 +478,13 @@ impl Ring {
     }
 }
 
+type OriginalTenantRanking<'a> = Peekable<Rev<btree_set::Iter<'a, (usize, Arc<str>)>>>;
+
 /// An immutable ordering plus updated ranks for only the reserved tenants.
 /// Each original entry is visited at most once during an admission; no
 /// full-store copy or repeated scan is needed for a multi-record reservation.
 struct Ranking<'a> {
-    original: Peekable<Rev<btree_set::Iter<'a, (usize, Arc<str>)>>>,
+    original: OriginalTenantRanking<'a>,
     updated: BTreeSet<(usize, Arc<str>)>,
 }
 
@@ -740,12 +749,8 @@ impl EvidenceStore {
                 return;
             }
         };
-        let plan = Reservation::new(&ring).plan(
-            &record,
-            replacement,
-            self.max_records,
-            self.max_bytes,
-        );
+        let plan =
+            Reservation::new(&ring).plan(&record, replacement, self.max_records, self.max_bytes);
         let Some(plan) = plan else {
             drop(ring);
             self.count_skipped(Skipped::FairShare);
@@ -1271,7 +1276,11 @@ mod tests {
                 record.origin,
                 record.request_id.clone(),
             );
-            assert!(ring.aliases[&alias].owners.contains_key(&record.diagnostic_id));
+            assert!(
+                ring.aliases[&alias]
+                    .owners
+                    .contains_key(&record.diagnostic_id)
+            );
         }
         for (tenant, holding) in &ring.tenants {
             let count = (holding.seqs.len(), Arc::clone(tenant));
@@ -1362,7 +1371,10 @@ mod tests {
         assert_eq!(records.len(), MAX_RECORDS_PER_REQUEST_ID);
         assert_eq!(records[0].status, Some(524));
         assert_eq!(records.last().unwrap().status, Some(539));
-        assert_eq!(found(&store, "acme", "shared-id"), MAX_RECORDS_PER_REQUEST_ID);
+        assert_eq!(
+            found(&store, "acme", "shared-id"),
+            MAX_RECORDS_PER_REQUEST_ID
+        );
         assert_eq!(found(&store, "acme", "before"), 1);
         let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
         assert_eq!(metric(&store, limited), 24);
@@ -1399,7 +1411,10 @@ mod tests {
             store.record(next);
         }
         assert_eq!(found(&store, "acme", "predictable"), 0);
-        assert_eq!(store.find("acme", first_owner).records[0].span_id, first_span);
+        assert_eq!(
+            store.find("acme", first_owner).records[0].span_id,
+            first_span
+        );
         for (owner, span) in owners {
             let found = store.find("acme", owner);
             assert_eq!(found.records.len(), 1);
@@ -1633,7 +1648,10 @@ mod tests {
             let ring = store.ring();
             (ring.usage("big").1, ring.usage("small").1)
         };
-        assert!(big_bytes.saturating_sub(big) < small_bytes + small, "{big_bytes}");
+        assert!(
+            big_bytes.saturating_sub(big) < small_bytes + small,
+            "{big_bytes}"
+        );
         assert!(small_bytes <= big_bytes + big, "{small_bytes}");
         let count = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
         assert_eq!(metric(&store, count), 0);
@@ -1765,11 +1783,7 @@ mod tests {
         store.record(small);
         let mut candidate = evidence(Some("other"), &"c".repeat(100));
         candidate.route = Some(Arc::from("/".repeat(200)));
-        let bytes = sized(
-            "other",
-            &candidate.request_id,
-            candidate.route.as_deref(),
-        );
+        let bytes = sized("other", &candidate.request_id, candidate.route.as_deref());
         assert!(small_bytes < bytes && bytes < large_bytes);
         store.record(candidate);
         // The heaviest tenant has two records, but removing its oldest
@@ -1839,11 +1853,7 @@ mod tests {
         assert_eq!(metric(&store, count), 1);
         assert_eq!(metric(&store, bytes), 1);
         check(&store);
-        let seqs: Vec<_> = store.ring().tenants["old"]
-            .seqs
-            .iter()
-            .copied()
-            .collect();
+        let seqs: Vec<_> = store.ring().tenants["old"].seqs.iter().copied().collect();
         for seq in seqs {
             assert!(store.ring().remove(seq));
         }

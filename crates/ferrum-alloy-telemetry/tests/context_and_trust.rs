@@ -679,16 +679,14 @@ async fn matching_accepted_remote_pairs_have_fresh_immutable_local_owners() {
         &[],
     )
     .await;
-    let (second, _) = run(
-        layer,
-        request_from("10.1.2.3:4000", None, &headers),
-        &[],
-    )
-    .await;
+    let (second, _) = run(layer, request_from("10.1.2.3:4000", None, &headers), &[]).await;
     assert_eq!(first.context.request_id, second.context.request_id);
     assert_eq!(first.context.trace_id, second.context.trace_id);
     assert_ne!(first.context.span_id, second.context.span_id);
-    assert_ne!(first.context.diagnostic_id(), second.context.diagnostic_id());
+    assert_ne!(
+        first.context.diagnostic_id(),
+        second.context.diagnostic_id()
+    );
     assert_eq!(response.headers()["x-request-id"], "predictable");
     let owner = first.context.diagnostic_id().clone();
     let mut cloned = first.context.clone();
