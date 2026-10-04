@@ -614,6 +614,7 @@ pub(crate) mod tests {
     use std::convert::Infallible;
     use std::fmt::Write;
     use std::future::Future;
+    use std::io::Write as _;
     use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -742,7 +743,6 @@ pub(crate) mod tests {
             update(&mut state);
         }
 
-        #[allow(clippy::print_stderr, reason = "bounded test failure evidence")]
         pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
             use crate::dims::Dimension;
 
@@ -810,7 +810,7 @@ pub(crate) mod tests {
                     state.last_error_stage,
                 );
             }
-            eprintln!("{message}");
+            let _ = std::io::stderr().lock().write_all(message.as_bytes());
         }
     }
 

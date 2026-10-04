@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Ignore stderr write errors when printing the bounded test-only cancellation
+  health failure snapshot, preserving the original driver result and avoiding
+  a second panic while unwinding. This does not explain or repair the historical
+  `d00fc47` timeout; fresh hosted checks and independent root review remain required.
 - Repair PR #141's test-only diagnostic worker guard ownership after
   [head `73e6b711` / Clippy job 111507388589](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37226589007/job/111507388589)
   rejected the field-only async capture. Construct the whole guard inside the
