@@ -217,7 +217,7 @@ pub(crate) fn measure(
         collector,
         environment,
         #[cfg(test)]
-        false,
+        None,
     )
 }
 
@@ -228,19 +228,35 @@ fn measure_inner(
     metrics: &Metrics,
     collector: Option<Arc<CollectorStats>>,
     environment: Value,
-    #[cfg(test)] cancellation_health: bool,
+    #[cfg(test)] diagnostics: Option<Arc<client::tests::HealthDiagnostics>>,
 ) -> Result<Value, Failure> {
     options.load.validate(cell.transport)?;
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("pki-generation");
+    }
     let pki = if cell.transport.tls() {
         Some(Pki::generate()?)
     } else {
         None
     };
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("server-tls-config");
+    }
     let server_tls = match &pki {
         Some(pki) => Some(pki.server(cell.transport.mtls())?),
         None => None,
     };
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("server-start-readiness");
+    }
     let server = server::start(cell.scenario, server_tls, pipeline)?;
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("client-tls-config");
+    }
     let target = Target {
         addr: server.addr,
         transport: cell.transport,
@@ -250,6 +266,10 @@ fn measure_inner(
             None => None,
         },
     };
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("client-runtime-build");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(server::THREADS)
         .thread_name(CLIENT_THREAD)
@@ -261,9 +281,25 @@ fn measure_inner(
     alloc::set_role(Role::Client);
     let measured = runtime.block_on(async {
         #[cfg(test)]
-        if cancellation_health && cell.workload == crate::dims::Workload::Cancel {
-            let health = client::tests::cancellation_health(target, options.load, probe);
-            return tokio::time::timeout(Duration::from_secs(15), health).await?;
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.coordinator_stage("client-driver-start");
+            let health = client::tests::cancellation_health(
+                target,
+                options.load,
+                probe,
+                Arc::clone(&diagnostics),
+            );
+            return match tokio::time::timeout(Duration::from_secs(15), health).await {
+                Ok(Ok(measured)) => Ok(measured),
+                Ok(Err(error)) => {
+                    diagnostics.failure(cell, "driver-error");
+                    Err(error)
+                }
+                Err(error) => {
+                    diagnostics.failure(cell, "timeout");
+                    Err(error.into())
+                }
+            };
         }
         client::drive(target, options.load, probe).await
     });
@@ -445,6 +481,19 @@ mod tests {
         CANCEL_FRAMES, FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload,
     };
 
+    struct HealthFailureEvidence {
+        cell: Cell,
+        diagnostics: Arc<client::tests::HealthDiagnostics>,
+    }
+
+    impl Drop for HealthFailureEvidence {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.diagnostics.failure(self.cell, "cell-error-or-assertion");
+            }
+        }
+    }
+
     fn options(seconds: f64) -> RunOptions {
         RunOptions {
             load: Load {
@@ -509,8 +558,23 @@ mod tests {
                 };
                 let metrics = Metrics::default();
                 let environment = probe::environment(options.label.as_deref());
-                let result =
-                    measure_inner(cell, &options, None, &metrics, None, environment, true).unwrap();
+                // Keep the bounded snapshots alive through timeout teardown
+                // and every report assertion; print at most once on failure.
+                let evidence = (*workload == Workload::Cancel).then(|| HealthFailureEvidence {
+                    cell,
+                    diagnostics: Arc::new(client::tests::HealthDiagnostics::new(options.load)),
+                });
+                let diagnostics = evidence.as_ref().map(|e| Arc::clone(&e.diagnostics));
+                let result = measure_inner(
+                    cell,
+                    &options,
+                    None,
+                    &metrics,
+                    None,
+                    environment,
+                    diagnostics,
+                )
+                .unwrap();
                 assert_work_completed(&result);
                 assert_eq!(result["seconds"], 5.0, "{result}");
                 assert_eq!(result["warmup_seconds"], 1.0, "{result}");

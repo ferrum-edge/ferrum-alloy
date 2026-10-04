@@ -149,17 +149,25 @@ where
 {
     if h2 {
         let (sender, connection) = http2::handshake(TokioExecutor::new(), io).await?;
+        #[cfg(test)]
+        let connection = tests::diagnostic_driver(connection);
         tokio::spawn(connection);
         Ok(Sender::H2(sender))
     } else {
         let (sender, connection) = http1::handshake(io).await?;
+        #[cfg(test)]
+        let connection = tests::diagnostic_driver(connection);
         tokio::spawn(connection);
         Ok(Sender::H1(sender))
     }
 }
 
 async fn dial(target: &Target) -> Result<Sender, Failure> {
+    #[cfg(test)]
+    tests::diagnostic_dial();
     let stream = TcpStream::connect(target.addr).await?;
+    #[cfg(test)]
+    tests::diagnostic_socket(stream.local_addr().ok());
     stream.set_nodelay(true)?;
     let h2 = target.transport.http2();
     if target.workload == Workload::Cancel && !h2 {
@@ -168,12 +176,20 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
         stream.set_zero_linger()?;
     }
     match &target.tls {
-        None => handshake(TokioIo::new(stream), h2).await,
+        None => {
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("http-handshake");
+            handshake(TokioIo::new(stream), h2).await
+        }
         Some(config) => {
             let name = ServerName::try_from("localhost")?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("tls-handshake");
             let stream = TlsConnector::from(Arc::clone(config))
                 .connect(name, stream)
                 .await?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("http-handshake");
             handshake(TokioIo::new(stream), h2).await
         }
     }
@@ -182,6 +198,8 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
 /// Sends one request and reads the body: all of it, or for `cancel` only
 /// until the first data frame, then drops the response.
 async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> {
+    #[cfg(test)]
+    tests::diagnostic_exchange_started(sender);
     let path = target.workload.path();
     let response = match sender {
         Sender::H1(sender) => {
@@ -189,6 +207,8 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
                 .header(http::header::HOST, target.addr.to_string())
                 .body(Empty::new())?;
             sender.ready().await?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("response-headers");
             sender.send_request(request).await?
         }
         Sender::H2(sender) => {
@@ -197,6 +217,8 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
             let uri = format!("{scheme}://{}{path}", target.addr);
             let request = Request::get(uri).body(Empty::new())?;
             sender.ready().await?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("response-headers");
             sender.send_request(request).await?
         }
     };
@@ -206,10 +228,16 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
     let cancel = target.workload == Workload::Cancel;
     let mut body = response.into_body();
     let mut bytes = 0_u64;
+    #[cfg(test)]
+    tests::diagnostic_worker_stage("first-data-frame");
     while let Some(frame) = body.frame().await {
         if let Some(data) = frame?.data_ref() {
             bytes += data.len() as u64;
+            #[cfg(test)]
+            tests::diagnostic_body_bytes(data.len() as u64);
             if cancel && !data.is_empty() {
+                #[cfg(test)]
+                tests::diagnostic_exchange_completed(sender);
                 return Ok(bytes);
             }
         }
@@ -234,6 +262,8 @@ async fn prepare(
         sender = dial(target).await?;
         totals.connects += 1;
     }
+    #[cfg(test)]
+    tests::diagnostic_sender_stage(&sender, "preparation-sender-ready");
     sender.ready().await?;
     Ok(sender)
 }
@@ -309,8 +339,12 @@ async fn worker_inner(
     let (mut warmup_exchanges, mut measured_exchanges) = (0, 0);
     loop {
         let current_phase = *phase.borrow_and_update();
+        #[cfg(test)]
+        tests::diagnostic_worker_phase(current_phase);
         match current_phase {
             Phase::Preparing => {
+                #[cfg(test)]
+                tests::diagnostic_worker_stage("preparation-parked");
                 phase.changed().await?;
                 continue;
             }
@@ -320,12 +354,16 @@ async fn worker_inner(
                 // coordinator takes the baseline or starts the clock.
                 let connection = async {
                     let mut connection = connected(&target, sender.take(), &mut totals).await?;
+                    #[cfg(test)]
+                    tests::diagnostic_sender_stage(&connection, "drain-sender-ready");
                     connection.ready().await?;
                     Ok::<_, Failure>(connection)
                 }
                 .await;
                 ready.send(connection.as_ref().map(|_| ()).map_err(ToString::to_string))?;
                 sender = Some(connection?);
+                #[cfg(test)]
+                tests::diagnostic_worker_stage("drain-parked");
                 phase.changed().await?;
                 continue;
             }
@@ -336,10 +374,12 @@ async fn worker_inner(
         if let Some(limit) = per_phase {
             match current_phase {
                 Phase::Warmup if warmup_exchanges >= limit => {
+                    tests::diagnostic_worker_stage("warmup-quota-phase-change");
                     phase.changed().await?;
                     continue;
                 }
                 Phase::Measuring { end, .. } if measured_exchanges >= limit => {
+                    tests::diagnostic_worker_stage("measurement-quota-deadline");
                     tokio::time::sleep_until(end.into()).await;
                     break;
                 }
@@ -353,12 +393,16 @@ async fn worker_inner(
                 if phase.borrow().contains(now, now) {
                     totals.error(error.as_ref());
                 }
+                #[cfg(test)]
+                tests::diagnostic_totals(&totals, true);
                 continue;
             }
         };
         let begin = Instant::now();
         let result = exchange(&mut current, &target).await;
         let end = Instant::now();
+        #[cfg(test)]
+        let failed = result.is_err();
         #[cfg(test)]
         match current_phase {
             Phase::Warmup => warmup_exchanges += 1,
@@ -376,6 +420,8 @@ async fn worker_inner(
                 Err(error) => totals.error(error.as_ref()),
             }
         }
+        #[cfg(test)]
+        tests::diagnostic_totals(&totals, failed);
         if reuse {
             sender = Some(current);
         }
@@ -385,6 +431,7 @@ async fn worker_inner(
         // A quiet tail of the fixed health window must not hide a driver that
         // died on late DATA. Prove reuse after the deadline on the retained
         // sender, without re-dialling or including this probe in the totals.
+        tests::diagnostic_reuse();
         let sender = sender.as_mut().ok_or("health probe lost its H2 sender")?;
         exchange(sender, &target).await?;
     }
@@ -412,6 +459,8 @@ async fn await_readiness(
     readiness: &mut mpsc::UnboundedReceiver<Result<(), String>>,
     workers: &mut JoinSet<Result<Totals, Failure>>,
 ) -> Result<(), Failure> {
+    #[cfg(test)]
+    tests::diagnostic_readiness_start(stage);
     for _ in 0..count {
         tokio::select! {
             biased;
@@ -427,6 +476,8 @@ async fn await_readiness(
                 }
             }
         }
+        #[cfg(test)]
+        tests::diagnostic_readiness_received();
     }
     Ok(())
 }
@@ -442,6 +493,8 @@ async fn measurement_window<S>(
     probe: impl Fn() -> S,
 ) -> Result<(S, S), Failure> {
     if !load.warmup.is_zero() {
+        #[cfg(test)]
+        tests::diagnostic_coordinator_stage("warmup-timer");
         phase.send_replace(Phase::Warmup);
         tokio::select! {
             biased;
@@ -455,6 +508,8 @@ async fn measurement_window<S>(
     await_readiness(load.concurrency, "measurement boundary", readiness, workers).await?;
     // Baseline probes and unfinished warm-up exchanges cannot consume the
     // requested window. All workers start their next exchange after release.
+    #[cfg(test)]
+    tests::diagnostic_coordinator_stage("baseline-probe");
     let start = probe();
     let window_start = Instant::now();
     let window_end = window_start + load.duration;
@@ -462,7 +517,11 @@ async fn measurement_window<S>(
         start: window_start,
         end: window_end,
     });
+    #[cfg(test)]
+    tests::diagnostic_coordinator_stage("measurement-deadline");
     tokio::time::sleep_until(window_end.into()).await;
+    #[cfg(test)]
+    tests::diagnostic_coordinator_stage("end-probe");
     Ok((start, probe()))
 }
 
@@ -481,7 +540,11 @@ async fn measure_workers<S>(
             connects,
             ..Totals::default()
         };
+        #[cfg(test)]
+        tests::diagnostic_coordinator_stage("worker-joins-and-reuse");
         while let Some(worker) = workers.join_next().await {
+            #[cfg(test)]
+            tests::diagnostic_worker_joined();
             totals.merge(worker??);
         }
         Ok(Measured {
@@ -495,6 +558,8 @@ async fn measure_workers<S>(
     if result.is_err() {
         // Await cancellation so parked peers have released their senders and
         // connections before the failed run returns.
+        #[cfg(test)]
+        tests::diagnostic_coordinator_stage("failed-worker-shutdown");
         workers.shutdown().await;
     }
     result
@@ -547,9 +612,11 @@ pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
 
     use std::convert::Infallible;
+    use std::fmt::Write;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     use hyper::Response;
@@ -566,6 +633,442 @@ pub(crate) mod tests {
     use crate::dims::FRAME_BYTES;
     use crate::pki::Pki;
 
+    // Task-local observation keeps the real dial/exchange/coordinator path.
+    // Only cancellation_health enters these scopes; other tests and the
+    // production binary have no diagnostic state. No lock crosses an await.
+    tokio::task_local! {
+        static HEALTH_COORDINATOR: Arc<HealthDiagnostics>;
+        static HEALTH_WORKER: (Arc<HealthDiagnostics>, usize);
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct ExchangeProgress {
+        started: u64,
+        completed: u64,
+        bytes: u64,
+    }
+
+    #[derive(Clone)]
+    struct ConnectionDiagnostic {
+        owner: usize,
+        generation: u64,
+        local_addr: Option<SocketAddr>,
+        driver: Arc<AtomicUsize>,
+    }
+
+    struct WorkerDiagnostic {
+        phase: &'static str,
+        exchange_phase: usize,
+        stage: &'static str,
+        since: Instant,
+        outcome: &'static str,
+        connect_attempts: u64,
+        connection: Option<ConnectionDiagnostic>,
+        sender_closed: Option<bool>,
+        // Preparation, warm-up, measurement, and retained-sender reuse.
+        exchanges: [ExchangeProgress; 4],
+        measured: usize,
+        errors: u64,
+        body_bytes: u64,
+        last_error_stage: Option<&'static str>,
+    }
+
+    struct CoordinatorDiagnostic {
+        stage: &'static str,
+        since: Instant,
+        readiness: usize,
+        joined: usize,
+        last_error_stage: Option<&'static str>,
+    }
+
+    pub(crate) struct HealthDiagnostics {
+        started: Instant,
+        load: Load,
+        coordinator: Mutex<CoordinatorDiagnostic>,
+        workers: [Mutex<WorkerDiagnostic>; 4],
+        printed: AtomicBool,
+    }
+
+    impl HealthDiagnostics {
+        pub(crate) fn new(load: Load) -> Self {
+            // The observer has exactly four slots, never a CLI-sized vector.
+            assert_eq!(load.concurrency, 4);
+            assert_eq!(load.streams, 2);
+            let started = Instant::now();
+            Self {
+                started,
+                load,
+                coordinator: Mutex::new(CoordinatorDiagnostic {
+                    stage: "load-validation",
+                    since: started,
+                    readiness: 0,
+                    joined: 0,
+                    last_error_stage: None,
+                }),
+                workers: std::array::from_fn(|_| {
+                    Mutex::new(WorkerDiagnostic {
+                        phase: "preparation",
+                        exchange_phase: 0,
+                        stage: "not-spawned",
+                        since: started,
+                        outcome: "not-spawned",
+                        connect_attempts: 0,
+                        connection: None,
+                        sender_closed: None,
+                        exchanges: [ExchangeProgress::default(); 4],
+                        measured: 0,
+                        errors: 0,
+                        body_bytes: 0,
+                        last_error_stage: None,
+                    })
+                }),
+                printed: AtomicBool::new(false),
+            }
+        }
+
+        pub(crate) fn coordinator_stage(&self, stage: &'static str) {
+            let mut state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+            if stage == "failed-worker-shutdown" {
+                state.last_error_stage = Some(state.stage);
+            }
+            state.stage = stage;
+            state.since = Instant::now();
+        }
+
+        fn worker(&self, index: usize, update: impl FnOnce(&mut WorkerDiagnostic)) {
+            let mut state = self.workers[index].lock().unwrap_or_else(|e| e.into_inner());
+            update(&mut state);
+        }
+
+        #[allow(clippy::print_stderr, reason = "bounded test failure evidence")]
+        pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
+            use crate::dims::Dimension;
+
+            if self.printed.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            let now = Instant::now();
+            let state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+            let mut message = format!(
+                "cancellation-health failure: reason={reason} scenario={} workload={} \
+                 transport={} elapsed_ms={} concurrency={} streams={} warmup_ms={} \
+                 window_ms={} per_phase={} timeout_ms=15000 coordinator={} \
+                 coordinator_stage_ms={} readiness={}/4 joined={}/4 \
+                 coordinator_last_error_stage={:?}\n",
+                cell.scenario.name(),
+                cell.workload.name(),
+                cell.transport.name(),
+                now.duration_since(self.started).as_millis(),
+                self.load.concurrency,
+                self.load.streams,
+                self.load.warmup.as_millis(),
+                self.load.duration.as_millis(),
+                HEALTH_EXCHANGES_PER_PHASE,
+                state.stage,
+                now.duration_since(state.since).as_millis(),
+                state.readiness,
+                state.joined,
+                state.last_error_stage,
+            );
+            drop(state);
+            for (index, worker) in self.workers.iter().enumerate() {
+                let state = worker.lock().unwrap_or_else(|e| e.into_inner());
+                let connection = state.connection.as_ref().map(|connection| {
+                    let driver = match connection.driver.load(Ordering::Relaxed) {
+                        0 => "not-polled",
+                        1 => "running",
+                        2 => "completed-ok",
+                        3 => "completed-error",
+                        _ => "future-dropped",
+                    };
+                    (
+                        connection.owner,
+                        connection.generation,
+                        connection.local_addr,
+                        driver,
+                    )
+                });
+                let _ = writeln!(
+                    message,
+                    "worker={index} phase={} stage={} stage_ms={} outcome={} \
+                     connect_attempts={} connection(owner,generation,local,driver)={connection:?} \
+                     sender_closed_last_observed={:?} \
+                     exchanges(preparation,warmup,measurement,reuse)={:?} \
+                     measured={} errors={} body_bytes={} last_error_stage={:?}",
+                    state.phase,
+                    state.stage,
+                    now.saturating_duration_since(state.since).as_millis(),
+                    state.outcome,
+                    state.connect_attempts,
+                    state.sender_closed,
+                    state.exchanges,
+                    state.measured,
+                    state.errors,
+                    state.body_bytes,
+                    state.last_error_stage,
+                );
+            }
+            eprintln!("{message}");
+        }
+    }
+
+    fn observe_worker(update: impl FnOnce(usize, &mut WorkerDiagnostic)) {
+        let _ = HEALTH_WORKER.try_with(|(diagnostics, index)| {
+            diagnostics.worker(*index, |state| update(*index, state));
+        });
+    }
+
+    pub(super) fn diagnostic_worker_stage(stage: &'static str) {
+        observe_worker(|_, state| {
+            state.stage = stage;
+            state.since = Instant::now();
+        });
+    }
+
+    pub(super) fn diagnostic_sender_stage(sender: &Sender, stage: &'static str) {
+        diagnostic_worker_stage(stage);
+        observe_worker(|_, state| state.sender_closed = Some(sender.is_closed()));
+    }
+
+    pub(super) fn diagnostic_dial() {
+        diagnostic_worker_stage("tcp-connect");
+        observe_worker(|_, state| {
+            state.connect_attempts = state.connect_attempts.saturating_add(1);
+            state.connection = None;
+            state.sender_closed = None;
+        });
+    }
+
+    pub(super) fn diagnostic_socket(local_addr: Option<SocketAddr>) {
+        observe_worker(|index, state| {
+            state.connection = Some(ConnectionDiagnostic {
+                owner: index,
+                generation: state.connect_attempts,
+                local_addr,
+                driver: Arc::new(AtomicUsize::new(0)),
+            });
+        });
+    }
+
+    pub(super) fn diagnostic_exchange_started(sender: &Sender) {
+        diagnostic_sender_stage(sender, "exchange-sender-ready");
+        observe_worker(|_, state| {
+            let progress = &mut state.exchanges[state.exchange_phase];
+            progress.started = progress.started.saturating_add(1);
+        });
+    }
+
+    pub(super) fn diagnostic_body_bytes(bytes: u64) {
+        observe_worker(|_, state| {
+            let progress = &mut state.exchanges[state.exchange_phase];
+            progress.bytes = progress.bytes.saturating_add(bytes);
+        });
+    }
+
+    pub(super) fn diagnostic_exchange_completed(sender: &Sender) {
+        diagnostic_sender_stage(sender, "exchange-completed");
+        observe_worker(|_, state| {
+            let progress = &mut state.exchanges[state.exchange_phase];
+            progress.completed = progress.completed.saturating_add(1);
+        });
+    }
+
+    pub(super) fn diagnostic_worker_phase(phase: Phase) {
+        observe_worker(|_, state| {
+            let (name, index) = match phase {
+                Phase::Preparing => ("preparation", 0),
+                Phase::Warmup => ("warmup", 1),
+                Phase::Draining => ("draining", 1),
+                Phase::Measuring { .. } => ("measurement", 2),
+            };
+            state.phase = name;
+            state.exchange_phase = index;
+        });
+    }
+
+    pub(super) fn diagnostic_reuse() {
+        diagnostic_worker_stage("retained-sender-reuse");
+        observe_worker(|_, state| {
+            state.phase = "reuse";
+            state.exchange_phase = 3;
+        });
+    }
+
+    pub(super) fn diagnostic_totals(totals: &Totals, failed: bool) {
+        observe_worker(|_, state| {
+            state.measured = totals.latencies_us.len();
+            state.errors = totals.errors;
+            state.body_bytes = totals.body_bytes;
+            if failed {
+                state.last_error_stage = Some(state.stage);
+            }
+        });
+    }
+
+    pub(super) fn diagnostic_coordinator_stage(stage: &'static str) {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| diagnostics.coordinator_stage(stage));
+    }
+
+    pub(super) fn diagnostic_readiness_start(stage: &str) {
+        let name = if stage == "startup" {
+            "startup-readiness"
+        } else {
+            "drain-readiness"
+        };
+        diagnostic_coordinator_stage(name);
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            let mut state = diagnostics
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.readiness = 0;
+        });
+    }
+
+    pub(super) fn diagnostic_readiness_received() {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            let mut state = diagnostics
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.readiness += 1;
+        });
+    }
+
+    pub(super) fn diagnostic_worker_joined() {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            let mut state = diagnostics
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.joined += 1;
+        });
+    }
+
+    struct DriverDiagnostic(Option<Arc<AtomicUsize>>);
+
+    impl Drop for DriverDiagnostic {
+        fn drop(&mut self) {
+            if let Some(state) = &self.0 {
+                state.store(4, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(super) fn diagnostic_driver<F>(
+        connection: F,
+    ) -> impl Future<Output = Result<(), hyper::Error>>
+    where
+        F: Future<Output = Result<(), hyper::Error>>,
+    {
+        let mut state = None;
+        observe_worker(|_, worker| {
+            state = worker.connection.as_ref().map(|c| Arc::clone(&c.driver));
+        });
+        let mut guard = DriverDiagnostic(state);
+        async move {
+            if let Some(state) = &guard.0 {
+                state.store(1, Ordering::Relaxed);
+            }
+            let result = connection.await;
+            if let Some(state) = guard.0.take() {
+                state.store(if result.is_ok() { 2 } else { 3 }, Ordering::Relaxed);
+            }
+            result
+        }
+    }
+
+    struct WorkerDiagnosticGuard {
+        diagnostics: Arc<HealthDiagnostics>,
+        index: usize,
+        finished: bool,
+    }
+
+    impl Drop for WorkerDiagnosticGuard {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.diagnostics.worker(self.index, |state| {
+                    state.outcome = "future-dropped";
+                });
+            }
+        }
+    }
+
+    async fn diagnostic_worker<F>(
+        diagnostics: Arc<HealthDiagnostics>,
+        index: usize,
+        future: F,
+    ) -> Result<Totals, Failure>
+    where
+        F: Future<Output = Result<Totals, Failure>>,
+    {
+        let mut guard = WorkerDiagnosticGuard {
+            diagnostics: Arc::clone(&diagnostics),
+            index,
+            finished: false,
+        };
+        HEALTH_WORKER
+            .scope((diagnostics, index), async move {
+                observe_worker(|_, state| state.outcome = "running");
+                let result = future.await;
+                observe_worker(|_, state| {
+                    state.outcome = if result.is_ok() {
+                        "completed-ok"
+                    } else {
+                        "completed-error"
+                    };
+                    if result.is_err() {
+                        state.last_error_stage = Some(state.stage);
+                    }
+                });
+                guard.finished = true;
+                result
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn health_diagnostics_survive_dropped_worker_and_driver_futures() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let worker = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+            diagnostic_dial();
+            diagnostic_socket(Some("127.0.0.1:12345".parse().unwrap()));
+            diagnostic_worker_phase(Phase::Warmup);
+            observe_worker(|_, state| state.exchanges[1].started = 1);
+            diagnostic_body_bytes(512);
+            diagnostic_worker_stage("first-data-frame");
+            let driver = diagnostic_driver(std::future::pending::<Result<(), hyper::Error>>());
+            driver.await?;
+            Ok(Totals::default())
+        });
+        let mut worker = Box::pin(worker);
+        // Poll once to establish the pending await, then drop exactly the
+        // future a timeout would cancel. No timer, network or retry is needed.
+        std::future::poll_fn(|cx| {
+            assert!(worker.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(worker);
+        diagnostics.worker(0, |state| {
+            assert_eq!(state.outcome, "future-dropped");
+            assert_eq!(state.phase, "warmup");
+            assert_eq!(state.stage, "first-data-frame");
+            assert_eq!(state.exchanges[1].started, 1);
+            assert_eq!(state.exchanges[1].completed, 0);
+            assert_eq!(state.exchanges[1].bytes, 512);
+            let connection = state.connection.as_ref().unwrap();
+            assert_eq!(connection.owner, 0);
+            assert_eq!(connection.generation, 1);
+            assert_eq!(connection.driver.load(Ordering::Relaxed), 4);
+        });
+        // Observation after scope exit cannot contaminate a retained slot.
+        diagnostic_worker_stage("outside-scope");
+        diagnostics.worker(0, |state| {
+            assert_eq!(state.stage, "first-data-frame");
+        });
+    }
+
     /// Functional cancellation health is finite work, not an unbounded reset
     /// flood. Pinned h2 retains 50 local resets per connection for one second.
     /// With two workers per connection, preparation, both phase budgets and
@@ -577,6 +1080,20 @@ pub(crate) mod tests {
         target: Target,
         load: Load,
         probe: impl Fn() -> S,
+        diagnostics: Arc<HealthDiagnostics>,
+    ) -> Result<Measured<S>, Failure> {
+        HEALTH_COORDINATOR
+            .scope(Arc::clone(&diagnostics), async move {
+                cancellation_health_inner(target, load, probe, diagnostics).await
+            })
+            .await
+    }
+
+    async fn cancellation_health_inner<S>(
+        target: Target,
+        load: Load,
+        probe: impl Fn() -> S,
+        diagnostics: Arc<HealthDiagnostics>,
     ) -> Result<Measured<S>, Failure> {
         load.validate(target.transport)?;
         assert_eq!(target.workload, Workload::Cancel);
@@ -586,8 +1103,16 @@ pub(crate) mod tests {
         let (phase, receiver) = watch::channel(Phase::Preparing);
         let (ready, mut readiness) = mpsc::unbounded_channel();
         let mut workers = JoinSet::new();
+        let mut worker_index = 0;
+        diagnostic_coordinator_stage("initial-dial-and-spawn");
         for _ in 0..load.connections(target.transport) {
-            let sender = dial(&target).await?;
+            let first = worker_index;
+            diagnostics.worker(first, |state| state.outcome = "dialing");
+            let sender = HEALTH_WORKER
+                .scope((Arc::clone(&diagnostics), first), dial(&target))
+                .await?;
+            let mut connection = None;
+            diagnostics.worker(first, |state| connection = state.connection.clone());
             let mut senders = Vec::new();
             if let Sender::H2(shared) = &sender {
                 for _ in 1..load.streams {
@@ -596,12 +1121,25 @@ pub(crate) mod tests {
             }
             senders.push(sender);
             for sender in senders {
-                workers.spawn(worker_inner(
-                    Arc::clone(&target),
-                    sender,
-                    receiver.clone(),
-                    ready.clone(),
-                    Some(HEALTH_EXCHANGES_PER_PHASE),
+                let index = worker_index;
+                worker_index += 1;
+                if index != first {
+                    diagnostics.worker(index, |state| state.connection = connection.clone());
+                }
+                diagnostics.worker(index, |state| {
+                    state.outcome = "spawned-not-polled";
+                    state.sender_closed = Some(sender.is_closed());
+                });
+                workers.spawn(diagnostic_worker(
+                    Arc::clone(&diagnostics),
+                    index,
+                    worker_inner(
+                        Arc::clone(&target),
+                        sender,
+                        receiver.clone(),
+                        ready.clone(),
+                        Some(HEALTH_EXCHANGES_PER_PHASE),
+                    ),
                 ));
             }
         }

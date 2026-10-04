@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Add bounded test-only cancellation-health failure diagnostics for PR #141.
+  [Head `d00fc47` / run 37225022927 / job 111502796765](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37225022927/job/111502796765)
+  failed with 41 harness passes and an Alloy matrix 15-second driver timeout;
+  its transport and stalled stage are unknown. The formatting-only successor
+  [head `3c029953` / run 37225520768 / job 111504252189](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37225520768/job/111504252189)
+  passed all 42 harness tests, including both complete matrices, without
+  establishing the earlier cause. Retain four worker snapshots outside the
+  timed future and print the exact cell, coordinator/worker awaits, phase
+  exchange/byte counters, socket identity and driver status once on failure.
+  Cover context retention when pending worker/driver futures are dropped.
+  Preserve all load, timeout, accounting, security and qualification gates.
+  This diagnostic-only change is not a timeout repair or performance acceptance;
+  fresh hosted checks and focused independent root review remain required.
 - Bound real-service cancellation health below the pinned h2 reset-retention
   limit after PR #141 head `d3468f6b6603e157c37ee41c70ef73ac6756f276` failed
   [qualification run 37223357081 / job 111497941354](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37223357081/job/111497941354).
