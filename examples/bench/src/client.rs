@@ -499,15 +499,128 @@ pub(crate) mod tests {
 
     use hyper::Response;
     use hyper::body::Frame;
+    use hyper::rt::Executor;
     use hyper::service::service_fn;
     use hyper_util::server::conn::auto::Builder;
     use tokio::net::TcpListener;
+    use tokio::runtime::Runtime;
     use tokio::sync::oneshot;
     use tokio_rustls::TlsAcceptor;
 
     use super::*;
     use crate::dims::FRAME_BYTES;
     use crate::pki::Pki;
+
+    /// Own every async task for one transport, including the connection
+    /// drivers and H2 children spawned by the unchanged TokioExecutor.
+    /// A current-thread runtime leaves no concurrently polling task when
+    /// block_on returns or unwinds; shutdown drops all remaining task futures.
+    /// This fixture does not spawn blocking work.
+    struct CancellationRuntime {
+        runtime: Option<Runtime>,
+    }
+
+    impl CancellationRuntime {
+        fn new() -> Self {
+            Self {
+                runtime: Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                ),
+            }
+        }
+
+        fn block_on<F: Future>(&self, future: F) -> F::Output {
+            self.runtime.as_ref().unwrap().block_on(future)
+        }
+
+        fn shutdown(mut self) {
+            let runtime = self.runtime.take().unwrap();
+            let metrics = runtime.metrics();
+            runtime.shutdown_timeout(Duration::from_secs(1));
+            // Check after shutdown, not after merely scheduling aborts. This
+            // includes tasks whose JoinHandles the production driver discards.
+            assert_eq!(metrics.num_alive_tasks(), 0);
+        }
+    }
+
+    impl Drop for CancellationRuntime {
+        fn drop(&mut self) {
+            if let Some(runtime) = self.runtime.take() {
+                // Unwind cannot asynchronously join the worker/server sets.
+                // Their drops request abort; runtime shutdown also drops every
+                // remaining async driver and executor child before returning.
+                runtime.shutdown_timeout(Duration::from_secs(1));
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_runtime_ends_drivers_and_executor_children_on_every_exit() {
+        #[derive(Clone, Copy, Debug)]
+        enum Exit {
+            Normal,
+            Timeout,
+            Unwind,
+        }
+
+        struct TaskDrop(Arc<AtomicUsize>);
+
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for exit in [Exit::Normal, Exit::Timeout, Exit::Unwind] {
+            let runtime = CancellationRuntime::new();
+            let metrics = runtime.runtime.as_ref().unwrap().metrics();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let driver_drop = TaskDrop(Arc::clone(&dropped));
+            let child_drop = TaskDrop(Arc::clone(&dropped));
+            let driver = runtime.block_on(async {
+                let (started, child_started) = oneshot::channel();
+                let driver = tokio::spawn(async move {
+                    let _driver_drop = driver_drop;
+                    TokioExecutor::new().execute(async move {
+                        let _child_drop = child_drop;
+                        started.send(()).unwrap();
+                        std::future::pending::<()>().await;
+                    });
+                    std::future::pending::<()>().await;
+                });
+                let ready = tokio::time::timeout(Duration::from_secs(10), child_started).await;
+                ready.unwrap().unwrap();
+                driver
+            });
+            assert_eq!(metrics.num_alive_tasks(), 2);
+            assert!(!driver.is_finished());
+            match exit {
+                Exit::Normal => runtime.shutdown(),
+                Exit::Timeout => {
+                    let result = runtime.block_on(async {
+                        let pending = std::future::pending::<()>();
+                        tokio::time::timeout(Duration::ZERO, pending).await
+                    });
+                    drop(runtime);
+                    assert!(result.is_err());
+                }
+                Exit::Unwind => {
+                    let result = std::panic::catch_unwind(move || {
+                        runtime.block_on(async { panic!("fixture unwind") });
+                    });
+                    assert!(result.is_err());
+                }
+            }
+            // Both pending futures were destroyed and the retained driver
+            // handle is finished, rather than merely marked for cancellation.
+            assert!(driver.is_finished(), "{exit:?}");
+            assert_eq!(dropped.load(Ordering::SeqCst), 2, "{exit:?}");
+            assert_eq!(metrics.num_alive_tasks(), 0, "{exit:?}");
+        }
+    }
 
     /// A first frame controlled by the test, followed by a body that never
     /// ends. Dropping it acknowledges that the client cancelled the stream.
@@ -582,10 +695,24 @@ pub(crate) mod tests {
     /// Exercise real workers and transport identities without assuming that a
     /// shared runner completes an exchange within a 200 ms benchmark window.
     /// This coordinator exists only in tests; production remains fixed-window.
-    pub(crate) async fn cancellation_rounds<S>(
+    pub(crate) fn cancellation_rounds<S>(
         transport: Transport,
         probe: impl Fn() -> S,
     ) -> Measured<S> {
+        let runtime = CancellationRuntime::new();
+        let rounds = cancellation_rounds_inner(transport, probe);
+        let result = runtime.block_on(rounds);
+        // Keep the owner through every causal assertion. Normal paths join
+        // workers and server sets first; timeout also shuts down all async
+        // tasks before the error is unwrapped or the next transport can start.
+        runtime.shutdown();
+        result.unwrap()
+    }
+
+    async fn cancellation_rounds_inner<S>(
+        transport: Transport,
+        probe: impl Fn() -> S,
+    ) -> Result<Measured<S>, tokio::time::error::Elapsed> {
         let timeout = Duration::from_secs(10);
         tokio::time::timeout(timeout, async {
             let pki = transport.tls().then(|| Pki::generate().unwrap());
@@ -605,8 +732,9 @@ pub(crate) mod tests {
             let accepted = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&accepted);
             let (stop, mut stopped) = oneshot::channel();
-            // Both the accept loop and every connection are owned. A timeout
-            // drops these sets; successful teardown aborts and joins them.
+            // Successful teardown aborts and joins these sets. Timeout or
+            // unwind drops them to request abort; the enclosing runtime owner
+            // also destroys unjoined connections and H2 executor children.
             let mut servers = JoinSet::new();
             servers.spawn(async move {
                 let requests = Arc::new(AtomicUsize::new(0));
@@ -766,7 +894,6 @@ pub(crate) mod tests {
             }
         })
         .await
-        .unwrap()
     }
 
     #[tokio::test]

@@ -13,6 +13,10 @@
   unchanged; the causal coordinator is compiled only for tests. Apply the exact
   hosted rustfmt correction to its startup readiness call; the generated-project
   job reported the same parent-workspace formatting failure, not a template bug.
+  Own each transport's client drivers and H2 executor children in an isolated
+  test runtime with bounded shutdown. Join workers and server sets on success;
+  destroy remaining async tasks before proceeding, including timeout/unwind,
+  and assert actual teardown with live-task counts and pending-task drop witnesses.
 - Refresh the authoritative implementation ledger for #28 with current issue
   states, immutable consumer heads and hosted evidence. Record merged Anvil,
   Foundry, Nexus #519 and GitForgeOps qualification as of 2026-10-04. Record

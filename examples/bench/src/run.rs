@@ -483,12 +483,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn http1_cancellation_reconnects_and_http2_does_not() {
+    #[test]
+    fn http1_cancellation_reconnects_and_http2_does_not() {
         for transport in Transport::ALL {
             let metrics = Metrics::default();
             let probe = || Sample::take(&metrics, None);
-            let measured = client::tests::cancellation_rounds(*transport, probe).await;
+            let measured = client::tests::cancellation_rounds(*transport, probe);
             let mut options = options(0.2);
             options.load.duration = measured.window;
             let cell = Cell {
