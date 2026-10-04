@@ -54,10 +54,14 @@ pub const CONFIG_FILE_ENV: &str = "FERRUM_ALLOY_CONFIG";
 /// configuration (see [`CLI_ENV_VARS`]).
 pub const DIAGNOSTICS_TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
 
+/// The CLI's Edge admin credential, authorized for `diagnostics:read` and
+/// a namespace (`ns`). Service configuration never reads it.
+pub const EDGE_DIAGNOSTICS_TOKEN_ENV: &str = "FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN";
+
 /// `FERRUM_ALLOY_*` variables that belong to the `ferrum-alloy` command
 /// rather than to service configuration. Loading configuration ignores them
 /// instead of rejecting them as unknown, and never reads their values.
-pub const CLI_ENV_VARS: &[&str] = &[DIAGNOSTICS_TOKEN_ENV];
+pub const CLI_ENV_VARS: &[&str] = &[DIAGNOSTICS_TOKEN_ENV, EDGE_DIAGNOSTICS_TOKEN_ENV];
 
 /// A secret value. `Debug`, `Display`, and `Serialize` never reveal it.
 #[derive(Clone, PartialEq, Eq)]

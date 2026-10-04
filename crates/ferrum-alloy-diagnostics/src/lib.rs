@@ -14,6 +14,7 @@
 mod open_enum;
 
 pub mod catalog;
+pub mod edge_record;
 pub mod model;
 pub mod otlp;
 pub mod parse;

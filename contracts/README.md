@@ -2,8 +2,9 @@
 
 | Path | Contract | Status |
 |---|---|---|
-| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.9` under `ferrum-contracts/`; shared status still **PROPOSED** (Anvil import not tested) |
-| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.9`; Alloy checks its reference pattern against the diagnostics catalog |
+| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.9-r2` under `ferrum-contracts/`; shared status still **PROPOSED** (Anvil import not tested) |
+| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.9-r2`; Alloy validates and binds authenticated lookup records per ADR 0009 |
+| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten released lookup record fixtures | Byte-exact from `contracts-edge-0.9.9-r2`; parser, binding, and hosted HTTP fixture tests |
 | `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007 (including an observed Ferrum Edge diagnostic reference), a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests; `fixtures/reports/gateway-diagnostic-ref.json` is a candidate for upstreaming to ferrum-contracts |
 | `fixtures/reports/*.expected.txt` | Deterministic rendering snapshots | Regenerate with `UPDATE_SNAPSHOTS=1` and review the diff |
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
@@ -17,7 +18,7 @@ A parity test (`crates/ferrum-alloy-diagnostics/tests/schema_parity.rs`) fails w
 ## Ferrum contracts pin
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
-diagnostic-ref schemas, and diagnostic-finding fixtures from the tag recorded
+diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures from the tag recorded
 in `ferrum-contracts/PIN`. The diagnostic-report schema's shared status is still PROPOSED. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in

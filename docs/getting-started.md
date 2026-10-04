@@ -251,6 +251,48 @@ ferrum-alloy diagnose --url https://ops.example/orders --request-id <id> --token
 
 Every refusal is the same `404`: a denied caller, another tenant's request, and an unknown or evicted id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
 
+### From an authenticated Edge diagnostic reference
+
+Capture the actual client response with a trusted client or recording system.
+Supply its facts separately from any service report, as `client-observation.json`:
+
+```json
+{
+  "reference": "fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f",
+  "namespace": "ferrum",
+  "status": 502,
+  "gateway_error": "connection_failure",
+  "protocol": "http2",
+  "request_started_at": "2026-09-27T10:15:00Z",
+  "response_received_at": "2026-09-27T10:15:05Z"
+}
+```
+
+`gateway_error` must be present: use null when no `X-Gateway-Error` was observed.
+The times bound the request that produced the response, not the later lookup;
+the window must be at most 300 seconds. Read an Edge admin JWT with
+`diagnostics:read` and the namespace's `ns` claim into
+`FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN` through your secret manager, then run:
+
+```sh
+ferrum-alloy diagnose --edge-admin-url https://edge-admin.example \
+  --edge-observation client-observation.json --format json
+```
+
+You can also add `--input report.json`, `--otlp traces.jsonl`, or the service's
+`--url` and `--request-id`. Those reports remain unverified and are not linked
+to this capture just by being supplied together. The Edge credential is distinct
+from the service credential; it cannot come from an argument or token file.
+The CLI follows no redirects, bypasses environment proxies, verifies HTTPS,
+and allows plaintext only directly to a canonical literal loopback IP (never
+DNS localhost). A request is bounded to 2s connect, 5s total, and a 64 KiB body;
+`--timeout-ms` can shorten the time bounds. A matching record with recognized
+vocabulary can confirm only the gateway's recorded response facts and cited
+classifications. Unknown tokens are refused; extensible labels cap confidence.
+It does not prove root cause or service timing. Exporting and rereading a report
+offline loses confirmation. See [ADR 0009](adr/0009-authenticated-edge-diagnostic-lookup.md)
+for the trust assumptions and limits.
+
 ## Feature matrix
 
 | Feature | Adds | Main dependencies |

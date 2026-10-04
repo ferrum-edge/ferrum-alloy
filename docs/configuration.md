@@ -37,6 +37,8 @@ Merging is per key. A table in a higher layer replaces only the keys it sets.
 - Setting both `<NAME>` and `<NAME>_FILE` is an error.
 - Syntax and schema (type) errors never quote values. A TOML syntax error reports the file, line, column, and parser message, without the source excerpt. A schema error reports the key path and the expected type or variants, never the supplied value. Both apply to startup errors and to `ferrum-alloy check` in human and JSON output. For a syntax error, the JSON output also has `location.line` and `location.column`. Semantic validation errors, reported after parsing, may quote non-secret values, such as an unaccepted algorithm name or a bind address; they never quote secrets.
 
+The management listener binds to loopback by default, but loopback is not an access boundary between processes. Without `management.token`, every process that can reach the listener is admitted, including sidecars or other containers sharing a pod network namespace and other local users or processes. Kubernetes NetworkPolicy does not isolate containers sharing loopback. Set `management.token` to a secret of at least 32 characters whenever those processes are not trusted, even on loopback; prefer `FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE` to supply it from a file. `/livez` and `/readyz` remain status-only and token-free. The detailed management routes require the token when configured; diagnostic retrieval uses its separate application authorizer. See [security](security.md#management-surface).
+
 ## Environment variables
 
 `FERRUM_ALLOY_CONFIG` names the configuration file. Every other supported variable maps to one configuration key:
@@ -108,6 +110,7 @@ Variables of the `ferrum-alloy` command itself (`config::CLI_ENV_VARS`) share th
 | Variable | Used by |
 |---|---|
 | `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` | `ferrum-alloy diagnose --url`: the credential sent to a service's diagnostic retrieval endpoint ([`[diagnostics]`](#diagnostics-feature-diagnostics)) |
+| `FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN` | `ferrum-alloy diagnose --edge-admin-url`: Edge admin JWT with `diagnostics:read` scope and an `ns` claim; never used for the service's `--url` endpoint |
 
 ### `RUST_LOG`
 
@@ -185,7 +188,7 @@ Each section below shows a key, its default, and its meaning.
 |---|---|---|
 | `enabled` | `true` | Serve the management listener. |
 | `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`, and is refused while diagnostic retrieval is installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)). `AlloyParts::serve_on` applies the same rules to the address a listener handed to it is actually bound to, which may differ from this setting, and refuses to serve otherwise: any loopback address is accepted without a token, any address with one, and diagnostic retrieval only on loopback. If you serve `AlloyParts::management_router` yourself, call `AlloyParts::check_management_listener` first. |
-| `token` | none | Bearer token (at least 32 characters) for `/health`, `/metrics`, the OpenAPI document, and its documentation UI. `/livez` and `/readyz` stay unauthenticated. |
+| `token` | none | Optional bearer token (at least 32 characters) required for `/health`, `/metrics`, the OpenAPI document, and its documentation UI when configured. Without it, those routes on a loopback listener admit every process that can reach loopback. `/livez` and `/readyz` stay unauthenticated. Diagnostic retrieval uses its separate application authorizer. |
 
 #### `[management.rate_limit]`
 
@@ -327,10 +330,10 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `serve` | `true` | Serve a registered document on the management listener (token-protected). |
+| `serve` | `true` | Serve a registered document on the management listener, requiring `management.token` when configured. |
 | `path` | `/openapi.json` | Literal path, like `health.liveness_path`. It must not be a path Alloy already serves on a listener that serves the document: `/livez`, `/readyz`, `/health`, or `/metrics` on the management listener, or, with `public = true`, a health path on the application listener while `health.app_endpoints` is on. With a registered document, `AlloyApp::into_parts` fails with a configuration error naming both settings; `ferrum-alloy check` cannot see whether a document is registered. |
 | `public` | `false` | Also serve it unauthenticated on the application listener. |
-| `ui` | `false` | Serve the documentation UI (feature `openapi-ui`) wherever the document is served: on the management listener behind `management.token`, and on the application listener, unauthenticated, only with `public = true`. Needs a registered document and `serve = true`. |
+| `ui` | `false` | Serve the documentation UI (feature `openapi-ui`) wherever the document is served: on the management listener requiring `management.token` when configured, and on the application listener, unauthenticated, only with `public = true`. Needs a registered document and `serve = true`. |
 | `ui_path` | `/docs` | Path of the UI page; its assets are served beneath it. Segments of letters, digits, `-`, `.`, `_`, and `~`, with no trailing `/`. It must not be or contain another served path, and must be outside `/diagnostics`. See the note on your routes below. |
 
 #### Documentation UI (feature `openapi-ui`)
@@ -341,7 +344,7 @@ CI loads the UI in Google Chrome, on both listeners, and fails if Swagger UI doe
 
 **Your routes.** With `public = true`, Alloy serves `path` (`/openapi.json`), `ui_path`, and every asset beneath `ui_path` on the application listener, ahead of your router, so startup fails if one of your routes matches any of them (see [route conflicts](#route-conflicts-on-the-application-listener)). If your API has a route at `/docs` (or beneath it) or at `/openapi.json`, pick a different `ui_path` (or `path`).
 
-With a management token, a browser must send `Authorization: Bearer <token>` with the page, its assets, and the document, for example through a local proxy or a header-injecting extension. Browsers do not add bearer tokens by themselves. A management listener on loopback without a token (the default) needs nothing.
+When `management.token` is configured, a browser must send `Authorization: Bearer <token>` with the page, its assets, and the document, for example through a local proxy or a header-injecting extension. Browsers do not add bearer tokens by themselves. Without a token, a loopback management listener admits every process that can reach it, including sidecars sharing a pod network namespace and other local users or processes; set the token if they are not trusted. See [security](security.md#management-surface).
 
 **Do not expose the UI publicly in production.** `ui` with `public` serves it, like the document, to anyone who can reach the application listener, and `ferrum-alloy check` and startup warn about that combination. Prefer the management listener, and reach it through a port-forward or tunnel. See [security](security.md#openapi-documentation-ui).
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Enforce `diagnose --url`'s timeout across the complete service request,
+  including response headers and the full body, so a peer cannot extend the
+  deadline by periodically sending bytes.
+- Add authenticated Edge diagnostic-reference lookup to `diagnose` through
+  `--edge-admin-url`, an explicit trusted `--edge-observation` client capture,
+  and the environment-only `FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN` credential
+  (`diagnostics:read` plus namespace). Validate and bind the released G01 record
+  before allowing its new record finding above `likely`; service reports,
+  serialized authentication flags, and offline rereads remain unverified.
+  Requests use verified TLS or direct literal-loopback HTTP, no redirects or
+  environment proxies, bounded time/body, and redacted credentials. Vendor the
+  ten released diagnostic-ref fixtures and pin `contracts-edge-0.9.9-r2`.
 - Fix HTTP/1.1 responses being cut by `server.idle_timeout_ms` while the
   client was still downloading them. Hyper lets go of a response body as soon
   as it has taken the last chunk, so the rest of a large response could wait
