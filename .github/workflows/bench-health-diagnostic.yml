@@ -27,7 +27,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
       # Only the cfg(test) observer reads this; no general tracing/log dump.
-      ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ github.workspace }}/target/health-diagnostic
+      ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ runner.temp }}/bench-health-diagnostic
       DIAGNOSTIC_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -70,6 +70,6 @@ jobs:
           name: bench-health-diagnostic-${{ github.event.pull_request.head.sha || github.sha }}
           # At most twelve 64 KiB snapshots plus two small identity/status files.
           # Raw build output, panic streams and dependency logs are not archived.
-          path: target/health-diagnostic/*.txt
+          path: ${{ env.ALLOY_BENCH_DIAGNOSTIC_DIR }}/*.txt
           if-no-files-found: warn
           retention-days: 7

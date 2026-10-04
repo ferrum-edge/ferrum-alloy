@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Keep hosted benchmark diagnostic provenance under runner temp, outside Rust
+  cache trees, so cache restores cannot remove source identity evidence.
 - Retain bounded test-only worker error identities/source chains outside the
   cancellation timeout, and observe narrowly scoped pinned-h2 wire error events
   through spawned executor tasks without payload/header/secret logging. Label
