@@ -19,7 +19,8 @@ fn bin() -> Command {
             command.env_remove(name);
         }
     }
-    command.env(TOKEN_ENV, TOKEN)
+    command.env(TOKEN_ENV, TOKEN);
+    command
 }
 
 fn report() -> String {
@@ -50,7 +51,11 @@ fn diagnose(url: &str, timeout_ms: &str) -> Output {
 fn serve(
     body: String,
     trickle: bool,
-) -> (String, std::sync::mpsc::Receiver<Instant>, thread::JoinHandle<String>) {
+) -> (
+    String,
+    std::sync::mpsc::Receiver<Instant>,
+    thread::JoinHandle<String>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -140,9 +145,7 @@ fn an_ordinary_service_report_is_fetched_successfully() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("alloy.service.operation_dominates")
-    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("alloy.service.operation_dominates"));
     assert!(request.starts_with("GET /diagnostics/v1/requests/req-1 HTTP/1.1\r\n"));
     assert!(
         request
