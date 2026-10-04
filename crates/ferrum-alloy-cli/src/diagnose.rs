@@ -25,6 +25,7 @@ use ferrum_alloy_diagnostics::render::render_text;
 use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
 
 use crate::Format;
+use crate::edge_lookup::CredentialRedactor;
 use crate::error::CliError;
 use crate::input::{invalid, read_regular_file_bounded};
 use crate::output::printable;
@@ -101,6 +102,11 @@ fn report_bytes(report: &impl serde::Serialize, limits: &Limits) -> Result<Vec<u
 
 /// Runs `diagnose`.
 pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
+    let redactor = CredentialRedactor::from_env();
+    run_redacted(args, &redactor).map_err(|error| redactor.redact_error(error))
+}
+
+fn run_redacted(args: DiagnoseArgs, redactor: &CredentialRedactor) -> Result<ExitCode, CliError> {
     let limits = Limits::default();
     if !(1..=120_000).contains(&args.timeout_ms) {
         return Err(CliError::Invalid(
@@ -133,8 +139,15 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
             let ids = otlp::trace_ids(&text, &import_limits)
                 .map_err(|e| CliError::Invalid(e.to_string()))?;
             let out = match args.format {
-                Format::Json => format!("{:#}\n", serde_json::json!({ "trace_ids": ids })),
-                Format::Human => ids.iter().map(|id| format!("{id}\n")).collect(),
+                Format::Json => {
+                    let mut value = serde_json::json!({ "trace_ids": ids });
+                    redactor.redact_json(&mut value);
+                    format!("{value:#}\n")
+                }
+                Format::Human => ids
+                    .iter()
+                    .map(|id| format!("{}\n", redactor.redact(id)))
+                    .collect(),
             };
             crate::print(&out)?;
             return Ok(ExitCode::SUCCESS);
@@ -196,13 +209,13 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     }
     report.findings.clone_from(&findings);
     if let Some(path) = &args.write_report {
-        let json = if let Some(lookup) = &lookup {
+        let json = if redactor.is_empty() {
+            report_bytes(&report, &limits)?
+        } else {
             let mut value =
                 serde_json::to_value(&report).map_err(|e| CliError::Io(e.to_string()))?;
-            lookup.redact_json(&mut value);
+            redactor.redact_json(&mut value);
             report_bytes(&value, &limits)?
-        } else {
-            report_bytes(&report, &limits)?
         };
         // Findings and pretty printing add bytes after the report was
         // checked: never write a file that `diagnose --input` would reject.
@@ -217,9 +230,7 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     match args.format {
         Format::Human => {
             let text = render_text(&report, &findings, &warnings);
-            let text = lookup
-                .as_ref()
-                .map_or_else(|| text.clone(), |l| l.redact(&text));
+            let text = redactor.redact(&text);
             crate::print(&printable(&text))?;
         }
         Format::Json => {
@@ -228,9 +239,7 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
                 "warnings": warnings.iter().map(|w| serde_json::json!({ "path": w.path, "message": w.message })).collect::<Vec<_>>(),
                 "report": report,
             });
-            if let Some(lookup) = &lookup {
-                lookup.redact_json(&mut value);
-            }
+            redactor.redact_json(&mut value);
             crate::print(&format!("{value:#}\n"))?;
         }
     }

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 const TOKEN_ENV: &str = "FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN";
 const TOKEN: &str = "private-edge-lookup-credential";
+const SERVICE_TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
 
 fn record() -> Value {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -107,7 +108,10 @@ fn serve(
         if let Err(error) = stream.write_all(body.as_bytes()) {
             assert!(client_may_stop_reading);
             assert!(
-                matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset),
+                matches!(
+                    error.kind(),
+                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+                ),
                 "unexpected fixture body write error: {error}"
             );
         }
@@ -137,6 +141,14 @@ fn an_authenticated_bound_record_confirms_only_the_new_record_finding() {
     let mut report_value: Value =
         serde_json::from_slice(&std::fs::read(report_fixture).unwrap()).unwrap();
     report_value["extensions"]["x-reflected-credential"] = json!(TOKEN);
+    report_value["extensions"][format!("x-{TOKEN}")] = json!("discard this key");
+    report_value["extensions"]["x-[REDACTED]"] = json!("keep this safe value");
+    report_value["extensions"]["x-nested"] = json!([{
+        "schema": "keep this safe field",
+        (format!("x-{TOKEN}")): "discard this nested key",
+        "x-[REDACTED]": "keep this nested safe value",
+        "deeper": [{ (TOKEN): TOKEN, "safe": "keep this deepest value" }],
+    }]);
     let report = dir.path().join("input.json");
     std::fs::write(&report, report_value.to_string()).unwrap();
     let output = diagnose(
@@ -166,8 +178,25 @@ fn an_authenticated_bound_record_confirms_only_the_new_record_finding() {
             .contains(&format!("authorization: bearer {TOKEN}"))
     );
     assert_private(&output);
-    assert!(!std::fs::read_to_string(&saved).unwrap().contains(TOKEN));
+    let saved_text = std::fs::read_to_string(&saved).unwrap();
+    assert!(!saved_text.contains(TOKEN));
+    let saved_value: Value = serde_json::from_str(&saved_text).unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    for report in [&value["report"], &saved_value] {
+        assert_eq!(report["schema"], "ferrum.diagnostic_report");
+        assert_eq!(
+            report["extensions"]["x-[REDACTED]"],
+            "keep this safe value"
+        );
+        assert_eq!(
+            report["extensions"]["x-nested"],
+            json!([{
+                "schema": "keep this safe field",
+                "x-[REDACTED]": "keep this nested safe value",
+                "deeper": [{ "safe": "keep this deepest value" }],
+            }])
+        );
+    }
     assert_eq!(value["report"]["collection"]["verification"], "unverified");
     let confirmed = value["report"]["findings"]
         .as_array()
@@ -206,6 +235,7 @@ fn plaintext_lookup_bypasses_all_environment_proxies() {
     let path = dir.path().join("capture.json");
     std::fs::write(&path, capture(&record).to_string()).unwrap();
     let output = bin()
+        .env(SERVICE_TOKEN_ENV, "separate-service-credential")
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("http_proxy", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -226,7 +256,9 @@ fn plaintext_lookup_bypasses_all_environment_proxies() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    server.join().unwrap();
+    let request = server.join().unwrap();
+    assert!(request.contains(TOKEN));
+    assert!(!request.contains("separate-service-credential"));
     assert_private(&output);
 }
 
@@ -282,6 +314,227 @@ fn response_bounds_and_timeout_are_enforced() {
 }
 
 #[test]
+fn a_trickling_body_cannot_extend_the_whole_operation_deadline() {
+    let record = record();
+    let observation = capture(&record);
+    let body = record.to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("trickling request did not arrive: {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_nodelay(true).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0; 1];
+        while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            request.push(byte[0]);
+            assert!(request.len() < 32 * 1024);
+        }
+        assert!(request.ends_with(b"\r\n\r\n"));
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len() + 40,
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        started_tx.send(Instant::now()).unwrap();
+        let mut writes = 0;
+        // Every gap is below the 600 ms read timeout, but a complete response
+        // takes at least four seconds. Without a total deadline it succeeds.
+        for _ in 0..40 {
+            if let Err(error) = stream.write_all(b" ") {
+                assert!(matches!(
+                    error.kind(),
+                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+                ));
+                return writes;
+            }
+            writes += 1;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if let Err(error) = stream.write_all(body.as_bytes()) {
+            assert!(matches!(
+                error.kind(),
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+            ));
+        }
+        writes
+    });
+    let output = diagnose(&url, &observation, &["--timeout-ms", "600"]);
+    // Measure before joining the fixture, which has its own bounded lifetime.
+    let elapsed = started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .elapsed();
+    let writes = server.join().unwrap();
+    assert!(writes >= 3, "fixture did not actively trickle: {writes}");
+    assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Edge record read failed or timed out"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_private(&output);
+}
+
+#[test]
+fn malformed_inputs_are_redacted_before_any_lookup_can_succeed() {
+    let trap = TcpListener::bind("127.0.0.1:0").unwrap();
+    trap.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", trap.local_addr().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("input-{TOKEN}.json"));
+    let saved = dir.path().join("report.json");
+    let capture_path = dir.path().join("capture.json");
+    std::fs::write(&capture_path, capture(&record()).to_string()).unwrap();
+    for input in [
+        json!({ "schema": TOKEN }).to_string(),
+        json!({ "schema": "ferrum.diagnostic_report", "schema_version": TOKEN }).to_string(),
+        format!("{{\"schema\":\"{TOKEN}\", broken"),
+    ] {
+        std::fs::write(&path, input).unwrap();
+        for format in ["json", "human"] {
+            let output = bin()
+                .args([
+                    "diagnose",
+                    "--edge-admin-url",
+                    &url,
+                    "--edge-observation",
+                    capture_path.to_str().unwrap(),
+                    "--input",
+                    path.to_str().unwrap(),
+                    "--write-report",
+                    saved.to_str().unwrap(),
+                    "--format",
+                    format,
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(3));
+            assert_private(&output);
+            assert!(!saved.exists());
+        }
+    }
+    // Credential validation can fail too; it must not disable input scrubbing.
+    let invalid_token = format!("{TOKEN}\"invalid");
+    let rejected = dir.path().join("rejected.json");
+    std::fs::write(&rejected, json!({ "schema": invalid_token }).to_string()).unwrap();
+    let output = bin()
+        .env(TOKEN_ENV, &invalid_token)
+        .args([
+            "diagnose",
+            "--edge-admin-url",
+            &url,
+            "--edge-observation",
+            capture_path.to_str().unwrap(),
+            "--input",
+            rejected.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert_private(&output);
+
+    let missing = dir.path().join(format!("missing-{TOKEN}.json"));
+    let output = bin()
+        .args([
+            "diagnose",
+            "--edge-admin-url",
+            &url,
+            "--edge-observation",
+            missing.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert_private(&output);
+    assert_eq!(trap.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+}
+
+#[test]
+fn output_errors_redact_the_credential_and_keep_the_failure_code() {
+    let record = record();
+    let (url, server) = serve("200 OK", "", record.to_string(), Duration::ZERO, false);
+    let dir = tempfile::tempdir().unwrap();
+    let saved = dir.path().join(TOKEN).join("missing-parent.json");
+    let output = diagnose(
+        &url,
+        &capture(&record),
+        &["--write-report", saved.to_str().unwrap()],
+    );
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("write "));
+    assert_private(&output);
+    assert!(!saved.exists());
+}
+
+#[test]
+fn redaction_refuses_to_save_a_report_if_required_structure_contains_the_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = dir.path().join("report.json");
+    let input = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/fixtures/reports/forged-verified-claim.json");
+    let output = bin()
+        .env(TOKEN_ENV, "schema")
+        .args([
+            "diagnose",
+            "--input",
+            input.to_str().unwrap(),
+            "--write-report",
+            saved.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("not writing"));
+    assert!(!error.contains("schema"));
+    assert!(output.stdout.is_empty());
+    assert!(!saved.exists());
+}
+
+#[test]
+fn lookup_failures_disclose_no_url_or_transport_details() {
+    for (url, code) in [
+        (format!("http://127.0.0.1:9/?secret={TOKEN}"), 3),
+        (format!("https://user:{TOKEN}@admin.example"), 3),
+        ("http://127.0.0.1:0".to_owned(), 1),
+    ] {
+        let output = diagnose(&url, &capture(&record()), &[]);
+        assert_eq!(output.status.code(), Some(code));
+        assert_private(&output);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains(&url));
+        assert!(!error.contains("secret="));
+        assert!(!error.contains("Caused by"));
+        if code == 1 {
+            assert_eq!(error, "error: Edge lookup failed or timed out\n");
+        }
+    }
+}
+
+#[test]
 fn https_never_sends_the_credential_to_an_unverified_server() {
     use std::sync::Arc;
 
@@ -315,6 +568,7 @@ fn https_never_sends_the_credential_to_an_unverified_server() {
                 Err(e) => panic!("TLS request did not arrive: {e}"),
             }
         };
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -398,6 +652,7 @@ fn explicit_observation_and_environment_credential_are_required_before_io() {
     std::fs::write(&path, capture(&record).to_string()).unwrap();
     let output = bin()
         .env_remove(TOKEN_ENV)
+        .env(SERVICE_TOKEN_ENV, TOKEN)
         .args([
             "diagnose",
             "--edge-admin-url",

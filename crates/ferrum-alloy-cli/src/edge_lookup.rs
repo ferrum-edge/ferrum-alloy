@@ -20,7 +20,6 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Private authority: never serialized or populated from input flags.
 pub(crate) struct AuthenticatedLookup {
     record: BoundRecord,
-    credential: String,
 }
 
 impl AuthenticatedLookup {
@@ -41,14 +40,70 @@ impl AuthenticatedLookup {
         }
         finding
     }
+}
+
+/// Output protection is independent of credential validation and lookup success.
+/// Even a rejected credential can have been reflected in an input or path.
+pub(crate) struct CredentialRedactor {
+    credentials: Vec<String>,
+}
+
+impl CredentialRedactor {
+    pub(crate) fn from_env() -> Self {
+        let raw = std::env::var_os(TOKEN_ENV).unwrap_or_default();
+        Self::new(&raw.to_string_lossy())
+    }
+
+    fn new(raw: &str) -> Self {
+        let mut credentials = Vec::new();
+        for token in [raw, raw.trim()] {
+            if !token.is_empty() {
+                credentials.push(token.to_owned());
+                // Parser errors may Debug-format even an invalid credential.
+                let quoted = format!("{token:?}");
+                credentials.push(quoted[1..quoted.len() - 1].to_owned());
+            }
+        }
+        credentials.sort_by_key(|token| std::cmp::Reverse(token.len()));
+        credentials.dedup();
+        Self { credentials }
+    }
+
+    fn contains_credential(&self, text: &str) -> bool {
+        self.credentials.iter().any(|token| text.contains(token))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.credentials.is_empty()
+    }
 
     /// Scrub reflected credentials even if another input repeats them.
     pub(crate) fn redact(&self, text: &str) -> String {
-        text.replace(&self.credential, "[REDACTED]")
+        for marker in ["[REDACTED]", "[]"] {
+            let mut redacted = text.to_owned();
+            for token in &self.credentials {
+                redacted = redacted.replace(token, marker);
+            }
+            // A short or invalid credential may occur in the marker itself.
+            if !self.contains_credential(&redacted) {
+                return redacted;
+            }
+        }
+        // Neither marker can safely represent this credential.
+        String::new()
     }
 
-    /// Redact JSON string values before serialization, preserving syntax even
-    /// when a supplied credential coincides with a JSON keyword.
+    pub(crate) fn redact_error(&self, error: CliError) -> CliError {
+        match error {
+            CliError::Io(text) => CliError::Io(self.redact(&text)),
+            CliError::Invalid(text) => CliError::Invalid(self.redact(&text)),
+            CliError::Drift(text) => CliError::Drift(self.redact(&text)),
+        }
+    }
+
+    /// Redact strings before serialization, preserving JSON syntax. Remove
+    /// credential-bearing keys instead of renaming them: a renamed key could
+    /// collide with safe data or recreate the credential through a suffix.
     pub(crate) fn redact_json(&self, value: &mut serde_json::Value) {
         match value {
             serde_json::Value::String(text) => *text = self.redact(text),
@@ -58,6 +113,7 @@ impl AuthenticatedLookup {
                 }
             }
             serde_json::Value::Object(values) => {
+                values.retain(|key, _| !self.contains_credential(key));
                 for value in values.values_mut() {
                     self.redact_json(value);
                 }
@@ -155,8 +211,10 @@ pub(crate) fn fetch(
         .map_err(|_| CliError::Invalid("invalid Edge diagnostics credential".into()))?;
     authorization.set_sensitive(true);
     let timeout = timeout.min(TOTAL_TIMEOUT);
+    let tls = crate::live::tls(url.scheme() == "https")
+        .map_err(|_| CliError::Io("could not initialize Edge lookup TLS".into()))?;
     let client = reqwest::blocking::Client::builder()
-        .tls_backend_preconfigured(crate::live::tls(url.scheme() == "https")?)
+        .tls_backend_preconfigured(tls)
         .connect_timeout(CONNECT_TIMEOUT.min(timeout))
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -166,6 +224,9 @@ pub(crate) fn fetch(
         .map_err(|_| CliError::Io("could not initialize Edge lookup client".into()))?;
     let response = client
         .get(url)
+        // In reqwest's blocking client, the client timeout also applies to
+        // each read. The request timeout enforces the whole body deadline.
+        .timeout(timeout)
         .header(ACCEPT, "application/json")
         .header(AUTHORIZATION, authorization)
         .send()
@@ -196,7 +257,7 @@ pub(crate) fn fetch(
         .map_err(|_| CliError::Io("Edge record read failed or timed out".into()))?;
     let record = edge_record::bind_record(&body, observation)
         .map_err(|e| CliError::Invalid(e.to_string()))?;
-    Ok(AuthenticatedLookup { record, credential })
+    Ok(AuthenticatedLookup { record })
 }
 
 #[cfg(test)]
@@ -205,6 +266,42 @@ mod tests {
     use super::*;
 
     const REF: &str = "fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f";
+
+    #[test]
+    fn redaction_preserves_safe_keys_and_does_not_recreate_credentials() {
+        let redactor = CredentialRedactor::new("private");
+        let mut value = serde_json::json!({
+            "schema": "ferrum.diagnostic_report",
+            "x-[REDACTED]": "safe data",
+            "x-private": "discard this key",
+            "nested": [{
+                "private": "discard this nested key",
+                "safe": "a private value",
+            }],
+        });
+        redactor.redact_json(&mut value);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema": "ferrum.diagnostic_report",
+                "x-[REDACTED]": "safe data",
+                "nested": [{ "safe": "a [REDACTED] value" }],
+            })
+        );
+
+        for token in ["R", "REDACTED", "[]", "\"quoted\"", " line\nbreak "] {
+            let redactor = CredentialRedactor::new(token);
+            let text = format!("reflected {token} and {token:?}");
+            let redacted = redactor.redact(&text);
+            assert!(!redactor.contains_credential(&redacted));
+        }
+
+        let redactor = CredentialRedactor::new("true");
+        let mut value = serde_json::json!({ "boolean": true, "string": "true" });
+        redactor.redact_json(&mut value);
+        assert_eq!(value["boolean"], true);
+        assert_eq!(value["string"], "[REDACTED]");
+    }
 
     #[test]
     fn targets_are_validated_before_building_the_lookup_path() {
