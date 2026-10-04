@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Refresh the authoritative implementation ledger for #28 with current issue
+  states, immutable consumer heads and hosted evidence. Record merged Anvil,
+  Foundry and GitForgeOps qualification; keep Nexus #519 and the canonical
+  diagnostic-report/service-manifest record and freeze pending. Document #140's
+  shared hosted benchmark preparation separately from #15/#16's external
+  dedicated acceptance and #24's owner publishing decisions. Correct stale
+  rule coverage, manifest agents, test-count and changelog claims; retain the
+  v0.9.10/v0.9.9 Edge window, PROPOSED schemas and unpublished status.
 - Anchor all CLI output writes to retained capability directory handles.
   Project and GitForgeOps trees reject internal directory links and retain
   every acquired directory across files; Edge, OpenAPI and diagnostic file

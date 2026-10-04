@@ -2,6 +2,8 @@
 
 Nothing is published. Every crate is `publish = false`, and stays so until the owner explicitly approves a release. This page records what CI already checks, the checklist a release commit must satisfy, and the owner decisions that must be made before the first publish.
 
+The [implementation ledger](implementation-status.md#release-candidate-tracker) records the current #28 status. Packaging and the checklist shipped in #59; #24 remains open for owner decisions. Shared hosted benchmark preparation does not fulfill #15/#16's dedicated acceptance, and #27's Nexus qualification/canonical contract record remains pending. These require separate evidence or decisions before declaring release readiness.
+
 ## What CI checks now
 
 The `Package dry run` job in `.github/workflows/ci.yml` runs on every pull request and every push to `main`. `cargo package` only builds `.crate` archives under `target/package/`; it never uploads anything.
@@ -28,7 +30,7 @@ A release commit must satisfy every item. Record the evidence in the release not
 
 - [ ] **Owner approval.** The owner has approved this release, and the [owner decisions](#open-owner-decisions) below are recorded.
 - [ ] **Version.** All five crates share `workspace.package.version`. Bump it and the `version` of every internal entry in `[workspace.dependencies]` together. Before 1.0, a breaking change bumps the minor version, and any other change bumps the patch version.
-- [ ] **Changelog.** A changelog entry lists the user-visible changes, including changes to configuration (`docs/configuration.md`), the diagnostic evidence schema, and Edge contracts. The repository has no changelog yet; the first release creates one.
+- [ ] **Changelog.** [CHANGELOG.md](../CHANGELOG.md) lists the user-visible changes, including changes to configuration (`docs/configuration.md`), the diagnostic evidence schema, and Edge contracts. Review its Unreleased entries and create the release entry for the approved version.
 - [ ] **MSRV.** The release notes state the MSRV (`rust-version`, currently 1.94, set by sqlx 0.9), and the `MSRV (1.94)` job passes on the release commit. An MSRV increase is called out as a change.
 - [ ] **Compatibility.** `docs/compatibility.md` and `docs/compatibility.json` describe the tested matrix on the release commit: the Edge support window (the latest Edge release and the previous one), the pinned images, and the component versions.
 - [ ] **Benchmark baseline.** A benchmark run for the release commit is recorded as [benchmarks](benchmarks.md) describes, with its host and limits. No regression budget exists yet (#15), so the baseline is evidence, not a gate.
