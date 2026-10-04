@@ -24,6 +24,8 @@ ferrum-alloy = { workspace = true }
 ferrum-alloy-edge = { workspace = true }
 ferrum-alloy-diagnostics = { workspace = true }
 clap = { workspace = true }
+cap-std = { workspace = true }
+cap-fs-ext = { workspace = true }
 # `diagnose --url`: one blocking GET with rustls, the `ring` provider passed
 # explicitly, and the platform trust store.
 reqwest = { workspace = true, features = ["blocking", "rustls-no-provider"] }

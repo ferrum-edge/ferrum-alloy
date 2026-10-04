@@ -85,6 +85,8 @@ zeroize = "1.9.0"
 url = "2.5.8"
 
 # CLI
+cap-std = "4.0.3"
+cap-fs-ext = { version = "4.0.3", default-features = false, features = ["std"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
 # Test-only

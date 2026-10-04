@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Anchor all CLI output writes to retained capability directory handles.
+  Project and GitForgeOps trees reject internal directory links and retain
+  every acquired directory across files; Edge, OpenAPI and diagnostic file
+  output retain their parent through exclusive creation or temporary writing
+  and replacement. Directory substitution cannot redirect writes through a
+  newly planted link. Operator-selected ancestors above the named root remain
+  trusted. Add command-level substitution barriers and public CLI controls;
+  qualify cap-std/cap-fs-ext 4.0.3 and their published dependency checksums.
+  Addresses the remaining directory race in GHSA-68jq-pr65-chjv / #134;
+  unpublished Alloy behavior, with Edge pairing and G01 contracts unchanged.
+
 - Require a configured management bearer token for detailed health, metrics,
   and management OpenAPI/UI even on loopback. Tokenless defaults expose only
   minimal liveness/readiness probes and separately authorized diagnostics.
@@ -46,10 +57,9 @@
 - Protect CLI output files from symlink redirection with exclusive creation or
   same-directory atomic replacement, and reject pre-existing symlink
   components at or beneath generated output roots, including roots written with
-  trailing slashes or `/.`. Missing ancestors are created with
-  `create_dir_all`, which follows ancestor symlinks; a concurrent writer in a
-  shared writable parent can also race (see
-  [security notes](docs/security.md#known-gaps)).
+  trailing slashes or `/.`. The directory-handle follow-up above closes the
+  check-to-open substitution gap. Ancestors above the named root remain trusted
+  path context (see [security notes](docs/security.md#known-gaps)).
 - Keep an upgraded (WebSocket) connection's slot with its socket: it now
   counts against `server.max_connections` and in
   `ferrum_alloy_active_connections` until the application drops it, so

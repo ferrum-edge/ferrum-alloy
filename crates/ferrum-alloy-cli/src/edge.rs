@@ -83,16 +83,19 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
                             crate::fsout::NewFileMode::Umask,
                         )?;
                     } else {
-                        crate::fsout::write_new(path, yaml.as_bytes()).map_err(|error| {
-                            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                                CliError::Invalid(format!(
-                                    "{} exists; pass --force to replace it",
-                                    path.display()
-                                ))
-                            } else {
-                                CliError::Io(error.to_string())
-                            }
-                        })?;
+                        let (mut output, name) = crate::fsout::OutputDir::for_file(path)?;
+                        output
+                            .write_new(Path::new(&name), yaml.as_bytes())
+                            .map_err(|error| {
+                                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                                    CliError::Invalid(format!(
+                                        "{} exists; pass --force to replace it",
+                                        path.display()
+                                    ))
+                                } else {
+                                    CliError::Io(error.to_string())
+                                }
+                            })?;
                     }
                     crate::eprint(&format!(
                         "wrote {} (validate with: ferrum-edge validate -m file -c {})\n",
@@ -108,39 +111,18 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
             let root = args.output.ok_or_else(|| {
                 CliError::Invalid("--output DIR is required for --format gitforgeops".into())
             })?;
-            let root = crate::fsout::normalize_output_root(&root)?;
-            if let Ok(metadata) = std::fs::symlink_metadata(&root) {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(CliError::Invalid(format!(
-                        "{} must be a real directory",
-                        root.display()
-                    )));
-                }
-                let mut entries =
-                    std::fs::read_dir(&root).map_err(|e| CliError::Io(e.to_string()))?;
-                if entries.next().is_some() {
-                    return Err(CliError::Invalid(format!(
-                        "{} is not empty; refusing to overwrite",
-                        root.display()
-                    )));
-                }
-            }
+            let mut output = crate::fsout::OutputDir::empty_tree(&root, true)?;
+            let root = output.path().to_path_buf();
             for file in export::gitforgeops_files(&resources, &manifest.gateway.namespace) {
                 let path = root.join(&file.path);
-                let result = (|| {
-                    if let Some(parent) = path.parent() {
-                        crate::fsout::create_dirs(&root, parent)?;
-                    }
-                    crate::fsout::write_new(&path, file.content.as_bytes())
-                        .map_err(|error| CliError::Io(error.to_string()))?;
-                    Ok::<(), CliError>(())
-                })();
-                result.map_err(|error| {
-                    CliError::Io(format!(
-                        "{error}; a partial output tree may remain at {}; remove it before re-running",
-                        root.display()
-                    ))
-                })?;
+                output
+                    .write_new(Path::new(&file.path), file.content.as_bytes())
+                    .map_err(|error| {
+                        CliError::Io(format!(
+                            "{error}; a partial output tree may remain at {}; remove it before re-running",
+                            root.display()
+                        ))
+                    })?;
                 crate::eprint(&format!("wrote {}\n", path.display()));
             }
             Ok(())
