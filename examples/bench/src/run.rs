@@ -445,6 +445,11 @@ mod tests {
     }
 
     fn assert_healthy(result: &Value) {
+        assert_work_completed(result);
+        assert_eq!(result["seconds"], 0.2, "{result}");
+    }
+
+    fn assert_work_completed(result: &Value) {
         assert_eq!(result["schema"], SCHEMA, "{result}");
         assert!(result["requests"].as_u64().unwrap() > 0, "{result}");
         assert_eq!(result["errors"], 0, "{result}");
@@ -455,7 +460,6 @@ mod tests {
                 "{result}"
             );
         }
-        assert_eq!(result["seconds"], 0.2, "{result}");
     }
 
     #[test]
@@ -479,11 +483,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn http1_cancellation_reconnects_and_http2_does_not() {
+    #[tokio::test]
+    async fn http1_cancellation_reconnects_and_http2_does_not() {
         for transport in Transport::ALL {
-            let result = run(Scenario::Plain, Workload::Cancel, *transport);
-            assert_healthy(&result);
+            let metrics = Metrics::default();
+            let probe = || Sample::take(&metrics, None);
+            let measured = client::tests::cancellation_rounds(*transport, probe).await;
+            let mut options = options(0.2);
+            options.load.duration = measured.window;
+            let cell = Cell {
+                scenario: Scenario::Plain,
+                workload: Workload::Cancel,
+                transport: *transport,
+            };
+            let result = report(cell, &options, probe::environment(None), measured);
+            assert_work_completed(&result);
+            assert_eq!(result["requests"], options.load.concurrency, "{result}");
+            assert_eq!(result["seconds"], options.load.duration.as_secs_f64());
             assert_cancellation(&result, *transport);
         }
     }

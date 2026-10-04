@@ -488,7 +488,7 @@ pub(crate) async fn drive<S>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
 
     use std::convert::Infallible;
@@ -500,11 +500,14 @@ mod tests {
     use hyper::Response;
     use hyper::body::Frame;
     use hyper::service::service_fn;
+    use hyper_util::server::conn::auto::Builder;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+    use tokio_rustls::TlsAcceptor;
 
     use super::*;
     use crate::dims::FRAME_BYTES;
+    use crate::pki::Pki;
 
     /// A first frame controlled by the test, followed by a body that never
     /// ends. Dropping it acknowledges that the client cancelled the stream.
@@ -542,6 +545,233 @@ mod tests {
                 let _ = cancelled.send(());
             }
         }
+    }
+
+    struct Cancellation {
+        connection: usize,
+        release: oneshot::Sender<()>,
+        cancelled: oneshot::Receiver<()>,
+    }
+
+    async fn cancellations(
+        arrivals: &mut mpsc::UnboundedReceiver<Cancellation>,
+        count: usize,
+    ) -> Vec<Cancellation> {
+        let mut requests = Vec::new();
+        for _ in 0..count {
+            requests.push(arrivals.recv().await.unwrap());
+        }
+        requests
+    }
+
+    async fn release_cancellations(requests: Vec<Cancellation>) -> Vec<usize> {
+        let mut connections = Vec::new();
+        let mut cancelled = Vec::new();
+        for request in requests {
+            connections.push(request.connection);
+            request.release.send(()).unwrap();
+            cancelled.push(request.cancelled);
+        }
+        for acknowledgement in cancelled {
+            acknowledgement.await.unwrap();
+        }
+        connections.sort_unstable();
+        connections
+    }
+
+    /// Exercise real workers and transport identities without assuming that a
+    /// shared runner completes an exchange within a 200 ms benchmark window.
+    /// This coordinator exists only in tests; production remains fixed-window.
+    pub(crate) async fn cancellation_rounds<S>(
+        transport: Transport,
+        probe: impl Fn() -> S,
+    ) -> Measured<S> {
+        let timeout = Duration::from_secs(10);
+        tokio::time::timeout(timeout, async {
+            let pki = transport.tls().then(|| Pki::generate().unwrap());
+            let tls = pki.as_ref().map(|pki| {
+                let config = pki.server(transport.mtls()).unwrap();
+                TlsAcceptor::from(config.rustls)
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = Arc::new(Target {
+                addr: listener.local_addr().unwrap(),
+                transport,
+                workload: Workload::Cancel,
+                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
+            });
+            let load = load(4, 2);
+            let (gates, mut arrivals) = mpsc::unbounded_channel();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&accepted);
+            let (stop, mut stopped) = oneshot::channel();
+            // Both the accept loop and every connection are owned. A timeout
+            // drops these sets; successful teardown aborts and joins them.
+            let mut servers = JoinSet::new();
+            servers.spawn(async move {
+                let requests = Arc::new(AtomicUsize::new(0));
+                let mut connections = JoinSet::new();
+                loop {
+                    let (stream, _) = tokio::select! {
+                        _ = &mut stopped => break,
+                        accepted = listener.accept() => accepted.unwrap(),
+                    };
+                    stream.set_nodelay(true).unwrap();
+                    let connection = observed.fetch_add(1, Ordering::SeqCst);
+                    let gates = gates.clone();
+                    let requests = Arc::clone(&requests);
+                    let service = service_fn(move |_| {
+                        let index = requests.fetch_add(1, Ordering::SeqCst);
+                        let bytes = match index / load.concurrency {
+                            0 => 3 * FRAME_BYTES,
+                            1 => FRAME_BYTES,
+                            _ => 2 * FRAME_BYTES,
+                        };
+                        let (release, receiver) = oneshot::channel();
+                        let (cancelled, acknowledgement) = oneshot::channel();
+                        gates
+                            .send(Cancellation {
+                                connection,
+                                release,
+                                cancelled: acknowledgement,
+                            })
+                            .unwrap();
+                        std::future::ready(Ok::<_, Infallible>(Response::new(GatedBody {
+                            release: Some(receiver),
+                            cancelled: Some(cancelled),
+                            data: Bytes::from(vec![b'x'; bytes]),
+                            sent: false,
+                        })))
+                    });
+                    let tls = tls.clone();
+                    connections.spawn(async move {
+                        let builder = Builder::new(TokioExecutor::new());
+                        match tls {
+                            None => {
+                                let _ = builder
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            }
+                            Some(acceptor) => {
+                                let stream = acceptor.accept(stream).await.unwrap();
+                                let session = stream.get_ref().1;
+                                assert_eq!(session.alpn_protocol(), Some(transport.alpn()));
+                                if transport.mtls() {
+                                    assert!(!session.peer_certificates().unwrap().is_empty());
+                                }
+                                let _ = builder
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            }
+                        }
+                    });
+                }
+                connections.shutdown().await;
+            });
+
+            let (phase, receiver) = watch::channel(Phase::Preparing);
+            let (ready, mut readiness) = mpsc::unbounded_channel();
+            let mut workers = JoinSet::new();
+            for _ in 0..load.connections(transport) {
+                let sender = dial(&target).await.unwrap();
+                if let Sender::H2(shared) = &sender {
+                    for _ in 1..load.streams {
+                        workers.spawn(worker(
+                            Arc::clone(&target),
+                            Sender::H2(shared.clone()),
+                            receiver.clone(),
+                            ready.clone(),
+                        ));
+                    }
+                }
+                workers.spawn(worker(
+                    Arc::clone(&target),
+                    sender,
+                    receiver.clone(),
+                    ready.clone(),
+                ));
+            }
+            drop(ready);
+            drop(receiver);
+            let preparation = cancellations(&mut arrivals, load.concurrency).await;
+            let preparation = release_cancellations(preparation).await;
+            await_readiness(
+                load.concurrency,
+                "startup",
+                &mut readiness,
+                &mut workers,
+            )
+            .await
+            .unwrap();
+            phase.send_replace(Phase::Draining);
+            await_readiness(
+                load.concurrency,
+                "measurement boundary",
+                &mut readiness,
+                &mut workers,
+            )
+            .await
+            .unwrap();
+            let start = probe();
+            let window_start = Instant::now();
+            phase.send_replace(Phase::Measuring {
+                start: window_start,
+                end: window_start + timeout,
+            });
+            let completed = cancellations(&mut arrivals, load.concurrency).await;
+            let completed = release_cancellations(completed).await;
+            // Each worker's next request proves it finished and accounted for
+            // the previous cancellation, including any HTTP/1 reconnect.
+            let crossing = cancellations(&mut arrivals, load.concurrency).await;
+            let window_end = Instant::now();
+            phase.send_replace(Phase::Measuring {
+                start: window_start,
+                end: window_end,
+            });
+            let end = probe();
+            // These exchanges began inside the window but can receive their
+            // first frame only after its deadline. They must not be counted.
+            let crossing = release_cancellations(crossing).await;
+            let mut totals = Totals {
+                connects: load.connections(transport) as u64,
+                ..Totals::default()
+            };
+            while let Some(worker) = workers.join_next().await {
+                totals.merge(worker.unwrap().unwrap());
+            }
+            assert_eq!(totals.latencies_us.len(), load.concurrency);
+            assert!(totals.latencies_us.iter().all(|latency| *latency > 0));
+            assert_eq!(totals.body_bytes, (load.concurrency * FRAME_BYTES) as u64);
+            assert_eq!(totals.errors, 0);
+            assert!(totals.error_samples.is_empty());
+            assert_eq!(totals.connects, accepted.load(Ordering::SeqCst) as u64);
+            if transport.http2() {
+                assert_eq!(preparation, [0, 0, 1, 1]);
+                assert_eq!(completed, preparation);
+                assert_eq!(crossing, preparation);
+                assert_eq!(totals.connects, load.connections(transport) as u64);
+            } else {
+                let distinct: std::collections::BTreeSet<_> = preparation
+                    .into_iter()
+                    .chain(completed)
+                    .chain(crossing)
+                    .collect();
+                assert_eq!(distinct.len(), 3 * load.concurrency);
+                assert_eq!(totals.connects, (3 * load.concurrency) as u64);
+            }
+            stop.send(()).unwrap();
+            servers.join_next().await.unwrap().unwrap();
+            assert!(workers.is_empty() && servers.is_empty());
+            assert!(readiness.is_closed());
+            Measured {
+                totals,
+                window: window_end.duration_since(window_start),
+                start,
+                end,
+            }
+        })
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

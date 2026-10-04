@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Make the benchmark cancellation protocol regression causal and bounded:
+  observe real worker completions, server body drops and accepted connection
+  identities over all six transports instead of assuming completed work in a
+  shared runner's 200 ms window. Require four measured cancellations, nonzero
+  latencies, zero errors, HTTP/1 reconnects and HTTP/2 reuse; release another
+  round only after the deadline and exclude its bytes and completions. The
+  hosted failure at PR #141 head `5d528ce` remains failed evidence. Production
+  fixed-window timing, zero-request rejection and qualification gates are
+  unchanged; the causal coordinator is compiled only for tests. Correct the
+  contracts guide's stale Anvil/Foundry consumer claims and retain Nexus's
+  failed `61348980` formatting gates and pending repair qualification.
 - Refresh the authoritative implementation ledger for #28 with current issue
   states, immutable consumer heads and hosted evidence. Record merged Anvil,
   Foundry and GitForgeOps qualification; keep Nexus #519 and the canonical
