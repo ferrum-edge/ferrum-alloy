@@ -5,12 +5,15 @@
 - Require a configured management bearer token for detailed health, metrics,
   and management OpenAPI/UI even on loopback. Tokenless defaults expose only
   minimal liveness/readiness probes and separately authorized diagnostics.
-- Bind every diagnostic group to trace identity and local/accepted-remote
-  provenance. Trusted gateways forwarding untraced client ids can no longer
-  mix unrelated requests or evict matching attempts at the per-id cap.
-  Untraced retries no longer aggregate. External-id preclaim remains a
-  correlation availability tradeoff; `accept_incoming = "never"` supplies
-  authoritative generated ids. Tenant fair sharing and G01 authority are unchanged.
+- Bind every diagnostic group to tenant, request-id origin and value, trace
+  identity, and local/accepted-remote provenance. Retries group only when they
+  share the same logical request id and accepted remote trace identity; a
+  trusted transport alone is insufficient. Untraced retries do not aggregate.
+  A caller-chosen external id can still preclaim a predictable id until
+  eviction, and a trusted gateway that forwards caller-chosen trace context
+  does not make that context an authenticated identity. `accept_incoming =
+  "never"` supplies authoritative generated request ids. Tenant fair sharing
+  and G01 authority are unchanged.
 - Shut down all remaining accepted TCP connections at the drain budget through
   owned `socket2` duplicate handles, including TLS, unawaited `OnUpgrade`, and
   unpolled upgrades. Retain permits/counts until application drop, with a bounded

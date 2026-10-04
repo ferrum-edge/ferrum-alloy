@@ -12,7 +12,17 @@ curl -s localhost:8080/readyz
 curl -s -X POST localhost:8080/items -H 'content-type: application/json' -d '{"name":"tea","quantity":2}'
 ```
 
-Management endpoints (`/livez`, `/readyz`, `/health`, `/metrics`) listen on `127.0.0.1:9090`.
+Management endpoints listen on `127.0.0.1:9090`. `/livez` and `/readyz` are
+minimal token-free probes. `/health`, `/metrics`, and management OpenAPI/UI
+require `Authorization: Bearer <token>` even on loopback; without a configured
+token they return `401`. Set `FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE` to a file
+containing a secret of at least 32 characters. Keep the file readable only by
+the service account (for example, mode `0600` on Unix), and do not put a live
+token in `alloy.toml` or a URL. A browser does not add bearer tokens itself;
+for the management UI, use a local proxy or a carefully scoped header-injecting
+extension that reads the token from a protected source. Diagnostic retrieval,
+when enabled, has a separate authorizer; the management token does not grant
+access to it. See the [management and secrets guide](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/configuration.md#management).
 
 ## Test
 

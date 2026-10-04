@@ -13,8 +13,10 @@ request_body_limit_bytes = 1048576
 request_timeout_ms = 30000
 
 [management]
-# Health detail and metrics. Keep on loopback, or set
-# FERRUM_ALLOY_MANAGEMENT_TOKEN (32+ characters) before binding elsewhere.
+# Detailed health, metrics, and management OpenAPI/UI require a bearer token,
+# even on loopback. Probes remain token-free. Supply a secret of 32+ characters
+# through FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE; protect that file from other users.
+# Set the token before binding elsewhere. Never put a live token in this file.
 bind = "127.0.0.1:9090"
 
 [logging]
