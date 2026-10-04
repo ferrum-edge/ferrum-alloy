@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import statistics
 import subprocess
@@ -163,6 +164,114 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def instruction_profile(path, pid, thread, command, creator):
+    """Require one complete format-1 final thread dump, not a partial/combined dump.
+
+    This is the Ir-only, instr+line format emitted by our fixed Callgrind options
+    (observed on Valgrind 3.22). Inclusive call costs are not added to self costs.
+    The hosted annotator additionally checks symbol/position interpretation.
+    """
+    text = path.read_text()
+    require(text.endswith("\n") and "\0" not in text, f"empty/truncated profile: {path.name}")
+    lines = text.splitlines()
+    require(lines[0] == "# callgrind format", "unsupported profile format")
+    summaries = [index for index, line in enumerate(lines) if line.startswith("summary:")]
+    require(len(summaries) == 1, "missing/duplicate profile summary")
+    end = summaries[0]
+    header = [line.strip() for line in lines[:end] if line.strip()]
+    expected = ["# callgrind format", "version: 1", f"creator: {creator}", f"pid: {pid}",
+                f"cmd:  {command}", "part: 1", f"thread: {thread}",
+                "desc: I1 cache:", "desc: D1 cache:", "desc: LL cache:"]
+    require(header[:len(expected)] == expected, "unsupported/mismatched profile metadata")
+    remaining = header[len(expected):]
+    require(len(remaining) == 4
+            and re.fullmatch(r"desc: Timerange: Basic block 0 - [1-9][0-9]*", remaining[0])
+            and remaining[1:] == ["desc: Trigger: Program termination",
+                                  "positions: instr line", "events: Ir"],
+            "unsupported profile range/trigger/positions/events")
+    summary = re.fullmatch(r"summary: ([1-9][0-9]*)", lines[end])
+    footer = re.fullmatch(r"totals: ([1-9][0-9]*)", lines[-1])
+    require(summary is not None and footer is not None, "invalid/zero summary or missing totals")
+    instructions = int(summary[1])
+    require(int(footer[1]) == instructions, "profile summary/totals differ")
+
+    position = r"(?:[+-]?(?:0x[0-9a-fA-F]+|[0-9]+)|\*)"
+    cost = re.compile(rf"{position}\s+{position}(?:\s+([0-9]+))?\s*")
+    association = re.compile(rf"(?:calls=[1-9][0-9]*|jump=[0-9]+|jcnd=[0-9]+/[0-9]+)"
+                             rf"\s+{position}\s+{position}\s*")
+    symbol = re.compile(r"(?:ob|fl|fi|fe|fn|cob|cfi|cfl|cfn|jfi|jfn)=\S.*")
+    self_cost = 0
+    pending_call = False
+    has_function = False
+    for line in lines[end + 1:-1]:
+        if not line.strip():
+            continue
+        entry = cost.fullmatch(line)
+        require(not pending_call or entry is not None, "call missing profile cost line")
+        if entry is not None:
+            require(has_function, "profile cost missing function")
+            if not pending_call:
+                self_cost += int(entry[1] or "0")
+            pending_call = False
+        elif symbol.fullmatch(line):
+            has_function = has_function or line.startswith("fn=")
+        elif association.fullmatch(line):
+            require(has_function, "profile association missing function")
+            pending_call = line.startswith("calls=")
+        else:
+            raise ValueError(f"malformed profile body: {path.name}")
+    require(not pending_call and self_cost == instructions, "incomplete profile self costs")
+    return instructions
+
+
+def instruction_profiles(out, name, pid, command):
+    """Recognize PID[-%02d thread] names; ignore only the matching empty base.
+
+    All thread files must qualify before the base placeholder can be ignored.
+    Their disjoint self costs must equal the same PID's final stderr collection.
+    No alternative PID, partial dump, unknown suffix, or empty child is waived.
+    See docs/benchmarks.md for the supported format and completeness semantics.
+    """
+    require(type(pid) is int and pid > 0, "missing profiler process identity")
+    messages = []
+    for line in (out / f"{name}.stderr").read_text().splitlines():
+        if line.startswith("=="):
+            prefix = f"=={pid}== "
+            require(line.startswith(prefix), "mixed/malformed profiler PID")
+            messages.append(line[len(prefix):])
+
+    def message(prefix, pattern):
+        selected = [line for line in messages if line.startswith(prefix)]
+        require(len(selected) == 1, f"missing/duplicate profiler {prefix}")
+        match = re.fullmatch(pattern, selected[0])
+        require(match is not None, f"unsupported profiler {prefix}")
+        return match
+
+    version = message("Using", r"Using Valgrind-(3\.[0-9]+\.[0-9]+) and LibVEX; "
+                              r"rerun with -h for copyright info")[1]
+    message("Events", r"Events\s+: Ir")
+    collected = int(message("Collected", r"Collected\s+: ([1-9][0-9]*)")[1])
+    base = f"{name}.callgrind.{pid}"
+    paths = sorted(out.glob(f"{name}.callgrind*"))
+    profiles = []
+    for path in paths:
+        require(path.is_file() and not path.is_symlink(), "unsupported profile file")
+        if path.name == base:
+            require(path.stat().st_size == 0, "nonempty unsuffixed per-thread profile")
+            continue
+        suffix = re.fullmatch(re.escape(base) + r"-([0-9]+)", path.name)
+        require(suffix is not None, f"unexpected profile name/PID: {path.name}")
+        thread = int(suffix[1])
+        require(thread > 0 and suffix[1] == f"{thread:02d}", "noncanonical profile thread")
+        instructions = instruction_profile(path, pid, thread, command, f"callgrind-{version}")
+        profiles.append((path, instructions))
+    require(profiles and any(path.name == f"{base}-01" for path, _ in profiles),
+            "unsupported/missing main-thread instruction profile")
+    require(sum(total for _, total in profiles) == collected,
+            "incomplete thread profiles: totals differ from profiler collection")
+    return profiles
+
+
 def stop(process):
     """Terminate the command group and join the owned child, even after leader exit."""
     def signal_group(sig):
@@ -200,6 +309,7 @@ class Evidence:
                  (self.out / f"{name}.stderr").open("w") as stderr:
                 process = subprocess.Popen(args, stdout=stdout, stderr=stderr, env=env,
                                            start_new_session=True)
+                record["pid"] = process.pid
                 try:
                     record["exit_code"] = process.wait(timeout=timeout)
                 finally:
@@ -213,6 +323,7 @@ class Evidence:
         finally:
             record["ended_unix_seconds"] = time.time()
             write_json(self.out / "commands.json", self.commands)
+        return record["pid"]
 
     def stage(self, name, action):
         self.stages[name] = {"status": "running"}
@@ -260,27 +371,29 @@ class Evidence:
 
     def profile(self, scenario):
         name = f"profile-{scenario}"
+        command = ["target/release/alloy-bench", "run", "--scenario", scenario,
+                   "--workload", "small", "--transport", "h1", "--seconds", "1", "--warmup", "0.2",
+                   "--concurrency", "8", "--rep", "1", "--run-id", name,
+                   "--label", CLASSIFICATION]
         args = ["valgrind", "--tool=callgrind", "--dump-instr=yes", "--collect-jumps=yes",
                 "--separate-threads=yes", f"--callgrind-out-file={self.out}/{name}.callgrind.%p",
-                "target/release/alloy-bench", "run", "--scenario", scenario,
-                "--workload", "small", "--transport", "h1", "--seconds", "1", "--warmup", "0.2",
-                "--concurrency", "8", "--rep", "1", "--run-id", name, "--label", CLASSIFICATION]
-        self.command(name, args, 90)
+                *command]
+        pid = self.command(name, args, 90)
         rows = [json.loads(line) for line in (self.out / f"{name}.stdout").read_text().splitlines()]
         validate(rows, [scenario], ["small"], ["h1"], 1, self.sha, name, False,
                  seconds=1.0, warmup=0.2, concurrency=8)
-        profiles = sorted(self.out.glob(f"{name}.callgrind.*"))
-        require(profiles, "unsupported/missing instruction profile")
-        instructions = 0
-        for index, path in enumerate(profiles):
-            text = path.read_text()
-            require("events: Ir" in text, "profile missing instruction events")
-            totals = [int(line.split()[1]) for line in text.splitlines()
-                      if line.startswith("summary:")]
-            instructions += sum(totals)
-            self.command(f"{name}-annotate-{index}",
-                         ["callgrind_annotate", "--auto=no", str(path)], 15)
-        require(instructions > 0, "empty instruction profile")
+        profiles = instruction_profiles(self.out, name, pid, " ".join(command))
+        for index, (path, instructions) in enumerate(profiles):
+            annotation = f"{name}-annotate-{index}"
+            self.command(annotation, ["callgrind_annotate", "--auto=no", "--show-percs=no",
+                                      str(path)], 15)
+            require(not (self.out / f"{annotation}.stderr").read_text().strip(),
+                    "profile annotation diagnostics")
+            totals = [" ".join(line.split()) for line in
+                      (self.out / f"{annotation}.stdout").read_text().splitlines()
+                      if "PROGRAM TOTALS" in line]
+            require(totals == [f"{instructions:,} PROGRAM TOTALS"],
+                    "missing/mismatched instruction annotation totals")
 
 
 def main():
