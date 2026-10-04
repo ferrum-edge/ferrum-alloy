@@ -685,10 +685,39 @@ mod tests {
             options.load.warmup = Duration::from_millis(100);
             let metrics = Metrics::default();
             let environment = probe::environment(None);
-            let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
+            // Bound all phases, not just measured requests: two H2 workers
+            // need at most 2 * (1 + 8 + 8 + 1) = 36 retained resets, below 50.
+            // Keep the real warm-up/drain/window and fatal retained-sender
+            // probe, with evidence alive through teardown and assertions.
+            let evidence = HealthFailureEvidence {
+                cell,
+                diagnostics: Arc::new(client::tests::HealthDiagnostics::new(options.load)),
+            };
+            let result = measure_inner(
+                cell,
+                &options,
+                None,
+                &metrics,
+                None,
+                environment,
+                Some(Arc::clone(&evidence.diagnostics)),
+            )
+            .unwrap();
             assert_healthy(&result);
             assert_cancellation(&result, transport);
             assert_eq!(result["warmup_seconds"], 0.1, "{result}");
+            let requests = options.load.concurrency * client::tests::HEALTH_EXCHANGES_PER_PHASE;
+            assert_eq!(result["requests"], requests, "{result}");
+            assert_eq!(result["concurrency"], 4, "{result}");
+            let connections = if transport.http2() { 2 } else { 4 };
+            let streams = if transport.http2() { 2 } else { 1 };
+            assert_eq!(result["connections"], connections, "{result}");
+            assert_eq!(result["streams_per_connection"], streams, "{result}");
+            assert_eq!(result["transport"], transport.name(), "{result}");
+            assert_eq!(result["protocol"], transport.protocol(), "{result}");
+            assert_eq!(result["tls"], transport.tls(), "{result}");
+            assert_eq!(result["mtls"], transport.mtls(), "{result}");
+            evidence.diagnostics.assert_warmed_progress(transport);
         }
     }
 

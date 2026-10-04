@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Fix #143's warmed cancellation health regression by using the existing
+  test-only phase budget and retained H2 reuse probe over h2c, H2 mTLS and
+  H1 mTLS. Keep the 100 ms warm-up / 200 ms window, require exactly 32 measured
+  cancellations with zero errors, and verify per-worker phase/byte accounting
+  and at most 36 cancellations per original H2 connection, below the unchanged
+  50-reset retention limit. Production load/protections remain unchanged;
+  #142's historical timeout cause remains unknown. Fresh hosted checks and
+  independent root review are required.
 - Initialize hosted benchmark diagnostics from `RUNNER_TEMP` in a runtime step
   and propagate the path through `GITHUB_ENV`, outside Rust cache trees, so
   source identity and failure uploads use valid workflow contexts. Correct the

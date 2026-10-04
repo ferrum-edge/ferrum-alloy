@@ -776,6 +776,62 @@ pub(crate) mod tests {
             update(&mut state);
         }
 
+        pub(crate) fn assert_warmed_progress(&self, transport: Transport) {
+            let coordinator = self.coordinator.lock().unwrap();
+            assert_eq!(coordinator.stage, "worker-joins-and-reuse");
+            assert_eq!(coordinator.readiness, 4);
+            assert_eq!(coordinator.joined, 4);
+            drop(coordinator);
+            let mut sockets = [None, None];
+            let mut resets = [0, 0];
+            for index in 0..4 {
+                self.worker(index, |state| {
+                    assert_eq!(state.outcome, "completed-ok");
+                    let [preparation, warmup, measurement, reuse] = state.exchanges;
+                    assert_eq!(preparation.started, 1);
+                    assert!(warmup.started > 0);
+                    assert!(warmup.started <= HEALTH_EXCHANGES_PER_PHASE as u64);
+                    assert_eq!(measurement.started, HEALTH_EXCHANGES_PER_PHASE as u64);
+                    assert_eq!(reuse.started, u64::from(transport.http2()));
+                    for progress in state.exchanges {
+                        assert_eq!(progress.started, progress.completed);
+                        assert!(progress.bytes >= progress.completed);
+                        assert!(progress.bytes <= progress.completed * FRAME_BYTES as u64);
+                    }
+                    // Preparation, drained warm-up and post-window reuse
+                    // bytes must stay outside the measured totals.
+                    assert_eq!(state.measured, HEALTH_EXCHANGES_PER_PHASE);
+                    assert_eq!(state.errors, 0);
+                    assert_eq!(state.body_bytes, measurement.bytes);
+                    if transport.http2() {
+                        let connection = state.connection.as_ref().unwrap();
+                        assert_eq!(connection.owner, (index / 2) * 2);
+                        assert_eq!(connection.generation, 1);
+                        let expected_dials = u64::from(index.is_multiple_of(2));
+                        assert_eq!(state.connect_attempts, expected_dials);
+                        assert_eq!(state.sender_closed, Some(false));
+                        let socket = connection.local_addr.unwrap();
+                        let retained = &mut sockets[index / 2];
+                        if let Some(original) = retained {
+                            assert_eq!(*original, socket);
+                        } else {
+                            *retained = Some(socket);
+                        }
+                        resets[index / 2] += state.exchanges.iter().map(|p| p.started).sum::<u64>();
+                    }
+                });
+            }
+            if transport.http2() {
+                assert_ne!(sockets[0], sockets[1]);
+                // Includes both workers' preparation, warm-up, measurement
+                // and retained-sender probes, even if no reset state expires.
+                for count in resets {
+                    assert!(count <= 36);
+                    assert!(count < 50);
+                }
+            }
+        }
+
         pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
             use crate::dims::Dimension;
 
