@@ -252,7 +252,13 @@ fn measure_inner(
     if let Some(diagnostics) = &diagnostics {
         diagnostics.coordinator_stage("server-start-readiness");
     }
-    let server = server::start(cell.scenario, server_tls, pipeline)?;
+    let server = server::start(
+        cell.scenario,
+        server_tls,
+        pipeline,
+        #[cfg(test)]
+        diagnostics.clone(),
+    )?;
     #[cfg(test)]
     if let Some(diagnostics) = &diagnostics {
         diagnostics.coordinator_stage("client-tls-config");
@@ -553,7 +559,10 @@ mod tests {
                 // and every report assertion; print at most once on failure.
                 let evidence = (*workload == Workload::Cancel).then(|| HealthFailureEvidence {
                     cell,
-                    diagnostics: Arc::new(client::tests::HealthDiagnostics::new(options.load)),
+                    diagnostics: Arc::new(
+                        client::tests::HealthDiagnostics::new(options.load)
+                            .with_origin("real-matrix"),
+                    ),
                 });
                 let diagnostics = evidence.as_ref().map(|e| Arc::clone(&e.diagnostics));
                 let result = measure_inner(
@@ -685,10 +694,42 @@ mod tests {
             options.load.warmup = Duration::from_millis(100);
             let metrics = Metrics::default();
             let environment = probe::environment(None);
-            let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
+            // Bound all phases, not just measured requests: two H2 workers
+            // need at most 2 * (1 + 8 + 8 + 1) = 36 retained resets, below 50.
+            // Keep the real warm-up/drain/window and fatal retained-sender
+            // probe, with evidence alive through teardown and assertions.
+            let evidence = HealthFailureEvidence {
+                cell,
+                diagnostics: Arc::new(
+                    client::tests::HealthDiagnostics::new(options.load)
+                        .with_origin("warmed-short-window"),
+                ),
+            };
+            let result = measure_inner(
+                cell,
+                &options,
+                None,
+                &metrics,
+                None,
+                environment,
+                Some(Arc::clone(&evidence.diagnostics)),
+            )
+            .unwrap();
             assert_healthy(&result);
             assert_cancellation(&result, transport);
             assert_eq!(result["warmup_seconds"], 0.1, "{result}");
+            assert_eq!(result["concurrency"], 4, "{result}");
+            let connections = if transport.http2() { 2 } else { 4 };
+            let streams = if transport.http2() { 2 } else { 1 };
+            assert_eq!(result["connections"], connections, "{result}");
+            assert_eq!(result["streams_per_connection"], streams, "{result}");
+            assert_eq!(result["transport"], transport.name(), "{result}");
+            assert_eq!(result["protocol"], transport.protocol(), "{result}");
+            assert_eq!(result["tls"], transport.tls(), "{result}");
+            assert_eq!(result["mtls"], transport.mtls(), "{result}");
+            let (requests, bytes) = evidence.diagnostics.assert_warmed_progress(transport);
+            assert_eq!(result["requests"], requests, "{result}");
+            assert_eq!(result["body_bytes"], bytes, "{result}");
         }
     }
 

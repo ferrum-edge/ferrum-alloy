@@ -23,6 +23,8 @@
 mod alloc;
 mod client;
 mod dims;
+#[cfg(test)]
+mod health;
 mod matrix;
 mod pki;
 mod probe;

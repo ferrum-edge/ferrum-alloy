@@ -189,6 +189,7 @@ pub(crate) fn start(
     scenario: Scenario,
     tls: Option<ServerTls>,
     pipeline: Option<OtelPipeline>,
+    #[cfg(test)] health: Option<Arc<crate::client::tests::HealthDiagnostics>>,
 ) -> Result<Server, Failure> {
     spawn(
         SERVER_THREAD,
@@ -198,7 +199,14 @@ pub(crate) fn start(
             if scenario == Scenario::Plain {
                 ready.ok();
                 let tls = tls.map(|tls| TlsAcceptor::from(tls.rustls));
-                serve_plain(listener, tls, stopped(stop)).await;
+                serve_plain(
+                    listener,
+                    tls,
+                    stopped(stop),
+                    #[cfg(test)]
+                    health,
+                )
+                .await;
                 return;
             }
             let diagnostics = scenario == Scenario::AlloyDiagnostics;
@@ -212,11 +220,14 @@ pub(crate) fn start(
                 .config(config)
                 .telemetry(TelemetryInit::ApplicationOwned)
                 .shutdown_signal(stopped(stop));
+            let router = router();
+            #[cfg(test)]
+            let router = observe_router(router, health);
             let app = if diagnostics {
-                let router = router().layer(middleware::from_fn(tag_tenant));
+                let router = router.layer(middleware::from_fn(tag_tenant));
                 app.router(router).diagnostics_authorizer(deny)
             } else {
-                app.router(router())
+                app.router(router)
             };
             let parts = app.into_parts();
             match parts {
@@ -233,18 +244,29 @@ pub(crate) fn start(
 /// The baseline: hyper-util's automatic HTTP/1.1 + HTTP/2 connection
 /// builder (what `axum::serve` uses) with `TCP_NODELAY`, as Alloy sets it,
 /// and optional TLS.
-async fn serve_plain(listener: TcpListener, tls: Option<TlsAcceptor>, stop: impl Future) {
+async fn serve_plain(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    stop: impl Future,
+    #[cfg(test)] health: Option<Arc<crate::client::tests::HealthDiagnostics>>,
+) {
     let router = router();
+    #[cfg(test)]
+    let router = observe_router(router, health);
     let mut stop = std::pin::pin!(stop);
     loop {
         let accepted = tokio::select! {
             _ = &mut stop => return,
             accepted = listener.accept() => accepted,
         };
-        let Ok((stream, _)) = accepted else {
+        let Ok((stream, _peer)) = accepted else {
             continue;
         };
         let _ = stream.set_nodelay(true);
+        #[cfg(test)]
+        let router = router
+            .clone()
+            .layer(axum::Extension(axum::extract::ConnectInfo(_peer)));
         let service = TowerToHyperService::new(router.clone());
         let tls = tls.clone();
         tokio::spawn(async move {
@@ -266,6 +288,24 @@ async fn serve_plain(listener: TcpListener, tls: Option<TlsAcceptor>, stop: impl
             }
         });
     }
+}
+
+#[cfg(test)]
+fn observe_router(
+    router: Router,
+    health: Option<Arc<crate::client::tests::HealthDiagnostics>>,
+) -> Router {
+    let Some(health) = health else {
+        return router;
+    };
+    router.layer(middleware::from_fn(move |request: Request, next: Next| {
+        let socket = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        let observation = health.observer.request(socket);
+        crate::health::response(next.run(request), observation)
+    }))
 }
 
 /// What the collector stub received.

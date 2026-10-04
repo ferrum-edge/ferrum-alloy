@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- Isolate the benchmark allocator unit test with thread-local RAII observation
+  and instance-owned role counters. It no longer permanently enables production
+  allocation counting for later non-counting health tests. Add concurrent-thread
+  allocation/restoration coverage without global toggles or suite serialization.
+- Extend test-only cancellation-health evidence with bounded worker, public
+  dispatcher, H2 wire-child and response-callback polling/wakes, plus server
+  router/response/body observations by original socket and request ordinal.
+  Controlled wire/header/DATA gates cover release, retained-sender reuse and
+  task destruction. Ordinary three-OS CI now preserves separate all-feature
+  and default-feature evidence outside cache trees. The genuine instrumented
+  Linux recurrence in #142 and the original uninstrumented cause remain
+  unresolved; allocator isolation is not a demonstrated timeout repair.
+- Fix #143's warmed cancellation health regression by using the existing
+  test-only phase budget and retained H2 reuse probe over h2c, H2 mTLS and
+  H1 mTLS. Keep the 100 ms warm-up / 200 ms window, require positive measured
+  progress with zero errors, and reconcile included/excluded exchange counts
+  and bytes exactly with worker and reported totals. Preparation, drained
+  warm-up, late measurement completion and reuse cannot contribute measured
+  bytes. All phases require at most 36 cancellations per original H2 connection,
+  below the unchanged 50-reset retention limit. This finite functional check
+  does not guarantee 32 completions in the short window or sustained cancellation
+  performance. Production load/protections remain unchanged; #142's historical
+  timeout cause remains unknown.
 - Initialize hosted benchmark diagnostics from `RUNNER_TEMP` in a runtime step
   and propagate the path through `GITHUB_ENV`, outside Rust cache trees, so
   source identity and failure uploads use valid workflow contexts. Correct the
@@ -17,13 +40,13 @@
   PR head, concurrently, with bounded always-upload evidence. Preserve all gates,
   clocks, protections and continuous CLI behavior. The historical `d00fc47`
   cause remains unproved; this is neither historical repair nor performance
-  acceptance, and fresh hosted checks and root review remain required.
+  acceptance.
 - Correct website and shared-contract adoption references using immutable current
   sources; retain historical website and released r2 claims and pending freeze.
 - Ignore stderr write errors when printing the bounded test-only cancellation
   health failure snapshot, preserving the original driver result and avoiding
   a second panic while unwinding. This does not explain or repair the historical
-  `d00fc47` timeout; fresh hosted checks and independent root review remain required.
+  `d00fc47` timeout.
 - Repair PR #141's test-only diagnostic worker guard ownership after
   [head `73e6b711` / Clippy job 111507388589](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37226589007/job/111507388589)
   rejected the field-only async capture. Construct the whole guard inside the
@@ -33,7 +56,7 @@
   error stage, preserving pending worker/driver and outside-scope coverage.
   Apply the exact two parent-workspace rustfmt hunks reported by Format and
   Generated projects, without template changes. The historical `d00fc47` timeout
-  remains unexplained; fresh hosted checks and independent root review are required.
+  remains unexplained.
 - Add bounded test-only cancellation-health failure diagnostics for PR #141.
   [Head `d00fc47` / run 37225022927 / job 111502796765](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37225022927/job/111502796765)
   failed with 41 harness passes and an Alloy matrix 15-second driver timeout;
@@ -45,8 +68,7 @@
   exchange/byte counters, socket identity and driver status once on failure.
   Cover context retention when pending worker/driver futures are dropped.
   Preserve all load, timeout, accounting, security and qualification gates.
-  This diagnostic-only change is not a timeout repair or performance acceptance;
-  fresh hosted checks and focused independent root review remain required.
+  This diagnostic-only change is not a timeout repair or performance acceptance.
 - Bound real-service cancellation health below the pinned h2 reset-retention
   limit after PR #141 head `d3468f6b6603e157c37ee41c70ef73ac6756f276` failed
   [qualification run 37223357081 / job 111497941354](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37223357081/job/111497941354).
