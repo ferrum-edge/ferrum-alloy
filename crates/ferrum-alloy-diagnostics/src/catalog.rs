@@ -211,6 +211,23 @@ pub const EVENTS: &[&str] = &[
     CLIENT_RESPONSE_HEADER,
 ];
 
+/// Evidence keys of the authenticated, response-bound Edge record finding
+/// (`alloy.r008`, ADR 0009). These are classifications and identity checks,
+/// not measurements. Creation/expiry times only bind a response window;
+/// duration buckets are never converted into numeric durations. Raw records
+/// and operator configuration are not report observations.
+pub const EDGE_RECORD_EVIDENCE_KEYS: &[&str] = &[
+    "edge.record.ref",
+    "edge.record.status",
+    "edge.record.gateway_error",
+    "edge.record.protocol",
+    "edge.record.created_at",
+    "edge.record.detail.backend_dispatch",
+    "edge.record.detail.error_class",
+    "edge.record.detail.body_error_class",
+    "edge.record.detail.route_timeout_phase",
+];
+
 /// Looks up a measurement entry.
 pub fn entry(name: &str) -> Option<&'static CatalogEntry> {
     ENTRIES.iter().find(|entry| entry.name == name)

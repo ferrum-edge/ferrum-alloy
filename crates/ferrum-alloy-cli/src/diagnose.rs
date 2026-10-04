@@ -1,9 +1,10 @@
 //! `ferrum-alloy diagnose`: explains supplied evidence.
 //!
 //! Deterministic rules only, and no external AI service. The only network
-//! access is `--url`, which fetches one live report from a running service
-//! (see [`crate::live`]). Every input, live reports included, is read with
-//! `parse_offline` and never treated as authenticated.
+//! access is `--url` (a service report) and `--edge-admin-url` (one G01
+//! record). Reports are always read with `parse_offline`. Only an admin
+//! record bound to a separate explicit client observation can authenticate
+//! a gateway record finding (ADR 0009).
 //!
 //! An OTLP export is held to the same report limits, with or without
 //! `--write-report`: rules only ever run on reports the parser accepts, so
@@ -14,7 +15,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Args;
-use ferrum_alloy_diagnostics::model::{DiagnosticReport, Producer, ProducerKind};
+use ferrum_alloy_diagnostics::edge_record;
+use ferrum_alloy_diagnostics::model::{
+    Collection, CollectionMethod, DiagnosticReport, Producer, ProducerKind, Verification,
+};
 use ferrum_alloy_diagnostics::otlp::{self, ImportLimits};
 use ferrum_alloy_diagnostics::parse::{Limits, parse_offline};
 use ferrum_alloy_diagnostics::render::render_text;
@@ -27,7 +31,8 @@ use crate::output::printable;
 
 /// Arguments for `diagnose`.
 #[derive(Debug, Args)]
-#[command(group = clap::ArgGroup::new("source").required(true).args(["input", "otlp", "url"]))]
+#[command(group = clap::ArgGroup::new("source").args(["input", "otlp", "url"]))]
+#[command(group = clap::ArgGroup::new("evidence").required(true).multiple(true).args(["input", "otlp", "url", "edge_observation"]))]
 pub(crate) struct DiagnoseArgs {
     /// A `ferrum.diagnostic_report` v1 JSON file.
     #[arg(long)]
@@ -54,7 +59,17 @@ pub(crate) struct DiagnoseArgs {
     /// `FERRUM_ALLOY_DIAGNOSTICS_TOKEN`.
     #[arg(long, requires = "url")]
     token_file: Option<PathBuf>,
-    /// Whole-request timeout for `--url`, in milliseconds (1 to 120000).
+    /// Edge admin base URL for an authenticated G01 lookup. Uses only
+    /// FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN (diagnostics:read plus ns).
+    #[arg(long, requires = "edge_observation", conflicts_with = "list_traces")]
+    edge_admin_url: Option<String>,
+    /// Explicit trusted client capture JSON, separate from any service report:
+    /// reference, namespace, status, gateway_error (null if absent), protocol,
+    /// request_started_at and response_received_at (RFC 3339, at most 300s apart).
+    #[arg(long, requires = "edge_admin_url")]
+    edge_observation: Option<PathBuf>,
+    /// Whole-request timeout in milliseconds (1 to 120000). Edge lookups
+    /// additionally cap it at 5000 and connection setup at 2000.
     #[arg(long, default_value_t = 10_000)]
     timeout_ms: u64,
     /// Write the assembled report (with findings) to this file, pretty-printed,
@@ -74,7 +89,7 @@ fn read(path: &Path, max: usize) -> Result<Vec<u8>, CliError> {
 
 /// The bytes `--write-report` writes: pretty-printed JSON, or compact JSON
 /// when the pretty form would not fit within `limits.max_bytes`.
-fn report_bytes(report: &DiagnosticReport, limits: &Limits) -> Result<Vec<u8>, CliError> {
+fn report_bytes(report: &impl serde::Serialize, limits: &Limits) -> Result<Vec<u8>, CliError> {
     let encode = |e: serde_json::Error| CliError::Io(e.to_string());
     let mut json = serde_json::to_vec_pretty(report).map_err(encode)?;
     if json.len() >= limits.max_bytes {
@@ -87,6 +102,19 @@ fn report_bytes(report: &DiagnosticReport, limits: &Limits) -> Result<Vec<u8>, C
 /// Runs `diagnose`.
 pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     let limits = Limits::default();
+    if !(1..=120_000).contains(&args.timeout_ms) {
+        return Err(CliError::Invalid(
+            "--timeout-ms must be within 1..=120000".into(),
+        ));
+    }
+    let observation = args
+        .edge_observation
+        .as_deref()
+        .map(|path| {
+            let bytes = read(path, edge_record::MAX_RECORD_BYTES)?;
+            edge_record::parse_observation(&bytes).map_err(|e| CliError::Invalid(e.to_string()))
+        })
+        .transpose()?;
     let (mut report, warnings, claimed) = if let Some(path) = &args.input {
         let bytes = read(path, limits.max_bytes)?;
         let parsed = parse_offline(&bytes, &limits)
@@ -125,11 +153,6 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
         let Some(request_id) = args.request_id.as_deref() else {
             return Err(CliError::Invalid("--url requires --request-id".into()));
         };
-        if !(1..=120_000).contains(&args.timeout_ms) {
-            return Err(CliError::Invalid(
-                "--timeout-ms must be within 1..=120000".into(),
-            ));
-        }
         let token = crate::live::token(args.token_file.as_deref())?;
         let url = crate::live::report_url(base, request_id, token.is_some())?;
         let timeout = Duration::from_millis(args.timeout_ms);
@@ -141,14 +164,45 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
             parsed.warnings,
             Some(parsed.claimed_verification),
         )
+    } else if observation.is_some() {
+        let report = DiagnosticReport::new(Collection {
+            collector: Producer {
+                kind: ProducerKind::Collector,
+                name: "ferrum-alloy-cli".into(),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
+                instance: None,
+            },
+            method: CollectionMethod::OfflineImport,
+            verification: Verification::Unverified,
+            notes: Vec::new(),
+        });
+        (report, Vec::new(), None)
     } else {
         return Err(CliError::Invalid("pass --input, --otlp, or --url".into()));
     };
 
-    let findings = analyze(&report, &Thresholds::default());
+    let lookup = match (args.edge_admin_url.as_deref(), observation.as_ref()) {
+        (Some(base), Some(observation)) => Some(crate::edge_lookup::fetch(
+            base,
+            observation,
+            Duration::from_millis(args.timeout_ms),
+        )?),
+        _ => None,
+    };
+    let mut findings = analyze(&report, &Thresholds::default());
+    if let Some(lookup) = &lookup {
+        findings.push(lookup.finding());
+        ferrum_alloy_diagnostics::rules::sort_findings(&mut findings);
+    }
     report.findings.clone_from(&findings);
     if let Some(path) = &args.write_report {
-        let json = report_bytes(&report, &limits)?;
+        let json = if let Some(lookup) = &lookup {
+            let mut value = serde_json::to_value(&report).map_err(|e| CliError::Io(e.to_string()))?;
+            lookup.redact_json(&mut value);
+            report_bytes(&value, &limits)?
+        } else {
+            report_bytes(&report, &limits)?
+        };
         // Findings and pretty printing add bytes after the report was
         // checked: never write a file that `diagnose --input` would reject.
         if let Err(e) = parse_offline(&json, &limits) {
@@ -162,14 +216,20 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     match args.format {
         Format::Human => {
             let text = render_text(&report, &findings, &warnings);
+            let text = lookup
+                .as_ref()
+                .map_or_else(|| text.clone(), |l| l.redact(&text));
             crate::print(&printable(&text))?;
         }
         Format::Json => {
-            let value = serde_json::json!({
+            let mut value = serde_json::json!({
                 "claimed_verification": claimed.map(|v| v.as_str().to_owned()),
                 "warnings": warnings.iter().map(|w| serde_json::json!({ "path": w.path, "message": w.message })).collect::<Vec<_>>(),
                 "report": report,
             });
+            if let Some(lookup) = &lookup {
+                lookup.redact_json(&mut value);
+            }
             crate::print(&format!("{value:#}\n"))?;
         }
     }

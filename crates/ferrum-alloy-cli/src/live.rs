@@ -108,7 +108,7 @@ pub(crate) fn report_url(base: &str, request_id: &str, has_token: bool) -> Resul
 
 /// TLS for `https`: rustls with the `ring` provider passed explicitly and the
 /// platform trust store. Nothing is installed globally.
-fn tls(require_roots: bool) -> Result<rustls::ClientConfig, CliError> {
+pub(crate) fn tls(require_roots: bool) -> Result<rustls::ClientConfig, CliError> {
     use rustls_platform_verifier::BuilderVerifierExt;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider)

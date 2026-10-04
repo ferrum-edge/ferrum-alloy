@@ -286,8 +286,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.9");
-    assert_eq!(pin["commit"], "25c4e9e00033d7941a1dd0ab733fa74e735546ae");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.9-r2");
+    assert_eq!(pin["commit"], "591c73a3f965fdab440c3a76b2707accdf491ba5");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();

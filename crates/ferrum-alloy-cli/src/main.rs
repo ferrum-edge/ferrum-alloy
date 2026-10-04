@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod check;
 mod diagnose;
 mod edge;
+mod edge_lookup;
 mod error;
 mod fsout;
 mod input;

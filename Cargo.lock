@@ -922,6 +922,7 @@ dependencies = [
  "ferrum-alloy",
  "ferrum-alloy-diagnostics",
  "ferrum-alloy-edge",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",

@@ -108,6 +108,7 @@ Variables of the `ferrum-alloy` command itself (`config::CLI_ENV_VARS`) share th
 | Variable | Used by |
 |---|---|
 | `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` | `ferrum-alloy diagnose --url`: the credential sent to a service's diagnostic retrieval endpoint ([`[diagnostics]`](#diagnostics-feature-diagnostics)) |
+| `FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN` | `ferrum-alloy diagnose --edge-admin-url`: Edge admin JWT with `diagnostics:read` scope and an `ns` claim; never used for the service's `--url` endpoint |
 
 ### `RUST_LOG`
 

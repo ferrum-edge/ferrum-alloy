@@ -36,6 +36,7 @@ toml = { workspace = true, features = ["parse", "serde", "display"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rcgen = { workspace = true, features = ["crypto", "ring"] }
 
 [lints]
 workspace = true
