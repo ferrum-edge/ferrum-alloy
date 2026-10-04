@@ -44,6 +44,18 @@ fn bin() -> Command {
     command
 }
 
+fn assert_client_disconnect(error: &std::io::Error, write: &str) {
+    assert!(
+        matches!(
+            error.kind(),
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+        ) || matches!(error.raw_os_error(), Some(10053 | 10054)),
+        "unexpected {write} write error: kind={:?}, raw_os_error={:?}",
+        error.kind(),
+        error.raw_os_error()
+    );
+}
+
 fn diagnose(url: &str, observation: &Value, extra: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("capture.json");
@@ -184,10 +196,7 @@ fn an_authenticated_bound_record_confirms_only_the_new_record_finding() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     for report in [&value["report"], &saved_value] {
         assert_eq!(report["schema"], "ferrum.diagnostic_report");
-        assert_eq!(
-            report["extensions"]["x-[REDACTED]"],
-            "keep this safe value"
-        );
+        assert_eq!(report["extensions"]["x-[REDACTED]"], "keep this safe value");
         assert_eq!(
             report["extensions"]["x-nested"],
             json!([{
@@ -359,20 +368,14 @@ fn a_trickling_body_cannot_extend_the_whole_operation_deadline() {
         // takes at least four seconds. Without a total deadline it succeeds.
         for _ in 0..40 {
             if let Err(error) = stream.write_all(b" ") {
-                assert!(matches!(
-                    error.kind(),
-                    ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
-                ));
+                assert_client_disconnect(&error, "trickle");
                 return writes;
             }
             writes += 1;
             std::thread::sleep(Duration::from_millis(100));
         }
         if let Err(error) = stream.write_all(body.as_bytes()) {
-            assert!(matches!(
-                error.kind(),
-                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
-            ));
+            assert_client_disconnect(&error, "final body");
         }
         writes
     });
