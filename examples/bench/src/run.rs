@@ -706,8 +706,6 @@ mod tests {
             assert_healthy(&result);
             assert_cancellation(&result, transport);
             assert_eq!(result["warmup_seconds"], 0.1, "{result}");
-            let requests = options.load.concurrency * client::tests::HEALTH_EXCHANGES_PER_PHASE;
-            assert_eq!(result["requests"], requests, "{result}");
             assert_eq!(result["concurrency"], 4, "{result}");
             let connections = if transport.http2() { 2 } else { 4 };
             let streams = if transport.http2() { 2 } else { 1 };
@@ -717,7 +715,9 @@ mod tests {
             assert_eq!(result["protocol"], transport.protocol(), "{result}");
             assert_eq!(result["tls"], transport.tls(), "{result}");
             assert_eq!(result["mtls"], transport.mtls(), "{result}");
-            evidence.diagnostics.assert_warmed_progress(transport);
+            let (requests, bytes) = evidence.diagnostics.assert_warmed_progress(transport);
+            assert_eq!(result["requests"], requests, "{result}");
+            assert_eq!(result["body_bytes"], bytes, "{result}");
         }
     }
 

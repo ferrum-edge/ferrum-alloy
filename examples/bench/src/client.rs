@@ -241,7 +241,7 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
             tests::diagnostic_body_bytes(data.len() as u64);
             if cancel && !data.is_empty() {
                 #[cfg(test)]
-                tests::diagnostic_exchange_completed(sender);
+                tests::diagnostic_exchange_completed(sender, bytes);
                 return Ok(bytes);
             }
         }
@@ -417,6 +417,8 @@ async fn worker_inner(
         let begin = Instant::now();
         let result = exchange(&mut current, &target).await;
         let end = Instant::now();
+        #[cfg(test)]
+        tests::diagnostic_exchange_window(*phase.borrow(), begin, end, &result);
         #[cfg(test)]
         let failed = result.is_err();
         #[cfg(test)]
@@ -660,11 +662,17 @@ pub(crate) mod tests {
     use crate::pki::Pki;
 
     // Task-local observation keeps the real dial/exchange/coordinator path.
-    // Only cancellation_health enters these scopes; other tests and the
-    // production binary have no diagnostic state. No lock crosses an await.
+    // Cancellation health and controlled boundary fixtures enter these
+    // scopes; the production binary has no diagnostic state. No lock crosses an await.
     tokio::task_local! {
         static HEALTH_COORDINATOR: Arc<HealthDiagnostics>;
         static HEALTH_WORKER: (Arc<HealthDiagnostics>, usize);
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct SuccessfulExchanges {
+        count: u64,
+        bytes: u64,
     }
 
     #[derive(Clone, Copy, Debug, Default)]
@@ -672,6 +680,22 @@ pub(crate) mod tests {
         started: u64,
         completed: u64,
         bytes: u64,
+        included: SuccessfulExchanges,
+        excluded: SuccessfulExchanges,
+    }
+
+    impl ExchangeProgress {
+        fn assert_accounted(self) {
+            assert_eq!(self.started, self.completed);
+            assert_eq!(self.completed, self.included.count + self.excluded.count);
+            assert_eq!(self.bytes, self.included.bytes + self.excluded.bytes);
+            for progress in [self.included, self.excluded] {
+                assert!(progress.bytes >= progress.count);
+                if progress.count == 0 {
+                    assert_eq!(progress.bytes, 0);
+                }
+            }
+        }
     }
 
     #[derive(Clone)]
@@ -776,7 +800,33 @@ pub(crate) mod tests {
             update(&mut state);
         }
 
-        pub(crate) fn assert_warmed_progress(&self, transport: Transport) {
+        fn assert_accounting(&self) -> (u64, u64) {
+            let mut included = SuccessfulExchanges::default();
+            for index in 0..4 {
+                self.worker(index, |state| {
+                    assert_eq!(state.outcome, "completed-ok");
+                    for (phase, progress) in state.exchanges.iter().enumerate() {
+                        progress.assert_accounted();
+                        if phase != 2 {
+                            assert_eq!(progress.included.count, 0);
+                            assert_eq!(progress.included.bytes, 0);
+                        }
+                    }
+                    let measurement = state.exchanges[2];
+                    assert_eq!(state.measured as u64, measurement.included.count);
+                    assert_eq!(state.body_bytes, measurement.included.bytes);
+                    assert_eq!(state.errors, 0);
+                    assert_eq!(state.error_events, 0);
+                    assert!(state.error_samples.is_empty());
+                    assert_eq!(state.last_error_stage, None);
+                    included.count += measurement.included.count;
+                    included.bytes += measurement.included.bytes;
+                });
+            }
+            (included.count, included.bytes)
+        }
+
+        pub(crate) fn assert_warmed_progress(&self, transport: Transport) -> (u64, u64) {
             let coordinator = self.coordinator.lock().unwrap();
             assert_eq!(coordinator.stage, "worker-joins-and-reuse");
             assert_eq!(coordinator.readiness, 4);
@@ -791,18 +841,14 @@ pub(crate) mod tests {
                     assert_eq!(preparation.started, 1);
                     assert!(warmup.started > 0);
                     assert!(warmup.started <= HEALTH_EXCHANGES_PER_PHASE as u64);
-                    assert_eq!(measurement.started, HEALTH_EXCHANGES_PER_PHASE as u64);
+                    assert!(measurement.started <= HEALTH_EXCHANGES_PER_PHASE as u64);
+                    // A closed-loop worker can have at most one successful
+                    // exchange finish beyond the fixed measurement deadline.
+                    assert!(measurement.excluded.count <= 1);
                     assert_eq!(reuse.started, u64::from(transport.http2()));
                     for progress in state.exchanges {
-                        assert_eq!(progress.started, progress.completed);
-                        assert!(progress.bytes >= progress.completed);
                         assert!(progress.bytes <= progress.completed * FRAME_BYTES as u64);
                     }
-                    // Preparation, drained warm-up and post-window reuse
-                    // bytes must stay outside the measured totals.
-                    assert_eq!(state.measured, HEALTH_EXCHANGES_PER_PHASE);
-                    assert_eq!(state.errors, 0);
-                    assert_eq!(state.body_bytes, measurement.bytes);
                     if transport.http2() {
                         let connection = state.connection.as_ref().unwrap();
                         assert_eq!(connection.owner, (index / 2) * 2);
@@ -830,6 +876,11 @@ pub(crate) mod tests {
                     assert!(count < 50);
                 }
             }
+            // Reconcile every successful phase byte, including any late
+            // measurement completion, with the actual returned worker totals.
+            let included = self.assert_accounting();
+            assert!(included.0 > 0);
+            included
         }
 
         pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
@@ -1213,11 +1264,45 @@ pub(crate) mod tests {
         });
     }
 
-    pub(super) fn diagnostic_exchange_completed(sender: &Sender) {
+    pub(super) fn diagnostic_exchange_completed(sender: &Sender, bytes: u64) {
         diagnostic_sender_stage(sender, "exchange-completed");
         observe_worker(|_, state| {
             let progress = &mut state.exchanges[state.exchange_phase];
             progress.completed = progress.completed.saturating_add(1);
+            if matches!(state.exchange_phase, 0 | 3) {
+                progress.excluded.count += 1;
+                progress.excluded.bytes += bytes;
+            }
+        });
+    }
+
+    pub(super) fn diagnostic_exchange_window(
+        phase: Phase,
+        begin: Instant,
+        finish: Instant,
+        result: &Result<u64, Failure>,
+    ) {
+        let Ok(bytes) = result else {
+            return;
+        };
+        // Compare raw window bounds and timestamps independently of
+        // Phase::contains and the worker's accounting decision. The saved
+        // exchange phase also keeps drained warm-up DATA outside the totals.
+        observe_worker(|_, state| {
+            let included = match phase {
+                Phase::Measuring { start, end } if state.exchange_phase == 2 => {
+                    begin >= start && finish <= end
+                }
+                _ => false,
+            };
+            let progress = &mut state.exchanges[state.exchange_phase];
+            let destination = if included {
+                &mut progress.included
+            } else {
+                &mut progress.excluded
+            };
+            destination.count += 1;
+            destination.bytes += *bytes;
         });
     }
 
@@ -1380,6 +1465,11 @@ pub(crate) mod tests {
                 };
                 observe_worker(|_, state| state.outcome = "running");
                 let result = future.await;
+                if let Ok(totals) = &result {
+                    // Snapshot the returned totals after retained-sender reuse,
+                    // rather than relying on the last measurement-loop snapshot.
+                    diagnostic_totals(totals, false);
+                }
                 if let Err(error) = &result {
                     diagnostic_error(error.as_ref());
                 }
@@ -2546,7 +2636,7 @@ pub(crate) mod tests {
         probe: impl Fn() -> S,
     ) -> Measured<S> {
         let runtime = CancellationRuntime::new();
-        let rounds = cancellation_rounds_inner(transport, probe);
+        let rounds = cancellation_rounds_inner(transport, probe, false);
         let result = runtime.block_on(rounds);
         // Keep the owner through every causal assertion. Normal paths join
         // workers and server sets first; timeout also shuts down all async
@@ -2558,6 +2648,7 @@ pub(crate) mod tests {
     async fn cancellation_rounds_inner<S>(
         transport: Transport,
         probe: impl Fn() -> S,
+        warmed: bool,
     ) -> Result<Measured<S>, tokio::time::error::Elapsed> {
         let timeout = Duration::from_secs(10);
         tokio::time::timeout(timeout, async {
@@ -2574,6 +2665,7 @@ pub(crate) mod tests {
                 tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
             });
             let load = load(4, 2);
+            let diagnostics = Arc::new(HealthDiagnostics::new(load));
             let (gates, mut arrivals) = mpsc::unbounded_channel();
             let accepted = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&accepted);
@@ -2598,7 +2690,11 @@ pub(crate) mod tests {
                         let index = requests.fetch_add(1, Ordering::SeqCst);
                         let bytes = match index / load.concurrency {
                             0 => 3 * FRAME_BYTES,
+                            1 if warmed => 2 * FRAME_BYTES,
                             1 => FRAME_BYTES,
+                            2 if warmed => FRAME_BYTES / 2,
+                            3 if warmed => FRAME_BYTES,
+                            4 if warmed => 4 * FRAME_BYTES,
                             _ => 2 * FRAME_BYTES,
                         };
                         let (release, receiver) = oneshot::channel();
@@ -2646,24 +2742,40 @@ pub(crate) mod tests {
             let (phase, receiver) = watch::channel(Phase::Preparing);
             let (ready, mut readiness) = mpsc::unbounded_channel();
             let mut workers = JoinSet::new();
+            let mut worker_index = 0;
             for _ in 0..load.connections(transport) {
-                let sender = dial(&target).await.unwrap();
+                let first = worker_index;
+                let sender = HEALTH_WORKER
+                    .scope((Arc::clone(&diagnostics), first), dial(&target))
+                    .await
+                    .unwrap();
+                let mut connection = None;
+                diagnostics.worker(first, |state| connection = state.connection.clone());
+                let mut senders = Vec::new();
                 if let Sender::H2(shared) = &sender {
                     for _ in 1..load.streams {
-                        workers.spawn(worker(
-                            Arc::clone(&target),
-                            Sender::H2(shared.clone()),
-                            receiver.clone(),
-                            ready.clone(),
-                        ));
+                        senders.push(Sender::H2(shared.clone()));
                     }
                 }
-                workers.spawn(worker(
-                    Arc::clone(&target),
-                    sender,
-                    receiver.clone(),
-                    ready.clone(),
-                ));
+                senders.push(sender);
+                for sender in senders {
+                    let index = worker_index;
+                    worker_index += 1;
+                    if index != first {
+                        diagnostics.worker(index, |state| state.connection = connection.clone());
+                    }
+                    workers.spawn(diagnostic_worker(
+                        Arc::clone(&diagnostics),
+                        index,
+                        worker_inner(
+                            Arc::clone(&target),
+                            sender,
+                            receiver.clone(),
+                            ready.clone(),
+                            warmed.then_some(HEALTH_EXCHANGES_PER_PHASE),
+                        ),
+                    ));
+                }
             }
             drop(ready);
             drop(receiver);
@@ -2672,7 +2784,18 @@ pub(crate) mod tests {
             await_readiness(load.concurrency, "startup", &mut readiness, &mut workers)
                 .await
                 .unwrap();
-            phase.send_replace(Phase::Draining);
+            let warmup = if warmed {
+                // Hold the first DATA until Draining is published. Every
+                // worker must finish this distinct warm-up frame before the
+                // real readiness rendezvous admits the measurement window.
+                phase.send_replace(Phase::Warmup);
+                let warmup = cancellations(&mut arrivals, load.concurrency).await;
+                phase.send_replace(Phase::Draining);
+                Some(release_cancellations(warmup).await)
+            } else {
+                phase.send_replace(Phase::Draining);
+                None
+            };
             await_readiness(
                 load.concurrency,
                 "measurement boundary",
@@ -2701,6 +2824,12 @@ pub(crate) mod tests {
             // These exchanges began inside the window but can receive their
             // first frame only after its deadline. They must not be counted.
             let crossing = release_cancellations(crossing).await;
+            let reuse = if warmed {
+                let reuse = cancellations(&mut arrivals, load.concurrency).await;
+                Some(release_cancellations(reuse).await)
+            } else {
+                None
+            };
             let mut totals = Totals {
                 connects: load.connections(transport) as u64,
                 ..Totals::default()
@@ -2710,15 +2839,59 @@ pub(crate) mod tests {
             }
             assert_eq!(totals.latencies_us.len(), load.concurrency);
             assert!(totals.latencies_us.iter().all(|latency| *latency > 0));
-            assert_eq!(totals.body_bytes, (load.concurrency * FRAME_BYTES) as u64);
+            let frame_bytes = if warmed { FRAME_BYTES / 2 } else { FRAME_BYTES };
+            assert_eq!(totals.body_bytes, (load.concurrency * frame_bytes) as u64);
             assert_eq!(totals.errors, 0);
             assert!(totals.error_samples.is_empty());
+            let (requests, bytes) = diagnostics.assert_accounting();
+            assert_eq!(totals.latencies_us.len() as u64, requests);
+            assert_eq!(totals.body_bytes, bytes);
             assert_eq!(totals.connects, accepted.load(Ordering::SeqCst) as u64);
             if transport.http2() {
                 assert_eq!(preparation, [0, 0, 1, 1]);
                 assert_eq!(completed, preparation);
                 assert_eq!(crossing, preparation);
                 assert_eq!(totals.connects, load.connections(transport) as u64);
+                if warmed {
+                    assert_eq!(warmup.unwrap(), preparation);
+                    assert_eq!(reuse.unwrap(), preparation);
+                    let mut sockets = [None, None];
+                    for index in 0..4 {
+                        diagnostics.worker(index, |state| {
+                            let [preparation, warmup, measurement, reuse] = state.exchanges;
+                            for progress in [preparation, warmup, reuse] {
+                                assert_eq!(progress.started, 1);
+                                assert_eq!(progress.excluded.count, 1);
+                            }
+                            assert_eq!(preparation.excluded.bytes, (3 * FRAME_BYTES) as u64);
+                            assert_eq!(warmup.excluded.bytes, (2 * FRAME_BYTES) as u64);
+                            assert_eq!(measurement.started, 2);
+                            assert_eq!(measurement.included.count, 1);
+                            assert_eq!(measurement.included.bytes, (FRAME_BYTES / 2) as u64);
+                            assert_eq!(measurement.excluded.count, 1);
+                            assert_eq!(measurement.excluded.bytes, FRAME_BYTES as u64);
+                            assert_eq!(reuse.excluded.bytes, (4 * FRAME_BYTES) as u64);
+                            let connection = state.connection.as_ref().unwrap();
+                            assert_eq!(connection.owner, (index / 2) * 2);
+                            assert_eq!(connection.generation, 1);
+                            assert_eq!(state.connect_attempts, u64::from(index.is_multiple_of(2)));
+                            assert_eq!(state.sender_closed, Some(false));
+                            let socket = connection.local_addr.unwrap();
+                            let retained = &mut sockets[index / 2];
+                            if let Some(original) = retained {
+                                assert_eq!(*original, socket);
+                            } else {
+                                *retained = Some(socket);
+                            }
+                            let resets = state.exchanges.iter().map(|p| p.started).sum::<u64>();
+                            assert_eq!(resets, 5);
+                        });
+                    }
+                    assert_ne!(sockets[0], sockets[1]);
+                    // Exactly ten cancellations per original connection,
+                    // including preparation, warm-up and the retained probe.
+                    assert_eq!(accepted.load(Ordering::SeqCst), 2);
+                }
             } else {
                 let distinct: std::collections::BTreeSet<_> = preparation
                     .into_iter()
@@ -2740,6 +2913,17 @@ pub(crate) mod tests {
             }
         })
         .await
+    }
+
+    #[test]
+    fn warmed_cancellation_excludes_drained_late_and_reuse_frames() {
+        let runtime = CancellationRuntime::new();
+        let rounds = cancellation_rounds_inner(Transport::H2c, || (), true);
+        let result = runtime.block_on(rounds);
+        runtime.shutdown();
+        let measured = result.unwrap();
+        assert_eq!(measured.totals.latencies_us.len(), 4);
+        assert_eq!(measured.totals.body_bytes, (4 * (FRAME_BYTES / 2)) as u64);
     }
 
     #[tokio::test]
