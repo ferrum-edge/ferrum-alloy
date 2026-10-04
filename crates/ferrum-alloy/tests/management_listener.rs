@@ -165,11 +165,7 @@ async fn tokenless_loopback_exposes_only_minimal_probes() {
     for &path in paths {
         // This is exactly the transport a same-netns sidecar uses. Even a
         // spoofed operator header cannot authenticate it without a token.
-        let reply = fetch_with(
-            &url(path),
-            &[("authorization", "Bearer attacker-token")],
-        )
-        .await;
+        let reply = fetch_with(&url(path), &[("authorization", "Bearer attacker-token")]).await;
         assert_eq!(reply.status, 401, "{path}");
         assert_eq!(reply.headers["www-authenticate"], "Bearer");
         assert_eq!(reply.headers["cache-control"], "no-store");

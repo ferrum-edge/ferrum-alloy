@@ -459,7 +459,13 @@ async fn untraced_ids_forwarded_by_a_gateway_never_mix_unrelated_requests() {
     assert_eq!(responses(&report).len(), 1);
     assert_eq!(report.subject.trace_id.as_deref(), Some(trace.as_str()));
     assert_eq!(report.observations[0].span, first_span);
-    assert!(report.collection.notes.iter().any(|n| n.starts_with("33 later")));
+    assert!(
+        report
+            .collection
+            .notes
+            .iter()
+            .any(|n| n.starts_with("33 later"))
+    );
     let text = metrics(&parts).await;
     let conflicts = r#"ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}"#;
     assert_eq!(metric(&text, conflicts), 33);
@@ -471,7 +477,10 @@ async fn untraced_ids_forwarded_by_a_gateway_never_mix_unrelated_requests() {
     let other = parse(&retrieve(&parts, "edge-reused", Some(TOKEN_B)).await);
     assert_eq!(responses(&other).len(), 1);
     assert_ne!(other.subject.trace_id, report.subject.trace_id);
-    assert_eq!(parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await), report);
+    assert_eq!(
+        parse(&retrieve(&parts, "edge-reused", Some(TOKEN_A)).await),
+        report
+    );
 }
 
 #[tokio::test]
@@ -481,7 +490,9 @@ async fn tokenless_management_keeps_diagnostic_authorization_separate() {
     let parts = parts(cfg);
     order(&parts, "tenant-a", "req-private").await;
     assert_eq!(
-        manage(&parts, operator(), "/health", Some(TOKEN_A)).await.status,
+        manage(&parts, operator(), "/health", Some(TOKEN_A))
+            .await
+            .status,
         StatusCode::UNAUTHORIZED
     );
     assert_not_found(&retrieve(&parts, "req-private", None).await);

@@ -879,12 +879,7 @@ async fn unpolled_upgrade_closes_before_return<I>(
     } else {
         None
     };
-    held_upgrade_closes_before_return(
-        server,
-        client,
-        (held, pending),
-    )
-    .await;
+    held_upgrade_closes_before_return(server, client, (held, pending)).await;
 }
 
 async fn held_upgrade_closes_before_return<I: AsyncRead + Unpin, H>(
@@ -933,13 +928,7 @@ async fn unpolled_tcp_upgrades_are_shut_down_before_serving_returns() {
         let (routes, receiver) = unpolled_upgrade_router();
         let server = support::start(AlloyApp::new("hardening").router(routes), config).await;
         let client = TcpStream::connect(server.addr).await.unwrap();
-        unpolled_upgrade_closes_before_return(
-            server,
-            client,
-            receiver,
-            await_upgrade,
-        )
-        .await;
+        unpolled_upgrade_closes_before_return(server, client, receiver, await_upgrade).await;
     }
 }
 
@@ -1829,16 +1818,11 @@ mod tls {
             let mut tls = tls_listener(300);
             tls.config.server.max_connections = 1;
             let (routes, receiver) = unpolled_upgrade_router();
-            let server = support::start(AlloyApp::new("hardening").router(routes), tls.config).await;
+            let server =
+                support::start(AlloyApp::new("hardening").router(routes), tls.config).await;
             let tcp = TcpStream::connect(server.addr).await.unwrap();
             let client = tls_connect(tcp, &tls.ca).await;
-            unpolled_upgrade_closes_before_return(
-                server,
-                client,
-                receiver,
-                await_upgrade,
-            )
-            .await;
+            unpolled_upgrade_closes_before_return(server, client, receiver, await_upgrade).await;
         }
     }
 

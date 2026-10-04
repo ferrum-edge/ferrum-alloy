@@ -221,11 +221,12 @@ impl ServerStats {
 }
 
 /// Holds a connection slot, the `active_connections` gauge, and the drain's
-/// count of open sockets for as long as the connection's socket is open. The
-/// connection task holds it until its transport exists, then the transport
-/// does, so that it stays with the socket when Hyper hands the socket over to
-/// the application for an upgraded (WebSocket) connection. Dropping it, with
-/// the socket or with an aborted connection task, releases all three, once.
+/// connection tracker until the owning transport is dropped, including
+/// after TCP shutdown. The connection task holds it until its transport
+/// exists, then the transport does, so it stays with the socket when Hyper
+/// hands the socket over to the application for an upgraded (WebSocket)
+/// connection. Dropping it, with the socket or with an aborted connection
+/// task, releases all three, once.
 struct ActiveConnection {
     stats: Arc<ServerStats>,
     /// Fails the transport once the listener force-closes its connections.
@@ -261,7 +262,13 @@ impl ActiveConnection {
 #[derive(Default)]
 struct SocketShutdown {
     state: Mutex<ShutdownState>,
+    // Per-listener fault injection; never alters process-wide handle limits.
+    #[cfg(test)]
+    clone_socket: Option<Box<SocketCloner>>,
 }
+
+#[cfg(test)]
+type SocketCloner = dyn Fn(&TcpStream) -> io::Result<Socket> + Send + Sync;
 
 #[derive(Default)]
 struct ShutdownState {
@@ -271,7 +278,7 @@ struct ShutdownState {
 
 impl SocketShutdown {
     fn register(self: &Arc<Self>, stream: &TcpStream) -> io::Result<SocketRegistration> {
-        let socket = SockRef::from(stream).try_clone()?;
+        let socket = self.clone_socket(stream)?;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let id = state.next_id;
         state.next_id = id
@@ -282,6 +289,14 @@ impl SocketShutdown {
             registry: Arc::clone(self),
             id,
         })
+    }
+
+    fn clone_socket(&self, stream: &TcpStream) -> io::Result<Socket> {
+        #[cfg(test)]
+        if let Some(clone) = &self.clone_socket {
+            return clone(stream);
+        }
+        SockRef::from(stream).try_clone()
     }
 
     /// Attempt every shutdown, even if one fails. Drop and shutdown are
@@ -504,6 +519,63 @@ fn builder(options: &ServeOptions, streams: StreamExecutor) -> Builder<StreamExe
     builder
 }
 
+/// Admission resources and one shared retry streak for accept/registration
+/// errors. An accepted socket alone does not show resource pressure has ended.
+struct AcceptState {
+    shutdown: Arc<SocketShutdown>,
+    permits: Arc<Semaphore>,
+    backoff: Duration,
+    #[cfg(test)]
+    accept_error: Arc<Mutex<Option<io::ErrorKind>>>,
+    #[cfg(test)]
+    retrying: Option<tokio::sync::mpsc::UnboundedSender<Duration>>,
+}
+
+impl AcceptState {
+    fn new(max_connections: usize) -> Self {
+        Self {
+            shutdown: Arc::new(SocketShutdown::default()),
+            permits: Arc::new(Semaphore::new(max_connections)),
+            backoff: Duration::from_millis(5),
+            #[cfg(test)]
+            accept_error: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            retrying: None,
+        }
+    }
+
+    async fn accept(&self, listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
+        #[cfg(test)]
+        if let Some(kind) = self
+            .accept_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            return Err(io::Error::from(kind));
+        }
+        listener.accept().await
+    }
+
+    /// Called only after releasing any refused socket and connection permit.
+    /// Shutdown must also interrupt resource-exhaustion retries.
+    async fn back_off(&mut self, lifecycle: &Lifecycle) -> bool {
+        #[cfg(test)]
+        if let Some(retrying) = &self.retrying {
+            let _ = retrying.send(self.backoff);
+        }
+        let retry = tokio::select! {
+            biased;
+            () = lifecycle.stop_accepting().cancelled() => false,
+            () = tokio::time::sleep(self.backoff) => true,
+        };
+        if retry {
+            self.backoff = (self.backoff * 2).min(Duration::from_secs(1));
+        }
+        retry
+    }
+}
+
 /// Serves `app` on `listener` until the lifecycle stops accepting, then
 /// drains within the budget. Returns once every connection task and HTTP/2
 /// stream task has ended, and once every upgraded connection has been
@@ -520,14 +592,23 @@ pub(crate) async fn serve(
     lifecycle: Lifecycle,
     stats: Arc<ServerStats>,
 ) -> io::Result<()> {
+    let state = AcceptState::new(options.max_connections);
+    serve_with_state(listener, app, options, lifecycle, stats, state).await
+}
+
+async fn serve_with_state(
+    listener: TcpListener,
+    app: Router,
+    options: ServeOptions,
+    lifecycle: Lifecycle,
+    stats: Arc<ServerStats>,
+    mut state: AcceptState,
+) -> io::Result<()> {
     let streams = Streams::default();
     // Every open connection socket, whether its connection task still serves
     // it or Hyper has handed it over to the application for an upgrade.
     let sockets = TaskTracker::new();
-    let shutdown = Arc::new(SocketShutdown::default());
-    let permits = Arc::new(Semaphore::new(options.max_connections));
     let mut connections = JoinSet::new();
-    let mut backoff = Duration::from_millis(5);
     loop {
         let accepted = tokio::select! {
             biased;
@@ -539,36 +620,41 @@ pub(crate) async fn serve(
                 }
                 continue;
             }
-            accepted = listener.accept() => accepted,
+            accepted = state.accept(&listener) => accepted,
         };
         let (stream, remote) = match accepted {
-            Ok(accepted) => {
-                backoff = Duration::from_millis(5);
-                accepted
-            }
+            Ok(accepted) => accepted,
             Err(error) => {
                 // Resource exhaustion (EMFILE) and similar: back off instead
                 // of spinning.
                 tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "accept failed");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(1));
+                if !state.back_off(&lifecycle).await {
+                    break;
+                }
                 continue;
             }
         };
-        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+        let Ok(permit) = Arc::clone(&state.permits).try_acquire_owned() else {
             stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
             drop(stream);
             continue;
         };
         let _ = stream.set_nodelay(true);
-        let registration = match shutdown.register(&stream) {
+        let registration = match state.shutdown.register(&stream) {
             Ok(registration) => registration,
             Err(error) => {
                 tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "cannot prepare socket shutdown; refusing connection");
                 drop(stream);
+                drop(permit);
+                if !state.back_off(&lifecycle).await {
+                    break;
+                }
                 continue;
             }
         };
+        // Only full admission (including the owned shutdown handle) ends a
+        // failure streak. Connection-limit refusals do not reset it either.
+        state.backoff = Duration::from_millis(5);
         let close = streams.connection();
         let executor = streams.executor(&close);
         let socket = sockets.token();
@@ -577,13 +663,7 @@ pub(crate) async fn serve(
         let stats = Arc::clone(&stats);
         let options = options.clone();
         connections.spawn(async move {
-            let active = ActiveConnection::open(
-                stats,
-                close,
-                permit,
-                socket,
-                Some(registration),
-            );
+            let active = ActiveConnection::open(stats, close, permit, socket, Some(registration));
             let builder = builder(&options, executor);
             handle(stream, remote, active, builder, app, &options, &lifecycle).await;
         });
@@ -627,7 +707,7 @@ pub(crate) async fn serve(
         streams.cancel();
         // This closes the TCP connection independently of polling or
         // dropping an upgraded transport, below TLS when enabled.
-        shutdown_error = shutdown.close_all().err();
+        shutdown_error = state.shutdown.close_all().err();
         // Aborting a task drops its connection and socket; `shutdown` returns
         // once every task has ended, including aborted tasks still unwinding.
         connections.shutdown().await;
