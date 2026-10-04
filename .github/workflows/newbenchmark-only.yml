@@ -35,9 +35,15 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: '1'
       RUST_BACKTRACE: '1'
       QUALIFICATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      QUALIFICATION_OUT: ${{ runner.temp }}/alloy-benchmark
       QUALIFICATION_FULL: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
     steps:
+      - name: Initialize qualification output directory
+        run: |
+          set -euo pipefail
+          QUALIFICATION_OUT="$RUNNER_TEMP/alloy-benchmark"
+          # Publish the path before mkdir so always() steps retain it on failure.
+          printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
+          mkdir -p "$QUALIFICATION_OUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ env.QUALIFICATION_SHA }}
