@@ -163,13 +163,19 @@ async fn a_finished_http1_body_blocked_in_the_transport_outlives_idle() {
     tokio::time::sleep(IDLE_TIMEOUT * 3).await;
     assert_eq!(connection.stats.idle_timeouts.load(Ordering::Relaxed), 0);
     assert_eq!(
-        connection.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        connection
+            .stats
+            .write_stall_timeouts
+            .load(Ordering::Relaxed),
         0
     );
     let receive = async {
         let mut buf = [0u8; CAPACITY];
         loop {
-            if let Some(end) = connection.received.windows(4).position(|w| w == b"\r\n\r\n")
+            if let Some(end) = connection
+                .received
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
                 && connection.received.len() >= end + 4 + BIG_BODY
             {
                 break;
@@ -193,7 +199,10 @@ async fn a_finished_http1_body_blocked_in_the_transport_outlives_idle() {
         .unwrap();
     assert_eq!(connection.stats.idle_timeouts.load(Ordering::Relaxed), 0);
     assert_eq!(
-        connection.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        connection
+            .stats
+            .write_stall_timeouts
+            .load(Ordering::Relaxed),
         0
     );
     assert_eq!(
@@ -214,7 +223,10 @@ async fn an_unread_finished_http1_response_is_closed_by_the_write_stall_timeout(
         .unwrap();
     assert!(started.elapsed() >= WRITE_STALL_TIMEOUT / 2);
     assert_eq!(
-        connection.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        connection
+            .stats
+            .write_stall_timeouts
+            .load(Ordering::Relaxed),
         1
     );
     assert_eq!(connection.stats.idle_timeouts.load(Ordering::Relaxed), 0);
@@ -243,7 +255,10 @@ async fn a_finished_http1_response_is_idle_while_the_client_reads_buffered_data(
         .unwrap();
     assert_eq!(connection.stats.idle_timeouts.load(Ordering::Relaxed), 1);
     assert_eq!(
-        connection.stats.write_stall_timeouts.load(Ordering::Relaxed),
+        connection
+            .stats
+            .write_stall_timeouts
+            .load(Ordering::Relaxed),
         0
     );
     assert_eq!(

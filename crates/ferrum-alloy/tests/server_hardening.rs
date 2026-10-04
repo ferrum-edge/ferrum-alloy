@@ -1009,7 +1009,10 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         0,
         "the slow-reader connections must not close by write stall (server close reasons: {close_reasons})"
     );
-    assert_eq!(server.stats.first_request_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        server.stats.first_request_timeouts.load(Ordering::Relaxed),
+        0
+    );
     server.shutdown().await.unwrap();
 }
 
