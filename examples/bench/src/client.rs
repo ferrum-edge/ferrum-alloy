@@ -183,7 +183,14 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
         None => {
             #[cfg(test)]
             tests::diagnostic_worker_stage("http-handshake");
-            handshake(TokioIo::new(stream), h2).await
+            #[cfg(test)]
+            {
+                tests::diagnostic_handshake(stream, h2).await
+            }
+            #[cfg(not(test))]
+            {
+                handshake(TokioIo::new(stream), h2).await
+            }
         }
         Some(config) => {
             let name = ServerName::try_from("localhost")?;
@@ -194,7 +201,14 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
                 .await?;
             #[cfg(test)]
             tests::diagnostic_worker_stage("http-handshake");
-            handshake(TokioIo::new(stream), h2).await
+            #[cfg(test)]
+            {
+                tests::diagnostic_handshake(stream, h2).await
+            }
+            #[cfg(not(test))]
+            {
+                handshake(TokioIo::new(stream), h2).await
+            }
         }
     }
 }
@@ -916,7 +930,14 @@ pub(crate) mod tests {
             }
             let now = Instant::now();
             let state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
-            let mut message = SnapshotText(String::new());
+            let wire_budget = if cell.transport.http2() {
+                DIAGNOSTIC_WIRE_BYTES
+            } else {
+                DIAGNOSTIC_WIRE_EMPTY_BYTES
+            };
+            let mut message = SnapshotText::new(
+                DIAGNOSTIC_SNAPSHOT_BYTES - wire_budget - DIAGNOSTIC_LOSS_BYTES,
+            );
             let feature = match std::env::var("ALLOY_BENCH_DIAGNOSTIC_FEATURE").as_deref() {
                 Ok("all-features") => "all-features",
                 Ok("default-features") => "default-features",
@@ -934,7 +955,7 @@ pub(crate) mod tests {
                  window_ms={} per_phase={} timeout_ms=15000 coordinator={} \
                  coordinator_stage_ms={} readiness={}/4 joined={}/4 \
                  coordinator_last_error_stage={:?} \
-                 wire_observer=pinned-h2-client-poll-only wire_cause_may_be_unknown",
+                 wire_observer=client-plaintext-and-pinned-h2-poll wire_cause_may_be_unknown",
                 cell.scenario.name(),
                 cell.workload.name(),
                 cell.transport.name(),
@@ -994,7 +1015,10 @@ pub(crate) mod tests {
                 );
             }
             self.observer.write(&mut message, now);
-            let _ = std::io::stderr().lock().write_all(message.0.as_bytes());
+            let mut wire = SnapshotText::new(wire_budget);
+            self.observer.write_wire(&mut wire, now);
+            let message = message.finish(wire);
+            let _ = std::io::stderr().lock().write_all(message.as_bytes());
             // Test-only, opt-in artifact output. One fixed-size snapshot per
             // cell; I/O failure must never replace the Result or unwind.
             if let Some(directory) = std::env::var_os("ALLOY_BENCH_DIAGNOSTIC_DIR") {
@@ -1011,7 +1035,7 @@ pub(crate) mod tests {
                     .create_new(true)
                     .open(path)
                 {
-                    let _ = file.write_all(message.0.as_bytes());
+                    let _ = file.write_all(message.as_bytes());
                 }
             }
         }
@@ -1025,6 +1049,9 @@ pub(crate) mod tests {
     const DIAGNOSTIC_CHAIN_DEPTH: usize = 4;
 
     const DIAGNOSTIC_SNAPSHOT_BYTES: usize = 64 * 1024;
+    const DIAGNOSTIC_WIRE_BYTES: usize = 48 * 1024;
+    const DIAGNOSTIC_WIRE_EMPTY_BYTES: usize = 512;
+    const DIAGNOSTIC_LOSS_BYTES: usize = 256;
 
     fn write_bounded(text: &mut String, limit: usize, input: &str) -> std::fmt::Result {
         for character in input.chars() {
@@ -1036,12 +1063,59 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    struct SnapshotText(String);
+    struct SnapshotText(String, usize, usize);
+
+    impl SnapshotText {
+        fn new(limit: usize) -> Self {
+            Self(String::new(), limit, 0)
+        }
+
+        fn finish(mut self, wire: Self) -> String {
+            self.0.push('\n');
+            self.0.push_str(&wire.0);
+            let _ = writeln!(
+                self.0,
+                "\nsnapshot_loss detail_bytes={} wire_bytes={} budget={} wire_reserve={} \
+                 compact_ages_cap_us={}",
+                self.2,
+                wire.2,
+                DIAGNOSTIC_SNAPSHOT_BYTES,
+                wire.1,
+                u64::MAX,
+            );
+            self.0
+        }
+    }
 
     impl std::fmt::Write for SnapshotText {
         fn write_str(&mut self, text: &str) -> std::fmt::Result {
-            write_bounded(&mut self.0, DIAGNOSTIC_SNAPSHOT_BYTES, text)
+            let before = self.0.len();
+            let _ = write_bounded(&mut self.0, self.1, text);
+            self.2 = self.2.saturating_add(text.len() - (self.0.len() - before));
+            // Continue formatting after capacity, so all lost bytes are counted.
+            Ok(())
         }
+    }
+
+    #[test]
+    fn snapshot_reserves_wire_state_and_reports_all_formatting_loss() {
+        let mut detail = SnapshotText::new(
+            DIAGNOSTIC_SNAPSHOT_BYTES - DIAGNOSTIC_WIRE_BYTES - DIAGNOSTIC_LOSS_BYTES,
+        );
+        let _ = write!(detail, "{}", "é".repeat(DIAGNOSTIC_SNAPSHOT_BYTES));
+        let mut wire = SnapshotText::new(DIAGNOSTIC_WIRE_BYTES);
+        let observer = crate::health::Observer::default();
+        observer.write_wire(&mut wire, Instant::now());
+        let _ = write!(wire, "{}", "0".repeat(DIAGNOSTIC_SNAPSHOT_BYTES));
+        let detail_loss = detail.2;
+        let wire_loss = wire.2;
+        let snapshot = detail.finish(wire);
+        assert!(snapshot.len() <= DIAGNOSTIC_SNAPSHOT_BYTES);
+        assert!(detail_loss > 0 && wire_loss > 0);
+        assert!(snapshot.contains("boundary=client-plaintext-I/O"));
+        assert!(snapshot.contains(&format!(
+            "snapshot_loss detail_bytes={detail_loss} wire_bytes={wire_loss}"
+        )));
     }
 
     #[derive(Default)]
@@ -1342,6 +1416,41 @@ pub(crate) mod tests {
                 driver: Arc::new(AtomicUsize::new(0)),
             });
         });
+    }
+
+    pub(super) async fn diagnostic_handshake<I>(io: I, h2: bool) -> Result<Sender, Failure>
+    where
+        I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let wire = h2
+            .then(|| {
+                HEALTH_WORKER
+                    .try_with(|(diagnostics, index)| {
+                        let mut connection = None;
+                        diagnostics.worker(*index, |state| connection = state.connection.clone());
+                        connection.and_then(|connection| {
+                            diagnostics.observer.wire(
+                                &diagnostics.instance,
+                                connection.owner,
+                                connection.generation,
+                                connection.local_addr,
+                            )
+                        })
+                    })
+                    .ok()
+                    .flatten()
+            })
+            .flatten();
+        match wire {
+            Some(wire) => {
+                handshake(
+                    TokioIo::new(crate::health::WireIo::new(io, wire)),
+                    h2,
+                )
+                .await
+            }
+            None => handshake(TokioIo::new(io), h2).await,
+        }
     }
 
     pub(super) fn diagnostic_exchange_started(sender: &Sender) {
@@ -1872,11 +1981,17 @@ pub(crate) mod tests {
                     // DATA on stream zero is a real protocol error. No frame
                     // or peer bytes may be retained by the event collector.
                     h2_write(&stream, 0, 0, 0, b"peer-private-marker").await;
-                    h2_until(&stream, 7).await;
+                    let (_, id, payload) = h2_until(&stream, 7).await;
+                    assert_eq!(id, 0);
+                    let last = u32::from_be_bytes(payload[..4].try_into().unwrap()) & 0x7fff_ffff;
+                    let reason = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+                    assert_eq!(reason, 1); // PROTOCOL_ERROR, not a guessed delay cause.
+                    Some((last, reason))
                 } else {
                     // Truncated PING (9-byte header + 1 of 8 payload bytes)
                     // followed by EOF is a real framed-reader I/O error.
                     wire_write(&stream, &[0, 0, 8, 6, 0, 0, 0, 0, 0, 0]).await;
+                    None
                 }
             });
             let result = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
@@ -1886,7 +2001,20 @@ pub(crate) mod tests {
             })
             .await;
             assert!(result.is_err());
-            server.await.unwrap();
+            let goaway = server.await.unwrap();
+            let wires = diagnostics.observer.wires();
+            assert_eq!(wires.len(), 1);
+            let frames = wires[0].snapshot();
+            if let Some((last, reason)) = goaway {
+                assert!(frames.has_goaway(crate::health::Direction::Tx, last, reason));
+                assert_eq!(frames.directions[1].invalid_streams, 1);
+            } else {
+                assert!(frames.directions[1].eof_partial());
+                assert_eq!(frames.directions[1].invalid_lengths, 0);
+            }
+            let mut frame_text = String::new();
+            diagnostics.observer.write_wire(&mut frame_text, Instant::now());
+            assert!(!frame_text.contains("peer-private-marker"));
             diagnostics.worker(0, |state| {
                 assert!(state.wire_events > 0);
                 assert!(state.wire_samples.len() <= ERROR_SAMPLES);
@@ -1937,6 +2065,21 @@ pub(crate) mod tests {
             assert_ne!(address, state.connection.as_ref().unwrap().local_addr);
         });
         for diagnostics in [&left, &right] {
+            let wire = &diagnostics.observer.wires()[0];
+            assert_eq!(wire.owner, 0);
+            assert_eq!(wire.generation, 1);
+            diagnostics.worker(0, |state| {
+                assert_eq!(wire.socket, state.connection.as_ref().unwrap().local_addr);
+            });
+            let mut text = String::new();
+            diagnostics.observer.write_wire(&mut text, Instant::now());
+            assert!(text.contains(&diagnostics.instance));
+            let other = if Arc::ptr_eq(diagnostics, &left) {
+                &right
+            } else {
+                &left
+            };
+            assert!(!text.contains(&other.instance));
             for index in 1..4 {
                 diagnostics.worker(index, |state| assert_eq!(state.wire_events, 0));
             }
@@ -2578,19 +2721,30 @@ pub(crate) mod tests {
                             "response-headers"
                         };
                         diagnostics.wait_stage(0, expected).await;
+                        let wires = diagnostics.observer.wires();
+                        assert_eq!(wires.len(), 1);
+                        let frames = wires[0].snapshot();
+                        let tx = &frames.directions[0];
+                        let rx = &frames.directions[1];
                         if matches!(held, Held::Wire) {
                             assert_eq!(wire[0].snapshot().inner_polls, 0);
                             assert!(requests.is_empty());
+                            assert_eq!(tx.headers_complete, 0);
+                            assert_eq!(rx.blocks_complete, 0);
                         } else {
+                            assert_eq!(tx.headers_complete, 1);
+                            assert_eq!(rx.data_complete, 0);
                             assert!(wire[0].snapshot().inner_polls > 0);
                             assert_eq!(requests.len(), 1);
                             let request = &requests[0];
                             assert_eq!(request.frames.load(Ordering::Relaxed), 0);
                             if matches!(held, Held::Headers) {
+                                assert_eq!(rx.blocks_complete, 0);
                                 assert!(request.response.lock().unwrap().is_none());
                                 assert_eq!(request.handler.snapshot().inner_polls, 0);
                                 assert_eq!(request.body.snapshot().polls, 0);
                             } else {
+                                assert_eq!(rx.blocks_complete, 1);
                                 assert!(request.response.lock().unwrap().is_some());
                                 assert_eq!(request.handler.snapshot().ready, 1);
                                 assert!(request.body.snapshot().pending > 0);
@@ -2604,6 +2758,7 @@ pub(crate) mod tests {
                         });
                         assert!(unrelated.observer.tasks("worker").is_empty());
                         assert!(unrelated.observer.requests().is_empty());
+                        assert!(unrelated.observer.wires().is_empty());
                         if release {
                             let gated = match held {
                                 Held::Wire => Arc::clone(&wire[0]),
@@ -2636,6 +2791,10 @@ pub(crate) mod tests {
                                     .all(|request| { request.frames.load(Ordering::Relaxed) == 1 })
                             );
                             assert!(gated.snapshot().wakes > before_wakes);
+                            let frames = wires[0].snapshot();
+                            assert_eq!(frames.directions[0].headers_complete, 2);
+                            assert_eq!(frames.directions[1].blocks_complete, 2);
+                            assert_eq!(frames.directions[1].data_complete, 2);
                         }
                         // Abort and join the tasks we own. Runtime shutdown
                         // below also destroys the separately spawned children.
@@ -3155,6 +3314,13 @@ pub(crate) mod tests {
             assert_eq!(totals.body_bytes, bytes);
             assert_eq!(totals.connects, accepted.load(Ordering::SeqCst) as u64);
             if transport.http2() {
+                let wires = diagnostics.observer.wires();
+                assert_eq!(wires.len(), 2);
+                for (index, wire) in wires.iter().enumerate() {
+                    assert_eq!(wire.owner, index * 2);
+                    assert_eq!(wire.generation, 1);
+                    assert!(wire.snapshot().directions[1].data_complete > 0);
+                }
                 assert_eq!(preparation, [0, 0, 1, 1]);
                 assert_eq!(completed, preparation);
                 assert_eq!(crossing, preparation);
@@ -3200,6 +3366,7 @@ pub(crate) mod tests {
                     assert_eq!(accepted.load(Ordering::SeqCst), 2);
                 }
             } else {
+                assert!(diagnostics.observer.wires().is_empty());
                 let distinct: std::collections::BTreeSet<_> = preparation
                     .into_iter()
                     .chain(completed)
