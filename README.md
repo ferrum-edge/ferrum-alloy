@@ -56,10 +56,12 @@ To go further, read [Getting started](docs/getting-started.md).
 |---|---|
 | **Configuration** | Typed and strict. Precedence is builder, then `FERRUM_ALLOY_*`, then TOML, then defaults. Secrets are redacted. See [configuration](docs/configuration.md). |
 | **Errors** | RFC 9457 Problem Details for framework errors and Problem-returning extractors. Application bodies are never rewritten. |
-| **Health** | Minimal liveness, cached single-flight readiness, and a draining state. Detailed health sits on a token-protected management listener. |
+| **Health** | Minimal liveness, cached single-flight readiness, and a draining state. Detailed health sits on a management listener that requires a token when configured. |
 | **Limits & lifecycle** | Body, header, connection, and admission limits. A deadline on time to response headers, which never cuts SSE streams. SIGTERM draining with a time budget and forced close. |
 | **Truthful telemetry** | Request ids and route-template metrics. W3C trace context is accepted only from trusted transport peers. Accounting ends exactly once, when the response *body* ends. OTLP export is bounded and counts any loss. |
-| **Optional batteries** | Cargo features: `otel`, `tls` (rustls with verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `openapi-ui` (a protected Swagger UI from embedded assets), `jwt` (JWKS), `http-client`, `compression`, `cors`, and `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service). |
+| **Optional batteries** | Cargo features: `otel`, `tls` (rustls with verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `openapi-ui` (Swagger UI from embedded assets, following the document's listener and token policy), `jwt` (JWKS), `http-client`, `compression`, `cors`, and `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service). |
+
+The management listener's loopback default admits every process that can reach it when no token is configured, including sidecars sharing a pod network namespace and other local users or processes. Set the existing management token of at least 32 characters whenever those processes are not trusted, even on loopback; the documented `_FILE` setting can supply it from a secret file. Kubernetes NetworkPolicy does not isolate containers sharing loopback. `/livez` and `/readyz` remain status-only and token-free. See [security](docs/security.md#management-surface) and [configuration](docs/configuration.md#management).
 
 ### CLI
 
