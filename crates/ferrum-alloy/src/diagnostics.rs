@@ -1291,7 +1291,11 @@ mod tests {
         assert_eq!(filed, ring.live());
         let aliases: usize = ring.aliases.values().map(|alias| alias.records).sum();
         assert_eq!(aliases, ring.live());
-        let allocated: usize = ring.aliases.values().map(|alias| alias.owner_capacity).sum();
+        let allocated: usize = ring
+            .aliases
+            .values()
+            .map(|alias| alias.owner_capacity)
+            .sum();
         assert!(allocated <= OWNER_CAPACITY_FACTOR * ring.live());
         let owner_bytes = (allocated * (size_of::<(RequestId, usize)>() + 1) * 8).div_ceil(7);
         assert!(owner_bytes <= OWNER_INDEX_BYTES * ring.live());
