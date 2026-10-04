@@ -7,8 +7,9 @@
   as it has taken the last chunk, so the rest of a large response could wait
   in Hyper's write buffer with no request counted in flight, and a pause of
   one idle timeout in the client's reading, or in the network, closed the
-  connection and truncated the response. A connection whose transport cannot
-  take a write is no longer idle on either protocol;
+  connection and truncated the response. An HTTP/1.1 connection whose transport
+  cannot take a write is no longer idle; HTTP/2 control writes, including blocked
+  PING and SETTINGS acknowledgements, do not defer idle closure;
   `server.write_stall_timeout_ms` still disconnects a client that stops
   reading, now also once its response body has ended. Once the transport has
   accepted the complete response, an idle close can still occur while the

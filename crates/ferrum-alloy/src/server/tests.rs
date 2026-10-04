@@ -1,5 +1,6 @@
-//! HTTP/1 response completion over bounded IO. Socket buffer options do not
-//! guarantee how much a platform accepts in one write; a duplex transport
+//! Response completion and HTTP/2 control backpressure over bounded IO.
+//! Socket buffer options do not guarantee how much a platform accepts in
+//! one write; a duplex transport
 //! gives these regressions an exact capacity on every hosted test platform.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -275,4 +276,241 @@ async fn a_finished_http1_response_is_idle_while_the_client_reads_buffered_data(
         response_body(&connection.received, SMALL_BODY).len(),
         SMALL_BODY
     );
+}
+
+/// Observes actual backpressure from the bounded transport, rather than
+/// assuming that sending control frames made the server's writes block.
+struct ObservedIo {
+    io: DuplexStream,
+    blocked: Arc<AtomicBool>,
+}
+
+impl AsyncRead for ObservedIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ObservedIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.io).poll_write(cx, buf);
+        this.blocked.store(result.is_pending(), Ordering::Relaxed);
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.io).poll_flush(cx);
+        this.blocked.store(result.is_pending(), Ordering::Relaxed);
+        result
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+}
+
+/// Time is paused, so give the connection a bounded number of polls without
+/// advancing to an unrelated timer while waiting for an IO state change.
+async fn wait_for_write_state(blocked: &AtomicBool, expected: bool) {
+    for _ in 0..1000 {
+        if blocked.load(Ordering::Relaxed) == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        blocked.load(Ordering::Relaxed),
+        expected,
+        "the server reached the expected transport write state"
+    );
+}
+
+async fn h2_frame(client: &mut DuplexStream) -> ([u8; FRAME_HEADER_LEN], Vec<u8>) {
+    let mut header = [0; FRAME_HEADER_LEN];
+    client.read_exact(&mut header).await.unwrap();
+    let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+    assert!(len <= CAPACITY, "the test receives only small frames");
+    let mut payload = vec![0; len];
+    client.read_exact(&mut payload).await.unwrap();
+    (header, payload)
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
+    const SMALL_BODY: usize = 128;
+    const CONTROL_CAPACITY: usize = 64;
+    const PINGS: usize = 4;
+    const SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+    const PING: &[u8] = &[0, 0, 8, 6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+    // GET / on stream 1, with END_STREAM and END_HEADERS. HPACK uses
+    // indexed method, scheme and path, and a literal authority of "t".
+    const GET: &[u8] = &[0, 0, 6, 1, 5, 0, 0, 0, 1, 0x82, 0x86, 0x84, 0x01, 1, b't'];
+    let idle_timeout = IDLE_TIMEOUT * 4;
+    let options = ServeOptions {
+        name: "app",
+        max_connections: 1,
+        max_header_count: 100,
+        max_header_bytes: 8192,
+        http2_max_concurrent_streams: 1,
+        header_read_timeout: IDLE_TIMEOUT,
+        idle_timeout,
+        write_stall_timeout: IDLE_TIMEOUT,
+        drain_timeout: WITHIN,
+        #[cfg(feature = "tls")]
+        tls: None,
+    };
+    let stats = Arc::new(ServerStats::default());
+    let slots = Arc::new(Semaphore::new(1));
+    let sockets = TaskTracker::new();
+    let streams = Streams::default();
+    let close = streams.connection();
+    let builder = builder(&options, streams.executor(&close));
+    let active = ActiveConnection::open(
+        Arc::clone(&stats),
+        close,
+        Arc::clone(&slots).acquire_owned().await.unwrap(),
+        sockets.token(),
+    );
+    let finished = Arc::new(Notify::new());
+    let body_finished = Arc::clone(&finished);
+    let routes = Router::new().route(
+        "/",
+        get(move || {
+            let body = FinishedBody {
+                data: Some(Bytes::from(vec![b'x'; SMALL_BODY])),
+                finished: Arc::clone(&body_finished),
+            };
+            async move { Body::new(body) }
+        }),
+    );
+    let lifecycle = Lifecycle::new(Arc::default());
+    let peer = PeerInfo {
+        remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
+        tls: None,
+    };
+    let blocked = Arc::new(AtomicBool::new(false));
+    let (mut client, server) = tokio::io::duplex(CONTROL_CAPACITY);
+    let io = ObservedIo {
+        io: server,
+        blocked: Arc::clone(&blocked),
+    };
+    let task = tokio::spawn(async move {
+        serve_io(io, peer, active, builder, routes, &options, &lifecycle).await;
+    });
+    let receive = async {
+        client
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await
+            .unwrap();
+        client.write_all(SETTINGS).await.unwrap();
+        let (header, _) = h2_frame(&mut client).await;
+        assert_eq!(header[3], 4, "the server selected HTTP/2");
+        assert_eq!(header[4], 0, "the server's initial SETTINGS");
+        client
+            .write_all(&[0, 0, 0, 4, 1, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        client.write_all(GET).await.unwrap();
+        let mut body = Vec::new();
+        loop {
+            let (header, payload) = h2_frame(&mut client).await;
+            if header[3] == DATA_FRAME {
+                assert_eq!(&header[5..], &[0, 0, 0, 1]);
+                body.extend_from_slice(&payload);
+                if header[4] & 1 != 0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(body, vec![b'x'; SMALL_BODY]);
+        finished.notified().await;
+    };
+    tokio::time::timeout(WITHIN, receive)
+        .await
+        .expect("the response completed before control-only traffic");
+    streams.tracker.close();
+    tokio::time::timeout(WITHIN, streams.tracker.wait())
+        .await
+        .expect("the response stream task released its request guard");
+    wait_for_write_state(&blocked, false).await;
+    let completed = Instant::now();
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 1);
+    assert_eq!(slots.available_permits(), 0);
+
+    // Four PING ACKs plus a SETTINGS ACK exceed the exact transport
+    // capacity. Repeatedly fill it, then drain it before the stall timeout,
+    // without another request, WINDOW_UPDATE, or response DATA byte.
+    for _ in 0..3 {
+        for _ in 0..PINGS {
+            client.write_all(PING).await.unwrap();
+        }
+        client.write_all(SETTINGS).await.unwrap();
+        wait_for_write_state(&blocked, true).await;
+        tokio::time::advance(IDLE_TIMEOUT / 4).await;
+        for _ in 0..PINGS {
+            let (header, payload) = h2_frame(&mut client).await;
+            assert_eq!(header[3], 6, "only PING ACKs, never response DATA");
+            assert_eq!(header[4], 1);
+            assert_eq!(payload, &PING[FRAME_HEADER_LEN..]);
+        }
+        let (header, payload) = h2_frame(&mut client).await;
+        assert_eq!(header[3], 4, "the SETTINGS ACK followed the PING ACKs");
+        assert_eq!(header[4], 1);
+        assert!(payload.is_empty());
+        wait_for_write_state(&blocked, false).await;
+        // Let the stall sampler see no pending write between bursts.
+        tokio::time::advance(IDLE_TIMEOUT / 2).await;
+        tokio::task::yield_now().await;
+        assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    }
+
+    // Put another short control-only blockage across the idle deadline.
+    let until_block = completed + idle_timeout - IDLE_TIMEOUT / 4;
+    tokio::time::advance(until_block - Instant::now()).await;
+    tokio::task::yield_now().await;
+    for _ in 0..PINGS {
+        client.write_all(PING).await.unwrap();
+    }
+    client.write_all(SETTINGS).await.unwrap();
+    wait_for_write_state(&blocked, true).await;
+    tokio::time::advance(IDLE_TIMEOUT / 2).await;
+    for _ in 0..1000 {
+        if stats.idle_timeouts.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    assert!(blocked.load(Ordering::Relaxed));
+
+    // Keep the client and unread ACKs alive through the close grace period.
+    // Only server-side cancellation can release this transport and its slot.
+    tokio::time::timeout(WITHIN, task)
+        .await
+        .expect("the idle connection closed within its bounded grace period")
+        .unwrap();
+    assert!(completed.elapsed() <= idle_timeout + IDLE_TIMEOUT * 2);
+    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.first_request_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.force_closed_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.force_closed_streams.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(slots.available_permits(), 1);
+    assert_eq!(sockets.len(), 0);
+    assert_eq!(streams.tracker.len(), 0);
+    let mut remaining = Vec::new();
+    client.read_to_end(&mut remaining).await.unwrap();
 }

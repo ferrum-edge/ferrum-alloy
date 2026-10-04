@@ -15,8 +15,11 @@ Every timing Alloy exposes, whether as a span attribute, metric, log field, `Ser
 
 Response body finalization, transport progress, and client receipt are separate
 boundaries. Hyper can release a finished body while its final bytes still wait in
-Hyper's write buffer. A blocked transport write keeps that connection from being
-idle; the write stall timeout bounds the wait instead.
+Hyper's write buffer. On HTTP/1.1, a blocked transport write keeps that connection
+from being idle; the write stall timeout bounds the wait instead. On HTTP/2,
+only response DATA writes count as progress; blocked control writes, including
+PING and SETTINGS acknowledgements, do not defer idle closure after the response
+body has ended.
 
 A completed transport write means the transport accepted those bytes, which can
 still be buffered in the kernel or on the client. Once the body has ended and
