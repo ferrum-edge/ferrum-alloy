@@ -118,7 +118,11 @@ impl Wake for ForwardWake {
             state.wakes = state.wakes.saturating_add(1);
             state.last_wake = Some(Instant::now());
         }
-        let target = self.target.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let target = self
+            .target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // Never forward a wake while holding an observation or target lock.
         if let Some(target) = target {
             target.wake();
@@ -393,7 +397,10 @@ pub(crate) async fn response_with_gates(
     let response = Observed::new(future, Some(Arc::clone(&observation.handler)))
         .gated(headers)
         .await;
-    *observation.response.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    *observation
+        .response
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
     response.map(|body| {
         axum::body::Body::new(ObservedBody {
             inner: Box::pin(body),
@@ -419,7 +426,9 @@ impl<B: hyper::body::Body> hyper::body::Body for ObservedBody<B> {
     ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
         let start = this.observation.body.begin();
-        if let Some(gate) = &this.gate && gate.poll(cx).is_pending() {
+        if let Some(gate) = &this.gate
+            && gate.poll(cx).is_pending()
+        {
             this.observation.body.finish(start, false, false);
             return Poll::Pending;
         }

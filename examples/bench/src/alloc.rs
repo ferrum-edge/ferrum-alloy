@@ -139,9 +139,8 @@ mod observation {
 
     impl Scope {
         pub(super) fn enter() -> Self {
-            let previous = OBSERVER.with(|observer| {
-                observer.replace(Some([Counts::default(); Role::ALL.len()]))
-            });
+            let previous = OBSERVER
+                .with(|observer| observer.replace(Some([Counts::default(); Role::ALL.len()])));
             Self {
                 previous,
                 counters: None,
@@ -297,7 +296,10 @@ mod tests {
             set_role(Role::Client);
             let data = std::hint::black_box(vec![0_u8; 2048]);
             assert!(inner.snapshot()[Role::Client as usize].bytes >= 2048);
-            assert_eq!(inner.snapshot()[Role::Collector as usize], Counts::default());
+            assert_eq!(
+                inner.snapshot()[Role::Collector as usize],
+                Counts::default()
+            );
             drop(data);
         }
         assert!(observation::active());

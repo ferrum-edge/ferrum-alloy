@@ -2511,8 +2511,8 @@ pub(crate) mod tests {
                             stream.set_nodelay(true).unwrap();
                             let service = service_fn(move |_| {
                                 let observation = server_observer.observer.request(Some(peer));
-                                let headers = matches!(held, Held::Headers)
-                                    .then(|| Arc::clone(&server_gate));
+                                let headers =
+                                    matches!(held, Held::Headers).then(|| Arc::clone(&server_gate));
                                 let data =
                                     matches!(held, Held::Data).then(|| Arc::clone(&server_gate));
                                 async move {
@@ -2540,20 +2540,16 @@ pub(crate) mod tests {
                                 .await;
                         });
                         let mut workers = JoinSet::new();
-                        workers.spawn(diagnostic_worker(
-                            Arc::clone(&diagnostics),
-                            0,
-                            async move {
-                                let mut sender = dial(&target).await?;
-                                let first = exchange(&mut sender, &target).await?;
-                                diagnostic_reuse();
-                                let reuse = exchange(&mut sender, &target).await?;
-                                Ok(Totals {
-                                    body_bytes: first + reuse,
-                                    ..Totals::default()
-                                })
-                            },
-                        ));
+                        workers.spawn(diagnostic_worker(Arc::clone(&diagnostics), 0, async move {
+                            let mut sender = dial(&target).await?;
+                            let first = exchange(&mut sender, &target).await?;
+                            diagnostic_reuse();
+                            let reuse = exchange(&mut sender, &target).await?;
+                            Ok(Totals {
+                                body_bytes: first + reuse,
+                                ..Totals::default()
+                            })
+                        }));
                         gate.reached().await;
                         let worker = diagnostics.observer.tasks("worker");
                         assert_eq!(worker.len(), 1);
@@ -2634,9 +2630,11 @@ pub(crate) mod tests {
                                 assert_eq!(request.socket, socket);
                                 assert_eq!(request.ordinal, index + 1);
                             }
-                            assert!(requests.iter().all(|request| {
-                                request.frames.load(Ordering::Relaxed) == 1
-                            }));
+                            assert!(
+                                requests
+                                    .iter()
+                                    .all(|request| { request.frames.load(Ordering::Relaxed) == 1 })
+                            );
                             assert!(gated.snapshot().wakes > before_wakes);
                         }
                         // Abort and join the tasks we own. Runtime shutdown
