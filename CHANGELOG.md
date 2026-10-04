@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Repair PR #141's test-only diagnostic worker guard ownership after
+  [head `73e6b711` / Clippy job 111507388589](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37226589007/job/111507388589)
+  rejected the field-only async capture. Construct the whole guard inside the
+  scoped future and explicitly disarm it on normal or Err completion; keep Drop
+  evidence for genuinely destroyed pending futures. Add single-poll regressions
+  for completed-ok/completed-error surviving wrapper destruction and retained
+  error stage, preserving pending worker/driver and outside-scope coverage.
+  Apply the exact two parent-workspace rustfmt hunks reported by Format and
+  Generated projects, without template changes. The historical `d00fc47` timeout
+  remains unexplained; fresh hosted checks and independent root review are required.
 - Add bounded test-only cancellation-health failure diagnostics for PR #141.
   [Head `d00fc47` / run 37225022927 / job 111502796765](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37225022927/job/111502796765)
   failed with 41 harness passes and an Alloy matrix 15-second driver timeout;

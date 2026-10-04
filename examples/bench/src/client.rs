@@ -736,7 +736,9 @@ pub(crate) mod tests {
         }
 
         fn worker(&self, index: usize, update: impl FnOnce(&mut WorkerDiagnostic)) {
-            let mut state = self.workers[index].lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.workers[index]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             update(&mut state);
         }
 
@@ -984,6 +986,12 @@ pub(crate) mod tests {
         finished: bool,
     }
 
+    impl WorkerDiagnosticGuard {
+        fn complete(&mut self) {
+            self.finished = true;
+        }
+    }
+
     impl Drop for WorkerDiagnosticGuard {
         fn drop(&mut self) {
             if !self.finished {
@@ -1002,13 +1010,14 @@ pub(crate) mod tests {
     where
         F: Future<Output = Result<Totals, Failure>>,
     {
-        let mut guard = WorkerDiagnosticGuard {
-            diagnostics: Arc::clone(&diagnostics),
-            index,
-            finished: false,
-        };
         HEALTH_WORKER
-            .scope((diagnostics, index), async move {
+            .scope((Arc::clone(&diagnostics), index), async move {
+                // Own the whole guard inside the scope across the worker's await.
+                let mut guard = WorkerDiagnosticGuard {
+                    diagnostics,
+                    index,
+                    finished: false,
+                };
                 observe_worker(|_, state| state.outcome = "running");
                 let result = future.await;
                 observe_worker(|_, state| {
@@ -1021,10 +1030,83 @@ pub(crate) mod tests {
                         state.last_error_stage = Some(state.stage);
                     }
                 });
-                guard.finished = true;
+                guard.complete();
                 result
             })
             .await
+    }
+
+    #[tokio::test]
+    async fn health_diagnostics_preserve_successful_worker_completion_after_drop() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let worker = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+            // An uncounted warm-up error must survive a later successful return.
+            diagnostic_worker_phase(Phase::Warmup);
+            diagnostic_worker_stage("response-headers");
+            diagnostic_totals(&Totals::default(), true);
+            let totals = Totals {
+                latencies_us: vec![7],
+                body_bytes: 512,
+                ..Totals::default()
+            };
+            diagnostic_totals(&totals, false);
+            diagnostic_reuse();
+            Ok(totals)
+        });
+        let mut worker = Box::pin(worker);
+        // A ready inner future must finish in one poll. Retain the completed
+        // wrapper until both its completion and destruction can be checked.
+        let totals = std::future::poll_fn(|cx| match worker.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => panic!("ready worker did not complete in one poll"),
+        })
+        .await
+        .unwrap();
+        assert_eq!(totals.latencies_us, vec![7]);
+        assert_eq!(totals.body_bytes, 512);
+        assert_eq!(totals.errors, 0);
+        let assert_completed = || {
+            diagnostics.worker(0, |state| {
+                assert_eq!(state.outcome, "completed-ok");
+                assert_eq!(state.stage, "retained-sender-reuse");
+                assert_eq!(state.measured, 1);
+                assert_eq!(state.body_bytes, 512);
+                assert_eq!(state.last_error_stage, Some("response-headers"));
+            });
+        };
+        assert_completed();
+        drop(worker);
+        assert_completed();
+    }
+
+    #[tokio::test]
+    async fn health_diagnostics_preserve_worker_error_completion_after_drop() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let worker = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+            diagnostic_worker_stage("first-data-frame");
+            diagnostic_body_bytes(512);
+            Err(std::io::Error::other("worker completion regression").into())
+        });
+        let mut worker = Box::pin(worker);
+        let error = std::future::poll_fn(|cx| match worker.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => panic!("ready worker error did not complete in one poll"),
+        })
+        .await
+        .unwrap_err();
+        let error = error.downcast::<std::io::Error>().unwrap();
+        assert_eq!(error.to_string(), "worker completion regression");
+        let assert_completed = || {
+            diagnostics.worker(0, |state| {
+                assert_eq!(state.outcome, "completed-error");
+                assert_eq!(state.stage, "first-data-frame");
+                assert_eq!(state.last_error_stage, Some("first-data-frame"));
+                assert_eq!(state.exchanges[0].bytes, 512);
+            });
+        };
+        assert_completed();
+        drop(worker);
+        assert_completed();
     }
 
     #[tokio::test]

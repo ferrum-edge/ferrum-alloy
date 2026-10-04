@@ -489,7 +489,8 @@ mod tests {
     impl Drop for HealthFailureEvidence {
         fn drop(&mut self) {
             if std::thread::panicking() {
-                self.diagnostics.failure(self.cell, "cell-error-or-assertion");
+                self.diagnostics
+                    .failure(self.cell, "cell-error-or-assertion");
             }
         }
     }
