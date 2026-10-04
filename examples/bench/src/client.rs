@@ -397,13 +397,7 @@ async fn measurement_window<S>(
         }
     }
     phase.send_replace(Phase::Draining);
-    await_readiness(
-        load.concurrency,
-        "measurement boundary",
-        readiness,
-        workers,
-    )
-    .await?;
+    await_readiness(load.concurrency, "measurement boundary", readiness, workers).await?;
     // Baseline probes and unfinished warm-up exchanges cannot consume the
     // requested window. All workers start their next exchange after release.
     let start = probe();
@@ -426,13 +420,7 @@ async fn measure_workers<S>(
     probe: impl Fn() -> S,
 ) -> Result<Measured<S>, Failure> {
     let result = async {
-        await_readiness(
-            load.concurrency,
-            "startup",
-            readiness,
-            workers,
-        )
-        .await?;
+        await_readiness(load.concurrency, "startup", readiness, workers).await?;
         let (start, end) = measurement_window(load, phase, readiness, workers, probe).await?;
         let mut totals = Totals {
             connects,
@@ -496,15 +484,7 @@ pub(crate) async fn drive<S>(
     }
     drop(ready);
     drop(receiver);
-    measure_workers(
-        load,
-        &phase,
-        &mut readiness,
-        &mut workers,
-        connects,
-        probe,
-    )
-    .await
+    measure_workers(load, &phase, &mut readiness, &mut workers, connects, probe).await
 }
 
 #[cfg(test)]
@@ -726,15 +706,9 @@ mod tests {
         let warmup_start = Instant::now();
         let measured = tokio::spawn(async move {
             let probe = || samples.fetch_add(1, Ordering::SeqCst);
-            let samples = measurement_window(
-                load,
-                &phase,
-                &mut readiness,
-                &mut workers,
-                probe,
-            )
-            .await
-            .unwrap();
+            let samples = measurement_window(load, &phase, &mut readiness, &mut workers, probe)
+                .await
+                .unwrap();
             let mut totals = Totals {
                 connects: 2,
                 ..Totals::default()
@@ -850,14 +824,9 @@ mod tests {
         let probes = Arc::new(AtomicUsize::new(0));
         let samples = Arc::clone(&probes);
         let measured = tokio::spawn(async move {
-            let result = measure_workers(
-                load,
-                &phase,
-                &mut readiness,
-                &mut workers,
-                2,
-                || samples.fetch_add(1, Ordering::SeqCst),
-            )
+            let result = measure_workers(load, &phase, &mut readiness, &mut workers, 2, || {
+                samples.fetch_add(1, Ordering::SeqCst)
+            })
             .await;
             // Returning the error includes joining every aborted peer, not
             // merely dropping the set and requesting their cancellation.
@@ -895,22 +864,19 @@ mod tests {
 
     #[tokio::test]
     async fn reported_startup_error_aborts_parked_peers_and_preserves_the_cause() {
-        let error = interrupted_admission(
-            Phase::Preparing,
-            Some("injected admission failure"),
-        )
-        .await;
+        let error =
+            interrupted_admission(Phase::Preparing, Some("injected admission failure")).await;
         assert_eq!(error, "worker startup: injected admission failure");
     }
 
     #[tokio::test]
     async fn reported_boundary_error_aborts_parked_peers_and_preserves_the_cause() {
-        let error = interrupted_admission(
-            Phase::Draining,
-            Some("injected admission failure"),
-        )
-        .await;
-        assert_eq!(error, "worker measurement boundary: injected admission failure");
+        let error =
+            interrupted_admission(Phase::Draining, Some("injected admission failure")).await;
+        assert_eq!(
+            error,
+            "worker measurement boundary: injected admission failure"
+        );
     }
 
     #[tokio::test]
