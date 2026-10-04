@@ -330,7 +330,12 @@ fn a_trickling_body_cannot_extend_the_whole_operation_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
+    let expected_request = format!(
+        "GET /diagnostics/v1/refs/{} HTTP/1.1",
+        record["ref"].as_str().unwrap()
+    );
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
@@ -357,44 +362,76 @@ fn a_trickling_body_cannot_extend_the_whole_operation_deadline() {
             assert!(request.len() < 32 * 1024);
         }
         assert!(request.ends_with(b"\r\n\r\n"));
+        let request = String::from_utf8(request).unwrap();
+        assert_eq!(request.lines().next().unwrap(), expected_request);
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {TOKEN}"))
+        );
         let head = format!(
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             body.len() + 40,
         );
         stream.write_all(head.as_bytes()).unwrap();
         started_tx.send(Instant::now()).unwrap();
-        let mut writes = 0;
+        let mut write_times = Vec::new();
+        let mut disconnected = false;
         // Every gap is below the 600 ms read timeout, but a complete response
         // takes at least four seconds. Without a total deadline it succeeds.
         for _ in 0..40 {
             if let Err(error) = stream.write_all(b" ") {
                 assert_client_disconnect(&error, "trickle");
-                return writes;
+                disconnected = true;
+                break;
             }
-            writes += 1;
+            write_times.push(Instant::now());
             std::thread::sleep(Duration::from_millis(100));
         }
-        if let Err(error) = stream.write_all(body.as_bytes()) {
+        if !disconnected && let Err(error) = stream.write_all(body.as_bytes()) {
             assert_client_disconnect(&error, "final body");
+            disconnected = true;
         }
-        writes
+        completed_tx.send((write_times, disconnected)).unwrap();
     });
     let output = diagnose(&url, &observation, &["--timeout-ms", "600"]);
     // Measure before joining the fixture, which has its own bounded lifetime.
-    let elapsed = started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .elapsed();
-    let writes = server.join().unwrap();
-    assert!(writes >= 3, "fixture did not actively trickle: {writes}");
-    assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
+    let returned_at = Instant::now();
+    let started = started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let elapsed = returned_at.duration_since(started);
+    // The request deadline starts before connect/send, so time spent reaching
+    // this server has already consumed it. There is no minimum body-read time.
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-    assert_eq!(output.status.code(), Some(1));
+    // Require bounded cleanup after the CLI returns, including an observed
+    // disconnect rather than successful completion of the four-second body.
+    let (write_times, disconnected) = completed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    server.join().unwrap();
+    assert!(disconnected, "client read the complete trickling response");
+    let writes: Vec<_> = write_times
+        .into_iter()
+        .filter(|written_at| *written_at <= returned_at)
+        .collect();
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Edge record read failed or timed out"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        writes.len() >= 3,
+        "fixture did not actively trickle before CLI returned: {}",
+        writes.len()
     );
+    assert!(writes.len() < 40, "client outlasted the trickle");
+    assert!(
+        writes
+            .windows(2)
+            .all(|pair| pair[1].duration_since(pair[0]) < Duration::from_millis(600)),
+        "fixture stalled between body writes"
+    );
+    assert!(
+        returned_at.duration_since(*writes.last().unwrap()) < Duration::from_millis(600),
+        "fixture stalled before CLI returned"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(error, "error: Edge record read failed or timed out\n");
+    assert!(!error.contains(&url));
     assert_private(&output);
 }
 
