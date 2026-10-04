@@ -23,6 +23,15 @@
   still covers the candidate tenant's projected holding; remove the global
   fallback and preserve sole records. Add variable-size, donor, replacement,
   exact-limit, mixed-pressure and concurrent/index regressions (#136).
+- Compact depleted diagnostic alias owner tables geometrically, tracking
+  allocation capacity across deletion tombstones. Aggregate owner-table
+  capacity stays within four slots per live owner, hence per retained record,
+  with constant table rounding/control overhead. Charge that owner allowance
+  in the byte estimate; keep configured limits and admission policy unchanged.
+  Add grow/drain/pair-refresh capacity regressions against the former index
+  and variable-length owner/alias stress with bounded compaction scans
+  (PR #138 / #136 / #137). The byte estimate remains distinct from process
+  memory; individual rebuilds scan one alias allocation under the store lock.
 - Give each frontend request immutable locally generated diagnostic ownership.
   Remote request ids and accepted traces remain correlation hints, preserving
   HTTP response ids and trace propagation; matching remote pairs and preclaims

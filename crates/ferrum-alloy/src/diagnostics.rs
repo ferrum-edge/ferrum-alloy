@@ -108,21 +108,31 @@ pub const MAX_ROUTE_BYTES: usize = 512;
 /// counts.
 const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
 
+/// Compact an alias's owner table once its allocation exceeds this many
+/// capacity slots per live owner. Rebuild at half-load to avoid alternating
+/// growth and compaction on single-owner insertions/removals.
+const OWNER_CAPACITY_FACTOR: usize = 4;
+
+/// Per-record allowance for owner buckets and control bytes, rounded up.
+const OWNER_INDEX_BYTES: usize =
+    ((size_of::<(RequestId, usize)>() + 1) * OWNER_CAPACITY_FACTOR * 8).div_ceil(7);
+
 /// Estimated fixed cost of one record besides its strings: its entries in
 /// the record map and in its tenant's sequence set, with B-tree nodes at
 /// their minimum occupancy of 5 of 11 entries; an index entry and a tenant
 /// entry with their hash table control bytes, at the tables' 7/8 maximum
-/// load, including the alias and its owner map; the smallest sequence number
-/// list; the tenant's entries in both tenant orderings; and the reference-count
-/// headers of its tenant and route. It is an estimate, not a measurement:
-/// allocator overhead and spare hash table capacity, which never shrinks,
-/// are not counted, while an index, tenant, or ordering entry shared by records is
-/// counted for each of them.
+/// load, including the alias; the owner table's bounded spare capacity;
+/// the smallest sequence number list; the tenant's entries in both tenant
+/// orderings; and the reference-count headers of its tenant and route.
+/// It is an estimate, not a measurement: allocator overhead, control-group
+/// padding and spare capacity of the other collections are not counted,
+/// while an index, tenant, or ordering entry shared by records is counted
+/// for each of them.
 const RECORD_OVERHEAD_BYTES: usize = (2 * size_of::<u64>() + size_of::<Stored>()) * 11 / 5
     + (size_of::<(Key, Filed)>() + 1) * 8 / 7
     + (size_of::<(Arc<str>, Holding)>() + 1) * 8 / 7
     + (size_of::<(Alias, Aliased)>() + 1) * 8 / 7
-    + (size_of::<(RequestId, usize)>() + 1) * 8 / 7
+    + OWNER_INDEX_BYTES
     + 2 * size_of::<(usize, Arc<str>)>() * 11 / 5
     + 4 * size_of::<u64>()
     + 2 * ARC_HEADER_BYTES;
@@ -295,7 +305,45 @@ struct Aliased {
     /// Local owners and their retained record counts. A reused external
     /// alias is ambiguous, even when all owners share a remote trace.
     owners: HashMap<RequestId, usize>,
+    /// Capacity observed when allocating/growing the table, retained until
+    /// rebuilding it. Deletions can lower `HashMap::capacity()` through
+    /// tombstones without releasing buckets, so that value alone cannot
+    /// decide when to compact. This bounds the allocation, not just its
+    /// current insertion capacity.
+    owner_capacity: usize,
     records: usize,
+}
+
+impl Aliased {
+    fn add(&mut self, owner: RequestId) {
+        *self.owners.entry(owner).or_default() += 1;
+        self.owner_capacity = self.owner_capacity.max(self.owners.capacity());
+        self.records += 1;
+    }
+
+    fn remove(&mut self, owner: &RequestId) {
+        self.records -= 1;
+        let Some(count) = self.owners.get_mut(owner) else {
+            return;
+        };
+        *count -= 1;
+        if *count != 0 {
+            return;
+        }
+        self.owners.remove(owner);
+        let live = self.owners.len();
+        if live == 0 || self.owner_capacity <= live.saturating_mul(OWNER_CAPACITY_FACTOR) {
+            return;
+        }
+        // Move the keys instead of cloning their strings. Each rebuild
+        // scans the old allocation only after geometric depletion; its
+        // work is amortized over the intervening owner removals, including
+        // when this runs under the global retention mutex.
+        let mut owners = HashMap::with_capacity(live.saturating_mul(2));
+        owners.extend(self.owners.drain());
+        self.owners = owners;
+        self.owner_capacity = self.owners.capacity();
+    }
 }
 
 /// What one tenant holds.
@@ -370,11 +418,7 @@ impl Ring {
         self.bytes = self.bytes.saturating_add(record.bytes);
         let alias = (tenant, record.origin, record.request_id.clone());
         let aliased = self.aliases.entry(alias).or_default();
-        *aliased
-            .owners
-            .entry(record.diagnostic_id.clone())
-            .or_default() += 1;
-        aliased.records += 1;
+        aliased.add(record.diagnostic_id.clone());
         self.index.entry(key).or_default().seqs.push(seq);
         self.records.insert(seq, record);
     }
@@ -402,13 +446,7 @@ impl Ring {
         }
         let alias = (tenant, record.origin, record.request_id);
         if let Some(aliased) = self.aliases.get_mut(&alias) {
-            aliased.records -= 1;
-            if let Some(count) = aliased.owners.get_mut(&record.diagnostic_id) {
-                *count -= 1;
-                if *count == 0 {
-                    aliased.owners.remove(&record.diagnostic_id);
-                }
-            }
+            aliased.remove(&record.diagnostic_id);
             if aliased.records == 0 {
                 self.aliases.remove(&alias);
             }
@@ -1253,8 +1291,14 @@ mod tests {
         assert_eq!(filed, ring.live());
         let aliases: usize = ring.aliases.values().map(|alias| alias.records).sum();
         assert_eq!(aliases, ring.live());
+        let allocated: usize = ring.aliases.values().map(|alias| alias.owner_capacity).sum();
+        assert!(allocated <= OWNER_CAPACITY_FACTOR * ring.live());
+        let owner_bytes = (allocated * (size_of::<(RequestId, usize)>() + 1) * 8).div_ceil(7);
+        assert!(owner_bytes <= OWNER_INDEX_BYTES * ring.live());
         for (alias, aliased) in &ring.aliases {
             assert_eq!(aliased.records, aliased.owners.values().sum::<usize>());
+            assert!(aliased.owners.capacity() <= aliased.owner_capacity);
+            assert!(aliased.owner_capacity <= OWNER_CAPACITY_FACTOR * aliased.owners.len());
             for (owner, count) in &aliased.owners {
                 let key = (Arc::clone(&alias.0), owner.clone());
                 assert_eq!(*count, ring.index[&key].seqs.len());
@@ -1505,6 +1549,148 @@ mod tests {
         assert_eq!(found(&store, "acme", "edge-1"), 0);
         assert_eq!(store.ring().aliases.len(), 2);
         check(&store);
+    }
+
+    #[test]
+    fn alias_owner_compaction_is_geometric_and_preserves_attempt_counts() {
+        let mut alias = Aliased::default();
+        // Exercise variable-size index keys directly. Frontend ownership
+        // still comes exclusively from fresh locally generated UUIDs.
+        let owners: Vec<_> = (0..512)
+            .map(|n| {
+                let padding = [0, 30, 122, 250][n % 4];
+                id(&format!("o-{n:03}-{}", "x".repeat(padding)))
+            })
+            .collect();
+        for owner in &owners {
+            alias.add(owner.clone());
+            assert!(alias.owner_capacity <= OWNER_CAPACITY_FACTOR * alias.owners.len());
+        }
+        for _ in 1..MAX_RECORDS_PER_REQUEST_ID {
+            alias.add(owners.last().unwrap().clone());
+        }
+        let initial_capacity = alias.owner_capacity;
+        let mut scanned_capacity = 0;
+        let mut rebuilds = 0;
+        for owner in &owners[..owners.len() - 1] {
+            let before = alias.owner_capacity;
+            alias.remove(owner);
+            if alias.owner_capacity < before {
+                scanned_capacity += before;
+                rebuilds += 1;
+                assert!(alias.owner_capacity <= before / 2);
+            }
+            assert!(alias.owners.capacity() <= alias.owner_capacity);
+            assert!(alias.owner_capacity <= OWNER_CAPACITY_FACTOR * alias.owners.len());
+            assert_eq!(
+                alias.owners[owners.last().unwrap()],
+                MAX_RECORDS_PER_REQUEST_ID
+            );
+        }
+        assert!(rebuilds > 1, "exercise multiple allocation sizes");
+        assert!(scanned_capacity < 2 * initial_capacity);
+        assert_eq!(alias.records, MAX_RECORDS_PER_REQUEST_ID);
+        let capacity = alias.owner_capacity;
+        for _ in 1..MAX_RECORDS_PER_REQUEST_ID {
+            alias.remove(owners.last().unwrap());
+            assert_eq!(alias.owner_capacity, capacity, "owner remains live");
+        }
+        assert_eq!(alias.records, 1);
+        assert_eq!(alias.owners.len(), 1);
+    }
+
+    /// Replay the former no-compaction index alongside sink admission. All
+    /// requests here have fresh local ownership, accepted caller aliases,
+    /// and one attempt, so count pressure removes exactly the oldest owner.
+    fn churn_alias(
+        store: &EvidenceStore,
+        alias: &RequestId,
+        legacy: &mut HashMap<RequestId, HashMap<RequestId, usize>>,
+    ) {
+        let oldest = {
+            let ring = store.ring();
+            (ring.live() == store.max_records).then(|| {
+                let record = ring.records.first_key_value().unwrap().1;
+                (record.request_id.clone(), record.diagnostic_id.clone())
+            })
+        };
+        if let Some((alias, owner)) = oldest {
+            let owners = legacy.get_mut(&alias).unwrap();
+            assert_eq!(owners.remove(&owner), Some(1));
+            if owners.is_empty() {
+                legacy.remove(&alias);
+            }
+        }
+        let mut next = evidence(Some("churn"), alias.as_str());
+        next.request_id_origin = RequestIdOrigin::UntrustedCaller;
+        legacy
+            .entry(alias.clone())
+            .or_default()
+            .insert(next.diagnostic_id().clone(), 1);
+        store.record(next);
+        check(store);
+        let ring = store.ring();
+        for (alias, aliased) in &ring.aliases {
+            assert_eq!(aliased.owners, legacy[&alias.2]);
+        }
+    }
+
+    #[test]
+    fn grow_drain_and_pair_refresh_bound_aggregate_allocated_alias_capacity() {
+        for max_records in [64usize, 128] {
+            let store = EvidenceStore::new(&settings(max_records, 1024 * 1024));
+            let mut legacy = HashMap::new();
+            for group in 0..max_records / 2 {
+                // After each drain, every older alias has a pair of owners.
+                // Refresh those pairs in insertion order so every large old
+                // allocation survives while the next alias grows and drains.
+                for _ in 0..group.saturating_sub(1) * 2 {
+                    let alias = store
+                        .ring()
+                        .records
+                        .first_key_value()
+                        .unwrap()
+                        .1
+                        .request_id
+                        .clone();
+                    churn_alias(&store, &alias, &mut legacy);
+                }
+                let padding = [0, 32, 128, 252][group % 4];
+                let alias = id(&format!("a{group:03}{}", "x".repeat(padding)));
+                for _ in 0..max_records - 2 * group {
+                    churn_alias(&store, &alias, &mut legacy);
+                }
+                assert_eq!(store.retained().0, max_records);
+                assert_eq!(store.ring().aliases.len(), group + 1);
+            }
+            let allocated: usize = store
+                .ring()
+                .aliases
+                .values()
+                .map(|alias| alias.owner_capacity)
+                .sum();
+            assert!(allocated <= OWNER_CAPACITY_FACTOR * max_records);
+            // This is measured table capacity, not owner/record counts or
+            // the byte estimate. Deletion may understate the legacy bucket
+            // allocation through tombstones, so even this lower bound must
+            // exceed the fixed index's linear allocation allowance.
+            let legacy_capacity: usize = legacy.values().map(HashMap::capacity).sum();
+            assert!(legacy_capacity > OWNER_CAPACITY_FACTOR * max_records);
+            for alias in legacy.keys() {
+                assert_eq!(found(&store, "churn", alias.as_str()), 0, "ambiguous");
+            }
+            let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
+            assert_eq!(metric(&store, limited), 0, "all owners were fresh");
+            let seqs: Vec<_> = store.ring().records.keys().copied().collect();
+            for seq in seqs {
+                assert!(store.ring().remove(seq));
+                check(&store);
+            }
+            assert_eq!(store.retained(), (0, 0));
+            assert!(store.ring().aliases.is_empty());
+            assert!(store.ring().index.is_empty());
+            assert!(store.ring().tenants.is_empty());
+        }
     }
 
     #[test]
