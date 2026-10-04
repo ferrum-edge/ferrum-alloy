@@ -371,50 +371,6 @@ pub(crate) fn validate_name(name: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-fn prepare_target(path: &Path) -> Result<PathBuf, CliError> {
-    let path = crate::fsout::normalize_output_root(path)?;
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(CliError::Invalid(format!(
-                    "{} is a symbolic link; refusing to write through it",
-                    path.display()
-                )));
-            }
-            if !metadata.is_dir() {
-                return Err(CliError::Invalid(format!(
-                    "{} exists and is not a directory",
-                    path.display()
-                )));
-            }
-            let mut entries = std::fs::read_dir(&path)
-                .map_err(|e| CliError::Io(format!("{}: {e}", path.display())))?;
-            if entries.next().is_some() {
-                return Err(CliError::Invalid(format!(
-                    "{} is not empty; refusing to overwrite",
-                    path.display()
-                )));
-            }
-            Ok(path)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            if !parent.is_dir() {
-                return Err(CliError::Invalid(format!(
-                    "parent directory {} does not exist",
-                    parent.display()
-                )));
-            }
-            crate::fsout::create_dirs(&path, &path)?;
-            Ok(path)
-        }
-        Err(error) => Err(CliError::Io(format!("{}: {error}", path.display()))),
-    }
-}
-
 fn toml_string(value: &str) -> String {
     toml::Value::String(value.to_owned()).to_string()
 }
@@ -606,23 +562,17 @@ pub(crate) fn run(args: NewArgs) -> Result<(), CliError> {
             .clone()
             .unwrap_or_else(|| PathBuf::from(&args.name)),
     )?;
-    let target = prepare_target(&target)?;
+    let mut output = crate::fsout::OutputDir::empty_tree(&target, false)?;
+    let target = output.path().to_path_buf();
     for (relative, content) in &files {
-        let path = target.join(relative);
-        let result = (|| {
-            if let Some(parent) = path.parent() {
-                crate::fsout::create_dirs(&target, parent)?;
-            }
-            crate::fsout::write_new(&path, content.as_bytes())
-                .map_err(|error| CliError::Io(error.to_string()))?;
-            Ok::<(), CliError>(())
-        })();
-        result.map_err(|error| {
-            CliError::Io(format!(
-                "{error}; a partial project tree may remain at {}; remove it before re-running",
-                target.display()
-            ))
-        })?;
+        output
+            .write_new(Path::new(relative), content.as_bytes())
+            .map_err(|error| {
+                CliError::Io(format!(
+                    "{error}; a partial project tree may remain at {}; remove it before re-running",
+                    target.display()
+                ))
+            })?;
     }
     crate::print(&format!(
         "Created {} in {}\n\nNext:\n  cd {}\n  cargo test\n  cargo run\n",

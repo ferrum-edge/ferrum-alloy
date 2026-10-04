@@ -191,19 +191,28 @@ fn diagnose_writes_reports_atomically() {
             .map(|entry| entry.unwrap().file_name())
             .collect()
     };
-    // A directory cannot be replaced by the report: the rename fails and
-    // the temporary file is removed.
+    // A directory cannot be replaced by the report. The failed rename leaves
+    // the temporary entry alone because its identity may have changed.
     std::fs::create_dir(&target).unwrap();
     let output = run(&args);
     assert_eq!(code(&output), 1, "{}", stderr(&output));
     assert!(target.is_dir());
-    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+    let failed_entries = entries();
+    assert_eq!(failed_entries.len(), 2);
+    let temporary = failed_entries
+        .iter()
+        .find(|name| *name != "report.json")
+        .unwrap();
+    let expected = std::fs::read(dir.path().join(temporary)).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+    assert!(report.is_object());
 
     std::fs::remove_dir(&target).unwrap();
     let output = run(&args);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert!(target.is_file());
-    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+    assert_eq!(entries().len(), 2);
+    assert_eq!(std::fs::read(dir.path().join(temporary)).unwrap(), expected);
 }
 
 #[cfg(unix)]
@@ -987,6 +996,195 @@ fn directory_output_writers_reject_symlinked_roots_but_follow_parent_context() {
         repo().join("crates/ferrum-alloy").to_str().unwrap(),
     ]);
     assert_eq!(code(&new_output), 3, "{}", stderr(&new_output));
+}
+
+#[cfg(any(unix, windows))]
+fn output_directory_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, link).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn file_writers_refuse_linked_selected_parents_and_accept_linked_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let linked = dir.path().join("selected-parent");
+    output_directory_link(&outside, &linked);
+    let manifest = fixture("manifests/orders-api.toml");
+    let otlp = fixture("otlp/edge-alloy-trace.jsonl");
+    let input = write(
+        dir.path(),
+        "openapi.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    let config = write(
+        dir.path(),
+        "config.toml",
+        "[server]\nbind = \"127.0.0.1:8080\"\n",
+    );
+    for (index, args) in [
+        vec!["edge", "export", "--manifest", &manifest],
+        vec!["edge", "export", "--manifest", &manifest, "--force"],
+        vec!["openapi", "export", "--input", &input],
+        vec![
+            "diagnose",
+            "--otlp",
+            &otlp,
+            "--trace-id",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        ],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output_option = if index == 3 {
+            "--write-report"
+        } else {
+            "--output"
+        };
+        let denied = linked.join(format!("denied-{index}"));
+        let mut denied_args = args.clone();
+        denied_args.extend([output_option, denied.to_str().unwrap()]);
+        let output = run(&denied_args);
+        assert_eq!(code(&output), 3, "{}", stderr(&output));
+        assert!(!outside.join(format!("denied-{index}")).exists());
+
+        // The link is now above a real named parent selected for this file.
+        let parent = linked.join(format!("real-parent-{index}"));
+        std::fs::create_dir(&parent).unwrap();
+        let accepted = parent.join("artifact");
+        let mut accepted_args = args;
+        accepted_args.extend([output_option, accepted.to_str().unwrap()]);
+        let output = run(&accepted_args);
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        assert!(accepted.is_file());
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 1);
+    }
+    // Input paths keep their separate bounded regular-file policy. A linked
+    // parent is valid for reading configuration, even when refused for output.
+    std::fs::copy(&config, outside.join("config.toml")).unwrap();
+    let linked_config = linked.join("config.toml");
+    let checked = run(&["check", "--config", linked_config.to_str().unwrap()]);
+    assert_eq!(code(&checked), 0, "{}", stderr(&checked));
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn generated_tree_commands_keep_trusted_ancestors_and_refuse_duplicate_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let ancestor = dir.path().join("ancestor");
+    output_directory_link(&real, &ancestor);
+    let manifest = fixture("manifests/orders-api.toml");
+    for (name, mut args, leaf) in [
+        ("project", vec!["new", "svc"], "src/main.rs"),
+        (
+            "gitops",
+            vec![
+                "edge",
+                "export",
+                "--format",
+                "gitforgeops",
+                "--manifest",
+                &manifest,
+            ],
+            "resources/ferrum/proxies/orders-api.yaml",
+        ),
+    ] {
+        let root = ancestor.join(name);
+        let option = if name == "project" {
+            "--path"
+        } else {
+            "--output"
+        };
+        args.extend([option, root.to_str().unwrap()]);
+        let output = run(&args);
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        let expected = std::fs::read(root.join(leaf)).unwrap();
+        let duplicate = run(&args);
+        assert_eq!(code(&duplicate), 3, "{}", stderr(&duplicate));
+        assert_eq!(std::fs::read(real.join(name).join(leaf)).unwrap(), expected);
+    }
+}
+
+#[test]
+fn file_output_anchors_preserve_current_and_parent_directory_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let manifest = fixture("manifests/orders-api.toml");
+    for relative in ["local.yaml", "./explicit-local.yaml", "../parent.yaml"] {
+        let output = bin()
+            .current_dir(&project)
+            .args([
+                "edge",
+                "export",
+                "--manifest",
+                &manifest,
+                "--output",
+                relative,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        assert!(project.join(relative).is_file());
+    }
+}
+
+#[test]
+fn file_output_parent_errors_keep_io_and_validation_exit_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = fixture("manifests/orders-api.toml");
+    let otlp = fixture("otlp/edge-alloy-trace.jsonl");
+    let input = write(
+        dir.path(),
+        "openapi.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    std::fs::write(dir.path().join("file-parent"), b"untouched").unwrap();
+    for (args, option) in [
+        (vec!["edge", "export", "--manifest", &manifest], "--output"),
+        (
+            vec!["edge", "export", "--manifest", &manifest, "--force"],
+            "--output",
+        ),
+        (vec!["openapi", "export", "--input", &input], "--output"),
+        (
+            vec![
+                "diagnose",
+                "--otlp",
+                &otlp,
+                "--trace-id",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+            ],
+            "--write-report",
+        ),
+    ] {
+        for (parent, expected) in [("missing", 1), ("missing/child", 1), ("file-parent", 3)] {
+            let target = dir.path().join(parent).join("artifact");
+            let mut args = args.clone();
+            args.extend([option, target.to_str().unwrap()]);
+            let output = run(&args);
+            let error = stderr(&output);
+            assert_eq!(code(&output), expected, "{error}");
+            if expected == 1 {
+                assert!(error.contains("write "), "{error}");
+            } else {
+                assert!(error.contains("must be a real directory"), "{error}");
+            }
+            assert!(!target.exists());
+        }
+    }
+    assert!(!dir.path().join("missing").exists());
+    assert_eq!(
+        std::fs::read(dir.path().join("file-parent")).unwrap(),
+        b"untouched"
+    );
 }
 
 #[test]

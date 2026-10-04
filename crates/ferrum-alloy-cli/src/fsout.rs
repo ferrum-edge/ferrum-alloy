@@ -1,13 +1,16 @@
-//! Safe output-file operations shared by CLI commands.
+//! Output operations anchored to owned directory handles, never checked paths.
 
-use std::collections::hash_map::RandomState;
-use std::ffi::OsString;
-use std::fs::OpenOptions;
+use std::collections::{BTreeMap, hash_map::RandomState};
+use std::ffi::{OsStr, OsString};
 use std::hash::{BuildHasher, Hasher};
-use std::io::{ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
+use std::path::{Component, Path, PathBuf};
+
+use cap_fs_ext::DirExt;
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path};
+use cap_std::fs::{OpenOptionsExt, Permissions, PermissionsExt};
 
 use crate::error::CliError;
 
@@ -18,12 +21,287 @@ fn temp_suffix() -> String {
     format!(".{}.{random:016x}.tmp", std::process::id())
 }
 
-#[cfg(unix)]
-fn preserved_permissions(path: &Path) -> Option<std::fs::Permissions> {
-    std::fs::symlink_metadata(path)
-        .ok()
-        .filter(|metadata| metadata.file_type().is_file())
-        .map(|metadata| std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o777))
+/// All handles live until the whole output operation completes. The map keys
+/// and `path` are labels only: filesystem operations receive a retained `Dir`
+/// and one normal component. In particular, a cached descendant is never
+/// reopened through its old name, and no raw descriptor/path alias is stored.
+pub(crate) struct OutputDir {
+    path: PathBuf,
+    root: Dir,
+    descendants: BTreeMap<PathBuf, Dir>,
+    // Windows cap-std locks directories against rename/delete. Retain the
+    // opened parent too; ancestors above it are deliberately trusted context.
+    _context: Option<Dir>,
+}
+
+impl OutputDir {
+    /// Opens (or creates) the named root without following its final component.
+    /// Identity is accepted at this open, before inspecting entries through the
+    /// handle. A mkdir is not an identity check: any concurrent replacement is
+    /// subject to the same no-follow open and empty-directory check.
+    pub(crate) fn empty_tree(path: &Path, create_ancestors: bool) -> Result<Self, CliError> {
+        let path = normalize_output_root(path)?;
+        if create_ancestors {
+            let parent = parent_context(&path);
+            std::fs::create_dir_all(parent)
+                .map_err(|error| CliError::Io(format!("create {}: {error}", parent.display())))?;
+        }
+        let output = Self::open_named(&path, true)?;
+        let mut entries = output
+            .root
+            .entries()
+            .map_err(|error| CliError::Io(format!("{}: {error}", path.display())))?;
+        if entries.next().is_some() {
+            return Err(CliError::Invalid(format!(
+                "{} is not empty; refusing to overwrite",
+                path.display()
+            )));
+        }
+        #[cfg(test)]
+        tests::checkpoint("root", &path);
+        Ok(output)
+    }
+
+    fn open_named(path: &Path, create: bool) -> Result<Self, CliError> {
+        let path = normalize_output_root(path)?;
+        let parent = parent_context(&path);
+        let context = Dir::open_ambient_dir(parent, ambient_authority()).map_err(|error| {
+            CliError::Io(format!(
+                "open parent directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            CliError::Invalid(format!("{} must name an output directory", path.display()))
+        })?;
+        let root = match context.open_dir_nofollow(name) {
+            Ok(root) => root,
+            Err(error) if create && error.kind() == ErrorKind::NotFound => {
+                match context.create_dir(name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(CliError::Io(format!("create {}: {error}", path.display())));
+                    }
+                }
+                #[cfg(test)]
+                tests::checkpoint("root-created", &path);
+                context
+                    .open_dir_nofollow(name)
+                    .map_err(|error| directory_open_error(&context, name, &path, error))?
+            }
+            Err(error) => {
+                return Err(directory_open_error(&context, name, &path, error));
+            }
+        };
+        Ok(Self {
+            path,
+            root,
+            descendants: BTreeMap::new(),
+            _context: Some(context),
+        })
+    }
+
+    /// For a single file, its immediate parent is the selected root. Above
+    /// that directory symlinks remain operator-trusted context. Unnamed roots
+    /// (`.`, `..`, filesystem roots) use an ambient directory handle directly;
+    /// the final component cannot itself be a directory link in those cases.
+    pub(crate) fn for_file(path: &Path) -> Result<(Self, OsString), CliError> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| CliError::Invalid(format!("{} names no file", path.display())))?;
+        let parent = parent_context(path);
+        let output = if parent.file_name().is_some() {
+            Self::open_named(parent, false)
+        } else if matches!(
+            parent.components().next_back(),
+            Some(Component::RootDir | Component::CurDir | Component::ParentDir)
+        ) {
+            Dir::open_ambient_dir(parent, ambient_authority())
+                .map(|root| Self {
+                    path: parent.to_path_buf(),
+                    root,
+                    descendants: BTreeMap::new(),
+                    _context: None,
+                })
+                .map_err(|error| {
+                    CliError::Io(format!("open directory {}: {error}", parent.display()))
+                })
+        } else {
+            Err(CliError::Invalid(format!(
+                "{} must name an output directory",
+                parent.display()
+            )))
+        }
+        .map_err(|error| match error {
+            CliError::Io(error) => CliError::Io(format!("write {}: {error}", path.display())),
+            error => error,
+        })?;
+        #[cfg(test)]
+        tests::checkpoint("root", &output.path);
+        Ok((output, name.to_os_string()))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn directory(&self, relative: &Path) -> io::Result<&Dir> {
+        if relative.as_os_str().is_empty() {
+            Ok(&self.root)
+        } else {
+            self.descendants.get(relative).ok_or_else(|| {
+                io::Error::new(ErrorKind::NotFound, "output directory handle is absent")
+            })
+        }
+    }
+
+    fn prepare_parent(&mut self, relative: &Path) -> io::Result<(PathBuf, OsString)> {
+        let mut names = Vec::new();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "output paths must contain only normal components",
+                ));
+            };
+            names.push(name.to_os_string());
+        }
+        let leaf = names
+            .pop()
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "output path names no file"))?;
+        let mut parent = PathBuf::new();
+        for name in names {
+            let next = parent.join(&name);
+            if self.directory(&next).is_err() {
+                let base = self.directory(&parent)?;
+                let child = match base.open_dir_nofollow(&name) {
+                    Ok(child) => child,
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        match base.create_dir(&name) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                            Err(error) => return Err(error),
+                        }
+                        #[cfg(test)]
+                        tests::checkpoint("directory-created", &self.path.join(&next));
+                        base.open_dir_nofollow(&name)?
+                    }
+                    Err(error) => return Err(error),
+                };
+                self.descendants.insert(next.clone(), child);
+                #[cfg(test)]
+                tests::checkpoint("directory", &self.path.join(&next));
+            }
+            parent = next;
+        }
+        Ok((parent, leaf))
+    }
+
+    /// Creates a leaf exclusively relative to its retained parent. Duplicate
+    /// leaves, symlinks and reparse points cannot be followed or overwritten.
+    pub(crate) fn write_new(&mut self, relative: &Path, bytes: &[u8]) -> Result<(), WriteNewError> {
+        let path = self.path.join(relative);
+        let failed = |operation, source| WriteNewError {
+            operation,
+            path: path.clone(),
+            source,
+        };
+        let (parent, name) = self
+            .prepare_parent(relative)
+            .map_err(|source| failed("open directory for", source))?;
+        let dir = self
+            .directory(&parent)
+            .map_err(|source| failed("open directory for", source))?;
+        #[cfg(test)]
+        tests::checkpoint("leaf", &path);
+        let mut file = dir
+            .open_with(&name, OpenOptions::new().write(true).create_new(true))
+            .map_err(|source| failed("create", source))?;
+        if let Err(error) = file.write_all(bytes) {
+            // Do not unlink by name after a failed write: a concurrent actor
+            // may have replaced that name with an unrelated entry.
+            return Err(failed("write", error));
+        }
+        Ok(())
+    }
+
+    fn write_atomically(
+        &self,
+        name: &Path,
+        bytes: &[u8],
+        new_file_mode: NewFileMode,
+    ) -> io::Result<()> {
+        #[cfg(not(unix))]
+        let _ = new_file_mode;
+        #[cfg(unix)]
+        let permissions = self
+            .root
+            .symlink_metadata(name)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_file())
+            .map(|metadata| Permissions::from_mode(metadata.permissions().mode() & 0o777));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(match new_file_mode {
+            NewFileMode::Umask => 0o666,
+            NewFileMode::Private => 0o600,
+        });
+        let mut attempts = 1;
+        let (temp, mut file) = loop {
+            let mut temp = OsString::from(".");
+            temp.push(name);
+            temp.push(temp_suffix());
+            match self.root.open_with(&temp, &options) {
+                Ok(file) => break (temp, file),
+                Err(error)
+                    if error.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS =>
+                {
+                    attempts += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let written = file.write_all(bytes);
+        #[cfg(unix)]
+        let written = written.and_then(|()| match permissions {
+            Some(permissions) => file.set_permissions(permissions),
+            None => Ok(()),
+        });
+        let written = written.and_then(|()| file.sync_all());
+        drop(file);
+        #[cfg(test)]
+        tests::checkpoint("temporary-written", &self.path.join(&temp));
+        #[cfg(test)]
+        tests::checkpoint("rename", &self.path);
+        // The temporary name may now refer to a foreign entry. Even checking
+        // its metadata before unlinking would race another leaf substitution,
+        // so leave it untouched on failure rather than deleting by name.
+        written.and_then(|()| self.root.rename(&temp, &self.root, name))
+    }
+}
+
+fn directory_open_error(context: &Dir, name: &OsStr, path: &Path, error: io::Error) -> CliError {
+    // This metadata classifies an already failed no-follow open; it never
+    // authorizes a subsequent open or weakens the directory identity check.
+    if context
+        .symlink_metadata(name)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        CliError::Invalid(format!(
+            "{} must be a real directory: {error}",
+            path.display()
+        ))
+    } else {
+        CliError::Io(format!("open directory {}: {error}", path.display()))
+    }
+}
+
+fn parent_context(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 /// Permissions for a newly created atomic output file.
@@ -35,173 +313,35 @@ pub(crate) enum NewFileMode {
     Private,
 }
 
-/// Atomically writes a file in its parent directory. A symlink at the final
-/// path is replaced rather than followed. New files use the selected mode on
-/// Unix; replacements preserve only the permission bits of an existing regular file.
+/// Holds the immediate parent throughout temporary creation, writing and
+/// replacement. A final symlink is replaced rather than followed.
 pub(crate) fn write_atomically(
     path: &Path,
     bytes: &[u8],
     new_file_mode: NewFileMode,
 ) -> Result<(), CliError> {
-    #[cfg(not(unix))]
-    let _ = new_file_mode;
-    let failed = |error: std::io::Error| CliError::Io(format!("write {}: {error}", path.display()));
-    let Some(name) = path.file_name() else {
-        return Err(CliError::Invalid(format!(
-            "{} names no file",
-            path.display()
-        )));
-    };
-    #[cfg(unix)]
-    let permissions = preserved_permissions(path);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(match new_file_mode {
-        NewFileMode::Umask => 0o666,
-        NewFileMode::Private => 0o600,
-    });
-    let mut attempts = 1;
-    let (temp, mut file) = loop {
-        let mut temp_name = OsString::from(".");
-        temp_name.push(name);
-        temp_name.push(temp_suffix());
-        let temp = path.with_file_name(temp_name);
-        match options.open(&temp) {
-            Ok(file) => break (temp, file),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS => {
-                attempts += 1;
-            }
-            Err(error) => return Err(failed(error)),
-        }
-    };
-    let written = file.write_all(bytes);
-    #[cfg(unix)]
-    let written = written.and_then(|()| match permissions {
-        Some(permissions) => file.set_permissions(permissions),
-        None => Ok(()),
-    });
-    let written = written.and_then(|()| file.sync_all());
-    drop(file);
-    let renamed = written.and_then(|()| replace_by_rename(&temp, path));
-    if let Err(error) = renamed {
-        let _ = std::fs::remove_file(&temp);
-        return Err(failed(error));
-    }
-    Ok(())
+    let (output, name) = OutputDir::for_file(path)?;
+    output
+        .write_atomically(Path::new(&name), bytes, new_file_mode)
+        .map_err(|error| CliError::Io(format!("write {}: {error}", path.display())))
 }
 
-#[cfg(not(windows))]
-fn replace_by_rename(temp: &Path, path: &Path) -> std::io::Result<()> {
-    std::fs::rename(temp, path)
-}
-
-#[cfg(windows)]
-fn replace_by_rename(temp: &Path, path: &Path) -> std::io::Result<()> {
-    match std::fs::rename(temp, path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                    return Err(error);
-                }
-                Ok(_) => std::fs::remove_file(path)?,
-                Err(check_error) if check_error.kind() == ErrorKind::NotFound => {}
-                Err(check_error) => return Err(check_error),
-            }
-            std::fs::rename(temp, path)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// Creates an output root and its descendants. Ancestors of `root` are user
-/// path context; only `root` and components beneath it are checked for links.
-pub(crate) fn create_dirs(root: &Path, path: &Path) -> Result<(), CliError> {
-    let root = normalize_output_root(root)?;
-    let relative = path.strip_prefix(&root).map_err(|_| {
-        CliError::Invalid(format!(
-            "{} is outside output root {}",
-            path.display(),
-            root.display()
-        ))
-    })?;
-    let parent = root
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)
-        .map_err(|error| CliError::Io(format!("create {}: {error}", parent.display())))?;
-    let mut directories = vec![root.to_path_buf()];
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            return Err(CliError::Invalid(format!(
-                "{} contains an invalid output path component",
-                path.display()
-            )));
-        };
-        current.push(name);
-        directories.push(current.clone());
-    }
-    for current in directories {
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(CliError::Invalid(format!(
-                    "{} must be a real directory",
-                    current.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|error| {
-                    CliError::Io(format!("create {}: {error}", current.display()))
-                })?;
-                let metadata = std::fs::symlink_metadata(&current)
-                    .map_err(|error| CliError::Io(format!("{}: {error}", current.display())))?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(CliError::Invalid(format!(
-                        "{} must be a real directory",
-                        current.display()
-                    )));
-                }
-            }
-            Err(error) => {
-                return Err(CliError::Io(format!("{}: {error}", current.display())));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Removes trailing separators and `.` components from a directory output
-/// root while refusing roots whose final component is `..` or absent.
-pub(crate) fn normalize_output_root(path: &Path) -> Result<std::path::PathBuf, CliError> {
+/// Removes trailing separators and `.` components, refusing `..` or an
+/// unnamed root. Normalization is syntax only, never a filesystem fence.
+fn normalize_output_root(path: &Path) -> Result<PathBuf, CliError> {
     let Some(name) = path.file_name() else {
         return Err(CliError::Invalid(format!(
             "{} must name an output directory",
             path.display()
         )));
     };
-    if name == ".." {
-        return Err(CliError::Invalid(format!(
-            "{} must not end in ..",
-            path.display()
-        )));
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    Ok(parent.join(name))
+    Ok(parent_context(path).join(name))
 }
 
-/// Creates a new output file exclusively, so a pre-existing leaf (including
-/// a symlink or Windows reparse point) cannot be followed or overwritten.
 pub(crate) struct WriteNewError {
     operation: &'static str,
-    path: std::path::PathBuf,
-    source: std::io::Error,
+    path: PathBuf,
+    source: io::Error,
 }
 
 impl WriteNewError {
@@ -222,59 +362,6 @@ impl std::fmt::Display for WriteNewError {
     }
 }
 
-pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), WriteNewError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|source| WriteNewError {
-            operation: "create",
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if let Err(error) = file.write_all(bytes) {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        return Err(WriteNewError {
-            operation: "write",
-            path: path.to_path_buf(),
-            source: error,
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn temporary_names_differ_between_attempts() {
-        let (first, second) = (temp_suffix(), temp_suffix());
-        assert_ne!(first, second);
-        assert!(first.ends_with(".tmp"), "{first}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn create_dirs_checks_symlinks_beneath_the_output_root_only() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir.path().join("outside");
-        std::fs::create_dir(&outside).unwrap();
-        let linked_parent = dir.path().join("linked-parent");
-        symlink(&outside, &linked_parent).unwrap();
-        let root = linked_parent.join("not-yet-created-root");
-        create_dirs(&root, &root).unwrap();
-        assert!(root.is_dir());
-
-        let output_root = dir.path().join("output-root");
-        std::fs::create_dir(&output_root).unwrap();
-        let linked_child = output_root.join("linked-child");
-        symlink(&outside, &linked_child).unwrap();
-        assert!(create_dirs(&output_root, &linked_child.join("nested")).is_err());
-        assert!(!outside.join("nested").exists());
-    }
-}
+#[path = "fsout_tests.rs"]
+mod tests;
