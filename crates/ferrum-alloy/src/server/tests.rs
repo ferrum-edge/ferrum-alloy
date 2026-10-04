@@ -1,4 +1,5 @@
-//! Response completion and HTTP/2 control backpressure over bounded IO.
+//! Admission failures over real sockets, plus response completion and
+//! HTTP/2 control backpressure over bounded IO.
 //! Socket buffer options do not guarantee how much a platform accepts in
 //! one write; a duplex transport
 //! gives these regressions an exact capacity on every hosted test platform.
@@ -21,6 +22,230 @@ const BIG_BODY: usize = 64 * CAPACITY;
 const IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_millis(400);
 const WITHIN: Duration = Duration::from_secs(5);
+
+/// Runs the production accept/registration/drain loop. Only the socket
+/// duplication result and an optional next accept error are injected, per
+/// listener, without changing process-wide limits or using raw descriptors.
+struct AdmissionTest {
+    addr: SocketAddr,
+    stats: Arc<ServerStats>,
+    permits: Arc<Semaphore>,
+    registry: Arc<SocketShutdown>,
+    fail_clone: Arc<AtomicBool>,
+    fail_next_accept: Arc<AtomicBool>,
+    attempts: Arc<Mutex<Vec<Instant>>>,
+    retrying: tokio::sync::mpsc::UnboundedReceiver<Duration>,
+    lifecycle: Lifecycle,
+    task: JoinHandle<io::Result<()>>,
+}
+
+impl AdmissionTest {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stats = Arc::new(ServerStats::default());
+        let lifecycle = Lifecycle::new(Arc::default());
+        let mut state = AcceptState::new(1);
+        let fail_clone = Arc::new(AtomicBool::new(true));
+        let fail_next_accept = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let fail = Arc::clone(&fail_clone);
+        let fail_accept = Arc::clone(&fail_next_accept);
+        let accept_error = Arc::clone(&state.accept_error);
+        let history = Arc::clone(&attempts);
+        state.shutdown = Arc::new(SocketShutdown {
+            clone_socket: Some(Box::new(move |stream| {
+                history.lock().unwrap().push(Instant::now());
+                if fail.load(Ordering::Relaxed) {
+                    if fail_accept.swap(false, Ordering::Relaxed) {
+                        *accept_error.lock().unwrap() = Some(io::ErrorKind::Other);
+                    }
+                    return Err(io::Error::other("injected socket duplication failure"));
+                }
+                SockRef::from(stream).try_clone()
+            })),
+            ..SocketShutdown::default()
+        });
+        let (sender, retrying) = tokio::sync::mpsc::unbounded_channel();
+        state.retrying = Some(sender);
+        let permits = Arc::clone(&state.permits);
+        let registry = Arc::clone(&state.shutdown);
+        let options = ServeOptions {
+            name: "app",
+            max_connections: 1,
+            max_header_count: 100,
+            max_header_bytes: 8192,
+            http2_max_concurrent_streams: 1,
+            header_read_timeout: WITHIN,
+            idle_timeout: WITHIN,
+            write_stall_timeout: WITHIN,
+            drain_timeout: WITHIN,
+            #[cfg(feature = "tls")]
+            tls: None,
+        };
+        let routes = Router::new().route("/", get(|| async { "recovered" }));
+        let task = tokio::spawn(serve_with_state(
+            listener,
+            routes,
+            options,
+            lifecycle.clone(),
+            Arc::clone(&stats),
+            state,
+        ));
+        Self {
+            addr,
+            stats,
+            permits,
+            registry,
+            fail_clone,
+            fail_next_accept,
+            attempts,
+            retrying,
+            lifecycle,
+            task,
+        }
+    }
+
+    fn assert_released(&self, available: usize) {
+        assert_eq!(self.stats.active_connections.load(Ordering::Relaxed), 0);
+        assert_eq!(self.permits.available_permits(), available);
+        assert!(self.registry.state.lock().unwrap().sockets.is_empty());
+        assert_eq!(
+            self.stats.force_closed_connections.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(self.stats.force_closed_streams.load(Ordering::Relaxed), 0);
+    }
+
+    async fn retry(&mut self, expected: Duration) {
+        let delay = tokio::time::timeout(WITHIN, self.retrying.recv())
+            .await
+            .expect("the real failure branch entered backoff")
+            .unwrap();
+        assert_eq!(delay, expected);
+        // The notification is emitted at the start of the actual wait, so
+        // these checks catch a permit or registry entry held during backoff.
+        self.assert_released(1);
+    }
+
+    async fn refused(&mut self, expected: Duration) {
+        let mut client = TcpStream::connect(self.addr).await.unwrap();
+        self.retry(expected).await;
+        assert_peer_closed(&mut client).await;
+    }
+
+    async fn recovered(&self) {
+        self.fail_clone.store(false, Ordering::Relaxed);
+        let mut client = TcpStream::connect(self.addr).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(WITHIN, client.read_to_end(&mut response))
+            .await
+            .expect("registration recovery serves an actual HTTP request")
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
+        assert!(response.ends_with(b"recovered"), "{response:?}");
+        tokio::time::timeout(WITHIN, async {
+            while self.permits.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the recovered transport released its registration and permit");
+        self.assert_released(1);
+        self.fail_clone.store(true, Ordering::Relaxed);
+    }
+
+    async fn stop(self) {
+        // Socket IO has completed. Pausing only here makes the cancellation
+        // assertion independent of hosted scheduling and socket readiness.
+        tokio::time::pause();
+        self.lifecycle.stop_accepting().cancel();
+        tokio::time::timeout(Duration::from_millis(1), self.task)
+            .await
+            .expect("shutdown interrupts backoff without waiting for its timer")
+            .unwrap()
+            .unwrap();
+        assert_eq!(self.stats.active_connections.load(Ordering::Relaxed), 0);
+        assert_eq!(self.permits.available_permits(), 1);
+        assert!(self.registry.state.lock().unwrap().sockets.is_empty());
+        assert_eq!(
+            self.stats.force_closed_connections.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(self.stats.force_closed_streams.load(Ordering::Relaxed), 0);
+    }
+}
+
+async fn assert_peer_closed(client: &mut TcpStream) {
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(WITHIN, client.read(&mut byte))
+        .await
+        .expect("the refused TCP socket closed before backoff ended");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+}
+
+#[tokio::test]
+async fn repeated_registration_failures_back_off_release_slots_and_cancel_at_the_cap() {
+    let mut server = AdmissionTest::start().await;
+    let delays = [5, 10, 20, 40, 80, 160, 320, 640, 1000, 1000].map(Duration::from_millis);
+    for delay in delays {
+        server.refused(delay).await;
+    }
+    {
+        let attempts = server.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), delays.len());
+        // Observe actual retry spacing, not just the reported delay value.
+        // Each connection is accepted from the OS and fails duplication.
+        for (pair, delay) in attempts.windows(2).zip(delays) {
+            assert!(pair[1].duration_since(pair[0]) >= delay);
+        }
+    }
+    assert_eq!(server.stats.rejected_connections.load(Ordering::Relaxed), 0);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn admission_errors_share_backoff_and_only_full_registration_resets_it() {
+    let mut server = AdmissionTest::start().await;
+    server.fail_next_accept.store(true, Ordering::Relaxed);
+    server.refused(Duration::from_millis(5)).await;
+    server.retry(Duration::from_millis(10)).await;
+    server.refused(Duration::from_millis(20)).await;
+
+    // Simulate all connection slots occupied while the listener is backing
+    // off. Refusal must not wait for a permit or reset the error streak.
+    let permits = Arc::clone(&server.permits);
+    let held = permits.try_acquire().unwrap();
+    let mut refused = TcpStream::connect(server.addr).await.unwrap();
+    assert_peer_closed(&mut refused).await;
+    assert_eq!(server.stats.rejected_connections.load(Ordering::Relaxed), 1);
+    assert_eq!(server.attempts.lock().unwrap().len(), 2);
+    server.assert_released(0);
+    drop(held);
+    server.refused(Duration::from_millis(40)).await;
+
+    server.recovered().await;
+    assert_eq!(server.attempts.lock().unwrap().len(), 4);
+    server.refused(Duration::from_millis(5)).await;
+    server.refused(Duration::from_millis(10)).await;
+    assert_eq!(server.attempts.lock().unwrap().len(), 6);
+    assert_eq!(server.stats.rejected_connections.load(Ordering::Relaxed), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn shutdown_also_interrupts_accept_failure_backoff() {
+    let mut server = AdmissionTest::start().await;
+    server.fail_next_accept.store(true, Ordering::Relaxed);
+    server.refused(Duration::from_millis(5)).await;
+    server.retry(Duration::from_millis(10)).await;
+    assert_eq!(server.attempts.lock().unwrap().len(), 1);
+    server.stop().await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn socket_shutdown_and_drop_cannot_target_a_later_connection() {
