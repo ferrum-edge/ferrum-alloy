@@ -1,0 +1,75 @@
+name: Benchmark health diagnostic
+
+on:
+  pull_request:
+    paths:
+      - 'examples/bench/**'
+      - '.github/workflows/bench-health-diagnostic.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'rust-toolchain.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-health-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  health:
+    name: Both real-service health matrices (diagnostic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      # Only the cfg(test) observer reads this; no general tracing/log dump.
+      ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ github.workspace }}/target/health-diagnostic
+      DIAGNOSTIC_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Record and verify exact source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$ALLOY_BENCH_DIAGNOSTIC_DIR"
+          actual=$(git rev-parse HEAD)
+          printf 'head=%s\nexpected=%s\nrun=%s\n' \
+            "$actual" "$DIAGNOSTIC_HEAD" "$GITHUB_RUN_ID" \
+            > "$ALLOY_BENCH_DIAGNOSTIC_DIR/source.txt"
+          test "$actual" = "$DIAGNOSTIC_HEAD"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Both complete health matrices once, concurrently
+        # Exactly the two existing functional health tests, with all their
+        # original cells, clocks, protections and assertions. No repetitions.
+        run: >-
+          cargo test --locked -p example-bench --bin alloy-bench
+          serves_every_workload_over_every_transport -- --test-threads=2 --nocapture
+      - name: Record experiment outcome
+        if: always()
+        env:
+          EXPERIMENT_STATUS: ${{ job.status }}
+        shell: bash
+        run: |
+          mkdir -p "$ALLOY_BENCH_DIAGNOSTIC_DIR"
+          printf 'status=%s\nhead=%s\n' "$EXPERIMENT_STATUS" "$DIAGNOSTIC_HEAD" \
+            > "$ALLOY_BENCH_DIAGNOSTIC_DIR/outcome.txt"
+      - name: Upload bounded diagnostic evidence, including on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bench-health-diagnostic-${{ github.event.pull_request.head.sha || github.sha }}
+          # At most twelve 64 KiB snapshots plus two small identity/status files.
+          # Raw build output, panic streams and dependency logs are not archived.
+          path: target/health-diagnostic/*.txt
+          if-no-files-found: warn
+          retention-days: 7

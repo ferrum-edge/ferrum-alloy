@@ -289,17 +289,7 @@ fn measure_inner(
                 probe,
                 Arc::clone(&diagnostics),
             );
-            return match tokio::time::timeout(Duration::from_secs(15), health).await {
-                Ok(Ok(measured)) => Ok(measured),
-                Ok(Err(error)) => {
-                    diagnostics.failure(cell, "driver-error");
-                    Err(error)
-                }
-                Err(error) => {
-                    diagnostics.failure(cell, "timeout");
-                    Err(error.into())
-                }
-            };
+            return client::tests::cancellation_health_timeout(health, &diagnostics, cell).await;
         }
         client::drive(target, options.load, probe).await
     });

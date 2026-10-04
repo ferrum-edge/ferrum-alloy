@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Retain bounded test-only worker error identities/source chains outside the
+  cancellation timeout, and observe narrowly scoped pinned-h2 wire error events
+  through spawned executor tasks without payload/header/secret logging. Label
+  public dispatcher Ok completion with unknown wire health. Add real retained
+  DATA timeout and released-gate controls using two H2 connections/four workers
+  after exactly 32 measured cancellations, with owned-task destruction checks.
+  Add one hosted diagnostic job for both complete health matrices once at exact
+  PR head, concurrently, with bounded always-upload evidence. Preserve all gates,
+  clocks, protections and continuous CLI behavior. The historical `d00fc47`
+  cause remains unproved; this is neither historical repair nor performance
+  acceptance, and fresh hosted checks and root review remain required.
 - Correct website and shared-contract adoption references using immutable current
   sources; retain historical website and released r2 claims and pending freeze.
 - Ignore stderr write errors when printing the bounded test-only cancellation

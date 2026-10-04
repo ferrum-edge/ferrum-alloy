@@ -148,7 +148,11 @@ where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     if h2 {
-        let (sender, connection) = http2::handshake(TokioExecutor::new(), io).await?;
+        #[cfg(not(test))]
+        let executor = TokioExecutor::new();
+        #[cfg(test)]
+        let executor = tests::DiagnosticExecutor::current();
+        let (sender, connection) = http2::handshake(executor, io).await?;
         #[cfg(test)]
         let connection = tests::diagnostic_driver(connection);
         tokio::spawn(connection);
@@ -243,6 +247,8 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
         }
     }
     if cancel {
+        #[cfg(test)]
+        tests::diagnostic_static_error("response ended before cancellation");
         return Err("the response ended before the client cancelled it".into());
     }
     Ok(bytes)
@@ -332,6 +338,10 @@ async fn worker_inner(
 ) -> Result<Totals, Failure> {
     let mut totals = Totals::default();
     let prepared = prepare(&target, sender, &mut totals).await;
+    #[cfg(test)]
+    if let Err(error) = &prepared {
+        tests::diagnostic_error(error.as_ref());
+    }
     ready.send(prepared.as_ref().map(|_| ()).map_err(ToString::to_string))?;
     let mut sender = Some(prepared?);
     let reuse = !(target.workload == Workload::Cancel && !target.transport.http2());
@@ -360,6 +370,10 @@ async fn worker_inner(
                     Ok::<_, Failure>(connection)
                 }
                 .await;
+                #[cfg(test)]
+                if let Err(error) = &connection {
+                    tests::diagnostic_error(error.as_ref());
+                }
                 ready.send(connection.as_ref().map(|_| ()).map_err(ToString::to_string))?;
                 sender = Some(connection?);
                 #[cfg(test)]
@@ -389,6 +403,8 @@ async fn worker_inner(
         let mut current = match connected(&target, sender.take(), &mut totals).await {
             Ok(current) => current,
             Err(error) => {
+                #[cfg(test)]
+                tests::diagnostic_error(error.as_ref());
                 let now = Instant::now();
                 if phase.borrow().contains(now, now) {
                     totals.error(error.as_ref());
@@ -403,6 +419,10 @@ async fn worker_inner(
         let end = Instant::now();
         #[cfg(test)]
         let failed = result.is_err();
+        #[cfg(test)]
+        if let Err(error) = &result {
+            tests::diagnostic_error(error.as_ref());
+        }
         #[cfg(test)]
         match current_phase {
             Phase::Warmup => warmup_exchanges += 1,
@@ -629,6 +649,11 @@ pub(crate) mod tests {
     use tokio::runtime::Runtime;
     use tokio::sync::oneshot;
     use tokio_rustls::TlsAcceptor;
+    use tracing::instrument::WithSubscriber;
+    use tracing::{Dispatch, Event, Metadata, Subscriber};
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+    use tracing_subscriber::{Layer, registry};
 
     use super::*;
     use crate::dims::FRAME_BYTES;
@@ -672,6 +697,10 @@ pub(crate) mod tests {
         errors: u64,
         body_bytes: u64,
         last_error_stage: Option<&'static str>,
+        error_events: u64,
+        error_samples: Vec<ErrorIdentity>,
+        wire_events: u64,
+        wire_samples: Vec<WireSample>,
     }
 
     struct CoordinatorDiagnostic {
@@ -721,6 +750,10 @@ pub(crate) mod tests {
                         errors: 0,
                         body_bytes: 0,
                         last_error_stage: None,
+                        error_events: 0,
+                        error_samples: Vec::new(),
+                        wire_events: 0,
+                        wire_samples: Vec::new(),
                     })
                 }),
                 printed: AtomicBool::new(false),
@@ -751,12 +784,15 @@ pub(crate) mod tests {
             }
             let now = Instant::now();
             let state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
-            let mut message = format!(
+            let mut message = SnapshotText(String::new());
+            let _ = writeln!(
+                message,
                 "cancellation-health failure: reason={reason} scenario={} workload={} \
                  transport={} elapsed_ms={} concurrency={} streams={} warmup_ms={} \
                  window_ms={} per_phase={} timeout_ms=15000 coordinator={} \
                  coordinator_stage_ms={} readiness={}/4 joined={}/4 \
-                 coordinator_last_error_stage={:?}\n",
+                 coordinator_last_error_stage={:?} \
+                 wire_observer=pinned-h2-client-poll-only wire_cause_may_be_unknown",
                 cell.scenario.name(),
                 cell.workload.name(),
                 cell.transport.name(),
@@ -779,8 +815,8 @@ pub(crate) mod tests {
                     let driver = match connection.driver.load(Ordering::Relaxed) {
                         0 => "not-polled",
                         1 => "running",
-                        2 => "completed-ok",
-                        3 => "completed-error",
+                        2 => "public-dispatch-completed-ok-wire-health-unknown",
+                        3 => "public-dispatch-completed-error",
                         _ => "future-dropped",
                     };
                     (
@@ -796,7 +832,8 @@ pub(crate) mod tests {
                      connect_attempts={} connection(owner,generation,local,driver)={connection:?} \
                      sender_closed_last_observed={:?} \
                      exchanges(preparation,warmup,measurement,reuse)={:?} \
-                     measured={} errors={} body_bytes={} last_error_stage={:?}",
+                     measured={} errors={} body_bytes={} last_error_stage={:?} \
+                     error_events={} error_samples={:?} wire_events={} wire_samples={:?}",
                     state.phase,
                     state.stage,
                     now.saturating_duration_since(state.since).as_millis(),
@@ -808,9 +845,260 @@ pub(crate) mod tests {
                     state.errors,
                     state.body_bytes,
                     state.last_error_stage,
+                    state.error_events,
+                    state.error_samples,
+                    state.wire_events,
+                    state.wire_samples,
                 );
             }
-            let _ = std::io::stderr().lock().write_all(message.as_bytes());
+            let _ = std::io::stderr().lock().write_all(message.0.as_bytes());
+            // Test-only, opt-in artifact output. One fixed-size snapshot per
+            // cell; I/O failure must never replace the Result or unwind.
+            if let Some(directory) = std::env::var_os("ALLOY_BENCH_DIAGNOSTIC_DIR") {
+                let name = format!("{}-{}.txt", cell.scenario.name(), cell.transport.name());
+                let path = std::path::PathBuf::from(directory).join(name);
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                {
+                    let _ = file.write_all(message.0.as_bytes());
+                }
+            }
+        }
+    }
+
+    // Bounds apply while formatting, before a String can grow. Only safe,
+    // known error representations are formatted: h2's opaque source Display
+    // can include peer GOAWAY debug bytes, and io::Error can wrap arbitrary
+    // application text. Neither is dumped, even when it would fit the bound.
+    const DIAGNOSTIC_TEXT_BYTES: usize = 256;
+    const DIAGNOSTIC_CHAIN_DEPTH: usize = 4;
+
+    const DIAGNOSTIC_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+    fn write_bounded(text: &mut String, limit: usize, input: &str) -> std::fmt::Result {
+        for character in input.chars() {
+            if text.len() + character.len_utf8() > limit {
+                return Err(std::fmt::Error);
+            }
+            text.push(character);
+        }
+        Ok(())
+    }
+
+    struct SnapshotText(String);
+
+    impl std::fmt::Write for SnapshotText {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            write_bounded(&mut self.0, DIAGNOSTIC_SNAPSHOT_BYTES, text)
+        }
+    }
+
+    #[derive(Default)]
+    struct BoundedText(String);
+
+    impl std::fmt::Write for BoundedText {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            write_bounded(&mut self.0, DIAGNOSTIC_TEXT_BYTES, text)
+        }
+    }
+
+    #[derive(Debug)]
+    struct ErrorIdentity {
+        stage: &'static str,
+        chain: Vec<String>,
+        source_end: &'static str,
+    }
+
+    impl ErrorIdentity {
+        fn new(stage: &'static str, error: &(dyn std::error::Error + 'static)) -> Self {
+            let mut chain = Vec::new();
+            let mut source = Some(error);
+            for _ in 0..DIAGNOSTIC_CHAIN_DEPTH {
+                let Some(error) = source else {
+                    break;
+                };
+                let mut text = BoundedText::default();
+                if let Some(error) = error.downcast_ref::<hyper::Error>() {
+                    // Hyper Display is its static description, not its source.
+                    let _ = write!(text, "hyper::Error: {error}");
+                } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                    let _ = write!(
+                        text,
+                        "io::Error kind={:?} os={:?}; inner text unknown (omitted)",
+                        error.kind(),
+                        error.raw_os_error(),
+                    );
+                } else if error.is::<rustls::Error>() {
+                    let _ = write!(text, "rustls::Error; detail unknown (omitted)");
+                } else {
+                    let _ = write!(text, "unknown opaque error; text omitted");
+                }
+                chain.push(text.0);
+                source = error.source();
+            }
+            Self {
+                stage,
+                chain,
+                source_end: if source.is_some() {
+                    "depth-limit; further sources unknown"
+                } else {
+                    "no further source exposed; inner cause may be unknown"
+                },
+            }
+        }
+    }
+
+    pub(super) fn diagnostic_error(error: &(dyn std::error::Error + 'static)) {
+        observe_worker(|_, state| {
+            let stage = state.stage;
+            record_error(state, stage, error);
+        });
+    }
+
+    pub(super) fn diagnostic_static_error(message: &'static str) {
+        observe_worker(|_, state| {
+            state.last_error_stage = Some(state.stage);
+            state.error_events = state.error_events.saturating_add(1);
+            if state.error_samples.len() < ERROR_SAMPLES {
+                let mut text = BoundedText::default();
+                let _ = write!(text, "worker: {message}");
+                state.error_samples.push(ErrorIdentity {
+                    stage: state.stage,
+                    chain: vec![text.0],
+                    source_end: "static worker error; no source exposed",
+                });
+            }
+        });
+    }
+
+    fn record_error(
+        state: &mut WorkerDiagnostic,
+        stage: &'static str,
+        error: &(dyn std::error::Error + 'static),
+    ) {
+        state.last_error_stage = Some(stage);
+        state.error_events = state.error_events.saturating_add(1);
+        if state.error_samples.len() < ERROR_SAMPLES {
+            state.error_samples.push(ErrorIdentity::new(stage, error));
+        }
+    }
+
+    #[derive(Debug)]
+    struct WireSample {
+        generation: u64,
+        local_addr: Option<SocketAddr>,
+        event: &'static str,
+        error: String,
+    }
+
+    // These two callsites in pinned h2 0.4.19 describe the actual connection
+    // poll's error path. Restrict before recording fields: no frame/header
+    // spans, messages, payload debug fields, or general log streams. Hyper's
+    // own unstable tracing is disabled and is not enabled for this experiment.
+    fn wire_metadata(metadata: &Metadata<'_>) -> bool {
+        metadata.is_event()
+            && metadata.target() == "h2::proto::connection"
+            && *metadata.level() == tracing::Level::DEBUG
+            && matches!(metadata.line(), Some(491 | 521))
+            && metadata.fields().len() == 2
+            && metadata.fields().field("error").is_some()
+    }
+
+    struct WireLayer {
+        diagnostics: Arc<HealthDiagnostics>,
+        connection: ConnectionDiagnostic,
+    }
+
+    struct IoKindVisitor(BoundedText);
+
+    impl tracing::field::Visit for IoKindVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "error" {
+                let _ = write!(self.0, "{value:?}");
+            }
+        }
+    }
+
+    impl<S: Subscriber> Layer<S> for WireLayer {
+        fn on_event(&self, event: &Event<'_>, _context: LayerContext<'_, S>) {
+            let io = event.metadata().line() == Some(491);
+            self.diagnostics.worker(self.connection.owner, |state| {
+                state.wire_events = state.wire_events.saturating_add(1);
+                if state.wire_samples.len() >= ERROR_SAMPLES {
+                    return;
+                }
+                let error = if io {
+                    // At this exact callsite the field is std::io::ErrorKind,
+                    // not io::Error or any peer-controlled debug data.
+                    let mut visitor = IoKindVisitor(BoundedText::default());
+                    event.record(&mut visitor);
+                    let IoKindVisitor(text) = visitor;
+                    text.0
+                } else {
+                    // The protocol field can contain GOAWAY debug bytes.
+                    // Do not even ask it to format. Occurrence is evidence;
+                    // a typed protocol reason is unavailable to this observer.
+                    "unknown; protocol detail omitted (may contain peer bytes)".into()
+                };
+                state.wire_samples.push(WireSample {
+                    generation: self.connection.generation,
+                    local_addr: self.connection.local_addr,
+                    event: if io {
+                        "h2-io-error"
+                    } else {
+                        "h2-connection-error"
+                    },
+                    error,
+                });
+            });
+        }
+    }
+
+    fn diagnostic_dispatch() -> Option<Dispatch> {
+        HEALTH_WORKER
+            .try_with(|(diagnostics, index)| {
+                let mut connection = None;
+                diagnostics.worker(*index, |state| connection = state.connection.clone());
+                connection.map(|connection| {
+                    Dispatch::new(registry().with(
+                        WireLayer {
+                            diagnostics: Arc::clone(diagnostics),
+                            connection,
+                        }
+                        .with_filter(filter_fn(wire_metadata)),
+                    ))
+                })
+            })
+            .ok()
+            .flatten()
+    }
+
+    #[derive(Clone)]
+    pub(super) struct DiagnosticExecutor(Option<Dispatch>);
+
+    impl DiagnosticExecutor {
+        pub(super) fn current() -> Self {
+            Self(diagnostic_dispatch())
+        }
+    }
+
+    impl<F> Executor<F> for DiagnosticExecutor
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        fn execute(&self, future: F) {
+            // Task-locals and thread defaults do not follow tokio::spawn.
+            // Carry this connection's dispatch on every executor child poll,
+            // including children spawned from children, on any runtime thread.
+            match &self.0 {
+                Some(dispatch) => {
+                    TokioExecutor::new().execute(future.with_subscriber(dispatch.clone()));
+                }
+                None => TokioExecutor::new().execute(future),
+            }
         }
     }
 
@@ -968,11 +1256,25 @@ pub(crate) mod tests {
             state = worker.connection.as_ref().map(|c| Arc::clone(&c.driver));
         });
         let mut guard = DriverDiagnostic(state);
+        let dispatch = diagnostic_dispatch();
+        let observer = HEALTH_WORKER
+            .try_with(|(diagnostics, index)| (Arc::clone(diagnostics), *index))
+            .ok();
         async move {
             if let Some(state) = &guard.0 {
                 state.store(1, Ordering::Relaxed);
             }
-            let result = connection.await;
+            let result = match dispatch {
+                Some(dispatch) => connection.with_subscriber(dispatch).await,
+                None => connection.await,
+            };
+            if let Err(error) = &result
+                && let Some((diagnostics, index)) = observer
+            {
+                diagnostics.worker(index, |state| {
+                    record_error(state, "public-driver-result", error);
+                });
+            }
             if let Some(state) = guard.0.take() {
                 state.store(if result.is_ok() { 2 } else { 3 }, Ordering::Relaxed);
             }
@@ -1020,6 +1322,9 @@ pub(crate) mod tests {
                 };
                 observe_worker(|_, state| state.outcome = "running");
                 let result = future.await;
+                if let Err(error) = &result {
+                    diagnostic_error(error.as_ref());
+                }
                 observe_worker(|_, state| {
                     state.outcome = if result.is_ok() {
                         "completed-ok"
@@ -1043,6 +1348,7 @@ pub(crate) mod tests {
             // An uncounted warm-up error must survive a later successful return.
             diagnostic_worker_phase(Phase::Warmup);
             diagnostic_worker_stage("response-headers");
+            diagnostic_error(&std::io::Error::from(std::io::ErrorKind::ConnectionReset));
             diagnostic_totals(&Totals::default(), true);
             let totals = Totals {
                 latencies_us: vec![7],
@@ -1072,6 +1378,8 @@ pub(crate) mod tests {
                 assert_eq!(state.measured, 1);
                 assert_eq!(state.body_bytes, 512);
                 assert_eq!(state.last_error_stage, Some("response-headers"));
+                assert_eq!(state.error_events, 1);
+                assert!(state.error_samples[0].chain[0].contains("ConnectionReset"));
             });
         };
         assert_completed();
@@ -1102,6 +1410,12 @@ pub(crate) mod tests {
                 assert_eq!(state.stage, "first-data-frame");
                 assert_eq!(state.last_error_stage, Some("first-data-frame"));
                 assert_eq!(state.exchanges[0].bytes, 512);
+                assert_eq!(state.error_events, 1);
+                let sample = &state.error_samples[0];
+                assert_eq!(sample.stage, "first-data-frame");
+                assert!(sample.chain[0].contains("io::Error kind=Other"));
+                assert!(sample.source_end.contains("unknown"));
+                assert!(!sample.chain[0].contains("worker completion regression"));
             });
         };
         assert_completed();
@@ -1119,6 +1433,7 @@ pub(crate) mod tests {
             observe_worker(|_, state| state.exchanges[1].started = 1);
             diagnostic_body_bytes(512);
             diagnostic_worker_stage("first-data-frame");
+            diagnostic_error(&std::io::Error::from(std::io::ErrorKind::ConnectionReset));
             let driver = diagnostic_driver(std::future::pending::<Result<(), hyper::Error>>());
             driver.await?;
             Ok(Totals::default())
@@ -1139,6 +1454,9 @@ pub(crate) mod tests {
             assert_eq!(state.exchanges[1].started, 1);
             assert_eq!(state.exchanges[1].completed, 0);
             assert_eq!(state.exchanges[1].bytes, 512);
+            assert_eq!(state.error_events, 1);
+            assert_eq!(state.error_samples[0].stage, "first-data-frame");
+            assert!(state.error_samples[0].chain[0].contains("ConnectionReset"));
             let connection = state.connection.as_ref().unwrap();
             assert_eq!(connection.owner, 0);
             assert_eq!(connection.generation, 1);
@@ -1149,6 +1467,214 @@ pub(crate) mod tests {
         diagnostics.worker(0, |state| {
             assert_eq!(state.stage, "first-data-frame");
         });
+    }
+
+    #[test]
+    fn error_observation_bounds_formatting_and_opaque_source_chains() {
+        struct RepeatedText(AtomicUsize);
+
+        impl std::fmt::Display for RepeatedText {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                for _ in 0..10_000 {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    formatter.write_str("é")?;
+                }
+                Ok(())
+            }
+        }
+
+        let text = RepeatedText(AtomicUsize::new(0));
+        let mut bounded = BoundedText::default();
+        assert!(write!(bounded, "{text}").is_err());
+        assert_eq!(bounded.0.len(), DIAGNOSTIC_TEXT_BYTES);
+        assert_eq!(
+            text.0.load(Ordering::Relaxed),
+            DIAGNOSTIC_TEXT_BYTES / 2 + 1,
+        );
+
+        #[derive(Debug)]
+        struct Opaque;
+
+        impl std::fmt::Display for Opaque {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("opaque error text must never be formatted");
+            }
+        }
+
+        impl std::error::Error for Opaque {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(self)
+            }
+        }
+
+        let diagnostics = HealthDiagnostics::new(load(4, 2));
+        diagnostics.worker(0, |state| {
+            for _ in 0..100 {
+                record_error(state, "preparation", &Opaque);
+            }
+            assert_eq!(state.error_events, 100);
+            assert_eq!(state.error_samples.len(), ERROR_SAMPLES);
+            for sample in &state.error_samples {
+                assert_eq!(sample.chain.len(), DIAGNOSTIC_CHAIN_DEPTH);
+                assert!(sample.chain.iter().all(|s| s.len() <= DIAGNOSTIC_TEXT_BYTES));
+                assert!(sample.source_end.starts_with("depth-limit"));
+            }
+        });
+    }
+
+    #[test]
+    fn health_observer_retains_real_initial_dial_and_preparation_failures() {
+        for preparation in [false, true] {
+            let runtime = CancellationRuntime::new();
+            let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+            let result = runtime.block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let target = Target {
+                    addr: listener.local_addr().unwrap(),
+                    transport: Transport::H2c,
+                    workload: Workload::Cancel,
+                    tls: None,
+                };
+                if preparation {
+                    tokio::spawn(async move {
+                        let mut servers = JoinSet::new();
+                        loop {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            servers.spawn(async move {
+                                let service = service_fn(|_| {
+                                    std::future::ready(Ok::<_, Infallible>(Response::new(
+                                        Empty::<Bytes>::new(),
+                                    )))
+                                });
+                                let builder =
+                                    hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                                let _ = builder
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            });
+                        }
+                    });
+                } else {
+                    // A real refused initial TCP connection, before workers
+                    // exist; the same observation hook retains its identity.
+                    drop(listener);
+                }
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    cancellation_health(
+                        target,
+                        load(4, 2),
+                        || (),
+                        Arc::clone(&diagnostics),
+                    ),
+                )
+                .await
+            });
+            runtime.shutdown();
+            assert!(result.unwrap().is_err());
+            let mut retained = 0;
+            for worker in 0..4 {
+                diagnostics.worker(worker, |state| {
+                    for sample in &state.error_samples {
+                        let ended = sample.chain[0].contains("response ended before cancellation");
+                        if preparation && ended {
+                            assert_eq!(sample.stage, "first-data-frame");
+                            retained += 1;
+                        } else if !preparation && sample.chain[0].contains("ConnectionRefused") {
+                            assert_eq!(sample.stage, "tcp-connect");
+                            assert_eq!(state.outcome, "initial-dial-error");
+                            retained += 1;
+                        }
+                    }
+                });
+            }
+            assert!(retained > 0);
+        }
+    }
+
+    #[test]
+    fn scoped_observer_sees_real_h2_child_wire_errors_without_peer_bytes() {
+        async fn wire_failure(diagnostics: Arc<HealthDiagnostics>, protocol: bool) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = Target {
+                addr: listener.local_addr().unwrap(),
+                transport: Transport::H2c,
+                workload: Workload::Cancel,
+                tls: None,
+            };
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut preface = [0; 24];
+                wire_read(&stream, &mut preface).await;
+                assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+                h2_write(&stream, 4, 0, 0, &[]).await;
+                h2_until(&stream, 1).await;
+                if protocol {
+                    // DATA on stream zero is a real protocol error. No frame
+                    // or peer bytes may be retained by the event collector.
+                    h2_write(&stream, 0, 0, 0, b"peer-private-marker").await;
+                    h2_until(&stream, 7).await;
+                } else {
+                    // Truncated PING payload + EOF is a real wire I/O error.
+                    wire_write(&stream, &[0, 0, 8, 6, 0, 0, 0, 0, 0, 0]).await;
+                }
+            });
+            let result = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+                let mut sender = dial(&target).await?;
+                exchange(&mut sender, &target).await?;
+                Ok(Totals::default())
+            })
+            .await;
+            assert!(result.is_err());
+            server.await.unwrap();
+            diagnostics.worker(0, |state| {
+                assert!(state.wire_events > 0);
+                assert!(state.wire_samples.len() <= ERROR_SAMPLES);
+                let sample = &state.wire_samples[0];
+                assert_eq!(sample.generation, 1);
+                let connection = state.connection.as_ref().unwrap();
+                assert_eq!(sample.local_addr, connection.local_addr);
+                if protocol {
+                    assert_eq!(sample.event, "h2-connection-error");
+                    assert!(sample.error.starts_with("unknown"));
+                } else {
+                    assert_eq!(sample.event, "h2-io-error");
+                    assert_eq!(sample.error, "UnexpectedEof");
+                }
+                let wire_text = format!("{:?}", state.wire_samples);
+                let error_text = format!("{:?}", state.error_samples);
+                assert!(!wire_text.contains("peer-private-marker"));
+                assert!(!error_text.contains("peer-private-marker"));
+                assert!(state.error_events > 0);
+            });
+        }
+
+        let runtime = CancellationRuntime::new();
+        let left = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let right = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                // Separate subscribers coexist without a global default. The
+                // real wire futures are separately spawned executor children.
+                tokio::join!(
+                    wire_failure(Arc::clone(&left), true),
+                    wire_failure(Arc::clone(&right), false),
+                );
+            })
+            .await
+        });
+        runtime.shutdown();
+        result.unwrap();
+        let mut address = None;
+        left.worker(0, |state| address = state.connection.as_ref().unwrap().local_addr);
+        right.worker(0, |state| {
+            assert_ne!(address, state.connection.as_ref().unwrap().local_addr);
+        });
+        for diagnostics in [&left, &right] {
+            for index in 1..4 {
+                diagnostics.worker(index, |state| assert_eq!(state.wire_events, 0));
+            }
+        }
     }
 
     /// Functional cancellation health is finite work, not an unbounded reset
@@ -1171,6 +1697,26 @@ pub(crate) mod tests {
             .await
     }
 
+    pub(crate) async fn cancellation_health_timeout<S>(
+        health: impl Future<Output = Result<Measured<S>, Failure>>,
+        diagnostics: &HealthDiagnostics,
+        cell: crate::dims::Cell,
+    ) -> Result<Measured<S>, Failure> {
+        // Shared by the real matrices and the controlled reuse regression.
+        // Keep the original strict failure bound and original Result.
+        match tokio::time::timeout(Duration::from_secs(15), health).await {
+            Ok(Ok(measured)) => Ok(measured),
+            Ok(Err(error)) => {
+                diagnostics.failure(cell, "driver-error");
+                Err(error)
+            }
+            Err(error) => {
+                diagnostics.failure(cell, "timeout");
+                Err(error.into())
+            }
+        }
+    }
+
     async fn cancellation_health_inner<S>(
         target: Target,
         load: Load,
@@ -1191,7 +1737,14 @@ pub(crate) mod tests {
             let first = worker_index;
             diagnostics.worker(first, |state| state.outcome = "dialing");
             let sender = HEALTH_WORKER
-                .scope((Arc::clone(&diagnostics), first), dial(&target))
+                .scope((Arc::clone(&diagnostics), first), async {
+                    let result = dial(&target).await;
+                    if let Err(error) = &result {
+                        diagnostic_error(error.as_ref());
+                        observe_worker(|_, state| state.outcome = "initial-dial-error");
+                    }
+                    result
+                })
                 .await?;
             let mut connection = None;
             diagnostics.worker(first, |state| connection = state.connection.clone());
@@ -1613,6 +2166,310 @@ pub(crate) mod tests {
         }
         connections.sort_unstable();
         connections
+    }
+
+    struct CountedGateBody {
+        inner: GatedBody,
+        drops: Arc<AtomicUsize>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+
+    impl hyper::body::Body for CountedGateBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            hyper::body::Body::poll_frame(Pin::new(&mut self.inner), cx)
+        }
+    }
+
+    impl Drop for CountedGateBody {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            self.changed.notify_one();
+        }
+    }
+
+    struct LiveFixtureTask(Arc<AtomicUsize>);
+
+    impl LiveFixtureTask {
+        fn new(live: Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(live)
+        }
+    }
+
+    impl Drop for LiveFixtureTask {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn retained_sender_probe_gate_case(release_gate: bool) {
+        use crate::dims::{Cell, Scenario};
+
+        let runtime = CancellationRuntime::new();
+        let metrics = runtime.runtime.as_ref().unwrap().metrics();
+        let load = Load {
+            warmup: Duration::from_secs(1),
+            duration: Duration::from_secs(5),
+            ..load(4, 2)
+        };
+        let diagnostics = Arc::new(HealthDiagnostics::new(load));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        let reuse_at = Arc::new([AtomicUsize::new(usize::MAX), AtomicUsize::new(usize::MAX)]);
+        let identities = Arc::new(Mutex::new([None, None]));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let probes = AtomicUsize::new(0);
+        let result = runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = Target {
+                addr: listener.local_addr().unwrap(),
+                transport: Transport::H2c,
+                workload: Workload::Cancel,
+                tls: None,
+            };
+            let (gates, mut arrivals) = mpsc::unbounded_channel();
+            let server_accepted = Arc::clone(&accepted);
+            let server_live = Arc::clone(&live);
+            let server_requests = Arc::clone(&requests);
+            let server_reuse_at = Arc::clone(&reuse_at);
+            let server_identities = Arc::clone(&identities);
+            let server_drops = Arc::clone(&drops);
+            let server_changed = Arc::clone(&changed);
+            tokio::spawn(async move {
+                let _owner = LiveFixtureTask::new(Arc::clone(&server_live));
+                let mut connections = JoinSet::new();
+                loop {
+                    let (stream, peer) = listener.accept().await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let connection = server_accepted.fetch_add(1, Ordering::SeqCst);
+                    assert!(connection < 2, "retained probe must not reconnect");
+                    server_identities.lock().unwrap()[connection] = Some(peer);
+                    let gates = gates.clone();
+                    let requests = Arc::clone(&server_requests);
+                    let reuse_at = Arc::clone(&server_reuse_at);
+                    let drops = Arc::clone(&server_drops);
+                    let changed = Arc::clone(&server_changed);
+                    let service = service_fn(move |_| {
+                        let index = requests[connection].fetch_add(1, Ordering::SeqCst);
+                        let threshold = reuse_at[connection].load(Ordering::SeqCst);
+                        let (release, cancelled) = if index >= threshold {
+                            assert!(index < threshold + 2);
+                            let (release, receiver) = oneshot::channel();
+                            let (cancelled, acknowledgement) = oneshot::channel();
+                            gates
+                                .send(Cancellation {
+                                    connection,
+                                    release,
+                                    cancelled: acknowledgement,
+                                })
+                                .unwrap();
+                            (Some(receiver), Some(cancelled))
+                        } else {
+                            (None, None)
+                        };
+                        std::future::ready(Ok::<_, Infallible>(Response::new(CountedGateBody {
+                            inner: GatedBody {
+                                release,
+                                cancelled,
+                                data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
+                                sent: false,
+                            },
+                            drops: Arc::clone(&drops),
+                            changed: Arc::clone(&changed),
+                        })))
+                    });
+                    let live = Arc::clone(&server_live);
+                    connections.spawn(async move {
+                        let _owner = LiveFixtureTask::new(live);
+                        let builder = Builder::new(TokioExecutor::new());
+                        let _ = builder
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
+                }
+            });
+            let probe = || {
+                let index = probes.fetch_add(1, Ordering::SeqCst);
+                if index == 0 {
+                    // The real drain rendezvous finished. Derive each reuse
+                    // ordinal from completed preparation/warm-up work, not
+                    // elapsed time or an assumed warm-up request count.
+                    for connection in 0..2 {
+                        let mut before = 0;
+                        for worker in (2 * connection)..(2 * connection + 2) {
+                            diagnostics.worker(worker, |state| {
+                                assert_eq!(state.phase, "draining");
+                                assert_eq!(state.exchanges[0].completed, 1);
+                                assert_eq!(
+                                    state.exchanges[1].started,
+                                    state.exchanges[1].completed,
+                                );
+                                assert!(state.exchanges[1].completed <= 8);
+                                before += state.exchanges[0].completed as usize;
+                                before += state.exchanges[1].completed as usize;
+                            });
+                        }
+                        reuse_at[connection].store(before + 16, Ordering::SeqCst);
+                    }
+                } else {
+                    assert_eq!(index, 1);
+                    for worker in 0..4 {
+                        diagnostics.worker(worker, |state| {
+                            assert_eq!(state.measured, 8);
+                            assert_eq!(state.exchanges[2].completed, 8);
+                            assert_eq!(state.errors, 0);
+                        });
+                    }
+                }
+                index
+            };
+            let controlled = async {
+                let health = cancellation_health(target, load, probe, Arc::clone(&diagnostics));
+                tokio::pin!(health);
+                let mut probes = tokio::select! {
+                    result = &mut health => {
+                        return match result {
+                            Err(error) => Err(error),
+                            Ok(_) => panic!("health returned before gated reuse"),
+                        };
+                    }
+                    probes = cancellations(&mut arrivals, 4) => probes,
+                };
+                let mut connections: Vec<_> = probes.iter().map(|p| p.connection).collect();
+                connections.sort_unstable();
+                assert_eq!(connections, [0, 0, 1, 1]);
+                assert_eq!(accepted.load(Ordering::SeqCst), 2);
+                assert_eq!(live.load(Ordering::SeqCst), 3);
+                let mut measured = 0;
+                for worker in 0..4 {
+                    diagnostics.worker(worker, |state| {
+                        assert_eq!(state.phase, "reuse");
+                        assert_eq!(state.measured, 8);
+                        assert_eq!(state.exchanges[2].completed, 8);
+                        assert_eq!(state.body_bytes, (8 * FRAME_BYTES) as u64);
+                        assert_eq!(state.errors, 0);
+                        measured += state.measured;
+                        let connection = state.connection.as_ref().unwrap();
+                        assert_eq!(connection.owner, (worker / 2) * 2);
+                        assert_eq!(connection.generation, 1);
+                        let peer = identities.lock().unwrap()[worker / 2];
+                        assert_eq!(connection.local_addr, peer);
+                    });
+                }
+                assert_eq!(measured, 32);
+                let before =
+                    reuse_at[0].load(Ordering::SeqCst) + reuse_at[1].load(Ordering::SeqCst);
+                // Real server body destruction acknowledges every earlier
+                // cancellation before the probe's first DATA is released.
+                while drops.load(Ordering::SeqCst) < before {
+                    changed.notified().await;
+                }
+                assert_eq!(drops.load(Ordering::SeqCst), before);
+                let held = if release_gate {
+                    None
+                } else {
+                    Some(probes.remove(0))
+                };
+                release_cancellations(probes).await;
+                let result = health.await;
+                // Own the whole retained gate through the await. Timeout drops
+                // it, but the current-thread owner destroys tasks before any
+                // newly unblocked server body can run after block_on returns.
+                drop(held);
+                result
+            };
+            cancellation_health_timeout(
+                controlled,
+                &diagnostics,
+                Cell {
+                    scenario: Scenario::Plain,
+                    workload: Workload::Cancel,
+                    transport: Transport::H2c,
+                },
+            )
+            .await
+        });
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        for connection in 0..2 {
+            let expected = reuse_at[connection].load(Ordering::SeqCst) + 2;
+            assert_eq!(requests[connection].load(Ordering::SeqCst), expected);
+            assert!(expected <= 36);
+        }
+        if release_gate {
+            let measured = result.unwrap();
+            let totals = &measured.totals;
+            assert_eq!(totals.latencies_us.len(), 32);
+            assert!(totals.latencies_us.iter().all(|latency| *latency > 0));
+            assert_eq!(totals.body_bytes, (32 * FRAME_BYTES) as u64);
+            assert_eq!(totals.errors, 0);
+            assert!(totals.error_samples.is_empty());
+            assert_eq!(totals.connects, 2);
+            assert_eq!(measured.window, Duration::from_secs(5));
+            assert_eq!((measured.start, measured.end), (0, 1));
+        } else {
+            let error = result.err().unwrap();
+            assert!(error.is::<tokio::time::error::Elapsed>());
+            let state = diagnostics.coordinator.lock().unwrap();
+            assert_eq!(state.stage, "worker-joins-and-reuse");
+            assert_eq!(state.joined, 3);
+            drop(state);
+            let mut pending = 0;
+            for worker in 0..4 {
+                diagnostics.worker(worker, |state| {
+                    assert_eq!(state.phase, "reuse");
+                    assert_eq!(state.measured, 8);
+                    assert_eq!(state.exchanges[2].completed, 8);
+                    if state.exchanges[3].completed == 0 {
+                        pending += 1;
+                        assert_eq!(state.stage, "first-data-frame");
+                        assert_eq!(state.exchanges[3].started, 1);
+                        assert_eq!(state.exchanges[3].bytes, 0);
+                    }
+                });
+            }
+            assert_eq!(pending, 1);
+        }
+        // Destruction is checked after shutdown, separately from the earlier
+        // timeout snapshot. This includes discarded drivers and H2 children.
+        runtime.shutdown();
+        assert_eq!(metrics.num_alive_tasks(), 0);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        let mut destroyed = 0;
+        for worker in 0..4 {
+            diagnostics.worker(worker, |state| {
+                assert_eq!(state.measured, 8);
+                assert_eq!(state.phase, "reuse");
+                let driver = &state.connection.as_ref().unwrap().driver;
+                assert!(matches!(driver.load(Ordering::Relaxed), 2..=4));
+                if state.outcome == "future-dropped" {
+                    destroyed += 1;
+                    assert_eq!(state.stage, "first-data-frame");
+                } else {
+                    assert_eq!(state.outcome, "completed-ok");
+                    assert_eq!(state.exchanges[3].completed, 1);
+                }
+            });
+        }
+        assert_eq!(destroyed, usize::from(!release_gate));
+    }
+
+    #[test]
+    fn retained_sender_probe_timeout_preserves_reuse_evidence_and_destroys_tasks() {
+        retained_sender_probe_gate_case(false);
+    }
+
+    #[test]
+    fn released_retained_sender_probe_reuses_both_connections() {
+        retained_sender_probe_gate_case(true);
     }
 
     /// Exercise real workers and transport identities without assuming that a
