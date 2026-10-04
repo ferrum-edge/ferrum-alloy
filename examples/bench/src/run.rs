@@ -484,20 +484,24 @@ mod tests {
         for transport in Transport::ALL {
             let result = run(Scenario::Plain, Workload::Cancel, *transport);
             assert_healthy(&result);
-            let requests = result["requests"].as_u64().unwrap();
-            let bytes = result["body_bytes"].as_u64().unwrap();
-            assert!(bytes >= requests * FRAME_BYTES as u64, "{result}");
-            assert!(
-                bytes < requests * (CANCEL_FRAMES * FRAME_BYTES) as u64,
-                "{result}"
-            );
-            if transport.http2() {
-                assert_eq!(result["connects"], result["connections"], "{result}");
-            } else {
-                let connections = result["connections"].as_u64().unwrap();
-                let connects = result["connects"].as_u64().unwrap();
-                assert!(connects >= connections + requests, "{result}");
-            }
+            assert_cancellation(&result, *transport);
+        }
+    }
+
+    fn assert_cancellation(result: &Value, transport: Transport) {
+        let requests = result["requests"].as_u64().unwrap();
+        let bytes = result["body_bytes"].as_u64().unwrap();
+        assert!(bytes >= requests * FRAME_BYTES as u64, "{result}");
+        assert!(
+            bytes < requests * (CANCEL_FRAMES * FRAME_BYTES) as u64,
+            "{result}"
+        );
+        if transport.http2() {
+            assert_eq!(result["connects"], result["connections"], "{result}");
+        } else {
+            let connections = result["connections"].as_u64().unwrap();
+            let connects = result["connects"].as_u64().unwrap();
+            assert!(connects >= connections + requests, "{result}");
         }
     }
 
@@ -515,6 +519,7 @@ mod tests {
             let environment = probe::environment(None);
             let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
             assert_healthy(&result);
+            assert_cancellation(&result, transport);
             assert_eq!(result["warmup_seconds"], 0.1, "{result}");
         }
     }
