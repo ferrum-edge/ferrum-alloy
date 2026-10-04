@@ -1,6 +1,6 @@
 # ADR 0004: Serve with hyper-util directly
 
-**Status:** Accepted (2026-09-26)
+**Status:** Accepted (2026-09-26). Amended (2026-10-04): owned TCP shutdown handles close unpolled upgrades.
 
 ## Context
 
@@ -15,7 +15,7 @@
 - a per-connection write stall deadline: the transport records response data written (HTTP/2 `DATA` frames only) and whether a write is blocked, and response bodies record when they wait on the connection and, on HTTP/2, each chunk they hand to Hyper, wrapped so that it counts as held until Hyper takes it for writing or drops it (exact per stream, resets included), so a peer that takes no response data, by flow control or a zero TCP window, cannot hold a slot either, even while Hyper holds part of a chunk beyond the window and the body waits for the application;
 - a rustls acceptor with a handshake timeout; the verified identity becomes `PeerInfo`;
 - shutdown: readiness reports draining, optionally for a grace period; accepting stops; each connection gets `graceful_shutdown` (HTTP/1.1 closes after the current response, HTTP/2 sends GOAWAY); the service waits up to the drain budget, force-closes, and flushes telemetry within its own budget;
-- the connection slot (semaphore permit, `active_connections` gauge, and the drain's count of open sockets) is owned by the transport, not the connection task, so it stays with the socket that Hyper hands over for an upgrade; at the drain budget every transport fails its reads and writes and wakes the tasks waiting on them, which closes upgraded sessions the application still reads or writes;
+- the connection slot (semaphore permit, `active_connections` gauge, and the drain's count of open sockets) is owned by the transport, not the connection task, so it stays with the socket that Hyper hands over for an upgrade; at the drain budget owned duplicate TCP handles shut down every remaining connection, below TLS and independently of application polling; every transport also fails reads/writes and wakes waiting tasks;
 - HTTP/2 stream tasks spawned through a tracking executor rather than `TokioExecutor`, so the drain waits for handlers and cancels those left at the budget;
 - per-connection cancellation tokens rather than hyper-util's `GracefulShutdown`, whose watchers subscribe lazily and would miss connections that finish a TLS handshake after shutdown starts.
 
@@ -24,4 +24,6 @@
 ## Consequences
 
 - WebSocket upgrades use `serve_connection_with_upgrades`. Upgraded sessions leave Hyper's accounting but not Alloy's: they count against `max_connections` until the application drops them and are drained and force-closed with the other connections. Applications close them gracefully by watching `Lifecycle::shutdown_token`.
+- Each accepted connection retains one additional socket handle, prepared through safe `socket2` APIs before TLS or HTTP takes ownership. The bounded registry locks only at registration, drop, and drain; no packet path touches it. Owned handles prevent descriptor reuse races. Shutdown attempts all handles and returns failures after cleanup.
+- An application-held upgraded object may retain its handles, permit, and gauge count after serving returns, but its TCP connection has been shut down. The final application-release wait is at most one second; applications remain responsible for freeing their objects and tasks.
 - Service-side HTTP/3 is not supported.

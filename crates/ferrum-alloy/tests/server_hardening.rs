@@ -820,6 +820,145 @@ async fn an_upgraded_session_is_force_closed_at_the_drain_budget() {
     assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
 }
 
+/// Hands the upgrade future to the test without polling the upgraded I/O.
+/// Keeping even an unawaited OnUpgrade must not keep TCP alive after drain.
+fn unpolled_upgrade_router() -> (
+    Router,
+    tokio::sync::mpsc::UnboundedReceiver<hyper::upgrade::OnUpgrade>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let routes = Router::new().route(
+        "/raw",
+        get(move |mut request: Request<Body>| {
+            let upgrade = hyper::upgrade::on(&mut request);
+            sender.send(upgrade).unwrap();
+            async {
+                http::Response::builder()
+                    .status(StatusCode::SWITCHING_PROTOCOLS)
+                    .header(http::header::CONNECTION, "upgrade")
+                    .header(http::header::UPGRADE, "raw")
+                    .body(Body::empty())
+                    .unwrap()
+            }
+        }),
+    );
+    (routes, receiver)
+}
+
+async fn unpolled_upgrade_closes_before_return<I>(
+    server: support::TestServer,
+    mut client: I,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<hyper::upgrade::OnUpgrade>,
+    await_upgrade: bool,
+) where
+    I: AsyncRead + AsyncWrite + Unpin,
+{
+    client
+        .write_all(b"GET /raw HTTP/1.1\r\nhost: t\r\nupgrade: raw\r\nconnection: Upgrade\r\n\r\n")
+        .await
+        .unwrap();
+    client.flush().await.unwrap();
+    let mut head = Vec::new();
+    tokio::time::timeout(WITHIN, async {
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(client.read_u8().await.unwrap());
+            assert!(head.len() <= 1024, "bounded upgrade response");
+        }
+    })
+    .await
+    .expect("101 response arrived");
+    assert!(head.starts_with(b"HTTP/1.1 101"), "{head:?}");
+    let mut pending = Some(receiver.recv().await.unwrap());
+    let held = if await_upgrade {
+        Some(
+            tokio::time::timeout(WITHIN, pending.take().unwrap())
+                .await
+                .expect("upgrade delivered")
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    held_upgrade_closes_before_return(server, client, (held, pending)).await;
+}
+
+async fn held_upgrade_closes_before_return<I: AsyncRead + Unpin, H>(
+    server: support::TestServer,
+    mut client: I,
+    held: H,
+) {
+    // The application-held object is never polled before server return.
+    let stats = Arc::clone(&server.stats);
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 1);
+    let mut refused = TcpStream::connect(server.addr).await.unwrap();
+    assert!(
+        closed_by_server(&mut refused).await,
+        "upgrade keeps its permit"
+    );
+    assert_eq!(stats.rejected_connections.load(Ordering::Relaxed), 1);
+    let started = Instant::now();
+    server.lifecycle.trigger_shutdown();
+    let mut task = server.task;
+    tokio::select! {
+        biased;
+        closed = closed_by_server(&mut client) => {
+            assert!(closed, "client observed EOF/reset while the upgrade was held");
+        }
+        result = &mut task => panic!("server returned before client closure: {result:?}"),
+    }
+    assert_eq!(stats.force_closed_connections.load(Ordering::Relaxed), 1);
+    tokio::time::timeout(WITHIN, task)
+        .await
+        .expect("unpolled upgrade cannot keep serve_on waiting")
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 1);
+    drop(held);
+    assert_eq!(stats.active_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.force_closed_connections.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn unpolled_tcp_upgrades_are_shut_down_before_serving_returns() {
+    for await_upgrade in [false, true] {
+        let mut config = hardened();
+        config.server.max_connections = 1;
+        config.shutdown.drain_timeout_ms = 300;
+        let (routes, receiver) = unpolled_upgrade_router();
+        let server = support::start(AlloyApp::new("hardening").router(routes), config).await;
+        let client = TcpStream::connect(server.addr).await.unwrap();
+        unpolled_upgrade_closes_before_return(server, client, receiver, await_upgrade).await;
+    }
+}
+
+#[tokio::test]
+async fn unpolled_websocket_is_shut_down_before_serving_returns() {
+    use axum::extract::ws::{WebSocket, WebSocketUpgrade};
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<WebSocket>();
+    let routes = Router::new().route(
+        "/ws",
+        get(move |upgrade: WebSocketUpgrade| {
+            let sender = sender.clone();
+            async move {
+                upgrade.on_upgrade(move |socket| async move {
+                    assert!(sender.send(socket).is_ok());
+                })
+            }
+        }),
+    );
+    let mut config = hardened();
+    config.server.max_connections = 1;
+    config.shutdown.drain_timeout_ms = 300;
+    let server = support::start(AlloyApp::new("hardening").router(routes), config).await;
+    let client = open_websocket(server.addr).await;
+    let held = tokio::time::timeout(WITHIN, receiver.recv())
+        .await
+        .expect("application received the WebSocket")
+        .unwrap();
+    held_upgrade_closes_before_return(server, client, held).await;
+}
+
 /// Two application tasks that write to one upgraded connection both wait
 /// on it once the peer reads nothing. At the drain budget both are woken and
 /// fail, not only the last one to wait, so the session ends and its socket
@@ -1671,6 +1810,20 @@ mod tls {
             .connect(name, tcp)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn unpolled_tls_upgrades_are_shut_down_before_serving_returns() {
+        for await_upgrade in [false, true] {
+            let mut tls = tls_listener(300);
+            tls.config.server.max_connections = 1;
+            let (routes, receiver) = unpolled_upgrade_router();
+            let server =
+                support::start(AlloyApp::new("hardening").router(routes), tls.config).await;
+            let tcp = TcpStream::connect(server.addr).await.unwrap();
+            let client = tls_connect(tcp, &tls.ca).await;
+            unpolled_upgrade_closes_before_return(server, client, receiver, await_upgrade).await;
+        }
     }
 
     /// The write stall timeout works above TLS: an HTTP/1.1 client that

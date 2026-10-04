@@ -384,7 +384,9 @@ pub struct ManagementConfig {
     pub enabled: bool,
     /// Listen address. A non-loopback address requires `token`.
     pub bind: SocketAddr,
-    /// Bearer token for detailed health, metrics, and OpenAPI.
+    /// Bearer token required for detailed health, metrics, and management
+    /// OpenAPI, even on loopback. When absent, these routes deny access;
+    /// minimal liveness/readiness probes remain available.
     pub token: Option<Secret>,
     /// Request rate limits.
     pub rate_limit: ManagementRateLimit,

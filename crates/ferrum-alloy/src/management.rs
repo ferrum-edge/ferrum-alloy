@@ -1,11 +1,12 @@
 //! The management listener: health, metrics, and published documents.
 //!
 //! It binds to loopback by default. Detailed health, metrics, and the
-//! OpenAPI document require `Authorization: Bearer <management.token>` when a
-//! token is configured; configuration validation refuses a non-loopback
-//! management bind without a token, and `AlloyParts::serve_on` a management
-//! listener actually bound off loopback without one. Every response is
-//! `no-store`.
+//! OpenAPI document require `Authorization: Bearer <management.token>` even
+//! on loopback. Without a token, only the minimal probes are accessible
+//! (diagnostics has its own authorizer). Configuration validation refuses a
+//! non-loopback management bind without a token, and `AlloyParts::serve_on`
+//! refuses a management listener actually bound off loopback without one.
+//! Probe and detailed responses are `no-store`.
 //!
 //! Requests are rate-limited before any handler or token check runs: per
 //! client, and except for the probes, which have a budget of their own, per
@@ -94,13 +95,9 @@ pub(crate) fn check_listener(addr: SocketAddr, token: bool) -> Result<(), String
 
 pub(crate) fn authorized(headers: &HeaderMap, token: Option<&Secret>) -> bool {
     let Some(token) = token else {
-        // Without a token every request is admitted. Validation refuses a
-        // non-loopback `management.bind`, and `AlloyParts::serve` and
-        // `serve_on` refuse a listener actually bound off loopback
-        // (`check_listener`). An application serving `management_router`
-        // itself must call `AlloyParts::check_management_listener`; nothing
-        // here can see where the router is served.
-        return true;
+        // Loopback is shared with local processes and same-netns sidecars.
+        // Binding there does not authenticate an operator.
+        return false;
     };
     headers
         .get(AUTHORIZATION)
@@ -113,10 +110,12 @@ pub(crate) fn authorized(headers: &HeaderMap, token: Option<&Secret>) -> bool {
 }
 
 fn unauthorized() -> Response {
-    Problem::new(ProblemKind::Unauthorized)
-        .with_detail("A valid management bearer token is required.")
-        .with_header(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))
-        .into_response()
+    no_store(
+        Problem::new(ProblemKind::Unauthorized)
+            .with_detail("A valid management bearer token is required.")
+            .with_header(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))
+            .into_response(),
+    )
 }
 
 fn no_store(mut response: Response) -> Response {
@@ -288,6 +287,7 @@ mod tests {
             HeaderValue::from_static("Bearer 0123456789abcdef0123456789abcdef"),
         );
         assert!(authorized(&headers, Some(&token)));
-        assert!(authorized(&HeaderMap::new(), None));
+        assert!(!authorized(&HeaderMap::new(), None));
+        assert!(!authorized(&headers, None));
     }
 }

@@ -545,8 +545,9 @@ pub struct AlloyParts {
     /// The management router, when enabled. [`AlloyParts::serve`] and
     /// [`AlloyParts::serve_on`] refuse to serve it on a listener that
     /// [`AlloyParts::check_management_listener`] refuses. Without a
-    /// management token its handlers admit every request, so when you serve
-    /// it yourself, call [`AlloyParts::check_management_listener`] on your
+    /// management token only minimal probes and separately authorized
+    /// diagnostics are accessible. When you serve it yourself, call
+    /// [`AlloyParts::check_management_listener`] on your
     /// listener first and do not serve it if that fails; nothing else checks
     /// where it is served. Serve it with a listener that
     /// inserts `ferrum_alloy::telemetry::PeerInfo` (or axum `ConnectInfo`):
@@ -661,16 +662,18 @@ impl AlloyParts {
     /// [`AlloyError::Config`] otherwise.
     ///
     /// After shutdown it returns only once no HTTP/2 stream handler is still
-    /// running and every connection socket on both listeners is closed:
+    /// running and every TCP connection on both listeners is shut down:
     /// connections still open when `shutdown.drain_timeout_ms` runs out are
     /// force-closed and stream tasks still running are cancelled, and it
     /// also waits for those tasks to finish unwinding. Upgraded (WebSocket)
     /// connections count against `server.max_connections` and are drained
     /// too: still open at the budget, their reads and writes fail and up to
-    /// 16 tasks waiting on them are woken, and it waits up to one more second
-    /// for the application to drop them. One that the application holds without
-    /// reading or writing it stays open after this returns, until the
-    /// application drops it. Close them gracefully by watching
+    /// 16 tasks waiting on them are woken, and their TCP connections are shut
+    /// down even if the application never polls them, including over TLS.
+    /// It waits up to one more second for the application to drop them. An
+    /// application-held upgrade may retain its descriptors, connection permit,
+    /// and active connection count after this returns, until it is dropped.
+    /// Close them gracefully by watching
     /// [`Lifecycle::shutdown_token`].
     pub async fn serve_on(
         mut self,

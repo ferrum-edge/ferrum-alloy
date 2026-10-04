@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- Require a configured management bearer token for detailed health, metrics,
+  and management OpenAPI/UI even on loopback. Tokenless defaults expose only
+  minimal liveness/readiness probes and separately authorized diagnostics.
+- Bind every diagnostic group to tenant, request-id origin and value, trace
+  identity, and local/accepted-remote provenance. Retries group only when they
+  share the same logical request id and accepted remote trace identity; a
+  trusted transport alone is insufficient. Untraced retries do not aggregate.
+  A caller-chosen external id can still preclaim a predictable id until
+  eviction, and a trusted gateway that forwards caller-chosen trace context
+  does not make that context an authenticated identity. `accept_incoming =
+  "never"` supplies authoritative generated request ids. Tenant fair sharing
+  and G01 authority are unchanged.
+- Shut down all remaining accepted TCP connections at the drain budget through
+  owned `socket2` duplicate handles, including TLS, unawaited `OnUpgrade`, and
+  unpolled upgrades. Retain permits/counts until application drop, with a bounded
+  final wait. Each accepted connection retains one additional socket handle;
+  no per-packet overhead is added. Add real-socket regressions to the existing
+  Linux/macOS/Windows hosted test matrix. These are unreleased source changes;
+  Alloy remains `0.1.0`, `publish = false`, with nothing published.
+
 - Enforce `diagnose --url`'s timeout across the complete service request,
   including response headers and the full body, so a peer cannot extend the
   deadline by periodically sending bytes.
@@ -41,8 +61,9 @@
   every read and write on them fails and up to 16 tasks waiting on them are
   woken, they are counted in `ferrum_alloy_force_closed_connections_total`,
   and serving waits up to one more second for the application to drop them.
-  An upgraded connection the application holds without reading or writing it
-  still stays open until the application drops it. Services with many
+  An upgraded connection held without reading or writing is now shut down
+  through its independently owned TCP handle; accounting and descriptors
+  remain until the application drops it. Services with many
   long-lived sessions may need a larger `max_connections`.
   Addresses GHSA-p9fc-ggvj-g423.
 - Close HTTP/2 connections whose peer withholds `WINDOW_UPDATE` while Hyper
@@ -79,23 +100,12 @@
   `diagnostics.max_bytes` sized for a number of small records now holds
   about half as many (roughly 2.0–2.3 times fewer); a record with the longest
   tenant, id, and route is charged about 2 KiB.
-- Retained diagnostic evidence is filed by who chose the request id
-  (`RequestEvidence::request_id_origin`, `evidence::RequestIdOrigin`:
-  `generated`, `trusted_peer`, `untrusted_caller`), and a lookup prefers a
-  generated id, so an id a caller sends back cannot join or evict a generated
-  id's records; the report says how many records a less trusted origin
-  filed under the id. Under one id, records whose trace context was accepted
-  or whose id was generated or chosen by a caller are bound to the first
-  record's trace: a later request of another trace that reuses the id is not
-  retained, is counted as
-  `ferrum_alloy_diagnostics_skipped_total{reason="request_id_conflict"}`,
-  and is noted in the report. Records whose id a trusted gateway sent without
-  trace context, as Ferrum Edge's retries arrive unless its `otel_tracing`
-  plugin is attached, are grouped by the id alone: the first record is never
-  evicted by later records under the id, though the store's count, byte and
-  fair-share bounds can still remove it; the report notes that the records
-  may include other requests that reused the id. Reports carry a
-  `request_id_origin` attribute on each `alloy.response` event.
+- Retained diagnostic evidence separates generated, transport-supplied,
+  and direct caller request ids and prefers generated ids in lookup. Records
+  under a tenant, origin, and id must share trace identity and provenance;
+  conflicts are skipped, counted, and noted in reports. Matching attempts
+  remain capped at 16, with oldest-attempt eviction and tenant fair sharing.
+  Reports carry `request_id_origin` on each `alloy.response` event.
 - Harden the diagnostics reader against hostile reports and OTLP files.
   `parse_offline` now discards supplied findings after checking their count
   and shape, so `ParsedReport.report.findings` is always empty and findings

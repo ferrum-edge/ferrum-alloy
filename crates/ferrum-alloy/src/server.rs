@@ -32,8 +32,8 @@
 //! connection task, are tracked by the drain as well and cancelled at the
 //! budget. The listener returns only after every connection task and stream
 //! task has ended, including aborted tasks that are still unwinding, so every
-//! socket a connection task served is closed and no handler is running by
-//! then.
+//! TCP connection a connection task served is shut down and no handler is
+//! running by then.
 //!
 //! An upgraded connection (WebSocket) leaves Hyper after the `101` response,
 //! but its slot stays with its socket: it counts against the connection limit
@@ -44,14 +44,17 @@
 //! and up to 16 tasks waiting on them are woken, so an application that reads
 //! or writes its session ends it, and the listener waits briefly for that.
 //! Alloy cannot drop an upgraded connection for the application: one that the
-//! application keeps without reading or writing it stays open after the
-//! listener returns, until the application drops it.
+//! application keeps without reading or writing it retains its accounting
+//! until drop, but its TCP socket is shut down before the listener returns.
+//! The shutdown handle is owned independently of the application, including
+//! for TLS transports, so it never targets a reused descriptor.
 
+use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker, ready};
 use std::time::Duration;
 
@@ -65,6 +68,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
 use pin_project_lite::pin_project;
+use socket2::{SockRef, Socket};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -88,8 +92,8 @@ const UPGRADED_CLOSE_GRACE: Duration = Duration::from_secs(1);
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct ServerStats {
-    /// Connections currently open, including upgraded (WebSocket)
-    /// connections that the application has not dropped yet.
+    /// Connection slots held, including upgraded (WebSocket) transports the
+    /// application has not dropped, even after their TCP shutdown at drain.
     pub active_connections: AtomicU64,
     /// Connections closed immediately because the limit was reached.
     pub rejected_connections: AtomicU64,
@@ -135,7 +139,7 @@ impl ServerStats {
             (
                 "ferrum_alloy_active_connections",
                 "gauge",
-                "Open connections, including upgraded ones.",
+                "Held connection slots, including upgrades after TCP shutdown until drop.",
                 &self.active_connections,
             ),
             (
@@ -217,17 +221,19 @@ impl ServerStats {
 }
 
 /// Holds a connection slot, the `active_connections` gauge, and the drain's
-/// count of open sockets for as long as the connection's socket is open. The
-/// connection task holds it until its transport exists, then the transport
-/// does, so that it stays with the socket when Hyper hands the socket over to
-/// the application for an upgraded (WebSocket) connection. Dropping it, with
-/// the socket or with an aborted connection task, releases all three, once.
+/// connection tracker until the owning transport is dropped, including
+/// after TCP shutdown. The connection task holds it until its transport
+/// exists, then the transport does, so it stays with the socket when Hyper
+/// hands the socket over to the application for an upgraded (WebSocket)
+/// connection. Dropping it, with the socket or with an aborted connection
+/// task, releases all three, once.
 struct ActiveConnection {
     stats: Arc<ServerStats>,
     /// Fails the transport once the listener force-closes its connections.
     close: ForceClose,
     _permit: OwnedSemaphorePermit,
     _socket: TaskTrackerToken,
+    shutdown: Option<SocketRegistration>,
 }
 
 impl ActiveConnection {
@@ -236,6 +242,7 @@ impl ActiveConnection {
         close: ForceClose,
         permit: OwnedSemaphorePermit,
         socket: TaskTrackerToken,
+        shutdown: Option<SocketRegistration>,
     ) -> Self {
         stats.active_connections.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -243,12 +250,97 @@ impl ActiveConnection {
             close,
             _permit: permit,
             _socket: socket,
+            shutdown,
         }
+    }
+}
+
+/// Owned duplicates of accepted TCP sockets, prepared once before TLS or
+/// HTTP takes ownership. Registration and drop take a lock once each; no
+/// read/write path touches the registry. A duplicate refers to the same
+/// connection on Unix and Windows, and keeps its handle alive through drain.
+#[derive(Default)]
+struct SocketShutdown {
+    state: Mutex<ShutdownState>,
+    // Per-listener fault injection; never alters process-wide handle limits.
+    #[cfg(test)]
+    clone_socket: Option<Box<SocketCloner>>,
+}
+
+#[cfg(test)]
+type SocketCloner = dyn Fn(&TcpStream) -> io::Result<Socket> + Send + Sync;
+
+#[derive(Default)]
+struct ShutdownState {
+    next_id: u64,
+    sockets: HashMap<u64, Socket>,
+}
+
+impl SocketShutdown {
+    fn register(self: &Arc<Self>, stream: &TcpStream) -> io::Result<SocketRegistration> {
+        let socket = self.clone_socket(stream)?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = state.next_id;
+        state.next_id = id
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("socket registration ids exhausted"))?;
+        state.sockets.insert(id, socket);
+        Ok(SocketRegistration {
+            registry: Arc::clone(self),
+            id,
+        })
+    }
+
+    fn clone_socket(&self, stream: &TcpStream) -> io::Result<Socket> {
+        #[cfg(test)]
+        if let Some(clone) = &self.clone_socket {
+            return clone(stream);
+        }
+        SockRef::from(stream).try_clone()
+    }
+
+    /// Attempt every shutdown, even if one fails. Drop and shutdown are
+    /// serialized, and each entry owns its socket rather than a raw handle.
+    fn close_all(&self) -> io::Result<()> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut first_error = None;
+        for socket in state.sockets.values() {
+            if let Err(error) = socket.shutdown(Shutdown::Both)
+                && error.kind() != io::ErrorKind::NotConnected
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Travels with the transport and its permit, including Hyper upgrades.
+struct SocketRegistration {
+    registry: Arc<SocketShutdown>,
+    id: u64,
+}
+
+impl Drop for SocketRegistration {
+    fn drop(&mut self) {
+        self.registry
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sockets
+            .remove(&self.id);
     }
 }
 
 impl Drop for ActiveConnection {
     fn drop(&mut self) {
+        // Release the duplicate handle before the count, permit, and drain
+        // token: a newly admitted connection must not inherit its lifetime.
+        drop(self.shutdown.take());
         self.stats
             .active_connections
             .fetch_sub(1, Ordering::Relaxed);
@@ -427,15 +519,72 @@ fn builder(options: &ServeOptions, streams: StreamExecutor) -> Builder<StreamExe
     builder
 }
 
+/// Admission resources and one shared retry streak for accept/registration
+/// errors. An accepted socket alone does not show resource pressure has ended.
+struct AcceptState {
+    shutdown: Arc<SocketShutdown>,
+    permits: Arc<Semaphore>,
+    backoff: Duration,
+    #[cfg(test)]
+    accept_error: Arc<Mutex<Option<io::ErrorKind>>>,
+    #[cfg(test)]
+    retrying: Option<tokio::sync::mpsc::UnboundedSender<Duration>>,
+}
+
+impl AcceptState {
+    fn new(max_connections: usize) -> Self {
+        Self {
+            shutdown: Arc::new(SocketShutdown::default()),
+            permits: Arc::new(Semaphore::new(max_connections)),
+            backoff: Duration::from_millis(5),
+            #[cfg(test)]
+            accept_error: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            retrying: None,
+        }
+    }
+
+    async fn accept(&self, listener: &TcpListener) -> io::Result<(TcpStream, SocketAddr)> {
+        #[cfg(test)]
+        if let Some(kind) = self
+            .accept_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            return Err(io::Error::from(kind));
+        }
+        listener.accept().await
+    }
+
+    /// Called only after releasing any refused socket and connection permit.
+    /// Shutdown must also interrupt resource-exhaustion retries.
+    async fn back_off(&mut self, lifecycle: &Lifecycle) -> bool {
+        #[cfg(test)]
+        if let Some(retrying) = &self.retrying {
+            let _ = retrying.send(self.backoff);
+        }
+        let retry = tokio::select! {
+            biased;
+            () = lifecycle.stop_accepting().cancelled() => false,
+            () = tokio::time::sleep(self.backoff) => true,
+        };
+        if retry {
+            self.backoff = (self.backoff * 2).min(Duration::from_secs(1));
+        }
+        retry
+    }
+}
+
 /// Serves `app` on `listener` until the lifecycle stops accepting, then
 /// drains within the budget. Returns once every connection task and HTTP/2
 /// stream task has ended, and once every upgraded connection has been
 /// dropped or `UPGRADED_CLOSE_GRACE` has passed after the budget: connections
 /// still open when the budget runs out are aborted, or for upgraded ones
-/// failed, and counted in `force_closed_connections`, and stream tasks still
-/// running are cancelled and counted in `force_closed_streams`. An upgraded
-/// connection that the application keeps without reading or writing it is
-/// still open when this returns.
+/// shut down, and counted in `force_closed_connections`, and stream tasks
+/// still running are cancelled and counted in `force_closed_streams`. An
+/// application-held upgrade retains its permit/count until drop, but cannot
+/// keep the accepted TCP connection open, even if it never polls its I/O.
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -443,13 +592,23 @@ pub(crate) async fn serve(
     lifecycle: Lifecycle,
     stats: Arc<ServerStats>,
 ) -> io::Result<()> {
+    let state = AcceptState::new(options.max_connections);
+    serve_with_state(listener, app, options, lifecycle, stats, state).await
+}
+
+async fn serve_with_state(
+    listener: TcpListener,
+    app: Router,
+    options: ServeOptions,
+    lifecycle: Lifecycle,
+    stats: Arc<ServerStats>,
+    mut state: AcceptState,
+) -> io::Result<()> {
     let streams = Streams::default();
     // Every open connection socket, whether its connection task still serves
     // it or Hyper has handed it over to the application for an upgrade.
     let sockets = TaskTracker::new();
-    let permits = Arc::new(Semaphore::new(options.max_connections));
     let mut connections = JoinSet::new();
-    let mut backoff = Duration::from_millis(5);
     loop {
         let accepted = tokio::select! {
             biased;
@@ -461,28 +620,41 @@ pub(crate) async fn serve(
                 }
                 continue;
             }
-            accepted = listener.accept() => accepted,
+            accepted = state.accept(&listener) => accepted,
         };
         let (stream, remote) = match accepted {
-            Ok(accepted) => {
-                backoff = Duration::from_millis(5);
-                accepted
-            }
+            Ok(accepted) => accepted,
             Err(error) => {
                 // Resource exhaustion (EMFILE) and similar: back off instead
                 // of spinning.
                 tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "accept failed");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(1));
+                if !state.back_off(&lifecycle).await {
+                    break;
+                }
                 continue;
             }
         };
-        let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+        let Ok(permit) = Arc::clone(&state.permits).try_acquire_owned() else {
             stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
             drop(stream);
             continue;
         };
         let _ = stream.set_nodelay(true);
+        let registration = match state.shutdown.register(&stream) {
+            Ok(registration) => registration,
+            Err(error) => {
+                tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "cannot prepare socket shutdown; refusing connection");
+                drop(stream);
+                drop(permit);
+                if !state.back_off(&lifecycle).await {
+                    break;
+                }
+                continue;
+            }
+        };
+        // Only full admission (including the owned shutdown handle) ends a
+        // failure streak. Connection-limit refusals do not reset it either.
+        state.backoff = Duration::from_millis(5);
         let close = streams.connection();
         let executor = streams.executor(&close);
         let socket = sockets.token();
@@ -491,7 +663,7 @@ pub(crate) async fn serve(
         let stats = Arc::clone(&stats);
         let options = options.clone();
         connections.spawn(async move {
-            let active = ActiveConnection::open(stats, close, permit, socket);
+            let active = ActiveConnection::open(stats, close, permit, socket, Some(registration));
             let builder = builder(&options, executor);
             handle(stream, remote, active, builder, app, &options, &lifecycle).await;
         });
@@ -509,6 +681,7 @@ pub(crate) async fn serve(
     })
     .await
     .is_ok();
+    let mut shutdown_error = None;
     if !drained {
         // Every open socket holds one token, in its connection task or in an
         // upgraded connection, so this counts each connection still open at
@@ -532,6 +705,9 @@ pub(crate) async fn serve(
         // and wakes the tasks waiting on them, including the application
         // tasks that own upgraded connections.
         streams.cancel();
+        // This closes the TCP connection independently of polling or
+        // dropping an upgraded transport, below TLS when enabled.
+        shutdown_error = state.shutdown.close_all().err();
         // Aborting a task drops its connection and socket; `shutdown` returns
         // once every task has ended, including aborted tasks still unwinding.
         connections.shutdown().await;
@@ -539,10 +715,9 @@ pub(crate) async fn serve(
         // next time it runs; `wait` returns once every one has done so.
         streams.tracker.close();
         streams.tracker.wait().await;
-        // An upgraded socket closes when the application drops it, which an
-        // application reading or writing it does once that fails. Alloy
-        // cannot drop it for the application, so the wait is bounded: one
-        // the application keeps without reading or writing stays open.
+        // TCP is already shut down. Give applications a bounded chance to
+        // drop upgrades and release their accounting; an unpolled one may
+        // retain its handles and permit until the application drops it.
         sockets.close();
         if tokio::time::timeout(UPGRADED_CLOSE_GRACE, sockets.wait())
             .await
@@ -552,11 +727,14 @@ pub(crate) async fn serve(
                 target: "ferrum_alloy::server",
                 listener = options.name,
                 remaining_upgraded = sockets.len(),
-                "upgraded connections still held by the application; their reads and writes fail"
+                "upgraded transports still held by the application after TCP shutdown attempts"
             );
         }
     }
-    Ok(())
+    match shutdown_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 async fn handle(
