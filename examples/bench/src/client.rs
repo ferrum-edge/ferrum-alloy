@@ -580,7 +580,7 @@ pub(crate) mod tests {
             let dropped = Arc::new(AtomicUsize::new(0));
             let driver_drop = TaskDrop(Arc::clone(&dropped));
             let child_drop = TaskDrop(Arc::clone(&dropped));
-            let driver = runtime.block_on(async {
+            let (driver,) = runtime.block_on(async {
                 let (started, child_started) = oneshot::channel();
                 let driver = tokio::spawn(async move {
                     let _driver_drop = driver_drop;
@@ -593,7 +593,7 @@ pub(crate) mod tests {
                 });
                 let ready = tokio::time::timeout(Duration::from_secs(10), child_started).await;
                 ready.unwrap().unwrap();
-                driver
+                (driver,)
             });
             assert_eq!(metrics.num_alive_tasks(), 2);
             assert!(!driver.is_finished());
