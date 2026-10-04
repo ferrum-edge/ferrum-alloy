@@ -1618,7 +1618,8 @@ pub(crate) mod tests {
                     h2_write(&stream, 0, 0, 0, b"peer-private-marker").await;
                     h2_until(&stream, 7).await;
                 } else {
-                    // Truncated PING payload + EOF is a real wire I/O error.
+                    // Truncated PING (9-byte header + 1 of 8 payload bytes)
+                    // followed by EOF is a real framed-reader I/O error.
                     wire_write(&stream, &[0, 0, 8, 6, 0, 0, 0, 0, 0, 0]).await;
                 }
             });
@@ -1642,7 +1643,11 @@ pub(crate) mod tests {
                     assert!(sample.error.starts_with("unknown"));
                 } else {
                     assert_eq!(sample.event, "h2-io-error");
-                    assert_eq!(sample.error, "UnexpectedEof");
+                    // h2 0.4.19's length-delimited reader needs 17 bytes here.
+                    // With only 10 buffered, tokio-util 0.7.19's default
+                    // Decoder::decode_eof returns ErrorKind::Other; h2
+                    // preserves that kind at its I/O-error callsite.
+                    assert_eq!(sample.error, "Other");
                 }
                 let wire_text = format!("{:?}", state.wire_samples);
                 let error_text = format!("{:?}", state.error_samples);

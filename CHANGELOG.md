@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
-- Keep hosted benchmark diagnostic provenance under runner temp, outside Rust
-  cache trees, so cache restores cannot remove source identity evidence.
+- Initialize hosted benchmark diagnostics from `RUNNER_TEMP` in a runtime step
+  and propagate the path through `GITHUB_ENV`, outside Rust cache trees, so
+  source identity and failure uploads use valid workflow contexts. Correct the
+  truncated-PING regression to require the pinned h2 0.4.19 / Tokio-util 0.7.19
+  framed-reader I/O kind `Other`, retaining separate protocol-error coverage.
 - Retain bounded test-only worker error identities/source chains outside the
   cancellation timeout, and observe narrowly scoped pinned-h2 wire error events
   through spawned executor tasks without payload/header/secret logging. Label
