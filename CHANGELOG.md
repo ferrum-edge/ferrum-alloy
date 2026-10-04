@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Correct website and shared-contract adoption references using immutable current
+  sources; retain historical website and released r2 claims and pending freeze.
 - Ignore stderr write errors when printing the bounded test-only cancellation
   health failure snapshot, preserving the original driver result and avoiding
   a second panic while unwinding. This does not explain or repair the historical

@@ -40,7 +40,10 @@ recorded facts under [ADR 0009](adr/0009-authenticated-edge-diagnostic-lookup.md
 [`591c73a3`](https://github.com/ferrum-edge/ferrum-contracts/tree/591c73a3f965fdab440c3a76b2707accdf491ba5)
 and its pins/PROPOSED annotations remain historical released bytes. Their older
 incomplete-consumer wording does not negate the qualified inputs above or establish
-a shipped freeze. The owner's [pairing test](https://github.com/ferrum-edge/ferrum-alloy/blob/d7ddb3688e058ec3cc2e17d166a801aa0037b5b1/crates/ferrum-alloy-edge/tests/pairing.rs)
+a shipped freeze. The current [canonical adoption record](https://github.com/ferrum-edge/ferrum-contracts/blob/d098c81a50f1baaa8c081d511868c74e957ddf43/docs/adoption.md)
+at merged PR #12's immutable main commit documents four qualified consumer slices;
+a matching qualified Alloy owner commit and coordinated canonical metadata/release
+remain pending. The owner's [pairing test](https://github.com/ferrum-edge/ferrum-alloy/blob/d7ddb3688e058ec3cc2e17d166a801aa0037b5b1/crates/ferrum-alloy-edge/tests/pairing.rs)
 compares the entire diagnostic-report schema outside `$id` and `x-contract`,
 **including descriptions**.
 
