@@ -1,7 +1,7 @@
 //! Output operations anchored to owned directory handles, never checked paths.
 
 use std::collections::{BTreeMap, hash_map::RandomState};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
@@ -66,7 +66,7 @@ impl OutputDir {
         let path = normalize_output_root(path)?;
         let parent = parent_context(&path);
         let context = Dir::open_ambient_dir(parent, ambient_authority()).map_err(|error| {
-            CliError::Invalid(format!("parent directory {}: {error}", parent.display()))
+            CliError::Io(format!("open parent directory {}: {error}", parent.display()))
         })?;
         let name = path.file_name().ok_or_else(|| {
             CliError::Invalid(format!("{} must name an output directory", path.display()))
@@ -83,18 +83,12 @@ impl OutputDir {
                 }
                 #[cfg(test)]
                 tests::checkpoint("root-created", &path);
-                context.open_dir_nofollow(name).map_err(|error| {
-                    CliError::Invalid(format!(
-                        "{} must be a real directory: {error}",
-                        path.display()
-                    ))
-                })?
+                context
+                    .open_dir_nofollow(name)
+                    .map_err(|error| directory_open_error(&context, name, &path, error))?
             }
             Err(error) => {
-                return Err(CliError::Invalid(format!(
-                    "{} must be a real directory: {error}",
-                    path.display()
-                )));
+                return Err(directory_open_error(&context, name, &path, error));
             }
         };
         Ok(Self {
@@ -110,30 +104,36 @@ impl OutputDir {
     /// (`.`, `..`, filesystem roots) use an ambient directory handle directly;
     /// the final component cannot itself be a directory link in those cases.
     pub(crate) fn for_file(path: &Path) -> Result<(Self, OsString), CliError> {
-        let name = path.file_name().ok_or_else(|| {
-            CliError::Invalid(format!("{} names no file", path.display()))
-        })?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| CliError::Invalid(format!("{} names no file", path.display())))?;
         let parent = parent_context(path);
         let output = if parent.file_name().is_some() {
-            Self::open_named(parent, false)?
+            Self::open_named(parent, false)
         } else if matches!(
-            parent.components().last(),
+            parent.components().next_back(),
             Some(Component::RootDir | Component::CurDir | Component::ParentDir)
         ) {
-            let root = Dir::open_ambient_dir(parent, ambient_authority())
-                .map_err(|error| CliError::Io(format!("{}: {error}", parent.display())))?;
-            Self {
-                path: parent.to_path_buf(),
-                root,
-                descendants: BTreeMap::new(),
-                _context: None,
-            }
+            Dir::open_ambient_dir(parent, ambient_authority())
+                .map(|root| Self {
+                    path: parent.to_path_buf(),
+                    root,
+                    descendants: BTreeMap::new(),
+                    _context: None,
+                })
+                .map_err(|error| {
+                    CliError::Io(format!("open directory {}: {error}", parent.display()))
+                })
         } else {
-            return Err(CliError::Invalid(format!(
+            Err(CliError::Invalid(format!(
                 "{} must name an output directory",
                 parent.display()
-            )));
-        };
+            )))
+        }
+        .map_err(|error| match error {
+            CliError::Io(error) => CliError::Io(format!("write {}: {error}", path.display())),
+            error => error,
+        })?;
         #[cfg(test)]
         tests::checkpoint("root", &output.path);
         Ok((output, name.to_os_string()))
@@ -164,9 +164,9 @@ impl OutputDir {
             };
             names.push(name.to_os_string());
         }
-        let leaf = names.pop().ok_or_else(|| {
-            io::Error::new(ErrorKind::InvalidInput, "output path names no file")
-        })?;
+        let leaf = names
+            .pop()
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "output path names no file"))?;
         let mut parent = PathBuf::new();
         for name in names {
             let next = parent.join(&name);
@@ -252,7 +252,9 @@ impl OutputDir {
             temp.push(temp_suffix());
             match self.root.open_with(&temp, &options) {
                 Ok(file) => break (temp, file),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS => {
+                Err(error)
+                    if error.kind() == ErrorKind::AlreadyExists && attempts < TEMP_ATTEMPTS =>
+                {
                     attempts += 1;
                 }
                 Err(error) => return Err(error),
@@ -267,13 +269,32 @@ impl OutputDir {
         let written = written.and_then(|()| file.sync_all());
         drop(file);
         #[cfg(test)]
+        tests::checkpoint(
+            "temporary-written",
+            &self.path.join(&temp),
+        );
+        #[cfg(test)]
         tests::checkpoint("rename", &self.path);
-        let renamed = written.and_then(|()| self.root.rename(&temp, &self.root, name));
-        if let Err(error) = renamed {
-            let _ = self.root.remove_file(&temp);
-            return Err(error);
-        }
-        Ok(())
+        // The temporary name may now refer to a foreign entry. Even checking
+        // its metadata before unlinking would race another leaf substitution,
+        // so leave it untouched on failure rather than deleting by name.
+        written.and_then(|()| self.root.rename(&temp, &self.root, name))
+    }
+}
+
+fn directory_open_error(context: &Dir, name: &OsStr, path: &Path, error: io::Error) -> CliError {
+    // This metadata classifies an already failed no-follow open; it never
+    // authorizes a subsequent open or weakens the directory identity check.
+    if context
+        .symlink_metadata(name)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        CliError::Invalid(format!(
+            "{} must be a real directory: {error}",
+            path.display()
+        ))
+    } else {
+        CliError::Io(format!("open directory {}: {error}", path.display()))
     }
 }
 

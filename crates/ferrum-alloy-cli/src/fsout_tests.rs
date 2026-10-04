@@ -268,7 +268,7 @@ fn atomic_commands_keep_temporary_files_and_rename_in_the_same_directory() {
 }
 
 #[test]
-fn failed_atomic_replacement_cleans_up_in_the_retained_directory() {
+fn failed_atomic_replacement_leaves_temporary_files_in_the_retained_directory() {
     for kind in ["edge-force", "openapi", "diagnose"] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("output");
@@ -282,12 +282,62 @@ fn failed_atomic_replacement_cleans_up_in_the_retained_directory() {
         let result = substituted_command(args, "rename", &root, &moved, &outside, true);
         assert!(result.is_err());
         assert!(moved.join("output.json").is_dir());
-        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 2);
         assert_eq!(
             std::fs::read(outside.join("output.json")).unwrap(),
             b"untouched"
         );
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn failed_atomic_replacement_preserves_a_substituted_temporary_leaf() {
+    for kind in ["edge-force", "openapi", "diagnose"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("output");
+        std::fs::create_dir(&root).unwrap();
+        let target = root.join("output.json");
+        std::fs::create_dir(&target).unwrap();
+        let sentinel = target.join("untouched");
+        std::fs::write(&sentinel, b"destination contents").unwrap();
+        let original = root.join("original-temporary");
+        let foreign = root.join("foreign-file");
+        std::fs::write(&foreign, b"foreign contents").unwrap();
+        let moved = original.clone();
+        let (start, started) = mpsc::sync_channel::<PathBuf>(1);
+        let (done, finished) = mpsc::sync_channel(1);
+        let attacker = std::thread::spawn(move || {
+            let temporary = started.recv_timeout(Duration::from_secs(10)).unwrap();
+            let expected = std::fs::read(&temporary).unwrap();
+            assert!(!expected.is_empty());
+            std::fs::rename(&temporary, &moved).unwrap();
+            std::fs::rename(&foreign, &temporary).unwrap();
+            done.send(()).unwrap();
+            (temporary, expected)
+        });
+        let selected = root.clone();
+        let mut fired = false;
+        HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |stage, path| {
+                if !fired && stage == "temporary-written" {
+                    assert_eq!(path.parent(), Some(selected.as_path()));
+                    fired = true;
+                    start.send(path.to_path_buf()).unwrap();
+                    finished.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            }));
+        });
+        let clear = ClearHook;
+        let result = invoke(command(kind, &root, &input(dir.path())));
+        drop(clear);
+        let (temporary, expected) = attacker.join().unwrap();
+        assert!(matches!(result, Err(CliError::Io(_))), "{kind}");
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"foreign contents");
+        assert_eq!(std::fs::read(&original).unwrap(), expected);
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"destination contents");
+        assert!(target.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
     }
 }
 
@@ -305,9 +355,7 @@ fn creation_never_accepts_a_substituted_directory_link() {
         let outside = dir.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
         let args = command("new", &root, &input(dir.path()));
-        assert!(
-            substituted_command(args, stage, &selected, &moved, &outside, false).is_err()
-        );
+        assert!(substituted_command(args, stage, &selected, &moved, &outside, false).is_err());
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     }
 }

@@ -191,19 +191,28 @@ fn diagnose_writes_reports_atomically() {
             .map(|entry| entry.unwrap().file_name())
             .collect()
     };
-    // A directory cannot be replaced by the report: the rename fails and
-    // the temporary file is removed.
+    // A directory cannot be replaced by the report. The failed rename leaves
+    // the temporary entry alone because its identity may have changed.
     std::fs::create_dir(&target).unwrap();
     let output = run(&args);
     assert_eq!(code(&output), 1, "{}", stderr(&output));
     assert!(target.is_dir());
-    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+    let failed_entries = entries();
+    assert_eq!(failed_entries.len(), 2);
+    let temporary = failed_entries
+        .iter()
+        .find(|name| *name != "report.json")
+        .unwrap();
+    let expected = std::fs::read(dir.path().join(temporary)).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+    assert!(report.is_object());
 
     std::fs::remove_dir(&target).unwrap();
     let output = run(&args);
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     assert!(target.is_file());
-    assert_eq!(entries(), vec![std::ffi::OsString::from("report.json")]);
+    assert_eq!(entries().len(), 2);
+    assert_eq!(std::fs::read(dir.path().join(temporary)).unwrap(), expected);
 }
 
 #[cfg(unix)]
@@ -1099,10 +1108,7 @@ fn generated_tree_commands_keep_trusted_ancestors_and_refuse_duplicate_roots() {
         let expected = std::fs::read(root.join(leaf)).unwrap();
         let duplicate = run(&args);
         assert_eq!(code(&duplicate), 3, "{}", stderr(&duplicate));
-        assert_eq!(
-            std::fs::read(real.join(name).join(leaf)).unwrap(),
-            expected
-        );
+        assert_eq!(std::fs::read(real.join(name).join(leaf)).unwrap(), expected);
     }
 }
 
@@ -1115,12 +1121,73 @@ fn file_output_anchors_preserve_current_and_parent_directory_paths() {
     for relative in ["local.yaml", "./explicit-local.yaml", "../parent.yaml"] {
         let output = bin()
             .current_dir(&project)
-            .args(["edge", "export", "--manifest", &manifest, "--output", relative])
+            .args([
+                "edge",
+                "export",
+                "--manifest",
+                &manifest,
+                "--output",
+                relative,
+            ])
             .output()
             .unwrap();
         assert_eq!(code(&output), 0, "{}", stderr(&output));
         assert!(project.join(relative).is_file());
     }
+}
+
+#[test]
+fn file_output_parent_errors_keep_io_and_validation_exit_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = fixture("manifests/orders-api.toml");
+    let otlp = fixture("otlp/edge-alloy-trace.jsonl");
+    let input = write(
+        dir.path(),
+        "openapi.json",
+        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
+    );
+    std::fs::write(dir.path().join("file-parent"), b"untouched").unwrap();
+    for (args, option) in [
+        (
+            vec!["edge", "export", "--manifest", &manifest],
+            "--output",
+        ),
+        (
+            vec!["edge", "export", "--manifest", &manifest, "--force"],
+            "--output",
+        ),
+        (vec!["openapi", "export", "--input", &input], "--output"),
+        (
+            vec![
+                "diagnose",
+                "--otlp",
+                &otlp,
+                "--trace-id",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+            ],
+            "--write-report",
+        ),
+    ] {
+        for (parent, expected) in [("missing", 1), ("missing/child", 1), ("file-parent", 3)] {
+            let target = dir.path().join(parent).join("artifact");
+            let mut args = args.clone();
+            args.extend([option, target.to_str().unwrap()]);
+            let output = run(&args);
+            let error = stderr(&output);
+            assert_eq!(code(&output), expected, "{error}");
+            if expected == 1 {
+                assert!(error.contains("write "), "{error}");
+            } else {
+                assert!(error.contains("must be a real directory"), "{error}");
+            }
+            assert!(!target.exists());
+        }
+    }
+    assert!(!dir.path().join("missing").exists());
+    assert_eq!(
+        std::fs::read(dir.path().join("file-parent")).unwrap(),
+        b"untouched"
+    );
 }
 
 #[test]

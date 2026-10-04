@@ -10,6 +10,8 @@
   newly planted link. Operator-selected ancestors above the named root remain
   trusted. Add command-level substitution barriers and public CLI controls;
   qualify cap-std/cap-fs-ext 4.0.3 and their published dependency checksums.
+  Leave uncertain temporary entries untouched after a failed atomic write;
+  preserve I/O exit codes and write context for output-parent failures.
   Addresses the remaining directory race in GHSA-68jq-pr65-chjv / #134;
   unpublished Alloy behavior, with Edge pairing and G01 contracts unchanged.
 
