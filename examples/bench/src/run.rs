@@ -252,7 +252,13 @@ fn measure_inner(
     if let Some(diagnostics) = &diagnostics {
         diagnostics.coordinator_stage("server-start-readiness");
     }
-    let server = server::start(cell.scenario, server_tls, pipeline)?;
+    let server = server::start(
+        cell.scenario,
+        server_tls,
+        pipeline,
+        #[cfg(test)]
+        diagnostics.clone(),
+    )?;
     #[cfg(test)]
     if let Some(diagnostics) = &diagnostics {
         diagnostics.coordinator_stage("client-tls-config");
@@ -553,7 +559,10 @@ mod tests {
                 // and every report assertion; print at most once on failure.
                 let evidence = (*workload == Workload::Cancel).then(|| HealthFailureEvidence {
                     cell,
-                    diagnostics: Arc::new(client::tests::HealthDiagnostics::new(options.load)),
+                    diagnostics: Arc::new(
+                        client::tests::HealthDiagnostics::new(options.load)
+                            .with_origin("real-matrix"),
+                    ),
                 });
                 let diagnostics = evidence.as_ref().map(|e| Arc::clone(&e.diagnostics));
                 let result = measure_inner(
@@ -691,7 +700,10 @@ mod tests {
             // probe, with evidence alive through teardown and assertions.
             let evidence = HealthFailureEvidence {
                 cell,
-                diagnostics: Arc::new(client::tests::HealthDiagnostics::new(options.load)),
+                diagnostics: Arc::new(
+                    client::tests::HealthDiagnostics::new(options.load)
+                        .with_origin("warmed-short-window"),
+                ),
             };
             let result = measure_inner(
                 cell,

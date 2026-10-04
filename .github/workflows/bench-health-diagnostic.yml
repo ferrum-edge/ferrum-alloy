@@ -27,6 +27,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
       DIAGNOSTIC_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ALLOY_BENCH_DIAGNOSTIC_FEATURE: default-features
     steps:
       - name: Initialize cache-safe diagnostic directory
         shell: bash
@@ -46,8 +47,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$ALLOY_BENCH_DIAGNOSTIC_DIR"
           actual=$(git rev-parse HEAD)
-          printf 'head=%s\nexpected=%s\nrun=%s\n' \
-            "$actual" "$DIAGNOSTIC_HEAD" "$GITHUB_RUN_ID" \
+          printf 'head=%s\nexpected=%s\nrun=%s\nattempt=%s\njob=%s\nos=%s\nrunner=%s\n' \
+            "$actual" "$DIAGNOSTIC_HEAD" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$GITHUB_JOB" "$RUNNER_OS" "$RUNNER_NAME" \
             > "$ALLOY_BENCH_DIAGNOSTIC_DIR/source.txt"
           test "$actual" = "$DIAGNOSTIC_HEAD"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

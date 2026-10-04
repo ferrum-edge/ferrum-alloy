@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- Isolate the benchmark allocator unit test with thread-local RAII observation
+  and instance-owned role counters. It no longer permanently enables production
+  allocation counting for later non-counting health tests. Add concurrent-thread
+  allocation/restoration coverage without global toggles or suite serialization.
+- Extend test-only cancellation-health evidence with bounded worker, public
+  dispatcher, H2 wire-child and response-callback polling/wakes, plus server
+  router/response/body observations by original socket and request ordinal.
+  Controlled wire/header/DATA gates cover release, retained-sender reuse and
+  task destruction. Ordinary three-OS CI now preserves separate all-feature
+  and default-feature evidence outside cache trees. The genuine instrumented
+  Linux recurrence in #142 and the original uninstrumented cause remain
+  unresolved; allocator isolation is not a demonstrated timeout repair.
 - Fix #143's warmed cancellation health regression by using the existing
   test-only phase budget and retained H2 reuse probe over h2c, H2 mTLS and
   H1 mTLS. Keep the 100 ms warm-up / 200 ms window, require positive measured

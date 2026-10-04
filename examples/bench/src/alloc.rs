@@ -101,6 +101,8 @@ static GLOBAL: Counting = Counting;
 
 #[inline]
 fn record(size: usize) {
+    #[cfg(test)]
+    observation::record(size);
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -110,6 +112,82 @@ fn record(size: usize) {
     if let Some(slot) = SLOTS.get(usize::from(role)) {
         slot.calls.fetch_add(1, Ordering::Relaxed);
         slot.bytes.fetch_add(size as u64, Ordering::Relaxed);
+    }
+}
+
+// Test observation never enables or updates production counters. Active
+// counters are owned by the scope and temporarily stored by value in TLS.
+// These const-initialized Copy cells have no destructor or allocation path.
+#[cfg(test)]
+mod observation {
+    use std::marker::PhantomData;
+    use std::rc::Rc;
+
+    use super::*;
+
+    thread_local! {
+        static OBSERVER: Cell<Option<[Counts; Role::ALL.len()]>> = const { Cell::new(None) };
+    }
+
+    pub(super) struct Scope {
+        previous: Option<[Counts; Role::ALL.len()]>,
+        counters: Option<[Counts; Role::ALL.len()]>,
+        role: u8,
+        // A scope cannot move to a different allocating thread.
+        _thread: PhantomData<Rc<()>>,
+    }
+
+    impl Scope {
+        pub(super) fn enter() -> Self {
+            let previous = OBSERVER.with(|observer| {
+                observer.replace(Some([Counts::default(); Role::ALL.len()]))
+            });
+            Self {
+                previous,
+                counters: None,
+                role: ROLE.with(Cell::get),
+                _thread: PhantomData,
+            }
+        }
+
+        pub(super) fn snapshot(&self) -> [Counts; Role::ALL.len()] {
+            self.counters
+                .or_else(|| OBSERVER.with(Cell::get))
+                .unwrap_or_default()
+        }
+
+        pub(super) fn close(&mut self) {
+            if self.counters.is_none() {
+                self.counters = OBSERVER
+                    .try_with(|observer| observer.replace(self.previous.take()))
+                    .ok()
+                    .flatten();
+                let _ = ROLE.try_with(|role| role.set(self.role));
+            }
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    pub(super) fn active() -> bool {
+        OBSERVER.with(|observer| observer.get().is_some())
+    }
+
+    pub(super) fn record(size: usize) {
+        let _ = OBSERVER.try_with(|observer| {
+            if let Some(mut counters) = observer.get() {
+                let role = ROLE.try_with(Cell::get).unwrap_or(Role::Service as u8);
+                if let Some(slot) = counters.get_mut(usize::from(role)) {
+                    slot.calls = slot.calls.saturating_add(1);
+                    slot.bytes = slot.bytes.saturating_add(size as u64);
+                }
+                observer.set(Some(counters));
+            }
+        });
     }
 }
 
@@ -154,21 +232,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn counts_allocations_by_role_once_enabled() {
-        enable();
-        assert!(enabled());
-        let delta = std::thread::spawn(|| {
+    fn scoped_allocations_isolate_concurrent_threads_and_restore_on_exit() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let counted_barrier = std::sync::Arc::clone(&barrier);
+        let before_global = snapshot();
+        let counted = std::thread::spawn(move || {
+            let original_role = ROLE.with(Cell::get);
+            let mut scope = observation::Scope::enter();
+            let active = observation::active();
+            let globally_enabled = enabled();
+            counted_barrier.wait();
             set_role(Role::Collector);
-            let before = snapshot();
             let data = std::hint::black_box(vec![0_u8; 4096]);
-            let after = snapshot();
+            set_role(Role::Client);
+            let client = std::hint::black_box(vec![0_u8; 2048]);
+            counted_barrier.wait();
+            let after = scope.snapshot();
+            // All assertions follow both rendezvous, so a failed isolation
+            // assertion cannot strand the other thread at a barrier.
+            assert!(active);
+            assert!(!globally_enabled);
+            assert_eq!(after[Role::Service as usize], Counts::default());
+            assert!(after[Role::Collector as usize].calls >= 1);
+            assert!(after[Role::Collector as usize].bytes >= 4096);
+            assert!(after[Role::Client as usize].calls >= 1);
+            assert!(after[Role::Client as usize].bytes >= 2048);
+            scope.close();
+            assert!(!observation::active());
+            assert_eq!(ROLE.with(Cell::get), original_role);
+            let unobserved = std::hint::black_box(vec![0_u8; 8192]);
+            assert_eq!(scope.snapshot(), after);
+            assert!(!enabled());
+            drop(scope);
+            drop(unobserved);
+            drop(client);
             drop(data);
-            after[Role::Collector as usize].since(before[Role::Collector as usize])
-        })
-        .join()
-        .unwrap();
-        assert!(delta.calls >= 1, "{delta:?}");
-        assert!(delta.bytes >= 4096, "{delta:?}");
+        });
+        let uncounted = std::thread::spawn(move || {
+            barrier.wait();
+            let active = observation::active();
+            let globally_enabled = enabled();
+            let data = std::hint::black_box(vec![0_u8; 16_384]);
+            barrier.wait();
+            assert!(!active);
+            assert!(!globally_enabled);
+            assert!(!observation::active());
+            drop(data);
+        });
+        counted.join().unwrap();
+        uncounted.join().unwrap();
+        assert_eq!(snapshot(), before_global);
+        assert!(!enabled());
+    }
+
+    #[test]
+    fn dropping_nested_scope_restores_outer_counters_and_role() {
+        let original_role = ROLE.with(Cell::get);
+        let outer = observation::Scope::enter();
+        set_role(Role::Collector);
+        let data = std::hint::black_box(vec![0_u8; 4096]);
+        let before = outer.snapshot();
+        {
+            let inner = observation::Scope::enter();
+            set_role(Role::Client);
+            let data = std::hint::black_box(vec![0_u8; 2048]);
+            assert!(inner.snapshot()[Role::Client as usize].bytes >= 2048);
+            assert_eq!(inner.snapshot()[Role::Collector as usize], Counts::default());
+            drop(data);
+        }
+        assert!(observation::active());
+        assert_eq!(ROLE.with(Cell::get), Role::Collector as u8);
+        assert_eq!(outer.snapshot(), before);
+        drop(outer);
+        assert!(!observation::active());
+        assert_eq!(ROLE.with(Cell::get), original_role);
+        assert!(!enabled());
+        drop(data);
     }
 
     /// The manifest restates `[workspace.lints]` with `unsafe_code` lowered

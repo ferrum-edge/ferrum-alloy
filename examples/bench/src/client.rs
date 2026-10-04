@@ -736,10 +736,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) struct HealthDiagnostics {
+        instance: String,
+        origin: &'static str,
+        pub(crate) observer: crate::health::Observer,
         started: Instant,
         load: Load,
         coordinator: Mutex<CoordinatorDiagnostic>,
         workers: [Mutex<WorkerDiagnostic>; 4],
+        worker_changed: [tokio::sync::Notify; 4],
         printed: AtomicBool,
     }
 
@@ -750,6 +754,9 @@ pub(crate) mod tests {
             assert_eq!(load.streams, 2);
             let started = Instant::now();
             Self {
+                instance: crate::run::new_run_id().unwrap(),
+                origin: "controlled-observer",
+                observer: crate::health::Observer::default(),
                 started,
                 load,
                 coordinator: Mutex::new(CoordinatorDiagnostic {
@@ -781,7 +788,13 @@ pub(crate) mod tests {
                     })
                 }),
                 printed: AtomicBool::new(false),
+                worker_changed: std::array::from_fn(|_| tokio::sync::Notify::new()),
             }
+        }
+
+        pub(crate) fn with_origin(mut self, origin: &'static str) -> Self {
+            self.origin = origin;
+            self
         }
 
         pub(crate) fn coordinator_stage(&self, stage: &'static str) {
@@ -798,6 +811,18 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             update(&mut state);
+        }
+
+        async fn wait_stage(&self, index: usize, stage: &'static str) {
+            loop {
+                let changed = self.worker_changed[index].notified();
+                let mut reached = false;
+                self.worker(index, |state| reached = state.stage == stage);
+                if reached {
+                    return;
+                }
+                changed.await;
+            }
         }
 
         fn assert_accounting(&self) -> (u64, u64) {
@@ -892,6 +917,16 @@ pub(crate) mod tests {
             let now = Instant::now();
             let state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
             let mut message = SnapshotText(String::new());
+            let feature = match std::env::var("ALLOY_BENCH_DIAGNOSTIC_FEATURE").as_deref() {
+                Ok("all-features") => "all-features",
+                Ok("default-features") => "default-features",
+                _ => "unspecified-features",
+            };
+            let _ = writeln!(
+                message,
+                "instance={} origin={} feature={feature}",
+                self.instance, self.origin,
+            );
             let _ = writeln!(
                 message,
                 "cancellation-health failure: reason={reason} scenario={} workload={} \
@@ -958,11 +993,18 @@ pub(crate) mod tests {
                     state.wire_samples,
                 );
             }
+            self.observer.write(&mut message, now);
             let _ = std::io::stderr().lock().write_all(message.0.as_bytes());
             // Test-only, opt-in artifact output. One fixed-size snapshot per
             // cell; I/O failure must never replace the Result or unwind.
             if let Some(directory) = std::env::var_os("ALLOY_BENCH_DIAGNOSTIC_DIR") {
-                let name = format!("{}-{}.txt", cell.scenario.name(), cell.transport.name());
+                let name = format!(
+                    "{feature}-{}-{}-{}-{}.txt",
+                    self.origin,
+                    cell.scenario.name(),
+                    cell.transport.name(),
+                    self.instance,
+                );
                 let path = std::path::PathBuf::from(directory).join(name);
                 if let Ok(mut file) = std::fs::OpenOptions::new()
                     .write(true)
@@ -1185,11 +1227,27 @@ pub(crate) mod tests {
     }
 
     #[derive(Clone)]
-    pub(super) struct DiagnosticExecutor(Option<Dispatch>);
+    pub(super) struct DiagnosticExecutor {
+        dispatch: Option<Dispatch>,
+        observer: Option<(Arc<HealthDiagnostics>, ConnectionDiagnostic)>,
+        sequence: Arc<AtomicUsize>,
+    }
 
     impl DiagnosticExecutor {
         pub(super) fn current() -> Self {
-            Self(diagnostic_dispatch())
+            let observer = HEALTH_WORKER
+                .try_with(|(diagnostics, index)| {
+                    let mut connection = None;
+                    diagnostics.worker(*index, |state| connection = state.connection.clone());
+                    connection.map(|connection| (Arc::clone(diagnostics), connection))
+                })
+                .ok()
+                .flatten();
+            Self {
+                dispatch: diagnostic_dispatch(),
+                observer,
+                sequence: Arc::new(AtomicUsize::new(0)),
+            }
         }
     }
 
@@ -1199,10 +1257,44 @@ pub(crate) mod tests {
         F::Output: Send + 'static,
     {
         fn execute(&self, future: F) {
+            let mut observation = None;
+            let mut gate = None;
+            if let Some((diagnostics, connection)) = &self.observer {
+                let ordinal = self.sequence.fetch_add(1, Ordering::Relaxed);
+                // Pinned Hyper 1.11.1 spawns Task first during handshake.
+                // Our body is Empty and requests are ordinary GETs: no Pipe
+                // or upgrade child can intervene; subsequent H2ClientFuture
+                // children are SendWhen response callbacks. The same enum
+                // type represents all variants, so type_name alone is NOT
+                // evidence of a wire task. Unexpected types stay unknown.
+                let h2 = std::any::type_name::<F>()
+                    .starts_with("hyper::proto::h2::client::H2ClientFuture<");
+                let kind = match (h2, ordinal) {
+                    (true, 0) => "h2-wire-child-pinned-first-spawn",
+                    (true, _) => "h2-response-callback-child-empty-get",
+                    _ => "executor-child-unknown",
+                };
+                observation = diagnostics.observer.task(
+                    kind,
+                    connection.owner,
+                    connection.generation,
+                    connection.local_addr,
+                    ordinal,
+                );
+                if h2 && ordinal == 0 {
+                    gate = diagnostics
+                        .observer
+                        .wire_gate
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                }
+            }
+            let future = crate::health::Observed::new(future, observation).gated(gate);
             // Task-locals and thread defaults do not follow tokio::spawn.
             // Carry this connection's dispatch on every executor child poll,
             // including children spawned from children, on any runtime thread.
-            match &self.0 {
+            match &self.dispatch {
                 Some(dispatch) => {
                     TokioExecutor::new().execute(future.with_subscriber(dispatch.clone()));
                 }
@@ -1218,9 +1310,12 @@ pub(crate) mod tests {
     }
 
     pub(super) fn diagnostic_worker_stage(stage: &'static str) {
-        observe_worker(|_, state| {
-            state.stage = stage;
-            state.since = Instant::now();
+        let _ = HEALTH_WORKER.try_with(|(diagnostics, index)| {
+            diagnostics.worker(*index, |state| {
+                state.stage = stage;
+                state.since = Instant::now();
+            });
+            diagnostics.worker_changed[*index].notify_one();
         });
     }
 
@@ -1403,6 +1498,21 @@ pub(crate) mod tests {
         let observer = HEALTH_WORKER
             .try_with(|(diagnostics, index)| (Arc::clone(diagnostics), *index))
             .ok();
+        let mut polls = None;
+        if let Some((diagnostics, index)) = &observer {
+            diagnostics.worker(*index, |state| {
+                if let Some(connection) = &state.connection {
+                    polls = diagnostics.observer.task(
+                        "public-dispatcher",
+                        connection.owner,
+                        connection.generation,
+                        connection.local_addr,
+                        0,
+                    );
+                }
+            });
+        }
+        let connection = crate::health::Observed::new(connection, polls);
         async move {
             if let Some(state) = &guard.0 {
                 state.store(1, Ordering::Relaxed);
@@ -1447,46 +1557,46 @@ pub(crate) mod tests {
         }
     }
 
-    async fn diagnostic_worker<F>(
+    fn diagnostic_worker<F>(
         diagnostics: Arc<HealthDiagnostics>,
         index: usize,
         future: F,
-    ) -> Result<Totals, Failure>
+    ) -> impl Future<Output = Result<Totals, Failure>>
     where
         F: Future<Output = Result<Totals, Failure>>,
     {
-        HEALTH_WORKER
-            .scope((Arc::clone(&diagnostics), index), async move {
-                // Own the whole guard inside the scope across the worker's await.
-                let mut guard = WorkerDiagnosticGuard {
-                    diagnostics,
-                    index,
-                    finished: false,
+        let polls = diagnostics.observer.task("worker", index, 0, None, 0);
+        let future = crate::health::Observed::new(future, polls);
+        HEALTH_WORKER.scope((Arc::clone(&diagnostics), index), async move {
+            // Own the whole guard inside the scope across the worker's await.
+            let mut guard = WorkerDiagnosticGuard {
+                diagnostics,
+                index,
+                finished: false,
+            };
+            observe_worker(|_, state| state.outcome = "running");
+            let result = future.await;
+            if let Ok(totals) = &result {
+                // Snapshot the returned totals after retained-sender reuse,
+                // rather than relying on the last measurement-loop snapshot.
+                diagnostic_totals(totals, false);
+            }
+            if let Err(error) = &result {
+                diagnostic_error(error.as_ref());
+            }
+            observe_worker(|_, state| {
+                state.outcome = if result.is_ok() {
+                    "completed-ok"
+                } else {
+                    "completed-error"
                 };
-                observe_worker(|_, state| state.outcome = "running");
-                let result = future.await;
-                if let Ok(totals) = &result {
-                    // Snapshot the returned totals after retained-sender reuse,
-                    // rather than relying on the last measurement-loop snapshot.
-                    diagnostic_totals(totals, false);
+                if result.is_err() {
+                    state.last_error_stage = Some(state.stage);
                 }
-                if let Err(error) = &result {
-                    diagnostic_error(error.as_ref());
-                }
-                observe_worker(|_, state| {
-                    state.outcome = if result.is_ok() {
-                        "completed-ok"
-                    } else {
-                        "completed-error"
-                    };
-                    if result.is_err() {
-                        state.last_error_stage = Some(state.stage);
-                    }
-                });
-                guard.complete();
-                result
-            })
-            .await
+            });
+            guard.complete();
+            result
+        })
     }
 
     #[tokio::test]
@@ -2364,6 +2474,200 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn bounded_poll_observer_distinguishes_wire_headers_and_data_gates() {
+        #[derive(Clone, Copy, Debug)]
+        enum Held {
+            Wire,
+            Headers,
+            Data,
+        }
+
+        for held in [Held::Wire, Held::Headers, Held::Data] {
+            for release in [false, true] {
+                let runtime = CancellationRuntime::new();
+                let diagnostics = Arc::new(
+                    HealthDiagnostics::new(load(4, 2)).with_origin("controlled-poll-gates"),
+                );
+                let unrelated = HealthDiagnostics::new(load(4, 2));
+                let gate = Arc::new(crate::health::Gate::default());
+                if matches!(held, Held::Wire) {
+                    *diagnostics.observer.wire_gate.lock().unwrap() = Some(Arc::clone(&gate));
+                }
+                let result = runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let target = Target {
+                            addr: listener.local_addr().unwrap(),
+                            transport: Transport::H2c,
+                            workload: Workload::Cancel,
+                            tls: None,
+                        };
+                        let server_observer = Arc::clone(&diagnostics);
+                        let server_gate = Arc::clone(&gate);
+                        let mut servers = JoinSet::new();
+                        servers.spawn(async move {
+                            let (stream, peer) = listener.accept().await.unwrap();
+                            stream.set_nodelay(true).unwrap();
+                            let service = service_fn(move |_| {
+                                let observation = server_observer.observer.request(Some(peer));
+                                let headers = matches!(held, Held::Headers)
+                                    .then(|| Arc::clone(&server_gate));
+                                let data =
+                                    matches!(held, Held::Data).then(|| Arc::clone(&server_gate));
+                                async move {
+                                    let response = crate::health::response_with_gates(
+                                        async {
+                                            Response::new(axum::body::Body::new(GatedBody {
+                                                release: None,
+                                                cancelled: None,
+                                                data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
+                                                sent: false,
+                                            }))
+                                        },
+                                        observation,
+                                        headers,
+                                        data,
+                                    )
+                                    .await;
+                                    Ok::<_, Infallible>(response)
+                                }
+                            });
+                            let builder =
+                                hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                            let _ = builder
+                                .serve_connection(TokioIo::new(stream), service)
+                                .await;
+                        });
+                        let mut workers = JoinSet::new();
+                        workers.spawn(diagnostic_worker(
+                            Arc::clone(&diagnostics),
+                            0,
+                            async move {
+                                let mut sender = dial(&target).await?;
+                                let first = exchange(&mut sender, &target).await?;
+                                diagnostic_reuse();
+                                let reuse = exchange(&mut sender, &target).await?;
+                                Ok(Totals {
+                                    body_bytes: first + reuse,
+                                    ..Totals::default()
+                                })
+                            },
+                        ));
+                        gate.reached().await;
+                        let worker = diagnostics.observer.tasks("worker");
+                        assert_eq!(worker.len(), 1);
+                        worker[0].pending().await;
+                        let driver = diagnostics.observer.tasks("public-dispatcher");
+                        assert_eq!(driver.len(), 1);
+                        driver[0].pending().await;
+                        let wire = diagnostics
+                            .observer
+                            .tasks("h2-wire-child-pinned-first-spawn");
+                        assert_eq!(wire.len(), 1);
+                        wire[0].pending().await;
+                        let callbacks = diagnostics
+                            .observer
+                            .tasks("h2-response-callback-child-empty-get");
+                        assert_eq!(callbacks.len(), 1);
+                        if matches!(held, Held::Data) {
+                            callbacks[0].ready().await;
+                        } else {
+                            callbacks[0].pending().await;
+                        }
+                        let requests = diagnostics.observer.requests();
+                        let expected = if matches!(held, Held::Data) {
+                            "first-data-frame"
+                        } else {
+                            "response-headers"
+                        };
+                        diagnostics.wait_stage(0, expected).await;
+                        if matches!(held, Held::Wire) {
+                            assert_eq!(wire[0].snapshot().inner_polls, 0);
+                            assert!(requests.is_empty());
+                        } else {
+                            assert!(wire[0].snapshot().inner_polls > 0);
+                            assert_eq!(requests.len(), 1);
+                            let request = &requests[0];
+                            assert_eq!(request.frames.load(Ordering::Relaxed), 0);
+                            if matches!(held, Held::Headers) {
+                                assert!(request.response.lock().unwrap().is_none());
+                                assert_eq!(request.handler.snapshot().inner_polls, 0);
+                                assert_eq!(request.body.snapshot().polls, 0);
+                            } else {
+                                assert!(request.response.lock().unwrap().is_some());
+                                assert_eq!(request.handler.snapshot().ready, 1);
+                                assert!(request.body.snapshot().pending > 0);
+                                assert_eq!(request.body.snapshot().inner_polls, 0);
+                                assert_eq!(callbacks[0].snapshot().ready, 1);
+                            }
+                        }
+                        diagnostics.worker(0, |state| {
+                            assert_eq!(state.stage, expected);
+                            assert_eq!(state.connect_attempts, 1);
+                        });
+                        assert!(unrelated.observer.tasks("worker").is_empty());
+                        assert!(unrelated.observer.requests().is_empty());
+                        if release {
+                            let gated = match held {
+                                Held::Wire => Arc::clone(&wire[0]),
+                                Held::Headers => Arc::clone(&requests[0].handler),
+                                Held::Data => Arc::clone(&worker[0]),
+                            };
+                            let before_wakes = gated.snapshot().wakes;
+                            gate.release();
+                            let totals = workers.join_next().await.unwrap().unwrap().unwrap();
+                            assert_eq!(totals.body_bytes, (2 * FRAME_BYTES) as u64);
+                            diagnostics.worker(0, |state| {
+                                assert_eq!(state.connect_attempts, 1);
+                                assert_eq!(state.exchanges[0].completed, 1);
+                                assert_eq!(state.exchanges[3].completed, 1);
+                                assert_eq!(state.outcome, "completed-ok");
+                            });
+                            let requests = diagnostics.observer.requests();
+                            assert_eq!(requests.len(), 2);
+                            let mut socket = None;
+                            diagnostics.worker(0, |state| {
+                                socket = state.connection.as_ref().unwrap().local_addr;
+                            });
+                            for (index, request) in requests.iter().enumerate() {
+                                assert_eq!(request.socket, socket);
+                                assert_eq!(request.ordinal, index + 1);
+                            }
+                            assert!(requests.iter().all(|request| {
+                                request.frames.load(Ordering::Relaxed) == 1
+                            }));
+                            assert!(gated.snapshot().wakes > before_wakes);
+                        }
+                        // Abort and join the tasks we own. Runtime shutdown
+                        // below also destroys the separately spawned children.
+                        workers.shutdown().await;
+                        servers.shutdown().await;
+                    })
+                    .await
+                });
+                runtime.shutdown();
+                result.unwrap();
+                for kind in [
+                    "worker",
+                    "public-dispatcher",
+                    "h2-wire-child-pinned-first-spawn",
+                    "h2-response-callback-child-empty-get",
+                ] {
+                    let tasks = diagnostics.observer.tasks(kind);
+                    assert!(!tasks.is_empty(), "{held:?} {kind}");
+                    assert!(tasks.iter().all(|task| task.snapshot().dropped));
+                }
+                for request in diagnostics.observer.requests() {
+                    assert!(request.handler.snapshot().dropped);
+                    if request.response.lock().unwrap().is_some() {
+                        assert!(request.body.snapshot().dropped);
+                    }
+                }
+            }
+        }
+    }
+
     fn retained_sender_probe_gate_case(release_gate: bool) {
         use crate::dims::{Cell, Scenario};
 
@@ -2374,7 +2678,12 @@ pub(crate) mod tests {
             duration: Duration::from_secs(5),
             ..load(4, 2)
         };
-        let diagnostics = Arc::new(HealthDiagnostics::new(load));
+        let origin = if release_gate {
+            "controlled-retained-release"
+        } else {
+            "controlled-retained-blocked"
+        };
+        let diagnostics = Arc::new(HealthDiagnostics::new(load).with_origin(origin));
         let accepted = Arc::new(AtomicUsize::new(0));
         let live = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
