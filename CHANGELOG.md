@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Enforce `diagnose --url`'s timeout across the complete service request,
+  including response headers and the full body, so a peer cannot extend the
+  deadline by periodically sending bytes.
 - Add authenticated Edge diagnostic-reference lookup to `diagnose` through
   `--edge-admin-url`, an explicit trusted `--edge-observation` client capture,
   and the environment-only `FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN` credential

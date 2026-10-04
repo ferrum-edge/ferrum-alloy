@@ -146,6 +146,9 @@ pub(crate) fn fetch(
         request = request.bearer_auth(token);
     }
     let response = request
+        // The blocking client timeout also applies separately to each body
+        // read. Keep a request-level timeout as the complete-operation deadline.
+        .timeout(timeout)
         .send()
         .map_err(|e| CliError::Io(format!("fetching the report failed: {e}")))?;
     match response.status() {
