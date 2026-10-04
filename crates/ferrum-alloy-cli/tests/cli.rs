@@ -1148,10 +1148,7 @@ fn file_output_parent_errors_keep_io_and_validation_exit_codes() {
     );
     std::fs::write(dir.path().join("file-parent"), b"untouched").unwrap();
     for (args, option) in [
-        (
-            vec!["edge", "export", "--manifest", &manifest],
-            "--output",
-        ),
+        (vec!["edge", "export", "--manifest", &manifest], "--output"),
         (
             vec!["edge", "export", "--manifest", &manifest, "--force"],
             "--output",

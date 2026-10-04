@@ -14,7 +14,6 @@
   preserve I/O exit codes and write context for output-parent failures.
   Addresses the remaining directory race in GHSA-68jq-pr65-chjv / #134;
   unpublished Alloy behavior, with Edge pairing and G01 contracts unchanged.
-
 - Require a configured management bearer token for detailed health, metrics,
   and management OpenAPI/UI even on loopback. Tokenless defaults expose only
   minimal liveness/readiness probes and separately authorized diagnostics.

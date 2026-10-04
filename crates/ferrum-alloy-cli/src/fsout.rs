@@ -66,7 +66,10 @@ impl OutputDir {
         let path = normalize_output_root(path)?;
         let parent = parent_context(&path);
         let context = Dir::open_ambient_dir(parent, ambient_authority()).map_err(|error| {
-            CliError::Io(format!("open parent directory {}: {error}", parent.display()))
+            CliError::Io(format!(
+                "open parent directory {}: {error}",
+                parent.display()
+            ))
         })?;
         let name = path.file_name().ok_or_else(|| {
             CliError::Invalid(format!("{} must name an output directory", path.display()))
@@ -269,10 +272,7 @@ impl OutputDir {
         let written = written.and_then(|()| file.sync_all());
         drop(file);
         #[cfg(test)]
-        tests::checkpoint(
-            "temporary-written",
-            &self.path.join(&temp),
-        );
+        tests::checkpoint("temporary-written", &self.path.join(&temp));
         #[cfg(test)]
         tests::checkpoint("rename", &self.path);
         // The temporary name may now refer to a foreign entry. Even checking
