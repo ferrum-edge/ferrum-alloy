@@ -1,11 +1,13 @@
-# Shared contract v1 qualification and freeze proposal
+# Shared contract v1 qualification, freeze and adoption
 
-2026-10-04. **Proposed owner decision for root review; not finalized or published.**
-Propose a root-coordinated freeze of the current `ferrum.diagnostic_report` v1 and
-`ferrum.service_manifest` v1 wire contracts as the **next canonical release step**,
-pending a matching qualified Alloy owner commit, canonical documentation/status
-metadata and hosted CI. This record changes no producer wire fields, validation
-bounds, schema descriptions, pins or fixtures.
+2026-10-04. **Root accepted the unchanged shared v1 freeze at qualified Alloy owner
+`81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`; canonical publication is complete.**
+[`contracts-edge-0.9.11`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
+at `390edbd5b2485af0988e02f7827fde778d76ae0a` marks `ferrum.diagnostic_report` v1
+and `ferrum.service_manifest` v1 EXISTING/implemented. This branch adopts that actual
+tag and verified Edge v0.9.11; its new hosted qualification remains pending.
+No producer wire fields, bounds, enums, reader rules or fixture payloads change.
+The only generated snapshot changes are the known Edge release/source headers.
 
 ## Qualified inputs
 
@@ -25,7 +27,11 @@ agreement through two qualified strict consumer fixture suites:
 and [Nexus](https://github.com/ferrum-edge/ferrum-nexus/blob/77fdb767ec8ef04e88f13df9fb291bc77fbd0344/server/src/test/service-manifest.test.ts).
 Both consume canonical r2 fixtures; consumer presentation bounds do not redefine
 the producer contract. The current Alloy producer's v1 wire fields and bounds remain
-unchanged from the [inspected owner source](https://github.com/ferrum-edge/ferrum-alloy/tree/d7ddb3688e058ec3cc2e17d166a801aa0037b5b1).
+unchanged at the [qualified owner source](https://github.com/ferrum-edge/ferrum-alloy/tree/81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e).
+Its sole applicable main PUSH [CI 37238543236](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37238543236)
+passed all 18 checks/jobs. Root accepted the owner qualification and unchanged v1
+freeze after full owner review and fresh independent review with no findings.
+Those gates qualify that immutable owner, not this later adoption commit.
 
 ## Authority and release limits
 
@@ -39,22 +45,44 @@ recorded facts under [ADR 0009](adr/0009-authenticated-edge-diagnostic-lookup.md
 `contracts-edge-0.9.9-r2` at
 [`591c73a3`](https://github.com/ferrum-edge/ferrum-contracts/tree/591c73a3f965fdab440c3a76b2707accdf491ba5)
 and its pins/PROPOSED annotations remain historical released bytes. Their older
-incomplete-consumer wording does not negate the qualified inputs above or establish
-a shipped freeze. The current [canonical adoption record](https://github.com/ferrum-edge/ferrum-contracts/blob/d098c81a50f1baaa8c081d511868c74e957ddf43/docs/adoption.md)
-at merged PR #12's immutable main commit documents four qualified consumer slices;
-a matching qualified Alloy owner commit and coordinated canonical metadata/release
-remain pending. The owner's [pairing test](https://github.com/ferrum-edge/ferrum-alloy/blob/d7ddb3688e058ec3cc2e17d166a801aa0037b5b1/crates/ferrum-alloy-edge/tests/pairing.rs)
+incomplete-consumer wording does not negate the qualified inputs above. The new
+[canonical adoption record](https://github.com/ferrum-edge/ferrum-contracts/blob/390edbd5b2485af0988e02f7827fde778d76ae0a/docs/adoption.md)
+binds those same four slices and qualified Alloy owner. The owner's
+[pairing test](https://github.com/ferrum-edge/ferrum-alloy/blob/81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e/crates/ferrum-alloy-edge/tests/pairing.rs)
 compares the entire diagnostic-report schema outside `$id` and `x-contract`,
 **including descriptions**.
 
-1. **Review and qualify the owner commit:** root reviews this proposal and the
-   matching Alloy commit's hosted gates; earlier green heads do not qualify it.
-2. **Record and release canonically:** coordinate the adoption record, qualified
-   immutable inputs and status/annotation metadata in ferrum-contracts, retain
-   wire fields/bounds, pass hosted CI, then release a canonical tag.
-3. **Adopt the released tag together:** update the owner pin and matching local
-   schema annotations, including descriptions, in the same change with hosted CI.
-   Preserve full parity; do not weaken it to bypass an annotation mismatch.
+The canonical [PR #13](https://github.com/ferrum-edge/ferrum-contracts/pull/13)
+merged at 22:40:08 UTC with final reviewed head
+`0cf926686f2164ad0b4de7b27e2eb5a25df6a261` as its second parent. Final-head
+[CI 37240041628](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/37240041628)
+and exact merge/main PUSH [CI 37240886730](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/37240886730)
+passed; the canonical tag/release was published at 22:41:21 UTC.
 
-Alloy #27 and #28 remain open for root disposition. This proposal does not grant
+Canonical `x-contract` carries the EXISTING/implemented decision with owner
+`availability: unreleased`. Report descriptions outside `$id`/`x-contract`
+still contain the historical PROPOSED and untested-import text copied from owner
+81cbb. They are exact historical annotations, not a reversal of current status.
+The tagged source's prepared/pending-publication wording records its earlier
+state; the actual GitHub release above records completed publication. Vendored
+bytes are never manually rewritten, and parity still includes every description.
+The manifest schema remains a transcription of owner structs and validation;
+post-default bounds, derived IDs and endpoint relationships remain owner rules.
+
+1. **Adoption candidate (this branch):** pin all 16 adopted files byte-exact from
+   the canonical tag, update every checksum and local report status metadata,
+   and pair the Edge baseline with `v0.9.11` at
+   `c764084b3b51c3f7ffde268c039688d35e49c553`, default image index
+   `sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`.
+   Keep v0.9.10 as the previous release under the existing latest-plus-previous policy.
+2. **Fresh hosted adoption gates (root):** require formatting, full pairing/schema
+   parity, strict fixtures, HTTP lookup and both Edge matrix jobs on the new Alloy
+   commit; qualified owner/canonical CI does not establish this branch's CI result.
+   Preserve immutable earlier consumer slices and qualify each new consumer pin
+   separately, including strict manifest/cross-store/HTTP boundaries.
+3. **Tracker disposition (root):** record all qualified coordinated adoptions before
+   deciding #27/#28. This candidate does not close either issue or grant performance,
+   production-apply, trace-store or separate crate publishing acceptance.
+
+Alloy #27 and #28 remain open for root disposition. This accepted shared freeze does not grant
 the separate owner publishing approval required by [#24](release.md#open-owner-decisions).

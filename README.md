@@ -19,7 +19,7 @@ Ferrum Alloy is a batteries-included toolkit for Rust API services built on [Axu
 
 Alloy works on its own. Behind [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge), it also shows a verified request story shared with the gateway. You can see which gateway span each service span belongs to and whether the gateway's identity was cryptographically verified. You can also see what the evidence does and does not prove about where the time went.
 
-> **Pre-release.** Nothing is published to crates.io yet (see [release readiness](docs/release.md)), and APIs and contracts may change. [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
+> **Pre-release.** Nothing is published to crates.io yet (see [release readiness](docs/release.md)), and Rust APIs may change. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
 
 ## Quick start
 
@@ -104,11 +104,13 @@ The management listener binds to loopback by default, but loopback does not auth
 ## Contracts
 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
-This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding fixtures.
-Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 (implemented here, shared status PROPOSED) and `ferrum.service_manifest` v1 (PROPOSED).
+This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures.
+The adopted tag is [`contracts-edge-0.9.11`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11) at `390edbd5b2485af0988e02f7827fde778d76ae0a`.
+Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented with root's accepted unchanged wire freeze at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`. Alloy remains unreleased (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
+The canonical report preserves historical `PROPOSED` descriptions byte for byte outside `$id`/`x-contract`; current shared status lives in `x-contract`. Tagged prepared/pending-publication wording records the source's pre-publication state. This adoption requires fresh hosted CI; earlier owner/consumer qualification does not qualify this branch or close [#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 
 ## Development
 

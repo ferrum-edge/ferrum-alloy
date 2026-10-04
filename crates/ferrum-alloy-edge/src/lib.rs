@@ -1,10 +1,10 @@
 //! Optional Ferrum Edge adapter for Alloy services.
 //!
-//! * [`contract`]: the Edge v0.9.9 and v0.9.8 headers, tokens, and span attributes this
+//! * [`contract`]: the Edge v0.9.11 and v0.9.10 headers, tokens, and span attributes this
 //!   adapter uses, each traceable to Edge source.
 //! * [`policy`]: gateway trust modes, verified consumer-identity handoff, and
 //!   removal of unverified gateway-asserted headers.
-//! * [`manifest`] and [`export`]: a PROPOSED service manifest and generation of
+//! * [`manifest`] and [`export`]: the frozen shared v1 service manifest and generation of
 //!   reviewable Edge file-mode and GitForgeOps resources.
 //! * [`agents`]: the `x-ferrum-mcp` OpenAPI extension (Edge v0.9.9's OpenAPI
 //!   to MCP bridge) that `ferrum-alloy openapi export` stamps and checks.

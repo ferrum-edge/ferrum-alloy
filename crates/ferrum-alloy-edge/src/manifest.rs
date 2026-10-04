@@ -1,13 +1,14 @@
 //! The service manifest: a versioned, reviewable description of how a
 //! service is published behind Ferrum Edge.
 //!
-//! **Status: PROPOSED at `contracts-edge-0.9.9-r2`.** Foundry #540 and Nexus #519
-//! have merged, qualified, authenticated read-only previews as of 2026-10-04;
-//! the canonical qualification record and coordinated v1 freeze remain pending.
+//! **Status: EXISTING shared v1 at `contracts-edge-0.9.11`.** Root accepted the
+//! unchanged wire freeze at qualified Alloy owner 81cbb410. Foundry #540 and
+//! Nexus #519 qualify authenticated read-only previews of the historical r2 fields;
+//! their immutable slices do not qualify this new pin adoption. Alloy is unreleased.
 //! `ferrum-alloy edge export` turns the manifest into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing* schema
-//! (verified against Edge v0.9.10 and v0.9.9). Edge does not consume the manifest.
-//! See `docs/shared-contract-qualification.md` for the proposed owner decision;
+//! (statically checked against Edge v0.9.11 and v0.9.10; hosted adoption CI pending).
+//! Edge does not consume the manifest. See `docs/shared-contract-qualification.md`;
 //! current wire fields and validation bounds are unchanged.
 //!
 //! The optional `[agents]` section is read only by `ferrum-alloy openapi
@@ -213,7 +214,7 @@ pub struct ManifestAuth {
     pub mode: Option<String>,
 }
 
-/// AI-agent tools published through Edge's OpenAPI to MCP bridge (PROPOSED).
+/// AI-agent tools published through Edge's OpenAPI to MCP bridge (shared v1).
 ///
 /// Only operations whose handlers declare `expose: true` in their own
 /// `x-ferrum-mcp` become tools; `openapi export` lists them in the extension's

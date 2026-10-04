@@ -196,7 +196,7 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.9`, unchanged from `contracts-edge-0.9.8`. They are
+/// `contracts-edge-0.9.11`, unchanged from `contracts-edge-0.9.8`. They are
 /// recorded here only to detect drift and are never rendered: rule
 /// `alloy.r007` renders the version-neutral explanations in
 /// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
@@ -286,8 +286,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.9-r2");
-    assert_eq!(pin["commit"], "591c73a3f965fdab440c3a76b2707accdf491ba5");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.11");
+    assert_eq!(pin["commit"], "390edbd5b2485af0988e02f7827fde778d76ae0a");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
@@ -338,6 +338,10 @@ fn edge_diagnostic_ref_pattern_matches_the_pinned_schema() {
 #[test]
 fn gateway_error_tokens_match_the_pinned_vocabulary() {
     let errors = pinned_json("vocabularies/gateway-errors.json");
+    assert_eq!(
+        errors["edge_release"],
+        ferrum_alloy_edge::contract::EDGE_RELEASE
+    );
     let entries = errors["x_gateway_error_tokens"].as_array().unwrap();
     let canonical_tokens: BTreeSet<String> = entries
         .iter()
@@ -390,6 +394,10 @@ fn gateway_error_tokens_match_the_pinned_vocabulary() {
 #[test]
 fn released_gateway_diagnostic_headers_match_the_pinned_vocabulary() {
     let headers = pinned_json("vocabularies/gateway-headers.json");
+    assert_eq!(
+        headers["edge_release"],
+        ferrum_alloy_edge::contract::EDGE_RELEASE
+    );
     let canonical_headers: BTreeSet<String> = headers["headers"]
         .as_array()
         .unwrap()
@@ -441,6 +449,43 @@ fn pinned_diagnostic_schema_and_finding_fixtures_match_alloy() {
     let root = repo_root();
     let local_schema = repo_json(LOCAL_SCHEMA);
     let pinned_schema = pinned_json("schemas/diagnostic-report/v1.schema.json");
+    let pin = repo_json(PIN);
+    let local_contract = &local_schema["x-contract"];
+    let pinned_contract = &pinned_schema["x-contract"];
+    for contract in [local_contract, pinned_contract] {
+        assert_eq!(contract["status"], "implemented");
+        assert_eq!(contract["owner"], "ferrum-edge/ferrum-alloy");
+        assert!(
+            contract["shared_status"]
+                .as_str()
+                .unwrap()
+                .starts_with("EXISTING shared v1")
+        );
+    }
+    assert_eq!(local_contract["availability"], "unreleased");
+    assert_eq!(local_contract["contracts_tag"], pin["tag"]);
+    assert_eq!(local_contract["contracts_commit"], pin["commit"]);
+    let release = &pinned_contract["coordinated_release"];
+    assert_eq!(release["contracts_tag"], pin["tag"]);
+    assert_eq!(
+        local_contract["qualified_owner_commit"],
+        release["qualified_owner_commit"]
+    );
+    assert_eq!(
+        release["qualified_owner_commit"],
+        "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e"
+    );
+    assert_eq!(
+        pinned_contract["provenance"][0]["commit"],
+        release["qualified_owner_commit"]
+    );
+    assert_eq!(
+        pinned_contract["provenance"][0]["availability"],
+        "unreleased"
+    );
+    // Keep every description in parity, including historical PROPOSED text.
+    // The tag's x-contract metadata records the accepted shared v1 freeze;
+    // its pending-publication wording is historical released source text.
     let without_contract_metadata = |mut schema: serde_json::Value| {
         schema.as_object_mut().unwrap().remove("$id");
         schema.as_object_mut().unwrap().remove("x-contract");
