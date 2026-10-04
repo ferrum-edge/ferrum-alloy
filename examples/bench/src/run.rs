@@ -209,6 +209,27 @@ pub(crate) fn measure(
     collector: Option<Arc<CollectorStats>>,
     environment: Value,
 ) -> Result<Value, Failure> {
+    measure_inner(
+        cell,
+        options,
+        pipeline,
+        metrics,
+        collector,
+        environment,
+        #[cfg(test)]
+        false,
+    )
+}
+
+fn measure_inner(
+    cell: Cell,
+    options: &RunOptions,
+    pipeline: Option<OtelPipeline>,
+    metrics: &Metrics,
+    collector: Option<Arc<CollectorStats>>,
+    environment: Value,
+    #[cfg(test)] cancellation_health: bool,
+) -> Result<Value, Failure> {
     options.load.validate(cell.transport)?;
     let pki = if cell.transport.tls() {
         Some(Pki::generate()?)
@@ -238,7 +259,14 @@ pub(crate) fn measure(
     let collector = collector.as_deref();
     let probe = || Sample::take(metrics, collector);
     alloc::set_role(Role::Client);
-    let measured = runtime.block_on(client::drive(target, options.load, probe));
+    let measured = runtime.block_on(async {
+        #[cfg(test)]
+        if cancellation_health && cell.workload == crate::dims::Workload::Cancel {
+            let health = client::tests::cancellation_health(target, options.load, probe);
+            return tokio::time::timeout(Duration::from_secs(15), health).await?;
+        }
+        client::drive(target, options.load, probe).await
+    });
     alloc::set_role(Role::Service);
     // Close the client's connections before stopping the server.
     drop(runtime);
@@ -467,6 +495,8 @@ mod tests {
         // within 200 ms in a shared debug-build process. Use the harness's
         // normal warm-up and window for finite 64 KiB bodies / 64-frame
         // streams, retaining four workers and the actual production path.
+        // Cancellation alone uses finite per-worker phase budgets below h2's
+        // reset-retention limit, through the same exchanges and coordinator.
         // Dedicated boundary and body tests keep their 200 ms windows.
         let mut options = options(5.0);
         options.load.warmup = Duration::from_secs(1);
@@ -479,7 +509,16 @@ mod tests {
                 };
                 let metrics = Metrics::default();
                 let environment = probe::environment(options.label.as_deref());
-                let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
+                let result = measure_inner(
+                    cell,
+                    &options,
+                    None,
+                    &metrics,
+                    None,
+                    environment,
+                    true,
+                )
+                .unwrap();
                 assert_work_completed(&result);
                 assert_eq!(result["seconds"], 5.0, "{result}");
                 assert_eq!(result["warmup_seconds"], 1.0, "{result}");
@@ -493,6 +532,11 @@ mod tests {
                 assert_eq!(result["run_id"], "test-run", "{result}");
                 assert_eq!(result["rep"], 1, "{result}");
                 assert_body_accounting(&result, *workload, *transport);
+                if *workload == Workload::Cancel {
+                    let requests =
+                        options.load.concurrency * client::tests::HEALTH_EXCHANGES_PER_PHASE;
+                    assert_eq!(result["requests"], requests, "{result}");
+                }
             }
         }
     }
@@ -540,13 +584,23 @@ mod tests {
             assert_eq!(result["requests"], options.load.concurrency, "{result}");
             assert_eq!(result["seconds"], options.load.duration.as_secs_f64());
             assert_cancellation(&result, *transport);
+            assert_eq!(
+                result["body_bytes"],
+                (options.load.concurrency * FRAME_BYTES) as u64,
+                "{result}"
+            );
         }
     }
 
     fn assert_cancellation(result: &Value, transport: Transport) {
         let requests = result["requests"].as_u64().unwrap();
         let bytes = result["body_bytes"].as_u64().unwrap();
-        assert!(bytes >= requests * FRAME_BYTES as u64, "{result}");
+        // Incoming frames need not preserve an application's 1 KiB chunks:
+        // Hyper's HTTP/1 decoder can return any nonempty partial chunk.
+        assert!(bytes >= requests, "{result}");
+        // The real router emits 1 KiB application chunks. Hyper encodes each
+        // as one HTTP/1 chunk; h2 can split, but does not join, those chunks.
+        assert!(bytes <= requests * FRAME_BYTES as u64, "{result}");
         assert!(
             bytes < requests * (CANCEL_FRAMES * FRAME_BYTES) as u64,
             "{result}"
@@ -558,6 +612,18 @@ mod tests {
             let connects = result["connects"].as_u64().unwrap();
             assert!(connects >= connections + requests, "{result}");
         }
+    }
+
+    #[test]
+    fn cancellation_accounting_accepts_a_partial_first_incoming_frame() {
+        let (bytes, connects) = client::tests::partial_first_cancellation();
+        let result = json!({
+            "requests": 1,
+            "body_bytes": bytes,
+            "connections": 1,
+            "connects": connects,
+        });
+        assert_cancellation(&result, Transport::H1);
     }
 
     #[test]

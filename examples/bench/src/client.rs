@@ -88,10 +88,17 @@ pub(crate) struct Totals {
 }
 
 impl Totals {
-    fn error(&mut self, error: &dyn std::fmt::Display) {
+    fn error(&mut self, error: &(dyn std::error::Error + 'static)) {
         self.errors += 1;
         if self.error_samples.len() < ERROR_SAMPLES {
-            self.error_samples.push(error.to_string());
+            let mut message = error.to_string();
+            let mut source = error.source();
+            while let Some(cause) = source {
+                message.push_str(": ");
+                message.push_str(&cause.to_string());
+                source = cause.source();
+            }
+            self.error_samples.push(message);
         }
     }
 
@@ -272,14 +279,34 @@ async fn connected(
 async fn worker(
     target: Arc<Target>,
     sender: Sender,
+    phase: watch::Receiver<Phase>,
+    ready: mpsc::UnboundedSender<Result<(), String>>,
+) -> Result<Totals, Failure> {
+    worker_inner(
+        target,
+        sender,
+        phase,
+        ready,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn worker_inner(
+    target: Arc<Target>,
+    sender: Sender,
     mut phase: watch::Receiver<Phase>,
     ready: mpsc::UnboundedSender<Result<(), String>>,
+    #[cfg(test)] per_phase: Option<usize>,
 ) -> Result<Totals, Failure> {
     let mut totals = Totals::default();
     let prepared = prepare(&target, sender, &mut totals).await;
     ready.send(prepared.as_ref().map(|_| ()).map_err(ToString::to_string))?;
     let mut sender = Some(prepared?);
     let reuse = !(target.workload == Workload::Cancel && !target.transport.http2());
+    #[cfg(test)]
+    let (mut warmup_exchanges, mut measured_exchanges) = (0, 0);
     loop {
         let current_phase = *phase.borrow_and_update();
         match current_phase {
@@ -305,12 +332,26 @@ async fn worker(
             Phase::Measuring { end, .. } if Instant::now() >= end => break,
             Phase::Warmup | Phase::Measuring { .. } => {}
         }
+        #[cfg(test)]
+        if let Some(limit) = per_phase {
+            match current_phase {
+                Phase::Warmup if warmup_exchanges >= limit => {
+                    phase.changed().await?;
+                    continue;
+                }
+                Phase::Measuring { end, .. } if measured_exchanges >= limit => {
+                    tokio::time::sleep_until(end.into()).await;
+                    break;
+                }
+                _ => {}
+            }
+        }
         let mut current = match connected(&target, sender.take(), &mut totals).await {
             Ok(current) => current,
             Err(error) => {
                 let now = Instant::now();
                 if phase.borrow().contains(now, now) {
-                    totals.error(&error);
+                    totals.error(error.as_ref());
                 }
                 continue;
             }
@@ -318,6 +359,12 @@ async fn worker(
         let begin = Instant::now();
         let result = exchange(&mut current, &target).await;
         let end = Instant::now();
+        #[cfg(test)]
+        match current_phase {
+            Phase::Warmup => warmup_exchanges += 1,
+            Phase::Measuring { .. } => measured_exchanges += 1,
+            _ => {}
+        }
         if phase.borrow().contains(begin, end) {
             match result {
                 Ok(bytes) => {
@@ -326,12 +373,20 @@ async fn worker(
                     totals.latencies_us.push(micros);
                     totals.body_bytes += bytes;
                 }
-                Err(error) => totals.error(&error),
+                Err(error) => totals.error(error.as_ref()),
             }
         }
         if reuse {
             sender = Some(current);
         }
+    }
+    #[cfg(test)]
+    if per_phase.is_some() && target.transport.http2() {
+        // A quiet tail of the fixed health window must not hide a driver that
+        // died on late DATA. Prove reuse after the deadline on the retained
+        // sender, without re-dialling or including this probe in the totals.
+        let sender = sender.as_mut().ok_or("health probe lost its H2 sender")?;
+        exchange(sender, &target).await?;
     }
     Ok(totals)
 }
@@ -511,6 +566,51 @@ pub(crate) mod tests {
     use crate::dims::FRAME_BYTES;
     use crate::pki::Pki;
 
+    /// Functional cancellation health is finite work, not an unbounded reset
+    /// flood. Pinned h2 retains 50 local resets per connection for one second.
+    /// With two workers per connection, preparation, both phase budgets and
+    /// the final reuse probe require at most 2 * (1 + 8 + 8 + 1) = 36 retained
+    /// resets, even if none expire.
+    pub(crate) const HEALTH_EXCHANGES_PER_PHASE: usize = 8;
+
+    pub(crate) async fn cancellation_health<S>(
+        target: Target,
+        load: Load,
+        probe: impl Fn() -> S,
+    ) -> Result<Measured<S>, Failure> {
+        load.validate(target.transport)?;
+        assert_eq!(target.workload, Workload::Cancel);
+        assert_eq!(load.concurrency, 4);
+        assert_eq!(load.streams, 2);
+        let target = Arc::new(target);
+        let (phase, receiver) = watch::channel(Phase::Preparing);
+        let (ready, mut readiness) = mpsc::unbounded_channel();
+        let mut workers = JoinSet::new();
+        for _ in 0..load.connections(target.transport) {
+            let sender = dial(&target).await?;
+            let mut senders = Vec::new();
+            if let Sender::H2(shared) = &sender {
+                for _ in 1..load.streams {
+                    senders.push(Sender::H2(shared.clone()));
+                }
+            }
+            senders.push(sender);
+            for sender in senders {
+                workers.spawn(worker_inner(
+                    Arc::clone(&target),
+                    sender,
+                    receiver.clone(),
+                    ready.clone(),
+                    Some(HEALTH_EXCHANGES_PER_PHASE),
+                ));
+            }
+        }
+        drop(ready);
+        drop(receiver);
+        let connects = load.connections(target.transport) as u64;
+        measure_workers(load, &phase, &mut readiness, &mut workers, connects, probe).await
+    }
+
     /// Own every async task for one transport, including the connection
     /// drivers and H2 children spawned by the unchanged TokioExecutor.
     /// A current-thread runtime leaves no concurrently polling task when
@@ -619,6 +719,209 @@ pub(crate) mod tests {
             assert!(driver.is_finished(), "{exit:?}");
             assert_eq!(dropped.load(Ordering::SeqCst), 2, "{exit:?}");
             assert_eq!(metrics.num_alive_tasks(), 0, "{exit:?}");
+        }
+    }
+
+    async fn wire_read(stream: &TcpStream, bytes: &mut [u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            stream.readable().await.unwrap();
+            match stream.try_read(&mut bytes[offset..]) {
+                Ok(0) => panic!("wire peer closed before sending the expected bytes"),
+                Ok(read) => offset += read,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("wire read: {error}"),
+            }
+        }
+    }
+
+    async fn wire_write(stream: &TcpStream, bytes: &[u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            stream.writable().await.unwrap();
+            match stream.try_write(&bytes[offset..]) {
+                Ok(0) => panic!("wire peer stopped accepting bytes"),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("wire write: {error}"),
+            }
+        }
+    }
+
+    /// Send only half of one declared 1 KiB HTTP/1 chunk. The second half is
+    /// withheld until exchange returns, so success cannot depend on coalescing
+    /// reads or reaching the chunk boundary / end of the response.
+    pub(crate) fn partial_first_cancellation() -> (u64, u64) {
+        let runtime = CancellationRuntime::new();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let target = Target {
+                    addr: listener.local_addr().unwrap(),
+                    transport: Transport::H1,
+                    workload: Workload::Cancel,
+                    tls: None,
+                };
+                let (finished, cancelled) = oneshot::channel();
+                let mut servers = JoinSet::new();
+                servers.spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        wire_read(&stream, &mut byte).await;
+                        request.push(byte[0]);
+                        assert!(request.len() <= 8192);
+                    }
+                    wire_write(
+                        &stream,
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n",
+                    )
+                    .await;
+                    wire_write(&stream, &[b'x'; FRAME_BYTES / 2]).await;
+                    cancelled.await.unwrap();
+                });
+                let mut sender = dial(&target).await.unwrap();
+                let bytes = exchange(&mut sender, &target).await.unwrap();
+                assert!(bytes > 0 && bytes <= (FRAME_BYTES / 2) as u64);
+                drop(sender);
+                let mut totals = Totals {
+                    connects: 1,
+                    ..Totals::default()
+                };
+                // Exercise the real HTTP/1 reconnect before releasing the
+                // peer, rather than inventing a connect count for reporting.
+                let replacement = connected(&target, None, &mut totals).await.unwrap();
+                drop(replacement);
+                finished.send(()).unwrap();
+                servers.join_next().await.unwrap().unwrap();
+                assert!(servers.is_empty());
+                (bytes, totals.connects)
+            })
+            .await
+        });
+        runtime.shutdown();
+        result.unwrap()
+    }
+
+    async fn h2_frame(stream: &TcpStream) -> (u8, u8, u32, Vec<u8>) {
+        let mut header = [0; 9];
+        wire_read(stream, &mut header).await;
+        let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+        assert!(len <= 16_384);
+        let id = u32::from_be_bytes(header[5..9].try_into().unwrap()) & 0x7fff_ffff;
+        let mut payload = vec![0; len];
+        wire_read(stream, &mut payload).await;
+        (header[3], header[4], id, payload)
+    }
+
+    async fn h2_write(stream: &TcpStream, kind: u8, flags: u8, id: u32, payload: &[u8]) {
+        let len = u32::try_from(payload.len()).unwrap().to_be_bytes();
+        let mut header = [0; 9];
+        header[..3].copy_from_slice(&len[1..]);
+        header[3] = kind;
+        header[4] = flags;
+        header[5..].copy_from_slice(&id.to_be_bytes());
+        wire_write(stream, &header).await;
+        wire_write(stream, payload).await;
+    }
+
+    async fn h2_until(stream: &TcpStream, expected: u8) -> (u8, u32, Vec<u8>) {
+        loop {
+            let (kind, flags, id, payload) = h2_frame(stream).await;
+            if kind == expected {
+                return (flags, id, payload);
+            }
+            match kind {
+                4 if flags == 0 => h2_write(stream, 4, 1, 0, &[]).await,
+                4 | 8 => {}
+                _ => panic!("expected H2 frame {expected}, received {kind}"),
+            }
+        }
+    }
+
+    async fn h2_cancelled_response(stream: &TcpStream) -> u32 {
+        let (flags, id, _) = h2_until(stream, 1).await;
+        assert_eq!(flags & 5, 5); // END_STREAM | END_HEADERS on the empty GET.
+        h2_write(stream, 1, 4, id, &[0x88]).await; // HPACK static :status 200.
+        h2_write(stream, 0, 0, id, &[b'x'; FRAME_BYTES]).await;
+        let (_, reset_id, reason) = h2_until(stream, 3).await;
+        assert_eq!(reset_id, id);
+        assert_eq!(reason, 8_u32.to_be_bytes()); // CANCEL.
+        id
+    }
+
+    #[test]
+    fn late_data_requires_retained_reset_state_for_http2_reuse() {
+        // Exercise the pinned default of 50 retained resets. Extend only the
+        // test retention time so scheduling cannot make resets expire; lower
+        // the error-reset limit to expose the first forgotten-stream error.
+        // No client or server production setting is changed by this fixture.
+        for resets in [50, 51] {
+            let runtime = CancellationRuntime::new();
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let target = Target {
+                        addr: listener.local_addr().unwrap(),
+                        transport: Transport::H2c,
+                        workload: Workload::Cancel,
+                        tls: None,
+                    };
+                    let (acknowledged, mut acknowledgements) = mpsc::unbounded_channel();
+                    let mut servers = JoinSet::new();
+                    servers.spawn(async move {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        stream.set_nodelay(true).unwrap();
+                        let mut preface = [0; 24];
+                        wire_read(&stream, &mut preface).await;
+                        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+                        h2_write(&stream, 4, 0, 0, &[]).await;
+                        let mut last = 0;
+                        for _ in 0..resets {
+                            last = h2_cancelled_response(&stream).await;
+                            acknowledged.send(()).unwrap();
+                        }
+                        // DATA already in flight when CANCEL was sent must
+                        // be ignored while the reset is retained.
+                        h2_write(&stream, 0, 0, last, &[b'x'; FRAME_BYTES]).await;
+                        if resets == 50 {
+                            h2_cancelled_response(&stream).await;
+                        } else {
+                            let (_, id, payload) = h2_until(&stream, 7).await;
+                            assert_eq!(id, 0);
+                            assert_eq!(&payload[4..8], &11_u32.to_be_bytes());
+                            assert_eq!(&payload[8..], b"too_many_internal_resets");
+                        }
+                    });
+                    let stream = TcpStream::connect(target.addr).await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let mut builder = http2::Builder::new(TokioExecutor::new());
+                    builder
+                        .reset_stream_duration(Duration::from_secs(60))
+                        .max_local_error_reset_streams(0);
+                    let (sender, connection) =
+                        builder.handshake(TokioIo::new(stream)).await.unwrap();
+                    let mut drivers = JoinSet::new();
+                    drivers.spawn(connection);
+                    let mut sender = Sender::H2(sender);
+                    for _ in 0..resets {
+                        assert_eq!(exchange(&mut sender, &target).await.unwrap(), 1024);
+                        acknowledgements.recv().await.unwrap();
+                    }
+                    if resets == 50 {
+                        assert_eq!(exchange(&mut sender, &target).await.unwrap(), 1024);
+                    }
+                    servers.join_next().await.unwrap().unwrap();
+                    drop(sender);
+                    drivers.shutdown().await;
+                    assert!(servers.is_empty() && drivers.is_empty());
+                })
+                .await
+            });
+            runtime.shutdown();
+            result.unwrap();
         }
     }
 
@@ -1297,10 +1600,10 @@ pub(crate) mod tests {
         let mut first = Totals::default();
         let mut second = Totals::default();
         for index in 0..ERROR_SAMPLES {
-            first.error(&format!("first {index}"));
-            second.error(&format!("second {index}"));
+            first.error(&std::io::Error::other(format!("first {index}")));
+            second.error(&std::io::Error::other(format!("second {index}")));
         }
-        first.error(&"dropped");
+        first.error(&std::io::Error::other("dropped"));
         assert_eq!(first.errors, ERROR_SAMPLES as u64 + 1);
         assert_eq!(first.error_samples.len(), ERROR_SAMPLES);
         first.error_samples.truncate(2);
@@ -1309,6 +1612,33 @@ pub(crate) mod tests {
         assert_eq!(first.error_samples.len(), ERROR_SAMPLES);
         assert_eq!(first.error_samples[1], "first 1");
         assert_eq!(first.error_samples[2], "second 0");
+    }
+
+    #[test]
+    fn error_samples_preserve_the_protocol_cause() {
+        #[derive(Debug)]
+        struct TransportError(std::io::Error);
+
+        impl std::fmt::Display for TransportError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("http2 error")
+            }
+        }
+
+        impl std::error::Error for TransportError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = TransportError(std::io::Error::other("too_many_internal_resets"));
+        let mut totals = Totals::default();
+        totals.error(&error);
+        assert_eq!(totals.errors, 1);
+        assert_eq!(
+            totals.error_samples,
+            ["http2 error: too_many_internal_resets"]
+        );
     }
 
     #[test]

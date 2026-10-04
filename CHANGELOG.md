@@ -2,7 +2,27 @@
 
 ## [Unreleased]
 
-- Correct the real-service benchmark health matrices after PR #141 head
+- Bound real-service cancellation health below the pinned h2 reset-retention
+  limit after PR #141 head `d3468f6b6603e157c37ee41c70ef73ac6756f276` failed
+  [qualification run 37223357081 / job 111497941354](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37223357081/job/111497941354).
+  Its warmed 5-second h2c/cancel cells reported 46 errors / 34 connects for
+  plain and 37 errors / 35 connects for Alloy; 37 other harness tests passed,
+  but the remaining transports were not reached. The original samples do
+  not prove an inner HTTP/2 cause. Source inspection establishes that
+  unlimited first-frame cancellations with in-flight DATA can exceed h2's
+  50-reset retention capacity; forgotten-stream DATA can consume its separate
+  protocol-error reset limit. Add a bounded wire regression for that mechanism.
+  Keep the real services, all workloads/transports and fixed 1/5-second clocks;
+  cancellation health uses eight exchanges per worker per phase and a fatal
+  post-window H2 reuse probe, at most 36 resets per connection. Require exactly
+  32 measured cancellations, nonzero latencies and zero errors. Preserve
+  continuous benchmark load and all qualification gates; this finite functional
+  fixture does not qualify sustained cancellation performance. Retain error
+  source chains in the existing sample strings. Accept nonempty partial first
+  incoming frames, with a bounded half-chunk HTTP/1 regression; keep exact
+  1 KiB accounting in the controlled fixture and full-body accounting elsewhere.
+  Hosted validation of this repair remains required.
+- Extend the real-service benchmark health windows after PR #141 head
   `7950a8b84ff7a0ee829e09c0b5c4a26789c1a3ee` failed
   [Linux run 37222237081 / job 111494745143](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37222237081/job/111494745143).
   The Alloy h2c stream cell completed no measured body in a zero-warm-up
@@ -14,8 +34,9 @@
   byte accounting and exact report labels/durations. Keep separate 200 ms
   boundary/probe, cancellation and full-body tests, worker-liveness/runtime
   teardown coverage, production measurement semantics and strict qualification
-  unchanged. Functional health coverage supplies no performance budget or
-  dedicated acceptance; fresh hosted CI remains required.
+  unchanged. That longer-window attempt subsequently failed at `d3468f6` as
+  recorded above; it is not passing repair evidence. Functional health coverage
+  supplies no performance budget or dedicated acceptance.
 - Make the benchmark cancellation protocol regression causal and bounded:
   observe real worker completions, server body drops and accepted connection
   identities over all six transports instead of assuming completed work in a
