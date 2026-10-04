@@ -487,17 +487,19 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
         client.write_all(GET).await.unwrap();
         let mut body = Vec::new();
         let mut release_body = Some(release_body);
+        let mut body_released = false;
         loop {
             let (header, payload) = h2_frame(&mut client).await;
             if header[3] == DATA_FRAME {
                 assert_eq!(&header[5..], &[0, 0, 0, 1]);
                 body.extend_from_slice(&payload);
-                if body.len() == SMALL_BODY {
+                if body.len() >= SMALL_BODY && !body_released {
                     release_body
                         .take()
                         .expect("the body guard is released once")
                         .send(())
                         .expect("the response body is waiting for client progress");
+                    body_released = true;
                 }
                 if header[4] & 1 != 0 {
                     break;
