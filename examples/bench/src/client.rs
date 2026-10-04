@@ -88,10 +88,17 @@ pub(crate) struct Totals {
 }
 
 impl Totals {
-    fn error(&mut self, error: &dyn std::fmt::Display) {
+    fn error(&mut self, error: &(dyn std::error::Error + 'static)) {
         self.errors += 1;
         if self.error_samples.len() < ERROR_SAMPLES {
-            self.error_samples.push(error.to_string());
+            let mut message = error.to_string();
+            let mut source = error.source();
+            while let Some(cause) = source {
+                message.push_str(": ");
+                message.push_str(&cause.to_string());
+                source = cause.source();
+            }
+            self.error_samples.push(message);
         }
     }
 
@@ -141,18 +148,30 @@ where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     if h2 {
-        let (sender, connection) = http2::handshake(TokioExecutor::new(), io).await?;
+        #[cfg(not(test))]
+        let executor = TokioExecutor::new();
+        #[cfg(test)]
+        let executor = tests::DiagnosticExecutor::current();
+        let (sender, connection) = http2::handshake(executor, io).await?;
+        #[cfg(test)]
+        let connection = tests::diagnostic_driver(connection);
         tokio::spawn(connection);
         Ok(Sender::H2(sender))
     } else {
         let (sender, connection) = http1::handshake(io).await?;
+        #[cfg(test)]
+        let connection = tests::diagnostic_driver(connection);
         tokio::spawn(connection);
         Ok(Sender::H1(sender))
     }
 }
 
 async fn dial(target: &Target) -> Result<Sender, Failure> {
+    #[cfg(test)]
+    tests::diagnostic_dial();
     let stream = TcpStream::connect(target.addr).await?;
+    #[cfg(test)]
+    tests::diagnostic_socket(stream.local_addr().ok());
     stream.set_nodelay(true)?;
     let h2 = target.transport.http2();
     if target.workload == Workload::Cancel && !h2 {
@@ -161,12 +180,20 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
         stream.set_zero_linger()?;
     }
     match &target.tls {
-        None => handshake(TokioIo::new(stream), h2).await,
+        None => {
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("http-handshake");
+            handshake(TokioIo::new(stream), h2).await
+        }
         Some(config) => {
             let name = ServerName::try_from("localhost")?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("tls-handshake");
             let stream = TlsConnector::from(Arc::clone(config))
                 .connect(name, stream)
                 .await?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("http-handshake");
             handshake(TokioIo::new(stream), h2).await
         }
     }
@@ -175,6 +202,8 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
 /// Sends one request and reads the body: all of it, or for `cancel` only
 /// until the first data frame, then drops the response.
 async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> {
+    #[cfg(test)]
+    tests::diagnostic_exchange_started(sender);
     let path = target.workload.path();
     let response = match sender {
         Sender::H1(sender) => {
@@ -182,6 +211,8 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
                 .header(http::header::HOST, target.addr.to_string())
                 .body(Empty::new())?;
             sender.ready().await?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("response-headers");
             sender.send_request(request).await?
         }
         Sender::H2(sender) => {
@@ -190,6 +221,8 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
             let uri = format!("{scheme}://{}{path}", target.addr);
             let request = Request::get(uri).body(Empty::new())?;
             sender.ready().await?;
+            #[cfg(test)]
+            tests::diagnostic_worker_stage("response-headers");
             sender.send_request(request).await?
         }
     };
@@ -199,15 +232,23 @@ async fn exchange(sender: &mut Sender, target: &Target) -> Result<u64, Failure> 
     let cancel = target.workload == Workload::Cancel;
     let mut body = response.into_body();
     let mut bytes = 0_u64;
+    #[cfg(test)]
+    tests::diagnostic_worker_stage("first-data-frame");
     while let Some(frame) = body.frame().await {
         if let Some(data) = frame?.data_ref() {
             bytes += data.len() as u64;
+            #[cfg(test)]
+            tests::diagnostic_body_bytes(data.len() as u64);
             if cancel && !data.is_empty() {
+                #[cfg(test)]
+                tests::diagnostic_exchange_completed(sender);
                 return Ok(bytes);
             }
         }
     }
     if cancel {
+        #[cfg(test)]
+        tests::diagnostic_static_error("response ended before cancellation");
         return Err("the response ended before the client cancelled it".into());
     }
     Ok(bytes)
@@ -227,6 +268,8 @@ async fn prepare(
         sender = dial(target).await?;
         totals.connects += 1;
     }
+    #[cfg(test)]
+    tests::diagnostic_sender_stage(&sender, "preparation-sender-ready");
     sender.ready().await?;
     Ok(sender)
 }
@@ -272,18 +315,46 @@ async fn connected(
 async fn worker(
     target: Arc<Target>,
     sender: Sender,
+    phase: watch::Receiver<Phase>,
+    ready: mpsc::UnboundedSender<Result<(), String>>,
+) -> Result<Totals, Failure> {
+    worker_inner(
+        target,
+        sender,
+        phase,
+        ready,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn worker_inner(
+    target: Arc<Target>,
+    sender: Sender,
     mut phase: watch::Receiver<Phase>,
     ready: mpsc::UnboundedSender<Result<(), String>>,
+    #[cfg(test)] per_phase: Option<usize>,
 ) -> Result<Totals, Failure> {
     let mut totals = Totals::default();
     let prepared = prepare(&target, sender, &mut totals).await;
+    #[cfg(test)]
+    if let Err(error) = &prepared {
+        tests::diagnostic_error(error.as_ref());
+    }
     ready.send(prepared.as_ref().map(|_| ()).map_err(ToString::to_string))?;
     let mut sender = Some(prepared?);
     let reuse = !(target.workload == Workload::Cancel && !target.transport.http2());
+    #[cfg(test)]
+    let (mut warmup_exchanges, mut measured_exchanges) = (0, 0);
     loop {
         let current_phase = *phase.borrow_and_update();
+        #[cfg(test)]
+        tests::diagnostic_worker_phase(current_phase);
         match current_phase {
             Phase::Preparing => {
+                #[cfg(test)]
+                tests::diagnostic_worker_stage("preparation-parked");
                 phase.changed().await?;
                 continue;
             }
@@ -293,31 +364,71 @@ async fn worker(
                 // coordinator takes the baseline or starts the clock.
                 let connection = async {
                     let mut connection = connected(&target, sender.take(), &mut totals).await?;
+                    #[cfg(test)]
+                    tests::diagnostic_sender_stage(&connection, "drain-sender-ready");
                     connection.ready().await?;
                     Ok::<_, Failure>(connection)
                 }
                 .await;
+                #[cfg(test)]
+                if let Err(error) = &connection {
+                    tests::diagnostic_error(error.as_ref());
+                }
                 ready.send(connection.as_ref().map(|_| ()).map_err(ToString::to_string))?;
                 sender = Some(connection?);
+                #[cfg(test)]
+                tests::diagnostic_worker_stage("drain-parked");
                 phase.changed().await?;
                 continue;
             }
             Phase::Measuring { end, .. } if Instant::now() >= end => break,
             Phase::Warmup | Phase::Measuring { .. } => {}
         }
+        #[cfg(test)]
+        if let Some(limit) = per_phase {
+            match current_phase {
+                Phase::Warmup if warmup_exchanges >= limit => {
+                    tests::diagnostic_worker_stage("warmup-quota-phase-change");
+                    phase.changed().await?;
+                    continue;
+                }
+                Phase::Measuring { end, .. } if measured_exchanges >= limit => {
+                    tests::diagnostic_worker_stage("measurement-quota-deadline");
+                    tokio::time::sleep_until(end.into()).await;
+                    break;
+                }
+                _ => {}
+            }
+        }
         let mut current = match connected(&target, sender.take(), &mut totals).await {
             Ok(current) => current,
             Err(error) => {
+                #[cfg(test)]
+                tests::diagnostic_error(error.as_ref());
                 let now = Instant::now();
                 if phase.borrow().contains(now, now) {
-                    totals.error(&error);
+                    totals.error(error.as_ref());
                 }
+                #[cfg(test)]
+                tests::diagnostic_totals(&totals, true);
                 continue;
             }
         };
         let begin = Instant::now();
         let result = exchange(&mut current, &target).await;
         let end = Instant::now();
+        #[cfg(test)]
+        let failed = result.is_err();
+        #[cfg(test)]
+        if let Err(error) = &result {
+            tests::diagnostic_error(error.as_ref());
+        }
+        #[cfg(test)]
+        match current_phase {
+            Phase::Warmup => warmup_exchanges += 1,
+            Phase::Measuring { .. } => measured_exchanges += 1,
+            _ => {}
+        }
         if phase.borrow().contains(begin, end) {
             match result {
                 Ok(bytes) => {
@@ -326,12 +437,23 @@ async fn worker(
                     totals.latencies_us.push(micros);
                     totals.body_bytes += bytes;
                 }
-                Err(error) => totals.error(&error),
+                Err(error) => totals.error(error.as_ref()),
             }
         }
+        #[cfg(test)]
+        tests::diagnostic_totals(&totals, failed);
         if reuse {
             sender = Some(current);
         }
+    }
+    #[cfg(test)]
+    if per_phase.is_some() && target.transport.http2() {
+        // A quiet tail of the fixed health window must not hide a driver that
+        // died on late DATA. Prove reuse after the deadline on the retained
+        // sender, without re-dialling or including this probe in the totals.
+        tests::diagnostic_reuse();
+        let sender = sender.as_mut().ok_or("health probe lost its H2 sender")?;
+        exchange(sender, &target).await?;
     }
     Ok(totals)
 }
@@ -357,6 +479,8 @@ async fn await_readiness(
     readiness: &mut mpsc::UnboundedReceiver<Result<(), String>>,
     workers: &mut JoinSet<Result<Totals, Failure>>,
 ) -> Result<(), Failure> {
+    #[cfg(test)]
+    tests::diagnostic_readiness_start(stage);
     for _ in 0..count {
         tokio::select! {
             biased;
@@ -372,6 +496,8 @@ async fn await_readiness(
                 }
             }
         }
+        #[cfg(test)]
+        tests::diagnostic_readiness_received();
     }
     Ok(())
 }
@@ -387,6 +513,8 @@ async fn measurement_window<S>(
     probe: impl Fn() -> S,
 ) -> Result<(S, S), Failure> {
     if !load.warmup.is_zero() {
+        #[cfg(test)]
+        tests::diagnostic_coordinator_stage("warmup-timer");
         phase.send_replace(Phase::Warmup);
         tokio::select! {
             biased;
@@ -400,6 +528,8 @@ async fn measurement_window<S>(
     await_readiness(load.concurrency, "measurement boundary", readiness, workers).await?;
     // Baseline probes and unfinished warm-up exchanges cannot consume the
     // requested window. All workers start their next exchange after release.
+    #[cfg(test)]
+    tests::diagnostic_coordinator_stage("baseline-probe");
     let start = probe();
     let window_start = Instant::now();
     let window_end = window_start + load.duration;
@@ -407,7 +537,11 @@ async fn measurement_window<S>(
         start: window_start,
         end: window_end,
     });
+    #[cfg(test)]
+    tests::diagnostic_coordinator_stage("measurement-deadline");
     tokio::time::sleep_until(window_end.into()).await;
+    #[cfg(test)]
+    tests::diagnostic_coordinator_stage("end-probe");
     Ok((start, probe()))
 }
 
@@ -426,7 +560,11 @@ async fn measure_workers<S>(
             connects,
             ..Totals::default()
         };
+        #[cfg(test)]
+        tests::diagnostic_coordinator_stage("worker-joins-and-reuse");
         while let Some(worker) = workers.join_next().await {
+            #[cfg(test)]
+            tests::diagnostic_worker_joined();
             totals.merge(worker??);
         }
         Ok(Measured {
@@ -440,6 +578,8 @@ async fn measure_workers<S>(
     if result.is_err() {
         // Await cancellation so parked peers have released their senders and
         // connections before the failed run returns.
+        #[cfg(test)]
+        tests::diagnostic_coordinator_stage("failed-worker-shutdown");
         workers.shutdown().await;
     }
     result
@@ -488,23 +628,1485 @@ pub(crate) async fn drive<S>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, reason = "tests")]
 
     use std::convert::Infallible;
+    use std::fmt::Write;
     use std::future::Future;
+    use std::io::Write as _;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     use hyper::Response;
     use hyper::body::Frame;
+    use hyper::rt::Executor;
     use hyper::service::service_fn;
+    use hyper_util::server::conn::auto::Builder;
     use tokio::net::TcpListener;
+    use tokio::runtime::Runtime;
     use tokio::sync::oneshot;
+    use tokio_rustls::TlsAcceptor;
+    use tracing::instrument::WithSubscriber;
+    use tracing::{Dispatch, Event, Metadata, Subscriber};
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+    use tracing_subscriber::{Layer, registry};
 
     use super::*;
     use crate::dims::FRAME_BYTES;
+    use crate::pki::Pki;
+
+    // Task-local observation keeps the real dial/exchange/coordinator path.
+    // Only cancellation_health enters these scopes; other tests and the
+    // production binary have no diagnostic state. No lock crosses an await.
+    tokio::task_local! {
+        static HEALTH_COORDINATOR: Arc<HealthDiagnostics>;
+        static HEALTH_WORKER: (Arc<HealthDiagnostics>, usize);
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct ExchangeProgress {
+        started: u64,
+        completed: u64,
+        bytes: u64,
+    }
+
+    #[derive(Clone)]
+    struct ConnectionDiagnostic {
+        owner: usize,
+        generation: u64,
+        local_addr: Option<SocketAddr>,
+        driver: Arc<AtomicUsize>,
+    }
+
+    struct WorkerDiagnostic {
+        phase: &'static str,
+        exchange_phase: usize,
+        stage: &'static str,
+        since: Instant,
+        outcome: &'static str,
+        connect_attempts: u64,
+        connection: Option<ConnectionDiagnostic>,
+        sender_closed: Option<bool>,
+        // Preparation, warm-up, measurement, and retained-sender reuse.
+        exchanges: [ExchangeProgress; 4],
+        measured: usize,
+        errors: u64,
+        body_bytes: u64,
+        last_error_stage: Option<&'static str>,
+        error_events: u64,
+        error_samples: Vec<ErrorIdentity>,
+        wire_events: u64,
+        wire_samples: Vec<WireSample>,
+    }
+
+    struct CoordinatorDiagnostic {
+        stage: &'static str,
+        since: Instant,
+        readiness: usize,
+        joined: usize,
+        last_error_stage: Option<&'static str>,
+    }
+
+    pub(crate) struct HealthDiagnostics {
+        started: Instant,
+        load: Load,
+        coordinator: Mutex<CoordinatorDiagnostic>,
+        workers: [Mutex<WorkerDiagnostic>; 4],
+        printed: AtomicBool,
+    }
+
+    impl HealthDiagnostics {
+        pub(crate) fn new(load: Load) -> Self {
+            // The observer has exactly four slots, never a CLI-sized vector.
+            assert_eq!(load.concurrency, 4);
+            assert_eq!(load.streams, 2);
+            let started = Instant::now();
+            Self {
+                started,
+                load,
+                coordinator: Mutex::new(CoordinatorDiagnostic {
+                    stage: "load-validation",
+                    since: started,
+                    readiness: 0,
+                    joined: 0,
+                    last_error_stage: None,
+                }),
+                workers: std::array::from_fn(|_| {
+                    Mutex::new(WorkerDiagnostic {
+                        phase: "preparation",
+                        exchange_phase: 0,
+                        stage: "not-spawned",
+                        since: started,
+                        outcome: "not-spawned",
+                        connect_attempts: 0,
+                        connection: None,
+                        sender_closed: None,
+                        exchanges: [ExchangeProgress::default(); 4],
+                        measured: 0,
+                        errors: 0,
+                        body_bytes: 0,
+                        last_error_stage: None,
+                        error_events: 0,
+                        error_samples: Vec::new(),
+                        wire_events: 0,
+                        wire_samples: Vec::new(),
+                    })
+                }),
+                printed: AtomicBool::new(false),
+            }
+        }
+
+        pub(crate) fn coordinator_stage(&self, stage: &'static str) {
+            let mut state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+            if stage == "failed-worker-shutdown" {
+                state.last_error_stage = Some(state.stage);
+            }
+            state.stage = stage;
+            state.since = Instant::now();
+        }
+
+        fn worker(&self, index: usize, update: impl FnOnce(&mut WorkerDiagnostic)) {
+            let mut state = self.workers[index]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            update(&mut state);
+        }
+
+        pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
+            use crate::dims::Dimension;
+
+            if self.printed.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            let now = Instant::now();
+            let state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+            let mut message = SnapshotText(String::new());
+            let _ = writeln!(
+                message,
+                "cancellation-health failure: reason={reason} scenario={} workload={} \
+                 transport={} elapsed_ms={} concurrency={} streams={} warmup_ms={} \
+                 window_ms={} per_phase={} timeout_ms=15000 coordinator={} \
+                 coordinator_stage_ms={} readiness={}/4 joined={}/4 \
+                 coordinator_last_error_stage={:?} \
+                 wire_observer=pinned-h2-client-poll-only wire_cause_may_be_unknown",
+                cell.scenario.name(),
+                cell.workload.name(),
+                cell.transport.name(),
+                now.duration_since(self.started).as_millis(),
+                self.load.concurrency,
+                self.load.streams,
+                self.load.warmup.as_millis(),
+                self.load.duration.as_millis(),
+                HEALTH_EXCHANGES_PER_PHASE,
+                state.stage,
+                now.duration_since(state.since).as_millis(),
+                state.readiness,
+                state.joined,
+                state.last_error_stage,
+            );
+            drop(state);
+            for (index, worker) in self.workers.iter().enumerate() {
+                let state = worker.lock().unwrap_or_else(|e| e.into_inner());
+                let connection = state.connection.as_ref().map(|connection| {
+                    let driver = match connection.driver.load(Ordering::Relaxed) {
+                        0 => "not-polled",
+                        1 => "running",
+                        2 => "public-dispatch-completed-ok-wire-health-unknown",
+                        3 => "public-dispatch-completed-error",
+                        _ => "future-dropped",
+                    };
+                    (
+                        connection.owner,
+                        connection.generation,
+                        connection.local_addr,
+                        driver,
+                    )
+                });
+                let _ = writeln!(
+                    message,
+                    "worker={index} phase={} stage={} stage_ms={} outcome={} \
+                     connect_attempts={} connection(owner,generation,local,driver)={connection:?} \
+                     sender_closed_last_observed={:?} \
+                     exchanges(preparation,warmup,measurement,reuse)={:?} \
+                     measured={} errors={} body_bytes={} last_error_stage={:?} \
+                     error_events={} error_samples={:?} wire_events={} wire_samples={:?}",
+                    state.phase,
+                    state.stage,
+                    now.saturating_duration_since(state.since).as_millis(),
+                    state.outcome,
+                    state.connect_attempts,
+                    state.sender_closed,
+                    state.exchanges,
+                    state.measured,
+                    state.errors,
+                    state.body_bytes,
+                    state.last_error_stage,
+                    state.error_events,
+                    state.error_samples,
+                    state.wire_events,
+                    state.wire_samples,
+                );
+            }
+            let _ = std::io::stderr().lock().write_all(message.0.as_bytes());
+            // Test-only, opt-in artifact output. One fixed-size snapshot per
+            // cell; I/O failure must never replace the Result or unwind.
+            if let Some(directory) = std::env::var_os("ALLOY_BENCH_DIAGNOSTIC_DIR") {
+                let name = format!("{}-{}.txt", cell.scenario.name(), cell.transport.name());
+                let path = std::path::PathBuf::from(directory).join(name);
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                {
+                    let _ = file.write_all(message.0.as_bytes());
+                }
+            }
+        }
+    }
+
+    // Bounds apply while formatting, before a String can grow. Only safe,
+    // known error representations are formatted: h2's opaque source Display
+    // can include peer GOAWAY debug bytes, and io::Error can wrap arbitrary
+    // application text. Neither is dumped, even when it would fit the bound.
+    const DIAGNOSTIC_TEXT_BYTES: usize = 256;
+    const DIAGNOSTIC_CHAIN_DEPTH: usize = 4;
+
+    const DIAGNOSTIC_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+    fn write_bounded(text: &mut String, limit: usize, input: &str) -> std::fmt::Result {
+        for character in input.chars() {
+            if text.len() + character.len_utf8() > limit {
+                return Err(std::fmt::Error);
+            }
+            text.push(character);
+        }
+        Ok(())
+    }
+
+    struct SnapshotText(String);
+
+    impl std::fmt::Write for SnapshotText {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            write_bounded(&mut self.0, DIAGNOSTIC_SNAPSHOT_BYTES, text)
+        }
+    }
+
+    #[derive(Default)]
+    struct BoundedText(String);
+
+    impl std::fmt::Write for BoundedText {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            write_bounded(&mut self.0, DIAGNOSTIC_TEXT_BYTES, text)
+        }
+    }
+
+    #[derive(Debug)]
+    struct ErrorIdentity {
+        stage: &'static str,
+        chain: Vec<String>,
+        source_end: &'static str,
+    }
+
+    impl ErrorIdentity {
+        fn new(stage: &'static str, error: &(dyn std::error::Error + 'static)) -> Self {
+            let mut chain = Vec::new();
+            let mut source = Some(error);
+            for _ in 0..DIAGNOSTIC_CHAIN_DEPTH {
+                let Some(error) = source else {
+                    break;
+                };
+                let mut text = BoundedText::default();
+                if let Some(error) = error.downcast_ref::<hyper::Error>() {
+                    // Hyper Display is its static description, not its source.
+                    let _ = write!(text, "hyper::Error: {error}");
+                } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                    let _ = write!(
+                        text,
+                        "io::Error kind={:?} os={:?}; inner text unknown (omitted)",
+                        error.kind(),
+                        error.raw_os_error(),
+                    );
+                } else if error.is::<rustls::Error>() {
+                    let _ = write!(text, "rustls::Error; detail unknown (omitted)");
+                } else {
+                    let _ = write!(text, "unknown opaque error; text omitted");
+                }
+                chain.push(text.0);
+                source = error.source();
+            }
+            Self {
+                stage,
+                chain,
+                source_end: if source.is_some() {
+                    "depth-limit; further sources unknown"
+                } else {
+                    "no further source exposed; inner cause may be unknown"
+                },
+            }
+        }
+    }
+
+    pub(super) fn diagnostic_error(error: &(dyn std::error::Error + 'static)) {
+        observe_worker(|_, state| {
+            let stage = state.stage;
+            record_error(state, stage, error);
+        });
+    }
+
+    pub(super) fn diagnostic_static_error(message: &'static str) {
+        observe_worker(|_, state| {
+            state.last_error_stage = Some(state.stage);
+            state.error_events = state.error_events.saturating_add(1);
+            if state.error_samples.len() < ERROR_SAMPLES {
+                let mut text = BoundedText::default();
+                let _ = write!(text, "worker: {message}");
+                state.error_samples.push(ErrorIdentity {
+                    stage: state.stage,
+                    chain: vec![text.0],
+                    source_end: "static worker error; no source exposed",
+                });
+            }
+        });
+    }
+
+    fn record_error(
+        state: &mut WorkerDiagnostic,
+        stage: &'static str,
+        error: &(dyn std::error::Error + 'static),
+    ) {
+        state.last_error_stage = Some(stage);
+        state.error_events = state.error_events.saturating_add(1);
+        if state.error_samples.len() < ERROR_SAMPLES {
+            state.error_samples.push(ErrorIdentity::new(stage, error));
+        }
+    }
+
+    #[derive(Debug)]
+    struct WireSample {
+        generation: u64,
+        local_addr: Option<SocketAddr>,
+        event: &'static str,
+        error: String,
+    }
+
+    // These two callsites in pinned h2 0.4.19 describe the actual connection
+    // poll's error path. Restrict before recording fields: no frame/header
+    // spans, messages, payload debug fields, or general log streams. Hyper's
+    // own unstable tracing is disabled and is not enabled for this experiment.
+    fn wire_metadata(metadata: &Metadata<'_>) -> bool {
+        metadata.is_event()
+            && metadata.target() == "h2::proto::connection"
+            && *metadata.level() == tracing::Level::DEBUG
+            && matches!(metadata.line(), Some(491 | 521))
+            && metadata.fields().len() == 2
+            && metadata.fields().field("error").is_some()
+    }
+
+    struct WireLayer {
+        diagnostics: Arc<HealthDiagnostics>,
+        connection: ConnectionDiagnostic,
+    }
+
+    struct IoKindVisitor(BoundedText);
+
+    impl tracing::field::Visit for IoKindVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "error" {
+                let _ = write!(self.0, "{value:?}");
+            }
+        }
+    }
+
+    impl<S: Subscriber> Layer<S> for WireLayer {
+        fn on_event(&self, event: &Event<'_>, _context: LayerContext<'_, S>) {
+            let io = event.metadata().line() == Some(491);
+            self.diagnostics.worker(self.connection.owner, |state| {
+                state.wire_events = state.wire_events.saturating_add(1);
+                if state.wire_samples.len() >= ERROR_SAMPLES {
+                    return;
+                }
+                let error = if io {
+                    // At this exact callsite the field is std::io::ErrorKind,
+                    // not io::Error or any peer-controlled debug data.
+                    let mut visitor = IoKindVisitor(BoundedText::default());
+                    event.record(&mut visitor);
+                    let IoKindVisitor(text) = visitor;
+                    text.0
+                } else {
+                    // The protocol field can contain GOAWAY debug bytes.
+                    // Do not even ask it to format. Occurrence is evidence;
+                    // a typed protocol reason is unavailable to this observer.
+                    "unknown; protocol detail omitted (may contain peer bytes)".into()
+                };
+                state.wire_samples.push(WireSample {
+                    generation: self.connection.generation,
+                    local_addr: self.connection.local_addr,
+                    event: if io {
+                        "h2-io-error"
+                    } else {
+                        "h2-connection-error"
+                    },
+                    error,
+                });
+            });
+        }
+    }
+
+    fn diagnostic_dispatch() -> Option<Dispatch> {
+        HEALTH_WORKER
+            .try_with(|(diagnostics, index)| {
+                let mut connection = None;
+                diagnostics.worker(*index, |state| connection = state.connection.clone());
+                connection.map(|connection| {
+                    Dispatch::new(
+                        registry().with(
+                            WireLayer {
+                                diagnostics: Arc::clone(diagnostics),
+                                connection,
+                            }
+                            .with_filter(filter_fn(wire_metadata)),
+                        ),
+                    )
+                })
+            })
+            .ok()
+            .flatten()
+    }
+
+    #[derive(Clone)]
+    pub(super) struct DiagnosticExecutor(Option<Dispatch>);
+
+    impl DiagnosticExecutor {
+        pub(super) fn current() -> Self {
+            Self(diagnostic_dispatch())
+        }
+    }
+
+    impl<F> Executor<F> for DiagnosticExecutor
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        fn execute(&self, future: F) {
+            // Task-locals and thread defaults do not follow tokio::spawn.
+            // Carry this connection's dispatch on every executor child poll,
+            // including children spawned from children, on any runtime thread.
+            match &self.0 {
+                Some(dispatch) => {
+                    TokioExecutor::new().execute(future.with_subscriber(dispatch.clone()));
+                }
+                None => TokioExecutor::new().execute(future),
+            }
+        }
+    }
+
+    fn observe_worker(update: impl FnOnce(usize, &mut WorkerDiagnostic)) {
+        let _ = HEALTH_WORKER.try_with(|(diagnostics, index)| {
+            diagnostics.worker(*index, |state| update(*index, state));
+        });
+    }
+
+    pub(super) fn diagnostic_worker_stage(stage: &'static str) {
+        observe_worker(|_, state| {
+            state.stage = stage;
+            state.since = Instant::now();
+        });
+    }
+
+    pub(super) fn diagnostic_sender_stage(sender: &Sender, stage: &'static str) {
+        diagnostic_worker_stage(stage);
+        observe_worker(|_, state| state.sender_closed = Some(sender.is_closed()));
+    }
+
+    pub(super) fn diagnostic_dial() {
+        diagnostic_worker_stage("tcp-connect");
+        observe_worker(|_, state| {
+            state.connect_attempts = state.connect_attempts.saturating_add(1);
+            state.connection = None;
+            state.sender_closed = None;
+        });
+    }
+
+    pub(super) fn diagnostic_socket(local_addr: Option<SocketAddr>) {
+        observe_worker(|index, state| {
+            state.connection = Some(ConnectionDiagnostic {
+                owner: index,
+                generation: state.connect_attempts,
+                local_addr,
+                driver: Arc::new(AtomicUsize::new(0)),
+            });
+        });
+    }
+
+    pub(super) fn diagnostic_exchange_started(sender: &Sender) {
+        diagnostic_sender_stage(sender, "exchange-sender-ready");
+        observe_worker(|_, state| {
+            let progress = &mut state.exchanges[state.exchange_phase];
+            progress.started = progress.started.saturating_add(1);
+        });
+    }
+
+    pub(super) fn diagnostic_body_bytes(bytes: u64) {
+        observe_worker(|_, state| {
+            let progress = &mut state.exchanges[state.exchange_phase];
+            progress.bytes = progress.bytes.saturating_add(bytes);
+        });
+    }
+
+    pub(super) fn diagnostic_exchange_completed(sender: &Sender) {
+        diagnostic_sender_stage(sender, "exchange-completed");
+        observe_worker(|_, state| {
+            let progress = &mut state.exchanges[state.exchange_phase];
+            progress.completed = progress.completed.saturating_add(1);
+        });
+    }
+
+    pub(super) fn diagnostic_worker_phase(phase: Phase) {
+        observe_worker(|_, state| {
+            let (name, index) = match phase {
+                Phase::Preparing => ("preparation", 0),
+                Phase::Warmup => ("warmup", 1),
+                Phase::Draining => ("draining", 1),
+                Phase::Measuring { .. } => ("measurement", 2),
+            };
+            state.phase = name;
+            state.exchange_phase = index;
+        });
+    }
+
+    pub(super) fn diagnostic_reuse() {
+        diagnostic_worker_stage("retained-sender-reuse");
+        observe_worker(|_, state| {
+            state.phase = "reuse";
+            state.exchange_phase = 3;
+        });
+    }
+
+    pub(super) fn diagnostic_totals(totals: &Totals, failed: bool) {
+        observe_worker(|_, state| {
+            state.measured = totals.latencies_us.len();
+            state.errors = totals.errors;
+            state.body_bytes = totals.body_bytes;
+            if failed {
+                state.last_error_stage = Some(state.stage);
+            }
+        });
+    }
+
+    pub(super) fn diagnostic_coordinator_stage(stage: &'static str) {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| diagnostics.coordinator_stage(stage));
+    }
+
+    pub(super) fn diagnostic_readiness_start(stage: &str) {
+        let name = if stage == "startup" {
+            "startup-readiness"
+        } else {
+            "drain-readiness"
+        };
+        diagnostic_coordinator_stage(name);
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            let mut state = diagnostics
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.readiness = 0;
+        });
+    }
+
+    pub(super) fn diagnostic_readiness_received() {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            let mut state = diagnostics
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.readiness += 1;
+        });
+    }
+
+    pub(super) fn diagnostic_worker_joined() {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            let mut state = diagnostics
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.joined += 1;
+        });
+    }
+
+    struct DriverDiagnostic(Option<Arc<AtomicUsize>>);
+
+    impl Drop for DriverDiagnostic {
+        fn drop(&mut self) {
+            if let Some(state) = &self.0 {
+                state.store(4, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(super) fn diagnostic_driver<F>(
+        connection: F,
+    ) -> impl Future<Output = Result<(), hyper::Error>>
+    where
+        F: Future<Output = Result<(), hyper::Error>>,
+    {
+        let mut state = None;
+        observe_worker(|_, worker| {
+            state = worker.connection.as_ref().map(|c| Arc::clone(&c.driver));
+        });
+        let mut guard = DriverDiagnostic(state);
+        let dispatch = diagnostic_dispatch();
+        let observer = HEALTH_WORKER
+            .try_with(|(diagnostics, index)| (Arc::clone(diagnostics), *index))
+            .ok();
+        async move {
+            if let Some(state) = &guard.0 {
+                state.store(1, Ordering::Relaxed);
+            }
+            let result = match dispatch {
+                Some(dispatch) => connection.with_subscriber(dispatch).await,
+                None => connection.await,
+            };
+            if let Err(error) = &result
+                && let Some((diagnostics, index)) = observer
+            {
+                diagnostics.worker(index, |state| {
+                    record_error(state, "public-driver-result", error);
+                });
+            }
+            if let Some(state) = guard.0.take() {
+                state.store(if result.is_ok() { 2 } else { 3 }, Ordering::Relaxed);
+            }
+            result
+        }
+    }
+
+    struct WorkerDiagnosticGuard {
+        diagnostics: Arc<HealthDiagnostics>,
+        index: usize,
+        finished: bool,
+    }
+
+    impl WorkerDiagnosticGuard {
+        fn complete(&mut self) {
+            self.finished = true;
+        }
+    }
+
+    impl Drop for WorkerDiagnosticGuard {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.diagnostics.worker(self.index, |state| {
+                    state.outcome = "future-dropped";
+                });
+            }
+        }
+    }
+
+    async fn diagnostic_worker<F>(
+        diagnostics: Arc<HealthDiagnostics>,
+        index: usize,
+        future: F,
+    ) -> Result<Totals, Failure>
+    where
+        F: Future<Output = Result<Totals, Failure>>,
+    {
+        HEALTH_WORKER
+            .scope((Arc::clone(&diagnostics), index), async move {
+                // Own the whole guard inside the scope across the worker's await.
+                let mut guard = WorkerDiagnosticGuard {
+                    diagnostics,
+                    index,
+                    finished: false,
+                };
+                observe_worker(|_, state| state.outcome = "running");
+                let result = future.await;
+                if let Err(error) = &result {
+                    diagnostic_error(error.as_ref());
+                }
+                observe_worker(|_, state| {
+                    state.outcome = if result.is_ok() {
+                        "completed-ok"
+                    } else {
+                        "completed-error"
+                    };
+                    if result.is_err() {
+                        state.last_error_stage = Some(state.stage);
+                    }
+                });
+                guard.complete();
+                result
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn health_diagnostics_preserve_successful_worker_completion_after_drop() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let worker = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+            // An uncounted warm-up error must survive a later successful return.
+            diagnostic_worker_phase(Phase::Warmup);
+            diagnostic_worker_stage("response-headers");
+            diagnostic_error(&std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+            diagnostic_totals(&Totals::default(), true);
+            let totals = Totals {
+                latencies_us: vec![7],
+                body_bytes: 512,
+                ..Totals::default()
+            };
+            diagnostic_totals(&totals, false);
+            diagnostic_reuse();
+            Ok(totals)
+        });
+        let mut worker = Box::pin(worker);
+        // A ready inner future must finish in one poll. Retain the completed
+        // wrapper until both its completion and destruction can be checked.
+        let totals = std::future::poll_fn(|cx| match worker.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => panic!("ready worker did not complete in one poll"),
+        })
+        .await
+        .unwrap();
+        assert_eq!(totals.latencies_us, vec![7]);
+        assert_eq!(totals.body_bytes, 512);
+        assert_eq!(totals.errors, 0);
+        let assert_completed = || {
+            diagnostics.worker(0, |state| {
+                assert_eq!(state.outcome, "completed-ok");
+                assert_eq!(state.stage, "retained-sender-reuse");
+                assert_eq!(state.measured, 1);
+                assert_eq!(state.body_bytes, 512);
+                assert_eq!(state.last_error_stage, Some("response-headers"));
+                assert_eq!(state.error_events, 1);
+                assert!(state.error_samples[0].chain[0].contains("ConnectionReset"));
+            });
+        };
+        assert_completed();
+        drop(worker);
+        assert_completed();
+    }
+
+    #[tokio::test]
+    async fn health_diagnostics_preserve_worker_error_completion_after_drop() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let worker = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+            diagnostic_worker_stage("first-data-frame");
+            diagnostic_body_bytes(512);
+            Err(std::io::Error::other("worker completion regression").into())
+        });
+        let mut worker = Box::pin(worker);
+        let error = std::future::poll_fn(|cx| match worker.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => panic!("ready worker error did not complete in one poll"),
+        })
+        .await
+        .unwrap_err();
+        let error = error.downcast::<std::io::Error>().unwrap();
+        assert_eq!(error.to_string(), "worker completion regression");
+        let assert_completed = || {
+            diagnostics.worker(0, |state| {
+                assert_eq!(state.outcome, "completed-error");
+                assert_eq!(state.stage, "first-data-frame");
+                assert_eq!(state.last_error_stage, Some("first-data-frame"));
+                assert_eq!(state.exchanges[0].bytes, 512);
+                assert_eq!(state.error_events, 1);
+                let sample = &state.error_samples[0];
+                assert_eq!(sample.stage, "first-data-frame");
+                assert!(sample.chain[0].contains("io::Error kind=Other"));
+                assert!(sample.source_end.contains("unknown"));
+                assert!(!sample.chain[0].contains("worker completion regression"));
+            });
+        };
+        assert_completed();
+        drop(worker);
+        assert_completed();
+    }
+
+    #[tokio::test]
+    async fn health_diagnostics_survive_dropped_worker_and_driver_futures() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let worker = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+            diagnostic_dial();
+            diagnostic_socket(Some("127.0.0.1:12345".parse().unwrap()));
+            diagnostic_worker_phase(Phase::Warmup);
+            observe_worker(|_, state| state.exchanges[1].started = 1);
+            diagnostic_body_bytes(512);
+            diagnostic_worker_stage("first-data-frame");
+            diagnostic_error(&std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+            let driver = diagnostic_driver(std::future::pending::<Result<(), hyper::Error>>());
+            driver.await?;
+            Ok(Totals::default())
+        });
+        let mut worker = Box::pin(worker);
+        // Poll once to establish the pending await, then drop exactly the
+        // future a timeout would cancel. No timer, network or retry is needed.
+        std::future::poll_fn(|cx| {
+            assert!(worker.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(worker);
+        diagnostics.worker(0, |state| {
+            assert_eq!(state.outcome, "future-dropped");
+            assert_eq!(state.phase, "warmup");
+            assert_eq!(state.stage, "first-data-frame");
+            assert_eq!(state.exchanges[1].started, 1);
+            assert_eq!(state.exchanges[1].completed, 0);
+            assert_eq!(state.exchanges[1].bytes, 512);
+            assert_eq!(state.error_events, 1);
+            assert_eq!(state.error_samples[0].stage, "first-data-frame");
+            assert!(state.error_samples[0].chain[0].contains("ConnectionReset"));
+            let connection = state.connection.as_ref().unwrap();
+            assert_eq!(connection.owner, 0);
+            assert_eq!(connection.generation, 1);
+            assert_eq!(connection.driver.load(Ordering::Relaxed), 4);
+        });
+        // Observation after scope exit cannot contaminate a retained slot.
+        diagnostic_worker_stage("outside-scope");
+        diagnostics.worker(0, |state| {
+            assert_eq!(state.stage, "first-data-frame");
+        });
+    }
+
+    #[test]
+    fn error_observation_bounds_formatting_and_opaque_source_chains() {
+        struct RepeatedText(AtomicUsize);
+
+        impl std::fmt::Display for RepeatedText {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                for _ in 0..10_000 {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    formatter.write_str("é")?;
+                }
+                Ok(())
+            }
+        }
+
+        let text = RepeatedText(AtomicUsize::new(0));
+        let mut bounded = BoundedText::default();
+        assert!(write!(bounded, "{text}").is_err());
+        assert_eq!(bounded.0.len(), DIAGNOSTIC_TEXT_BYTES);
+        assert_eq!(
+            text.0.load(Ordering::Relaxed),
+            DIAGNOSTIC_TEXT_BYTES / 2 + 1,
+        );
+
+        #[derive(Debug)]
+        struct Opaque;
+
+        impl std::fmt::Display for Opaque {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("opaque error text must never be formatted");
+            }
+        }
+
+        impl std::error::Error for Opaque {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(self)
+            }
+        }
+
+        let diagnostics = HealthDiagnostics::new(load(4, 2));
+        diagnostics.worker(0, |state| {
+            for _ in 0..100 {
+                record_error(state, "preparation", &Opaque);
+            }
+            assert_eq!(state.error_events, 100);
+            assert_eq!(state.error_samples.len(), ERROR_SAMPLES);
+            for sample in &state.error_samples {
+                assert_eq!(sample.chain.len(), DIAGNOSTIC_CHAIN_DEPTH);
+                assert!(
+                    sample
+                        .chain
+                        .iter()
+                        .all(|s| s.len() <= DIAGNOSTIC_TEXT_BYTES)
+                );
+                assert!(sample.source_end.starts_with("depth-limit"));
+            }
+        });
+    }
+
+    #[test]
+    fn health_observer_retains_real_initial_dial_and_preparation_failures() {
+        for preparation in [false, true] {
+            let runtime = CancellationRuntime::new();
+            let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+            let result = runtime.block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let target = Target {
+                    addr: listener.local_addr().unwrap(),
+                    transport: Transport::H2c,
+                    workload: Workload::Cancel,
+                    tls: None,
+                };
+                if preparation {
+                    tokio::spawn(async move {
+                        let mut servers = JoinSet::new();
+                        loop {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            servers.spawn(async move {
+                                let service = service_fn(|_| {
+                                    std::future::ready(Ok::<_, Infallible>(Response::new(Empty::<
+                                        Bytes,
+                                    >::new(
+                                    ))))
+                                });
+                                let builder =
+                                    hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                                let _ = builder
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            });
+                        }
+                    });
+                } else {
+                    // A real refused initial TCP connection, before workers
+                    // exist; the same observation hook retains its identity.
+                    drop(listener);
+                }
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    cancellation_health(target, load(4, 2), || (), Arc::clone(&diagnostics)),
+                )
+                .await
+            });
+            runtime.shutdown();
+            assert!(result.unwrap().is_err());
+            let mut retained = 0;
+            for worker in 0..4 {
+                diagnostics.worker(worker, |state| {
+                    for sample in &state.error_samples {
+                        let ended = sample.chain[0].contains("response ended before cancellation");
+                        if preparation && ended {
+                            assert_eq!(sample.stage, "first-data-frame");
+                            retained += 1;
+                        } else if !preparation && sample.chain[0].contains("ConnectionRefused") {
+                            assert_eq!(sample.stage, "tcp-connect");
+                            assert_eq!(state.outcome, "initial-dial-error");
+                            retained += 1;
+                        }
+                    }
+                });
+            }
+            assert!(retained > 0);
+        }
+    }
+
+    #[test]
+    fn scoped_observer_sees_real_h2_child_wire_errors_without_peer_bytes() {
+        async fn wire_failure(diagnostics: Arc<HealthDiagnostics>, protocol: bool) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = Target {
+                addr: listener.local_addr().unwrap(),
+                transport: Transport::H2c,
+                workload: Workload::Cancel,
+                tls: None,
+            };
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut preface = [0; 24];
+                wire_read(&stream, &mut preface).await;
+                assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+                h2_write(&stream, 4, 0, 0, &[]).await;
+                h2_until(&stream, 1).await;
+                if protocol {
+                    // DATA on stream zero is a real protocol error. No frame
+                    // or peer bytes may be retained by the event collector.
+                    h2_write(&stream, 0, 0, 0, b"peer-private-marker").await;
+                    h2_until(&stream, 7).await;
+                } else {
+                    // Truncated PING (9-byte header + 1 of 8 payload bytes)
+                    // followed by EOF is a real framed-reader I/O error.
+                    wire_write(&stream, &[0, 0, 8, 6, 0, 0, 0, 0, 0, 0]).await;
+                }
+            });
+            let result = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
+                let mut sender = dial(&target).await?;
+                exchange(&mut sender, &target).await?;
+                Ok(Totals::default())
+            })
+            .await;
+            assert!(result.is_err());
+            server.await.unwrap();
+            diagnostics.worker(0, |state| {
+                assert!(state.wire_events > 0);
+                assert!(state.wire_samples.len() <= ERROR_SAMPLES);
+                let sample = &state.wire_samples[0];
+                assert_eq!(sample.generation, 1);
+                let connection = state.connection.as_ref().unwrap();
+                assert_eq!(sample.local_addr, connection.local_addr);
+                if protocol {
+                    assert_eq!(sample.event, "h2-connection-error");
+                    assert!(sample.error.starts_with("unknown"));
+                } else {
+                    assert_eq!(sample.event, "h2-io-error");
+                    // h2 0.4.19's length-delimited reader needs 17 bytes here.
+                    // With only 10 buffered, tokio-util 0.7.19's default
+                    // Decoder::decode_eof returns ErrorKind::Other; h2
+                    // preserves that kind at its I/O-error callsite.
+                    assert_eq!(sample.error, "Other");
+                }
+                let wire_text = format!("{:?}", state.wire_samples);
+                let error_text = format!("{:?}", state.error_samples);
+                assert!(!wire_text.contains("peer-private-marker"));
+                assert!(!error_text.contains("peer-private-marker"));
+                assert!(state.error_events > 0);
+            });
+        }
+
+        let runtime = CancellationRuntime::new();
+        let left = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let right = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                // Separate subscribers coexist without a global default. The
+                // real wire futures are separately spawned executor children.
+                tokio::join!(
+                    wire_failure(Arc::clone(&left), true),
+                    wire_failure(Arc::clone(&right), false),
+                );
+            })
+            .await
+        });
+        runtime.shutdown();
+        result.unwrap();
+        let mut address = None;
+        left.worker(0, |state| {
+            address = state.connection.as_ref().unwrap().local_addr
+        });
+        right.worker(0, |state| {
+            assert_ne!(address, state.connection.as_ref().unwrap().local_addr);
+        });
+        for diagnostics in [&left, &right] {
+            for index in 1..4 {
+                diagnostics.worker(index, |state| assert_eq!(state.wire_events, 0));
+            }
+        }
+    }
+
+    /// Functional cancellation health is finite work, not an unbounded reset
+    /// flood. Pinned h2 retains 50 local resets per connection for one second.
+    /// With two workers per connection, preparation, both phase budgets and
+    /// the final reuse probe require at most 2 * (1 + 8 + 8 + 1) = 36 retained
+    /// resets, even if none expire.
+    pub(crate) const HEALTH_EXCHANGES_PER_PHASE: usize = 8;
+
+    pub(crate) async fn cancellation_health<S>(
+        target: Target,
+        load: Load,
+        probe: impl Fn() -> S,
+        diagnostics: Arc<HealthDiagnostics>,
+    ) -> Result<Measured<S>, Failure> {
+        HEALTH_COORDINATOR
+            .scope(Arc::clone(&diagnostics), async move {
+                cancellation_health_inner(target, load, probe, diagnostics).await
+            })
+            .await
+    }
+
+    pub(crate) async fn cancellation_health_timeout<S>(
+        health: impl Future<Output = Result<Measured<S>, Failure>>,
+        diagnostics: &HealthDiagnostics,
+        cell: crate::dims::Cell,
+    ) -> Result<Measured<S>, Failure> {
+        // Shared by the real matrices and the controlled reuse regression.
+        // Keep the original strict failure bound and original Result.
+        match tokio::time::timeout(Duration::from_secs(15), health).await {
+            Ok(Ok(measured)) => Ok(measured),
+            Ok(Err(error)) => {
+                diagnostics.failure(cell, "driver-error");
+                Err(error)
+            }
+            Err(error) => {
+                diagnostics.failure(cell, "timeout");
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn cancellation_health_inner<S>(
+        target: Target,
+        load: Load,
+        probe: impl Fn() -> S,
+        diagnostics: Arc<HealthDiagnostics>,
+    ) -> Result<Measured<S>, Failure> {
+        load.validate(target.transport)?;
+        assert_eq!(target.workload, Workload::Cancel);
+        assert_eq!(load.concurrency, 4);
+        assert_eq!(load.streams, 2);
+        let target = Arc::new(target);
+        let (phase, receiver) = watch::channel(Phase::Preparing);
+        let (ready, mut readiness) = mpsc::unbounded_channel();
+        let mut workers = JoinSet::new();
+        let mut worker_index = 0;
+        diagnostic_coordinator_stage("initial-dial-and-spawn");
+        for _ in 0..load.connections(target.transport) {
+            let first = worker_index;
+            diagnostics.worker(first, |state| state.outcome = "dialing");
+            let sender = HEALTH_WORKER
+                .scope((Arc::clone(&diagnostics), first), async {
+                    let result = dial(&target).await;
+                    if let Err(error) = &result {
+                        diagnostic_error(error.as_ref());
+                        observe_worker(|_, state| state.outcome = "initial-dial-error");
+                    }
+                    result
+                })
+                .await?;
+            let mut connection = None;
+            diagnostics.worker(first, |state| connection = state.connection.clone());
+            let mut senders = Vec::new();
+            if let Sender::H2(shared) = &sender {
+                for _ in 1..load.streams {
+                    senders.push(Sender::H2(shared.clone()));
+                }
+            }
+            senders.push(sender);
+            for sender in senders {
+                let index = worker_index;
+                worker_index += 1;
+                if index != first {
+                    diagnostics.worker(index, |state| state.connection = connection.clone());
+                }
+                diagnostics.worker(index, |state| {
+                    state.outcome = "spawned-not-polled";
+                    state.sender_closed = Some(sender.is_closed());
+                });
+                workers.spawn(diagnostic_worker(
+                    Arc::clone(&diagnostics),
+                    index,
+                    worker_inner(
+                        Arc::clone(&target),
+                        sender,
+                        receiver.clone(),
+                        ready.clone(),
+                        Some(HEALTH_EXCHANGES_PER_PHASE),
+                    ),
+                ));
+            }
+        }
+        drop(ready);
+        drop(receiver);
+        let connects = load.connections(target.transport) as u64;
+        measure_workers(load, &phase, &mut readiness, &mut workers, connects, probe).await
+    }
+
+    /// Own every async task for one transport, including the connection
+    /// drivers and H2 children spawned by the unchanged TokioExecutor.
+    /// A current-thread runtime leaves no concurrently polling task when
+    /// block_on returns or unwinds; shutdown drops all remaining task futures.
+    /// This fixture does not spawn blocking work.
+    struct CancellationRuntime {
+        runtime: Option<Runtime>,
+    }
+
+    impl CancellationRuntime {
+        fn new() -> Self {
+            Self {
+                runtime: Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                ),
+            }
+        }
+
+        fn block_on<F: Future>(&self, future: F) -> F::Output {
+            self.runtime.as_ref().unwrap().block_on(future)
+        }
+
+        fn shutdown(mut self) {
+            let runtime = self.runtime.take().unwrap();
+            let metrics = runtime.metrics();
+            runtime.shutdown_timeout(Duration::from_secs(1));
+            // Check after shutdown, not after merely scheduling aborts. This
+            // includes tasks whose JoinHandles the production driver discards.
+            assert_eq!(metrics.num_alive_tasks(), 0);
+        }
+    }
+
+    impl Drop for CancellationRuntime {
+        fn drop(&mut self) {
+            if let Some(runtime) = self.runtime.take() {
+                // Unwind cannot asynchronously join the worker/server sets.
+                // Their drops request abort; runtime shutdown also drops every
+                // remaining async driver and executor child before returning.
+                runtime.shutdown_timeout(Duration::from_secs(1));
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_runtime_ends_drivers_and_executor_children_on_every_exit() {
+        #[derive(Clone, Copy, Debug)]
+        enum Exit {
+            Normal,
+            Timeout,
+            Unwind,
+        }
+
+        struct TaskDrop(Arc<AtomicUsize>);
+
+        impl Drop for TaskDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for exit in [Exit::Normal, Exit::Timeout, Exit::Unwind] {
+            let runtime = CancellationRuntime::new();
+            let metrics = runtime.runtime.as_ref().unwrap().metrics();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let driver_drop = TaskDrop(Arc::clone(&dropped));
+            let child_drop = TaskDrop(Arc::clone(&dropped));
+            let (driver,) = runtime.block_on(async {
+                let (started, child_started) = oneshot::channel();
+                let driver = tokio::spawn(async move {
+                    let _driver_drop = driver_drop;
+                    TokioExecutor::new().execute(async move {
+                        let _child_drop = child_drop;
+                        started.send(()).unwrap();
+                        std::future::pending::<()>().await;
+                    });
+                    std::future::pending::<()>().await;
+                });
+                let ready = tokio::time::timeout(Duration::from_secs(10), child_started).await;
+                ready.unwrap().unwrap();
+                (driver,)
+            });
+            assert_eq!(metrics.num_alive_tasks(), 2);
+            assert!(!driver.is_finished());
+            match exit {
+                Exit::Normal => runtime.shutdown(),
+                Exit::Timeout => {
+                    let result = runtime.block_on(async {
+                        let pending = std::future::pending::<()>();
+                        tokio::time::timeout(Duration::ZERO, pending).await
+                    });
+                    drop(runtime);
+                    assert!(result.is_err());
+                }
+                Exit::Unwind => {
+                    let result = std::panic::catch_unwind(move || {
+                        runtime.block_on(async { panic!("fixture unwind") });
+                    });
+                    assert!(result.is_err());
+                }
+            }
+            // Both pending futures were destroyed and the retained driver
+            // handle is finished, rather than merely marked for cancellation.
+            assert!(driver.is_finished(), "{exit:?}");
+            assert_eq!(dropped.load(Ordering::SeqCst), 2, "{exit:?}");
+            assert_eq!(metrics.num_alive_tasks(), 0, "{exit:?}");
+        }
+    }
+
+    async fn wire_read(stream: &TcpStream, bytes: &mut [u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            stream.readable().await.unwrap();
+            match stream.try_read(&mut bytes[offset..]) {
+                Ok(0) => panic!("wire peer closed before sending the expected bytes"),
+                Ok(read) => offset += read,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("wire read: {error}"),
+            }
+        }
+    }
+
+    async fn wire_write(stream: &TcpStream, bytes: &[u8]) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            stream.writable().await.unwrap();
+            match stream.try_write(&bytes[offset..]) {
+                Ok(0) => panic!("wire peer stopped accepting bytes"),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("wire write: {error}"),
+            }
+        }
+    }
+
+    /// Send only half of one declared 1 KiB HTTP/1 chunk. The second half is
+    /// withheld until exchange returns, so success cannot depend on coalescing
+    /// reads or reaching the chunk boundary / end of the response.
+    pub(crate) fn partial_first_cancellation() -> (u64, u64) {
+        let runtime = CancellationRuntime::new();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let target = Target {
+                    addr: listener.local_addr().unwrap(),
+                    transport: Transport::H1,
+                    workload: Workload::Cancel,
+                    tls: None,
+                };
+                let (finished, cancelled) = oneshot::channel();
+                let mut servers = JoinSet::new();
+                servers.spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        wire_read(&stream, &mut byte).await;
+                        request.push(byte[0]);
+                        assert!(request.len() <= 8192);
+                    }
+                    wire_write(
+                        &stream,
+                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n",
+                    )
+                    .await;
+                    wire_write(&stream, &[b'x'; FRAME_BYTES / 2]).await;
+                    cancelled.await.unwrap();
+                });
+                let mut sender = dial(&target).await.unwrap();
+                let bytes = exchange(&mut sender, &target).await.unwrap();
+                assert!(bytes > 0 && bytes <= (FRAME_BYTES / 2) as u64);
+                drop(sender);
+                let mut totals = Totals {
+                    connects: 1,
+                    ..Totals::default()
+                };
+                // Exercise the real HTTP/1 reconnect before releasing the
+                // peer, rather than inventing a connect count for reporting.
+                let replacement = connected(&target, None, &mut totals).await.unwrap();
+                drop(replacement);
+                finished.send(()).unwrap();
+                servers.join_next().await.unwrap().unwrap();
+                assert!(servers.is_empty());
+                (bytes, totals.connects)
+            })
+            .await
+        });
+        runtime.shutdown();
+        result.unwrap()
+    }
+
+    async fn h2_frame(stream: &TcpStream) -> (u8, u8, u32, Vec<u8>) {
+        let mut header = [0; 9];
+        wire_read(stream, &mut header).await;
+        let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+        assert!(len <= 16_384);
+        let id = u32::from_be_bytes(header[5..9].try_into().unwrap()) & 0x7fff_ffff;
+        let mut payload = vec![0; len];
+        wire_read(stream, &mut payload).await;
+        (header[3], header[4], id, payload)
+    }
+
+    async fn h2_write(stream: &TcpStream, kind: u8, flags: u8, id: u32, payload: &[u8]) {
+        let len = u32::try_from(payload.len()).unwrap().to_be_bytes();
+        let mut header = [0; 9];
+        header[..3].copy_from_slice(&len[1..]);
+        header[3] = kind;
+        header[4] = flags;
+        header[5..].copy_from_slice(&id.to_be_bytes());
+        wire_write(stream, &header).await;
+        wire_write(stream, payload).await;
+    }
+
+    async fn h2_until(stream: &TcpStream, expected: u8) -> (u8, u32, Vec<u8>) {
+        loop {
+            let (kind, flags, id, payload) = h2_frame(stream).await;
+            if kind == expected {
+                return (flags, id, payload);
+            }
+            match kind {
+                4 if flags == 0 => h2_write(stream, 4, 1, 0, &[]).await,
+                4 | 8 => {}
+                _ => panic!("expected H2 frame {expected}, received {kind}"),
+            }
+        }
+    }
+
+    async fn h2_cancelled_response(stream: &TcpStream) -> u32 {
+        let (flags, id, _) = h2_until(stream, 1).await;
+        assert_eq!(flags & 5, 5); // END_STREAM | END_HEADERS on the empty GET.
+        h2_write(stream, 1, 4, id, &[0x88]).await; // HPACK static :status 200.
+        h2_write(stream, 0, 0, id, &[b'x'; FRAME_BYTES]).await;
+        let (_, reset_id, reason) = h2_until(stream, 3).await;
+        assert_eq!(reset_id, id);
+        assert_eq!(reason, 8_u32.to_be_bytes()); // CANCEL.
+        id
+    }
+
+    #[test]
+    fn late_data_requires_retained_reset_state_for_http2_reuse() {
+        // Exercise the pinned default of 50 retained resets. Extend only the
+        // test retention time so scheduling cannot make resets expire; lower
+        // the error-reset limit to expose the first forgotten-stream error.
+        // No client or server production setting is changed by this fixture.
+        for resets in [50, 51] {
+            let runtime = CancellationRuntime::new();
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let target = Target {
+                        addr: listener.local_addr().unwrap(),
+                        transport: Transport::H2c,
+                        workload: Workload::Cancel,
+                        tls: None,
+                    };
+                    let (acknowledged, mut acknowledgements) = mpsc::unbounded_channel();
+                    let mut servers = JoinSet::new();
+                    servers.spawn(async move {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        stream.set_nodelay(true).unwrap();
+                        let mut preface = [0; 24];
+                        wire_read(&stream, &mut preface).await;
+                        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+                        h2_write(&stream, 4, 0, 0, &[]).await;
+                        let mut last = 0;
+                        for _ in 0..resets {
+                            last = h2_cancelled_response(&stream).await;
+                            acknowledged.send(()).unwrap();
+                        }
+                        // DATA already in flight when CANCEL was sent must
+                        // be ignored while the reset is retained.
+                        h2_write(&stream, 0, 0, last, &[b'x'; FRAME_BYTES]).await;
+                        if resets == 50 {
+                            h2_cancelled_response(&stream).await;
+                        } else {
+                            let (_, id, payload) = h2_until(&stream, 7).await;
+                            assert_eq!(id, 0);
+                            assert_eq!(&payload[4..8], &11_u32.to_be_bytes());
+                            assert_eq!(&payload[8..], b"too_many_internal_resets");
+                        }
+                    });
+                    let stream = TcpStream::connect(target.addr).await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let mut builder = http2::Builder::new(TokioExecutor::new());
+                    builder
+                        .reset_stream_duration(Duration::from_secs(60))
+                        .max_local_error_reset_streams(0);
+                    let (sender, connection) =
+                        builder.handshake(TokioIo::new(stream)).await.unwrap();
+                    let mut drivers = JoinSet::new();
+                    drivers.spawn(connection);
+                    let mut sender = Sender::H2(sender);
+                    for _ in 0..resets {
+                        assert_eq!(exchange(&mut sender, &target).await.unwrap(), 1024);
+                        acknowledgements.recv().await.unwrap();
+                    }
+                    if resets == 50 {
+                        assert_eq!(exchange(&mut sender, &target).await.unwrap(), 1024);
+                    }
+                    servers.join_next().await.unwrap().unwrap();
+                    drop(sender);
+                    drivers.shutdown().await;
+                    assert!(servers.is_empty() && drivers.is_empty());
+                })
+                .await
+            });
+            runtime.shutdown();
+            result.unwrap();
+        }
+    }
 
     /// A first frame controlled by the test, followed by a body that never
     /// ends. Dropping it acknowledges that the client cancelled the stream.
@@ -542,6 +2144,546 @@ mod tests {
                 let _ = cancelled.send(());
             }
         }
+    }
+
+    struct Cancellation {
+        connection: usize,
+        release: oneshot::Sender<()>,
+        cancelled: oneshot::Receiver<()>,
+    }
+
+    async fn cancellations(
+        arrivals: &mut mpsc::UnboundedReceiver<Cancellation>,
+        count: usize,
+    ) -> Vec<Cancellation> {
+        let mut requests = Vec::new();
+        for _ in 0..count {
+            requests.push(arrivals.recv().await.unwrap());
+        }
+        requests
+    }
+
+    async fn release_cancellations(requests: Vec<Cancellation>) -> Vec<usize> {
+        let mut connections = Vec::new();
+        let mut cancelled = Vec::new();
+        for request in requests {
+            connections.push(request.connection);
+            request.release.send(()).unwrap();
+            cancelled.push(request.cancelled);
+        }
+        for acknowledgement in cancelled {
+            acknowledgement.await.unwrap();
+        }
+        connections.sort_unstable();
+        connections
+    }
+
+    struct CountedGateBody {
+        inner: GatedBody,
+        drops: Arc<AtomicUsize>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+
+    impl hyper::body::Body for CountedGateBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            hyper::body::Body::poll_frame(Pin::new(&mut self.inner), cx)
+        }
+    }
+
+    impl Drop for CountedGateBody {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            self.changed.notify_one();
+        }
+    }
+
+    struct LiveFixtureTask(Arc<AtomicUsize>);
+
+    impl LiveFixtureTask {
+        fn new(live: Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(live)
+        }
+    }
+
+    impl Drop for LiveFixtureTask {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn retained_sender_probe_gate_case(release_gate: bool) {
+        use crate::dims::{Cell, Scenario};
+
+        let runtime = CancellationRuntime::new();
+        let metrics = runtime.runtime.as_ref().unwrap().metrics();
+        let load = Load {
+            warmup: Duration::from_secs(1),
+            duration: Duration::from_secs(5),
+            ..load(4, 2)
+        };
+        let diagnostics = Arc::new(HealthDiagnostics::new(load));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        let reuse_at = Arc::new([AtomicUsize::new(usize::MAX), AtomicUsize::new(usize::MAX)]);
+        let identities = Arc::new(Mutex::new([None, None]));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let probes = AtomicUsize::new(0);
+        let result = runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = Target {
+                addr: listener.local_addr().unwrap(),
+                transport: Transport::H2c,
+                workload: Workload::Cancel,
+                tls: None,
+            };
+            let (gates, mut arrivals) = mpsc::unbounded_channel();
+            let server_accepted = Arc::clone(&accepted);
+            let server_live = Arc::clone(&live);
+            let server_requests = Arc::clone(&requests);
+            let server_reuse_at = Arc::clone(&reuse_at);
+            let server_identities = Arc::clone(&identities);
+            let server_drops = Arc::clone(&drops);
+            let server_changed = Arc::clone(&changed);
+            tokio::spawn(async move {
+                let _owner = LiveFixtureTask::new(Arc::clone(&server_live));
+                let mut connections = JoinSet::new();
+                loop {
+                    let (stream, peer) = listener.accept().await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let connection = server_accepted.fetch_add(1, Ordering::SeqCst);
+                    assert!(connection < 2, "retained probe must not reconnect");
+                    server_identities.lock().unwrap()[connection] = Some(peer);
+                    let gates = gates.clone();
+                    let requests = Arc::clone(&server_requests);
+                    let reuse_at = Arc::clone(&server_reuse_at);
+                    let drops = Arc::clone(&server_drops);
+                    let changed = Arc::clone(&server_changed);
+                    let service = service_fn(move |_| {
+                        let index = requests[connection].fetch_add(1, Ordering::SeqCst);
+                        let threshold = reuse_at[connection].load(Ordering::SeqCst);
+                        let (release, cancelled) = if index >= threshold {
+                            assert!(index < threshold + 2);
+                            let (release, receiver) = oneshot::channel();
+                            let (cancelled, acknowledgement) = oneshot::channel();
+                            gates
+                                .send(Cancellation {
+                                    connection,
+                                    release,
+                                    cancelled: acknowledgement,
+                                })
+                                .unwrap();
+                            (Some(receiver), Some(cancelled))
+                        } else {
+                            (None, None)
+                        };
+                        std::future::ready(Ok::<_, Infallible>(Response::new(CountedGateBody {
+                            inner: GatedBody {
+                                release,
+                                cancelled,
+                                data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
+                                sent: false,
+                            },
+                            drops: Arc::clone(&drops),
+                            changed: Arc::clone(&changed),
+                        })))
+                    });
+                    let live = Arc::clone(&server_live);
+                    connections.spawn(async move {
+                        let _owner = LiveFixtureTask::new(live);
+                        let builder = Builder::new(TokioExecutor::new());
+                        let _ = builder
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
+                }
+            });
+            let probe = || {
+                let index = probes.fetch_add(1, Ordering::SeqCst);
+                if index == 0 {
+                    // The real drain rendezvous finished. Derive each reuse
+                    // ordinal from completed preparation/warm-up work, not
+                    // elapsed time or an assumed warm-up request count.
+                    for connection in 0..2 {
+                        let mut before = 0;
+                        for worker in (2 * connection)..(2 * connection + 2) {
+                            diagnostics.worker(worker, |state| {
+                                assert_eq!(state.phase, "draining");
+                                assert_eq!(state.exchanges[0].completed, 1);
+                                assert_eq!(
+                                    state.exchanges[1].started,
+                                    state.exchanges[1].completed,
+                                );
+                                assert!(state.exchanges[1].completed <= 8);
+                                before += state.exchanges[0].completed as usize;
+                                before += state.exchanges[1].completed as usize;
+                            });
+                        }
+                        reuse_at[connection].store(before + 16, Ordering::SeqCst);
+                    }
+                } else {
+                    assert_eq!(index, 1);
+                    for worker in 0..4 {
+                        diagnostics.worker(worker, |state| {
+                            assert_eq!(state.measured, 8);
+                            assert_eq!(state.exchanges[2].completed, 8);
+                            assert_eq!(state.errors, 0);
+                        });
+                    }
+                }
+                index
+            };
+            let controlled = async {
+                let health = cancellation_health(target, load, probe, Arc::clone(&diagnostics));
+                tokio::pin!(health);
+                let mut probes = tokio::select! {
+                    result = &mut health => {
+                        return match result {
+                            Err(error) => Err(error),
+                            Ok(_) => panic!("health returned before gated reuse"),
+                        };
+                    }
+                    probes = cancellations(&mut arrivals, 4) => probes,
+                };
+                let mut connections: Vec<_> = probes.iter().map(|p| p.connection).collect();
+                connections.sort_unstable();
+                assert_eq!(connections, [0, 0, 1, 1]);
+                assert_eq!(accepted.load(Ordering::SeqCst), 2);
+                assert_eq!(live.load(Ordering::SeqCst), 3);
+                let mut measured = 0;
+                for worker in 0..4 {
+                    diagnostics.worker(worker, |state| {
+                        assert_eq!(state.phase, "reuse");
+                        assert_eq!(state.measured, 8);
+                        assert_eq!(state.exchanges[2].completed, 8);
+                        assert_eq!(state.body_bytes, (8 * FRAME_BYTES) as u64);
+                        assert_eq!(state.errors, 0);
+                        measured += state.measured;
+                        let connection = state.connection.as_ref().unwrap();
+                        assert_eq!(connection.owner, (worker / 2) * 2);
+                        assert_eq!(connection.generation, 1);
+                        let peer = identities.lock().unwrap()[worker / 2];
+                        assert_eq!(connection.local_addr, peer);
+                    });
+                }
+                assert_eq!(measured, 32);
+                let before =
+                    reuse_at[0].load(Ordering::SeqCst) + reuse_at[1].load(Ordering::SeqCst);
+                // Real server body destruction acknowledges every earlier
+                // cancellation before the probe's first DATA is released.
+                while drops.load(Ordering::SeqCst) < before {
+                    changed.notified().await;
+                }
+                assert_eq!(drops.load(Ordering::SeqCst), before);
+                let held = if release_gate {
+                    None
+                } else {
+                    Some(probes.remove(0))
+                };
+                release_cancellations(probes).await;
+                let result = health.await;
+                // Own the whole retained gate through the await. Timeout drops
+                // it, but the current-thread owner destroys tasks before any
+                // newly unblocked server body can run after block_on returns.
+                drop(held);
+                result
+            };
+            cancellation_health_timeout(
+                controlled,
+                &diagnostics,
+                Cell {
+                    scenario: Scenario::Plain,
+                    workload: Workload::Cancel,
+                    transport: Transport::H2c,
+                },
+            )
+            .await
+        });
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        for connection in 0..2 {
+            let expected = reuse_at[connection].load(Ordering::SeqCst) + 2;
+            assert_eq!(requests[connection].load(Ordering::SeqCst), expected);
+            assert!(expected <= 36);
+        }
+        if release_gate {
+            let measured = result.unwrap();
+            let totals = &measured.totals;
+            assert_eq!(totals.latencies_us.len(), 32);
+            assert!(totals.latencies_us.iter().all(|latency| *latency > 0));
+            assert_eq!(totals.body_bytes, (32 * FRAME_BYTES) as u64);
+            assert_eq!(totals.errors, 0);
+            assert!(totals.error_samples.is_empty());
+            assert_eq!(totals.connects, 2);
+            assert_eq!(measured.window, Duration::from_secs(5));
+            assert_eq!((measured.start, measured.end), (0, 1));
+        } else {
+            let error = result.err().unwrap();
+            assert!(error.is::<tokio::time::error::Elapsed>());
+            let state = diagnostics.coordinator.lock().unwrap();
+            assert_eq!(state.stage, "worker-joins-and-reuse");
+            assert_eq!(state.joined, 3);
+            drop(state);
+            let mut pending = 0;
+            for worker in 0..4 {
+                diagnostics.worker(worker, |state| {
+                    assert_eq!(state.phase, "reuse");
+                    assert_eq!(state.measured, 8);
+                    assert_eq!(state.exchanges[2].completed, 8);
+                    if state.exchanges[3].completed == 0 {
+                        pending += 1;
+                        assert_eq!(state.stage, "first-data-frame");
+                        assert_eq!(state.exchanges[3].started, 1);
+                        assert_eq!(state.exchanges[3].bytes, 0);
+                    }
+                });
+            }
+            assert_eq!(pending, 1);
+        }
+        // Destruction is checked after shutdown, separately from the earlier
+        // timeout snapshot. This includes discarded drivers and H2 children.
+        runtime.shutdown();
+        assert_eq!(metrics.num_alive_tasks(), 0);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        let mut destroyed = 0;
+        for worker in 0..4 {
+            diagnostics.worker(worker, |state| {
+                assert_eq!(state.measured, 8);
+                assert_eq!(state.phase, "reuse");
+                let driver = &state.connection.as_ref().unwrap().driver;
+                assert!(matches!(driver.load(Ordering::Relaxed), 2..=4));
+                if state.outcome == "future-dropped" {
+                    destroyed += 1;
+                    assert_eq!(state.stage, "first-data-frame");
+                } else {
+                    assert_eq!(state.outcome, "completed-ok");
+                    assert_eq!(state.exchanges[3].completed, 1);
+                }
+            });
+        }
+        assert_eq!(destroyed, usize::from(!release_gate));
+    }
+
+    #[test]
+    fn retained_sender_probe_timeout_preserves_reuse_evidence_and_destroys_tasks() {
+        retained_sender_probe_gate_case(false);
+    }
+
+    #[test]
+    fn released_retained_sender_probe_reuses_both_connections() {
+        retained_sender_probe_gate_case(true);
+    }
+
+    /// Exercise real workers and transport identities without assuming that a
+    /// shared runner completes an exchange within a 200 ms benchmark window.
+    /// This coordinator exists only in tests; production remains fixed-window.
+    pub(crate) fn cancellation_rounds<S>(
+        transport: Transport,
+        probe: impl Fn() -> S,
+    ) -> Measured<S> {
+        let runtime = CancellationRuntime::new();
+        let rounds = cancellation_rounds_inner(transport, probe);
+        let result = runtime.block_on(rounds);
+        // Keep the owner through every causal assertion. Normal paths join
+        // workers and server sets first; timeout also shuts down all async
+        // tasks before the error is unwrapped or the next transport can start.
+        runtime.shutdown();
+        result.unwrap()
+    }
+
+    async fn cancellation_rounds_inner<S>(
+        transport: Transport,
+        probe: impl Fn() -> S,
+    ) -> Result<Measured<S>, tokio::time::error::Elapsed> {
+        let timeout = Duration::from_secs(10);
+        tokio::time::timeout(timeout, async {
+            let pki = transport.tls().then(|| Pki::generate().unwrap());
+            let tls = pki.as_ref().map(|pki| {
+                let config = pki.server(transport.mtls()).unwrap();
+                TlsAcceptor::from(config.rustls)
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = Arc::new(Target {
+                addr: listener.local_addr().unwrap(),
+                transport,
+                workload: Workload::Cancel,
+                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
+            });
+            let load = load(4, 2);
+            let (gates, mut arrivals) = mpsc::unbounded_channel();
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&accepted);
+            let (stop, mut stopped) = oneshot::channel();
+            // Successful teardown aborts and joins these sets. Timeout or
+            // unwind drops them to request abort; the enclosing runtime owner
+            // also destroys unjoined connections and H2 executor children.
+            let mut servers = JoinSet::new();
+            servers.spawn(async move {
+                let requests = Arc::new(AtomicUsize::new(0));
+                let mut connections = JoinSet::new();
+                loop {
+                    let (stream, _) = tokio::select! {
+                        _ = &mut stopped => break,
+                        accepted = listener.accept() => accepted.unwrap(),
+                    };
+                    stream.set_nodelay(true).unwrap();
+                    let connection = observed.fetch_add(1, Ordering::SeqCst);
+                    let gates = gates.clone();
+                    let requests = Arc::clone(&requests);
+                    let service = service_fn(move |_| {
+                        let index = requests.fetch_add(1, Ordering::SeqCst);
+                        let bytes = match index / load.concurrency {
+                            0 => 3 * FRAME_BYTES,
+                            1 => FRAME_BYTES,
+                            _ => 2 * FRAME_BYTES,
+                        };
+                        let (release, receiver) = oneshot::channel();
+                        let (cancelled, acknowledgement) = oneshot::channel();
+                        gates
+                            .send(Cancellation {
+                                connection,
+                                release,
+                                cancelled: acknowledgement,
+                            })
+                            .unwrap();
+                        std::future::ready(Ok::<_, Infallible>(Response::new(GatedBody {
+                            release: Some(receiver),
+                            cancelled: Some(cancelled),
+                            data: Bytes::from(vec![b'x'; bytes]),
+                            sent: false,
+                        })))
+                    });
+                    let tls = tls.clone();
+                    connections.spawn(async move {
+                        let builder = Builder::new(TokioExecutor::new());
+                        match tls {
+                            None => {
+                                let _ = builder
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            }
+                            Some(acceptor) => {
+                                let stream = acceptor.accept(stream).await.unwrap();
+                                let session = stream.get_ref().1;
+                                assert_eq!(session.alpn_protocol(), Some(transport.alpn()));
+                                if transport.mtls() {
+                                    assert!(!session.peer_certificates().unwrap().is_empty());
+                                }
+                                let _ = builder
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            }
+                        }
+                    });
+                }
+                connections.shutdown().await;
+            });
+
+            let (phase, receiver) = watch::channel(Phase::Preparing);
+            let (ready, mut readiness) = mpsc::unbounded_channel();
+            let mut workers = JoinSet::new();
+            for _ in 0..load.connections(transport) {
+                let sender = dial(&target).await.unwrap();
+                if let Sender::H2(shared) = &sender {
+                    for _ in 1..load.streams {
+                        workers.spawn(worker(
+                            Arc::clone(&target),
+                            Sender::H2(shared.clone()),
+                            receiver.clone(),
+                            ready.clone(),
+                        ));
+                    }
+                }
+                workers.spawn(worker(
+                    Arc::clone(&target),
+                    sender,
+                    receiver.clone(),
+                    ready.clone(),
+                ));
+            }
+            drop(ready);
+            drop(receiver);
+            let preparation = cancellations(&mut arrivals, load.concurrency).await;
+            let preparation = release_cancellations(preparation).await;
+            await_readiness(load.concurrency, "startup", &mut readiness, &mut workers)
+                .await
+                .unwrap();
+            phase.send_replace(Phase::Draining);
+            await_readiness(
+                load.concurrency,
+                "measurement boundary",
+                &mut readiness,
+                &mut workers,
+            )
+            .await
+            .unwrap();
+            let start = probe();
+            let window_start = Instant::now();
+            phase.send_replace(Phase::Measuring {
+                start: window_start,
+                end: window_start + timeout,
+            });
+            let completed = cancellations(&mut arrivals, load.concurrency).await;
+            let completed = release_cancellations(completed).await;
+            // Each worker's next request proves it finished and accounted for
+            // the previous cancellation, including any HTTP/1 reconnect.
+            let crossing = cancellations(&mut arrivals, load.concurrency).await;
+            let window_end = Instant::now();
+            phase.send_replace(Phase::Measuring {
+                start: window_start,
+                end: window_end,
+            });
+            let end = probe();
+            // These exchanges began inside the window but can receive their
+            // first frame only after its deadline. They must not be counted.
+            let crossing = release_cancellations(crossing).await;
+            let mut totals = Totals {
+                connects: load.connections(transport) as u64,
+                ..Totals::default()
+            };
+            while let Some(worker) = workers.join_next().await {
+                totals.merge(worker.unwrap().unwrap());
+            }
+            assert_eq!(totals.latencies_us.len(), load.concurrency);
+            assert!(totals.latencies_us.iter().all(|latency| *latency > 0));
+            assert_eq!(totals.body_bytes, (load.concurrency * FRAME_BYTES) as u64);
+            assert_eq!(totals.errors, 0);
+            assert!(totals.error_samples.is_empty());
+            assert_eq!(totals.connects, accepted.load(Ordering::SeqCst) as u64);
+            if transport.http2() {
+                assert_eq!(preparation, [0, 0, 1, 1]);
+                assert_eq!(completed, preparation);
+                assert_eq!(crossing, preparation);
+                assert_eq!(totals.connects, load.connections(transport) as u64);
+            } else {
+                let distinct: std::collections::BTreeSet<_> = preparation
+                    .into_iter()
+                    .chain(completed)
+                    .chain(crossing)
+                    .collect();
+                assert_eq!(distinct.len(), 3 * load.concurrency);
+                assert_eq!(totals.connects, (3 * load.concurrency) as u64);
+            }
+            stop.send(()).unwrap();
+            servers.join_next().await.unwrap().unwrap();
+            assert!(workers.is_empty() && servers.is_empty());
+            assert!(readiness.is_closed());
+            Measured {
+                totals,
+                window: window_end.duration_since(window_start),
+                start,
+                end,
+            }
+        })
+        .await
     }
 
     #[tokio::test]
@@ -945,10 +3087,10 @@ mod tests {
         let mut first = Totals::default();
         let mut second = Totals::default();
         for index in 0..ERROR_SAMPLES {
-            first.error(&format!("first {index}"));
-            second.error(&format!("second {index}"));
+            first.error(&std::io::Error::other(format!("first {index}")));
+            second.error(&std::io::Error::other(format!("second {index}")));
         }
-        first.error(&"dropped");
+        first.error(&std::io::Error::other("dropped"));
         assert_eq!(first.errors, ERROR_SAMPLES as u64 + 1);
         assert_eq!(first.error_samples.len(), ERROR_SAMPLES);
         first.error_samples.truncate(2);
@@ -957,6 +3099,33 @@ mod tests {
         assert_eq!(first.error_samples.len(), ERROR_SAMPLES);
         assert_eq!(first.error_samples[1], "first 1");
         assert_eq!(first.error_samples[2], "second 0");
+    }
+
+    #[test]
+    fn error_samples_preserve_the_protocol_cause() {
+        #[derive(Debug)]
+        struct TransportError(std::io::Error);
+
+        impl std::fmt::Display for TransportError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("http2 error")
+            }
+        }
+
+        impl std::error::Error for TransportError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = TransportError(std::io::Error::other("too_many_internal_resets"));
+        let mut totals = Totals::default();
+        totals.error(&error);
+        assert_eq!(totals.errors, 1);
+        assert_eq!(
+            totals.error_samples,
+            ["http2 error: too_many_internal_resets"]
+        );
     }
 
     #[test]

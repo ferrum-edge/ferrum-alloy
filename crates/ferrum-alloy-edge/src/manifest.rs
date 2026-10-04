@@ -1,11 +1,14 @@
 //! The service manifest: a versioned, reviewable description of how a
 //! service is published behind Ferrum Edge.
 //!
-//! **Status: PROPOSED contract.** No Ferrum product consumes this manifest
-//! yet. `ferrum-alloy edge export` turns it into Ferrum Edge file-mode
+//! **Status: PROPOSED at `contracts-edge-0.9.9-r2`.** Foundry #540 and Nexus #519
+//! have merged, qualified, authenticated read-only previews as of 2026-10-04;
+//! the canonical qualification record and coordinated v1 freeze remain pending.
+//! `ferrum-alloy edge export` turns the manifest into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing* schema
-//! (verified against Edge v0.9.9 and v0.9.8). Nexus and Foundry consumption is future
-//! work; field names may change before any consumer implements them.
+//! (verified against Edge v0.9.10 and v0.9.9). Edge does not consume the manifest.
+//! See `docs/shared-contract-qualification.md` for the proposed owner decision;
+//! current wire fields and validation bounds are unchanged.
 //!
 //! The optional `[agents]` section is read only by `ferrum-alloy openapi
 //! export`, which stamps it into the OpenAPI document as Edge v0.9.9's

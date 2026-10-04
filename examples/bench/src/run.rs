@@ -209,17 +209,54 @@ pub(crate) fn measure(
     collector: Option<Arc<CollectorStats>>,
     environment: Value,
 ) -> Result<Value, Failure> {
+    measure_inner(
+        cell,
+        options,
+        pipeline,
+        metrics,
+        collector,
+        environment,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn measure_inner(
+    cell: Cell,
+    options: &RunOptions,
+    pipeline: Option<OtelPipeline>,
+    metrics: &Metrics,
+    collector: Option<Arc<CollectorStats>>,
+    environment: Value,
+    #[cfg(test)] diagnostics: Option<Arc<client::tests::HealthDiagnostics>>,
+) -> Result<Value, Failure> {
     options.load.validate(cell.transport)?;
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("pki-generation");
+    }
     let pki = if cell.transport.tls() {
         Some(Pki::generate()?)
     } else {
         None
     };
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("server-tls-config");
+    }
     let server_tls = match &pki {
         Some(pki) => Some(pki.server(cell.transport.mtls())?),
         None => None,
     };
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("server-start-readiness");
+    }
     let server = server::start(cell.scenario, server_tls, pipeline)?;
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("client-tls-config");
+    }
     let target = Target {
         addr: server.addr,
         transport: cell.transport,
@@ -229,6 +266,10 @@ pub(crate) fn measure(
             None => None,
         },
     };
+    #[cfg(test)]
+    if let Some(diagnostics) = &diagnostics {
+        diagnostics.coordinator_stage("client-runtime-build");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(server::THREADS)
         .thread_name(CLIENT_THREAD)
@@ -238,7 +279,20 @@ pub(crate) fn measure(
     let collector = collector.as_deref();
     let probe = || Sample::take(metrics, collector);
     alloc::set_role(Role::Client);
-    let measured = runtime.block_on(client::drive(target, options.load, probe));
+    let measured = runtime.block_on(async {
+        #[cfg(test)]
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.coordinator_stage("client-driver-start");
+            let health = client::tests::cancellation_health(
+                target,
+                options.load,
+                probe,
+                Arc::clone(&diagnostics),
+            );
+            return client::tests::cancellation_health_timeout(health, &diagnostics, cell).await;
+        }
+        client::drive(target, options.load, probe).await
+    });
     alloc::set_role(Role::Service);
     // Close the client's connections before stopping the server.
     drop(runtime);
@@ -417,6 +471,20 @@ mod tests {
         CANCEL_FRAMES, FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload,
     };
 
+    struct HealthFailureEvidence {
+        cell: Cell,
+        diagnostics: Arc<client::tests::HealthDiagnostics>,
+    }
+
+    impl Drop for HealthFailureEvidence {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.diagnostics
+                    .failure(self.cell, "cell-error-or-assertion");
+            }
+        }
+    }
+
     fn options(seconds: f64) -> RunOptions {
         RunOptions {
             load: Load {
@@ -445,6 +513,11 @@ mod tests {
     }
 
     fn assert_healthy(result: &Value) {
+        assert_work_completed(result);
+        assert_eq!(result["seconds"], 0.2, "{result}");
+    }
+
+    fn assert_work_completed(result: &Value) {
         assert_eq!(result["schema"], SCHEMA, "{result}");
         assert!(result["requests"].as_u64().unwrap() > 0, "{result}");
         assert_eq!(result["errors"], 0, "{result}");
@@ -455,43 +528,126 @@ mod tests {
                 "{result}"
             );
         }
-        assert_eq!(result["seconds"], 0.2, "{result}");
+    }
+
+    fn assert_health_matrix(scenario: Scenario) {
+        // These real-service cells prove functional progress, not completion
+        // within 200 ms in a shared debug-build process. Use the harness's
+        // normal warm-up and window for finite 64 KiB bodies / 64-frame
+        // streams, retaining four workers and the actual production path.
+        // Cancellation alone uses finite per-worker phase budgets below h2's
+        // reset-retention limit, through the same exchanges and coordinator.
+        // Dedicated boundary and body tests keep their 200 ms windows.
+        let mut options = options(5.0);
+        options.load.warmup = Duration::from_secs(1);
+        for transport in Transport::ALL {
+            for workload in Workload::ALL {
+                let cell = Cell {
+                    scenario,
+                    workload: *workload,
+                    transport: *transport,
+                };
+                let metrics = Metrics::default();
+                let environment = probe::environment(options.label.as_deref());
+                // Keep the bounded snapshots alive through timeout teardown
+                // and every report assertion; print at most once on failure.
+                let evidence = (*workload == Workload::Cancel).then(|| HealthFailureEvidence {
+                    cell,
+                    diagnostics: Arc::new(client::tests::HealthDiagnostics::new(options.load)),
+                });
+                let diagnostics = evidence.as_ref().map(|e| Arc::clone(&e.diagnostics));
+                let result = measure_inner(
+                    cell,
+                    &options,
+                    None,
+                    &metrics,
+                    None,
+                    environment,
+                    diagnostics,
+                )
+                .unwrap();
+                assert_work_completed(&result);
+                assert_eq!(result["seconds"], 5.0, "{result}");
+                assert_eq!(result["warmup_seconds"], 1.0, "{result}");
+                assert_eq!(result["scenario"], scenario.name(), "{result}");
+                assert_eq!(result["transport"], transport.name(), "{result}");
+                assert_eq!(result["workload"], workload.name(), "{result}");
+                assert_eq!(result["protocol"], transport.protocol(), "{result}");
+                assert_eq!(result["tls"], transport.tls(), "{result}");
+                assert_eq!(result["mtls"], transport.mtls(), "{result}");
+                assert_eq!(result["environment"]["label"], "test", "{result}");
+                assert_eq!(result["run_id"], "test-run", "{result}");
+                assert_eq!(result["rep"], 1, "{result}");
+                assert_body_accounting(&result, *workload, *transport);
+                if *workload == Workload::Cancel {
+                    let requests =
+                        options.load.concurrency * client::tests::HEALTH_EXCHANGES_PER_PHASE;
+                    assert_eq!(result["requests"], requests, "{result}");
+                }
+            }
+        }
     }
 
     #[test]
     fn plain_serves_every_workload_over_every_transport() {
-        for transport in Transport::ALL {
-            for workload in Workload::ALL {
-                let result = run(Scenario::Plain, *workload, *transport);
-                assert_healthy(&result);
-                assert_eq!(result["transport"], transport.name());
-                assert_eq!(result["workload"], workload.name());
-            }
-        }
+        assert_health_matrix(Scenario::Plain);
     }
 
     #[test]
     fn alloy_serves_every_workload_over_every_transport() {
-        for transport in Transport::ALL {
-            for workload in Workload::ALL {
-                assert_healthy(&run(Scenario::Alloy, *workload, *transport));
+        assert_health_matrix(Scenario::Alloy);
+    }
+
+    fn assert_body_accounting(result: &Value, workload: Workload, transport: Transport) {
+        let size = match workload {
+            Workload::Small => br#"{"id":42,"name":"tea","quantity":2,"tags":["a","b"]}"#.len(),
+            Workload::Large => LARGE_BYTES,
+            Workload::Stream => STREAM_FRAMES * FRAME_BYTES,
+            Workload::Cancel => {
+                assert_cancellation(result, transport);
+                return;
             }
-        }
+        };
+        let requests = result["requests"].as_u64().unwrap();
+        let bytes = result["body_bytes"].as_u64().unwrap();
+        assert_eq!(bytes, requests * size as u64, "{result}");
     }
 
     #[test]
     fn http1_cancellation_reconnects_and_http2_does_not() {
         for transport in Transport::ALL {
-            let result = run(Scenario::Plain, Workload::Cancel, *transport);
-            assert_healthy(&result);
+            let metrics = Metrics::default();
+            let probe = || Sample::take(&metrics, None);
+            let measured = client::tests::cancellation_rounds(*transport, probe);
+            let mut options = options(0.2);
+            options.load.duration = measured.window;
+            let cell = Cell {
+                scenario: Scenario::Plain,
+                workload: Workload::Cancel,
+                transport: *transport,
+            };
+            let result = report(cell, &options, probe::environment(None), measured);
+            assert_work_completed(&result);
+            assert_eq!(result["requests"], options.load.concurrency, "{result}");
+            assert_eq!(result["seconds"], options.load.duration.as_secs_f64());
             assert_cancellation(&result, *transport);
+            assert_eq!(
+                result["body_bytes"],
+                (options.load.concurrency * FRAME_BYTES) as u64,
+                "{result}"
+            );
         }
     }
 
     fn assert_cancellation(result: &Value, transport: Transport) {
         let requests = result["requests"].as_u64().unwrap();
         let bytes = result["body_bytes"].as_u64().unwrap();
-        assert!(bytes >= requests * FRAME_BYTES as u64, "{result}");
+        // Incoming frames need not preserve an application's 1 KiB chunks:
+        // Hyper's HTTP/1 decoder can return any nonempty partial chunk.
+        assert!(bytes >= requests, "{result}");
+        // The real router emits 1 KiB application chunks. Hyper encodes each
+        // as one HTTP/1 chunk; h2 can split, but does not join, those chunks.
+        assert!(bytes <= requests * FRAME_BYTES as u64, "{result}");
         assert!(
             bytes < requests * (CANCEL_FRAMES * FRAME_BYTES) as u64,
             "{result}"
@@ -503,6 +659,18 @@ mod tests {
             let connects = result["connects"].as_u64().unwrap();
             assert!(connects >= connections + requests, "{result}");
         }
+    }
+
+    #[test]
+    fn cancellation_accounting_accepts_a_partial_first_incoming_frame() {
+        let (bytes, connects) = client::tests::partial_first_cancellation();
+        let result = json!({
+            "requests": 1,
+            "body_bytes": bytes,
+            "connections": 1,
+            "connects": connects,
+        });
+        assert_cancellation(&result, Transport::H1);
     }
 
     #[test]
