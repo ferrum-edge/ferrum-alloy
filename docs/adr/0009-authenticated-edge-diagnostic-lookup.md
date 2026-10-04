@@ -75,8 +75,11 @@ wrong namespace, wrong replica, or an unknown reference. There is no automatic
 data-plane probing or new Edge API. Network I/O stays in the CLI, and the
 diagnostics crate gains no dependencies.
 
-The diagnostic-ref schema and ten valid/invalid fixtures are vendored byte for
+The diagnostic-ref schema and ten valid/invalid fixtures were first vendored byte for
 byte from `contracts-edge-0.9.9-r2` (commit
 `591c73a3f965fdab440c3a76b2707accdf491ba5`), with SHA-256 values in PIN. Hosted
-CI runs recording HTTP fixtures and schema/vocabulary drift tests. The Edge
-support pairing and MSRV are unchanged.
+CI runs recording HTTP fixtures and schema/vocabulary drift tests. This path did
+not change the Edge support policy or MSRV. The 2026-10-04 adoption candidate now
+pins the identical schema/fixture bytes from `contracts-edge-0.9.11` at
+`390edbd5b2485af0988e02f7827fde778d76ae0a`; the latest-plus-previous Edge window
+rolls to v0.9.11/v0.9.10 and requires fresh hosted pairing and HTTP fixture checks.

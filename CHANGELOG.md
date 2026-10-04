@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Adopt published `contracts-edge-0.9.11` at
+  `390edbd5b2485af0988e02f7827fde778d76ae0a`: vendor all 16 adopted files
+  byte-exact and pin every SHA-256. Record root's accepted unchanged report and
+  manifest shared v1 freeze at qualified owner `81cbb410`; keep owner availability
+  unreleased, historical PROPOSED descriptions and full schema parity.
+  Preserve immutable consumer qualification slices and their authority limits;
+  new coordinated adoption gates and #27/#28 disposition remain with root.
+- Pin verified Edge v0.9.11 (`c764084b3b51c3f7ffde268c039688d35e49c553`),
+  default multi-arch index
+  `sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`.
+  Roll the existing latest-plus-previous support window to v0.9.11/v0.9.10,
+  update paired CLI assertions and only the known generated YAML headers, and
+  statically re-audit existing config/MCP contracts. Fresh hosted adoption CI
+  remains required; no Alloy crate publication or performance acceptance is granted.
 - Isolate the benchmark allocator unit test with thread-local RAII observation
   and instance-owned role counters. It no longer permanently enables production
   allocation counting for later non-counting health tests. Add concurrent-thread

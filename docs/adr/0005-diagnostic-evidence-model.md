@@ -2,6 +2,15 @@
 
 **Status:** Accepted (2026-09-26)
 
+**2026-10-04 amendment:** The original PROPOSED/pin statements below are historical.
+Anvil #312's bounded read-only importer is merged and qualified; root accepted the
+unchanged shared report/manifest v1 freeze at qualified owner 81cbb. Published
+`contracts-edge-0.9.11` marks both EXISTING/implemented, with Alloy owner availability
+still unreleased. This pin adoption retains every historical schema description
+for full parity and requires fresh hosted CI. See the
+[owner/adoption record](../shared-contract-qualification.md) for immutable slices
+and remaining #27/#28 gates; no trust or timing authority is widened.
+
 ## Context
 
 Ferrum Anvil already defines a `DiagnosticFinding` shape: confidence `confirmed`/`likely`/`unknown`/`conflicting_evidence`, plus scope, owner, `does_not_prove`, and `confirm_with`. Its audited Edge v0.9.7 catalog shows that `X-Gateway-Error` is spoofable on some paths. Alloy must explain Edge-plus-service timing without converting missing or unverifiable evidence into confident claims.

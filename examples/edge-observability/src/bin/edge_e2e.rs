@@ -12,8 +12,8 @@
 //! Edge v0.9.8 hands Alloy its SERVER span as the `traceparent` parent. Edge
 //! v0.9.9 exports a CLIENT span per backend attempt and hands Alloy that span
 //! instead, so Alloy's SERVER span nests under the attempt and the attempt
-//! under the Edge SERVER span. Both releases are in the support window, so the
-//! parentage checks accept either shape and nothing deeper.
+//! under the Edge SERVER span. Supported v0.9.11/v0.9.10 retain that attempt
+//! shape; parentage checks also accept legacy v0.9.8 input and nothing deeper.
 //!
 //! Besides the happy path it drives the attempt and connection cases: a
 //! gateway retry, a cold and a reused gateway connection, concurrent HTTP/2
