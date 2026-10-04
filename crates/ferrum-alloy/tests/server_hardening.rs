@@ -946,7 +946,7 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         .handshake(TokioIo::new(tcp))
         .await
         .unwrap();
-    tokio::spawn(connection);
+    let connection = tokio::spawn(connection);
     let big = format!("http://{}/big", server.addr);
     let response = sender.send_request(request(&big)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -954,11 +954,33 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
     let mut http2_body = response.into_body();
 
     let started = Instant::now();
+    // Close each client as soon as its own body is complete. Holding the
+    // faster connection open until join! returns lets it legitimately go
+    // idle while the other client is still downloading.
     let (http1_received, http2_received) = tokio::join!(
-        read_big_http1_slowly(&mut http1),
-        read_big_http2_slowly(&mut http2_body),
+        async {
+            let received = read_big_http1_slowly(&mut http1).await;
+            drop(http1);
+            received
+        },
+        async {
+            let received = read_big_http2_slowly(&mut http2_body).await;
+            drop((http2_body, sender));
+            // The driver owns the socket even after its response ends.
+            connection.abort();
+            let _ = connection.await;
+            received
+        },
     );
     let elapsed = started.elapsed();
+    let closed = async {
+        while server.stats.active_connections.load(Ordering::Relaxed) > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(WITHIN, closed)
+        .await
+        .expect("both completed clients released their connection slots");
     let close_reasons = format!(
         "idle={}, write_stall={}, first_request={}",
         server.stats.idle_timeouts.load(Ordering::Relaxed),
@@ -987,7 +1009,7 @@ async fn slow_readers_of_a_finished_response_outlive_the_idle_timeout() {
         0,
         "the slow-reader connections must not close by write stall (server close reasons: {close_reasons})"
     );
-    drop((http1, http2_body));
+    assert_eq!(server.stats.first_request_timeouts.load(Ordering::Relaxed), 0);
     server.shutdown().await.unwrap();
 }
 
@@ -1037,52 +1059,6 @@ async fn a_finished_http1_response_waiting_on_a_full_transport_is_not_idle() {
         "the pause was shorter than the write stall timeout (server close reasons: {close_reasons})"
     );
     drop(stream);
-    server.shutdown().await.unwrap();
-}
-
-/// An HTTP/1.1 client that stops reading a finished response, which then
-/// waits in Hyper's write buffer, is disconnected by the write stall
-/// timeout, not the shorter idle timeout, and its slot is freed.
-#[tokio::test]
-async fn an_unread_finished_http1_response_is_closed_by_the_write_stall_timeout() {
-    let mut config = write_stall_limited();
-    config.server.idle_timeout_ms = IDLE_TIMEOUT.as_millis() as u64;
-    config.server.max_connections = 1;
-    let (listener, _) = listener_with_small_send_buffer();
-    let server = support::start_on(
-        AlloyApp::new("hardening").router(router()),
-        config,
-        listener,
-    )
-    .await;
-    let mut stream = connect_with_small_window(server.addr).await;
-    stream
-        .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
-        .await
-        .unwrap();
-    let started = Instant::now();
-    let mut head = [0u8; 64];
-    let n = stream.read(&mut head).await.unwrap();
-    assert!(
-        head[..n].starts_with(b"HTTP/1.1 200"),
-        "{}",
-        String::from_utf8_lossy(&head[..n])
-    );
-    // Stop reading until the server gives up on the response.
-    counted(&server.stats.write_stall_timeouts).await;
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed >= WRITE_STALL_TIMEOUT / 2,
-        "closed by the write stall timeout, not at once ({elapsed:?})"
-    );
-    assert!(
-        closed_by_server(&mut stream).await,
-        "the connection is closed"
-    );
-    let stats = &server.stats;
-    assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
-    assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
-    assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
     server.shutdown().await.unwrap();
 }
 

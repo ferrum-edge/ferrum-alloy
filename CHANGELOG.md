@@ -10,7 +10,9 @@
   connection and truncated the response. A connection whose transport cannot
   take a write is no longer idle on either protocol;
   `server.write_stall_timeout_ms` still disconnects a client that stops
-  reading, now also once its response body has ended.
+  reading, now also once its response body has ended. Once the transport has
+  accepted the complete response, an idle close can still occur while the
+  client reads buffered bytes; that close does not truncate the response.
 - Protect CLI output files from symlink redirection with exclusive creation or
   same-directory atomic replacement, and reject pre-existing symlink
   components at or beneath generated output roots, including roots written with

@@ -76,6 +76,9 @@ use tower::ServiceExt;
 
 use crate::lifecycle::Lifecycle;
 
+#[cfg(test)]
+mod tests;
+
 /// How long the listener waits, after the drain budget, for applications to
 /// drop upgraded connections whose reads and writes now fail.
 const UPGRADED_CLOSE_GRACE: Duration = Duration::from_secs(1);
@@ -111,7 +114,8 @@ pub struct ServerStats {
     /// read timeout.
     pub first_request_timeouts: AtomicU64,
     /// Connections closed after serving a request because no request was in
-    /// flight for the idle timeout.
+    /// flight, no response data was written, and no transport write was
+    /// blocked for the idle timeout. Buffered data may still reach the client.
     pub idle_timeouts: AtomicU64,
     /// HTTP/2 stream tasks (a request's handler and response body) still
     /// running at the end of the drain budget, then cancelled.
