@@ -137,7 +137,7 @@ fn assert_private(output: &Output) {
 #[test]
 fn an_ordinary_service_report_is_fetched_successfully() {
     let body = report();
-    let (url, _, server) = serve(body, false);
+    let (url, _started_rx, server) = serve(body, false);
     let output = diagnose(&url, "1000");
     let request = server.join().unwrap();
     assert!(
