@@ -236,6 +236,9 @@ mod tests {
         let counted_barrier = std::sync::Arc::clone(&barrier);
         let before_global = snapshot();
         let counted = std::thread::spawn(move || {
+            // Warm the barrier's platform primitives before observing allocations;
+            // pthread-backed synchronization can allocate lazily on its first wait.
+            counted_barrier.wait();
             let original_role = ROLE.with(Cell::get);
             let mut scope = observation::Scope::enter();
             let active = observation::active();
@@ -247,7 +250,7 @@ mod tests {
             let client = std::hint::black_box(vec![0_u8; 2048]);
             counted_barrier.wait();
             let after = scope.snapshot();
-            // All assertions follow both rendezvous, so a failed isolation
+            // All assertions follow the final rendezvous, so a failed isolation
             // assertion cannot strand the other thread at a barrier.
             assert!(active);
             assert!(!globally_enabled);
@@ -268,6 +271,7 @@ mod tests {
             drop(data);
         });
         let uncounted = std::thread::spawn(move || {
+            barrier.wait();
             barrier.wait();
             let active = observation::active();
             let globally_enabled = enabled();
