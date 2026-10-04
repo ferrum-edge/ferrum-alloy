@@ -4,9 +4,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{ErrorKind, Read as _, Write as _};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -54,6 +56,55 @@ fn assert_client_disconnect(error: &std::io::Error, write: &str) {
         error.kind(),
         error.raw_os_error()
     );
+}
+
+/// Retry nonblocking fixture I/O within one absolute lifetime, checking
+/// cancellation even when the peer makes progress or interrupts a syscall.
+fn trickle_io<T>(
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    mut operation: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                ErrorKind::Interrupted,
+                "trickle fixture cancelled",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "trickle fixture exceeded its lifetime",
+            ));
+        }
+        match operation() {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
+fn trickle_write(
+    stream: &mut TcpStream,
+    mut bytes: &[u8],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let written = trickle_io(cancelled, deadline, || stream.write(bytes))?;
+        if written == 0 {
+            return Err(std::io::Error::new(
+                ErrorKind::WriteZero,
+                "trickle fixture could not write the response",
+            ));
+        }
+        bytes = &bytes[written..];
+    }
+    Ok(())
 }
 
 fn diagnose(url: &str, observation: &Value, extra: &[&str]) -> Output {
@@ -336,77 +387,106 @@ fn a_trickling_body_cannot_extend_the_whole_operation_deadline() {
     );
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&cancelled);
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
+        let result = (|| -> std::io::Result<_> {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut stream, _) = trickle_io(&stop, deadline, || listener.accept())?;
+            stream.set_nonblocking(true)?;
+            stream.set_nodelay(true)?;
+            let mut request = Vec::new();
+            let mut byte = [0; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = trickle_io(&stop, deadline, || stream.read(&mut byte))?;
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "trickling request ended before its headers",
+                    ));
                 }
-                Err(e) => panic!("trickling request did not arrive: {e}"),
+                request.push(byte[0]);
+                if request.len() >= 32 * 1024 {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "trickling request headers exceeded the fixture limit",
+                    ));
+                }
             }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream.set_nodelay(true).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut request = Vec::new();
-        let mut byte = [0; 1];
-        while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
-            request.push(byte[0]);
-            assert!(request.len() < 32 * 1024);
-        }
-        assert!(request.ends_with(b"\r\n\r\n"));
-        let request = String::from_utf8(request).unwrap();
-        assert_eq!(request.lines().next().unwrap(), expected_request);
-        assert!(
-            request
-                .to_ascii_lowercase()
-                .contains(&format!("authorization: bearer {TOKEN}"))
-        );
-        let head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            body.len() + 40,
-        );
-        stream.write_all(head.as_bytes()).unwrap();
-        started_tx.send(Instant::now()).unwrap();
-        let mut write_times = Vec::new();
-        let mut disconnected = false;
-        // Every gap is below the 600 ms read timeout, but a complete response
-        // takes at least four seconds. Without a total deadline it succeeds.
-        for _ in 0..40 {
-            if let Err(error) = stream.write_all(b" ") {
-                assert_client_disconnect(&error, "trickle");
-                disconnected = true;
-                break;
+            let request = String::from_utf8(request)
+                .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len() + 40,
+            );
+            trickle_write(&mut stream, head.as_bytes(), &stop, deadline)?;
+            let _ = started_tx.send(Instant::now());
+            let mut write_times = Vec::new();
+            let mut disconnect = None;
+            // Every gap is below the 600 ms read timeout, but a complete response
+            // takes at least four seconds. Without a total deadline it succeeds.
+            for _ in 0..40 {
+                if let Err(error) = trickle_write(&mut stream, b" ", &stop, deadline) {
+                    disconnect = Some((error, "trickle"));
+                    break;
+                }
+                write_times.push(Instant::now());
+                std::thread::sleep(Duration::from_millis(100));
             }
-            write_times.push(Instant::now());
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if !disconnected && let Err(error) = stream.write_all(body.as_bytes()) {
-            assert_client_disconnect(&error, "final body");
-            disconnected = true;
-        }
-        completed_tx.send((write_times, disconnected)).unwrap();
+            if disconnect.is_none() {
+                disconnect = trickle_write(&mut stream, body.as_bytes(), &stop, deadline)
+                    .err()
+                    .map(|error| (error, "final body"));
+            }
+            Ok((request, write_times, disconnect))
+        })();
+        // The socket has been dropped before completion is recorded, including
+        // every I/O error path. A panic closes the channel and is reported at join.
+        let _ = completed_tx.send(Instant::now());
+        result
     });
-    let output = diagnose(&url, &observation, &["--timeout-ms", "600"]);
-    // Measure before joining the fixture, which has its own bounded lifetime.
-    let returned_at = Instant::now();
-    let started = started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    // Keep ownership of the fixture outside all fallible client/proof work so
+    // even a helper panic or a channel failure cannot bypass cancellation/join.
+    let proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let output = diagnose(&url, &observation, &["--timeout-ms", "600"]);
+        // Measure before cleanup; joining must not inflate the CLI return time.
+        let returned_at = Instant::now();
+        let completion_deadline = returned_at + Duration::from_secs(1);
+        let started = started_rx.recv_timeout(Duration::from_secs(1));
+        let completion_wait = completion_deadline.saturating_duration_since(Instant::now());
+        let completed = completed_rx.recv_timeout(completion_wait);
+        (output, returned_at, started, completed)
+    }));
+    cancelled.store(true, Ordering::Relaxed);
+    let server_result = match server.join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    let (output, returned_at, started, completed) = match proof {
+        Ok(proof) => proof,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    let started = started.unwrap();
     let elapsed = returned_at.duration_since(started);
     // The request deadline starts before connect/send, so time spent reaching
     // this server has already consumed it. There is no minimum body-read time.
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     // Require bounded cleanup after the CLI returns, including an observed
     // disconnect rather than successful completion of the four-second body.
-    let (write_times, disconnected) = completed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    server.join().unwrap();
-    assert!(disconnected, "client read the complete trickling response");
+    let completed_at = completed.unwrap();
+    assert!(
+        completed_at.duration_since(returned_at) < Duration::from_secs(1),
+        "fixture did not complete within one second of CLI return"
+    );
+    let (request, write_times, disconnect) = server_result.unwrap();
+    assert_eq!(request.lines().next().unwrap(), expected_request);
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {TOKEN}"))
+    );
+    let (error, write) = disconnect.expect("client read the complete trickling response");
+    assert_client_disconnect(&error, write);
     let writes: Vec<_> = write_times
         .into_iter()
         .filter(|written_at| *written_at <= returned_at)
