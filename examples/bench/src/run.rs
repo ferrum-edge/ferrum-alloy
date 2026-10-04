@@ -509,16 +509,8 @@ mod tests {
                 };
                 let metrics = Metrics::default();
                 let environment = probe::environment(options.label.as_deref());
-                let result = measure_inner(
-                    cell,
-                    &options,
-                    None,
-                    &metrics,
-                    None,
-                    environment,
-                    true,
-                )
-                .unwrap();
+                let result =
+                    measure_inner(cell, &options, None, &metrics, None, environment, true).unwrap();
                 assert_work_completed(&result);
                 assert_eq!(result["seconds"], 5.0, "{result}");
                 assert_eq!(result["warmup_seconds"], 1.0, "{result}");
