@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::convert::Infallible;
+use std::future::Future;
 
 use axum::routing::get;
 use bytes::Bytes;
@@ -53,6 +54,57 @@ impl http_body::Body for FinishedBody {
 impl Drop for FinishedBody {
     fn drop(&mut self) {
         if self.data.is_none() {
+            self.finished.notify_one();
+        }
+    }
+}
+
+/// Holds the request guard after yielding its final data until the test has
+/// observed that data at the client transport.
+struct GuardedFinishedBody {
+    data: Option<Bytes>,
+    release: tokio::sync::oneshot::Receiver<()>,
+    released: bool,
+    finished: Arc<Notify>,
+}
+
+impl http_body::Body for GuardedFinishedBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        let this = self.get_mut();
+        if this.released {
+            return Poll::Ready(None);
+        }
+        if let Some(data) = this.data.take() {
+            return Poll::Ready(Some(Ok(Frame::data(data))));
+        }
+        match Pin::new(&mut this.release).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(_) => {
+                this.released = true;
+                Poll::Ready(None)
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.released
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let len = self.data.as_ref().map_or(0, |data| data.len() as u64);
+        SizeHint::with_exact(len)
+    }
+}
+
+impl Drop for GuardedFinishedBody {
+    fn drop(&mut self) {
+        if self.released {
             self.finished.notify_one();
         }
     }
@@ -382,15 +434,27 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
         sockets.token(),
     );
     let finished = Arc::new(Notify::new());
+    let (release_body, release_body_rx) = tokio::sync::oneshot::channel();
+    let release_body_rx = Arc::new(tokio::sync::Mutex::new(Some(release_body_rx)));
     let body_finished = Arc::clone(&finished);
     let routes = Router::new().route(
         "/",
         get(move || {
-            let body = FinishedBody {
-                data: Some(Bytes::from(vec![b'x'; SMALL_BODY])),
-                finished: Arc::clone(&body_finished),
-            };
-            async move { Body::new(body) }
+            let body_finished = Arc::clone(&body_finished);
+            let release_body_rx = Arc::clone(&release_body_rx);
+            async move {
+                let release = release_body_rx
+                    .lock()
+                    .await
+                    .take()
+                    .expect("the test route is called once");
+                Body::new(GuardedFinishedBody {
+                    data: Some(Bytes::from(vec![b'x'; SMALL_BODY])),
+                    release,
+                    released: false,
+                    finished: body_finished,
+                })
+            }
         }),
     );
     let lifecycle = Lifecycle::new(Arc::default());
@@ -422,11 +486,19 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
             .unwrap();
         client.write_all(GET).await.unwrap();
         let mut body = Vec::new();
+        let mut release_body = Some(release_body);
         loop {
             let (header, payload) = h2_frame(&mut client).await;
             if header[3] == DATA_FRAME {
                 assert_eq!(&header[5..], &[0, 0, 0, 1]);
                 body.extend_from_slice(&payload);
+                if body.len() == SMALL_BODY {
+                    release_body
+                        .take()
+                        .expect("the body guard is released once")
+                        .send(())
+                        .expect("the response body is waiting for client progress");
+                }
                 if header[4] & 1 != 0 {
                     break;
                 }
