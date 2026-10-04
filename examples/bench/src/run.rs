@@ -462,25 +462,64 @@ mod tests {
         }
     }
 
-    #[test]
-    fn plain_serves_every_workload_over_every_transport() {
+    fn assert_health_matrix(scenario: Scenario) {
+        // These real-service cells prove functional progress, not completion
+        // within 200 ms in a shared debug-build process. Use the harness's
+        // normal warm-up and window for finite 64 KiB bodies / 64-frame
+        // streams, retaining four workers and the actual production path.
+        // Dedicated boundary and body tests keep their 200 ms windows.
+        let mut options = options(5.0);
+        options.load.warmup = Duration::from_secs(1);
         for transport in Transport::ALL {
             for workload in Workload::ALL {
-                let result = run(Scenario::Plain, *workload, *transport);
-                assert_healthy(&result);
-                assert_eq!(result["transport"], transport.name());
-                assert_eq!(result["workload"], workload.name());
+                let cell = Cell {
+                    scenario,
+                    workload: *workload,
+                    transport: *transport,
+                };
+                let metrics = Metrics::default();
+                let environment = probe::environment(options.label.as_deref());
+                let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
+                assert_work_completed(&result);
+                assert_eq!(result["seconds"], 5.0, "{result}");
+                assert_eq!(result["warmup_seconds"], 1.0, "{result}");
+                assert_eq!(result["scenario"], scenario.name(), "{result}");
+                assert_eq!(result["transport"], transport.name(), "{result}");
+                assert_eq!(result["workload"], workload.name(), "{result}");
+                assert_eq!(result["protocol"], transport.protocol(), "{result}");
+                assert_eq!(result["tls"], transport.tls(), "{result}");
+                assert_eq!(result["mtls"], transport.mtls(), "{result}");
+                assert_eq!(result["environment"]["label"], "test", "{result}");
+                assert_eq!(result["run_id"], "test-run", "{result}");
+                assert_eq!(result["rep"], 1, "{result}");
+                assert_body_accounting(&result, *workload, *transport);
             }
         }
     }
 
     #[test]
+    fn plain_serves_every_workload_over_every_transport() {
+        assert_health_matrix(Scenario::Plain);
+    }
+
+    #[test]
     fn alloy_serves_every_workload_over_every_transport() {
-        for transport in Transport::ALL {
-            for workload in Workload::ALL {
-                assert_healthy(&run(Scenario::Alloy, *workload, *transport));
+        assert_health_matrix(Scenario::Alloy);
+    }
+
+    fn assert_body_accounting(result: &Value, workload: Workload, transport: Transport) {
+        let size = match workload {
+            Workload::Small => br#"{"id":42,"name":"tea","quantity":2,"tags":["a","b"]}"#.len(),
+            Workload::Large => LARGE_BYTES,
+            Workload::Stream => STREAM_FRAMES * FRAME_BYTES,
+            Workload::Cancel => {
+                assert_cancellation(result, transport);
+                return;
             }
-        }
+        };
+        let requests = result["requests"].as_u64().unwrap();
+        let bytes = result["body_bytes"].as_u64().unwrap();
+        assert_eq!(bytes, requests * size as u64, "{result}");
     }
 
     #[test]

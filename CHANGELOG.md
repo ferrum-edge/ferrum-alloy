@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Correct the real-service benchmark health matrices after PR #141 head
+  `7950a8b84ff7a0ee829e09c0b5c4a26789c1a3ee` failed
+  [Linux run 37222237081 / job 111494745143](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37222237081/job/111494745143).
+  The Alloy h2c stream cell completed no measured body in a zero-warm-up
+  200 ms window; the test's short-window progress assumption was invalid,
+  with the exact scheduler/transport delay unknown. Use a test-only 1-second
+  warm-up and fixed 5-second health budget through the real production path
+  for every workload and all six transports on both plain and Alloy servers.
+  Retain nonzero work/latencies and zero errors; assert full-body/cancellation
+  byte accounting and exact report labels/durations. Keep separate 200 ms
+  boundary/probe, cancellation and full-body tests, worker-liveness/runtime
+  teardown coverage, production measurement semantics and strict qualification
+  unchanged. Functional health coverage supplies no performance budget or
+  dedicated acceptance; fresh hosted CI remains required.
 - Make the benchmark cancellation protocol regression causal and bounded:
   observe real worker completions, server body drops and accepted connection
   identities over all six transports instead of assuming completed work in a
