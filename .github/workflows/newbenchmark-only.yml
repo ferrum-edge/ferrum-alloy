@@ -1,0 +1,119 @@
+name: Hosted benchmark qualification
+
+on:
+  pull_request:
+    paths:
+      - 'examples/bench/**'
+      - 'crates/ferrum-alloy/**'
+      - 'crates/ferrum-alloy-telemetry/**'
+      - 'crates/ferrum-alloy-diagnostics/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'docs/benchmarks.md'
+      - '.github/workflows/newbenchmark-only.yml'
+  # Full matrix only after this workflow lands on main. No ref/URL inputs.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-benchmark-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualification:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    name: Shared Linux experimental evidence (not dedicated acceptance)
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 210 || 60 }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      # One optimized binary with symbols for both profiles and comparisons.
+      CARGO_PROFILE_RELEASE_DEBUG: '1'
+      RUST_BACKTRACE: '1'
+      QUALIFICATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      QUALIFICATION_FULL: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+    steps:
+      - name: Initialize qualification output directory
+        run: |
+          set -euo pipefail
+          QUALIFICATION_OUT="$RUNNER_TEMP/alloy-benchmark"
+          # Publish the path before mkdir so always() steps retain it on failure.
+          printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
+          mkdir -p "$QUALIFICATION_OUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ env.QUALIFICATION_SHA }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      # No cache, secrets, reusable workflow, or privileged PR event. Fork
+      # source runs only on an ephemeral GitHub-hosted VM with read access.
+      - name: Record immutable source and environment
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_OUT"
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SHA"
+          git diff --exit-code
+          git rev-parse HEAD > "$QUALIFICATION_OUT/source.txt"
+          git status --porcelain >> "$QUALIFICATION_OUT/source.txt"
+          sha256sum Cargo.lock rust-toolchain.toml > "$QUALIFICATION_OUT/inputs.sha256"
+          {
+            echo 'classification=shared GitHub-hosted experimental; no dedicated baseline or budget'
+            printenv ImageOS ImageVersion RUNNER_OS RUNNER_ARCH
+            uname -a
+            lscpu
+            cat /proc/loadavg
+            cat /proc/sys/kernel/perf_event_paranoid
+            rustc -Vv
+            cargo -V
+            python3 --version
+          } > "$QUALIFICATION_OUT/environment.txt"
+      - name: Install hosted instruction profiler
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y valgrind
+          valgrind --version >> "$QUALIFICATION_OUT/environment.txt"
+          dpkg-query -W valgrind >> "$QUALIFICATION_OUT/environment.txt"
+      - name: Preserve harness correctness and JSON schema snapshots
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s examples/bench/hosted -p 'test_*.py' -v \
+            2>&1 | tee "$QUALIFICATION_OUT/validator-tests.log"
+          cargo test --locked -p example-bench \
+            2>&1 | tee "$QUALIFICATION_OUT/harness-tests.log"
+          cargo test --locked -p ferrum-alloy-telemetry --features subscriber --test json_log \
+            2>&1 | tee "$QUALIFICATION_OUT/json-schema-tests.log"
+      - name: Build the single release binary
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p example-bench \
+            2>&1 | tee "$QUALIFICATION_OUT/build.log"
+          sha256sum target/release/alloy-bench > "$QUALIFICATION_OUT/binary.sha256"
+      - name: Collect profiles and five interleaved repetitions
+        timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 180 || 15 }}
+        run: python3 examples/bench/hosted/qualify.py
+      - name: Hash all evidence including partial failures
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_OUT"
+          cd "$QUALIFICATION_OUT"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z \
+            | xargs -0 -r sha256sum > SHA256SUMS
+      - name: Upload raw evidence and failure status
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: alloy-benchmark-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_OUT }}/
+          if-no-files-found: error
+          retention-days: 30
