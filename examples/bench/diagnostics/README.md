@@ -161,7 +161,7 @@ foreign observer without fixture masking, verifies scope restoration, two real G
 on its original accepted socket, public-driver completion and wire-child drop, and requires zero
 foreign callbacks through closure. The `Some(wire)` adapter remains unchanged.
 The existing transport/protocol error control preserves the published whitelist at
-patched lines 514/544: only 514 formats `std::io::ErrorKind`; 544 keeps peer details
+patched lines 507/537: only 507 formats `std::io::ErrorKind`; 537 keeps peer details
 omitted. Server saturation still requires exactly one omitted endpoint and its
 server-plaintext-I/O boundary. The EOF control uses the compact `p=` preface label
 while preserving its zero raw-read-error assertion. The existing

@@ -59,10 +59,10 @@
 +        );
 @@ -1967 +1987 @@
 -            && matches!(metadata.line(), Some(491 | 521))
-+            && matches!(metadata.line(), Some(514 | 544))
++            && matches!(metadata.line(), Some(507 | 537))
 @@ -1989 +2009 @@
 -            let io = event.metadata().line() == Some(491);
-+            let io = event.metadata().line() == Some(514);
++            let io = event.metadata().line() == Some(507);
 @@ -2197,2 +2217,16 @@
 -            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
 -            None => handshake(TokioIo::new(io), h2).await,
@@ -233,10 +233,10 @@
 +    }
 +
 +    pub(crate) fn saturate_protocol(&self) {
-+        self.state
++        *self.state
 +            .lock()
 +            .unwrap_or_else(|e| e.into_inner())
-+            .protocol = Box::new(protocol::ProtocolState::saturated());
++            .protocol = protocol::ProtocolState::saturated();
 +    }
 +
 @@ -620,0 +643,10 @@
@@ -389,7 +389,7 @@
 +        assert!(text.contains("wp Rx H hex=9:0 0/0/0/0 0/1\n"));
 +        assert!(text.contains("we Rx a:0\n"));
 @@ -3264,0 +3290 @@
-+            state.protocol = Box::new(protocol::ProtocolState::saturated());
++            *state.protocol = protocol::ProtocolState::saturated();
 @@ -3370,5 +3396,4 @@
 -        // Shorter wf/wc/ws prefixes retain every original field and save
 -        // 3,760 bytes. Added socket rows <=12*174, drop rows <=4*17 and TLS
