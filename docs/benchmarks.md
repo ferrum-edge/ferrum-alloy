@@ -1,5 +1,9 @@
 # Benchmarks
 
+The separate [bounded protocol observer experiment](../examples/bench/diagnostics/README.md)
+for #142 uses an explicitly labeled temporary h2 fork. Its gates and artifacts are
+distinct from ordinary qualification; it makes no initiating-cause or repair claim.
+
 The harness in `examples/bench` measures the relative cost of Alloy's layers against a plain hyper server, across server stacks, workloads, and transports. It writes one machine-readable JSON line per run, so that regression budgets can later be computed from committed raw data.
 
 Recorded evidence includes historical shared-machine measurements from 2026-09-26 (see [Results](#results-2026-09-26-previous-harness)) and [bounded shared hosted preparation from 2026-10-04](#hosted-evidence-2026-10-04). Neither supplies capacity numbers or a dedicated baseline. **No performance regression budget exists.** The [hosted qualification workflow](#hosted-qualification-preparation) checks evidence completeness and collects experimental profiles and comparisons; it does not fulfill the dedicated-host acceptance criteria in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15).

@@ -1,0 +1,323 @@
+--- a/crates/ferrum-alloy/src/bench_diagnostics.rs
++++ b/crates/ferrum-alloy/src/bench_diagnostics.rs
+@@ -14,0 +15,4 @@
++
++#[path = "../../../examples/bench/diagnostics/protocol_future.rs"]
++mod protocol;
++pub use protocol::ProtocolFuture;
+@@ -45,0 +50,2 @@
++    /// Fixed numerical events from the isolated h2 fork, after protocol locks release.
++    fn protocol_event(&self, _event: h2::alloy_diagnostics::Event) {}
+--- a/crates/ferrum-alloy/src/server.rs
++++ b/crates/ferrum-alloy/src/server.rs
+@@ -803,2 +803,13 @@
+-        let stream = crate::bench_diagnostics::PlaintextIo::optional(stream, observation);
+-        serve_io(stream, peer, active, builder, app, options, lifecycle).await;
++        let stream = crate::bench_diagnostics::PlaintextIo::optional(stream, observation.clone());
++        let future = serve_io(
++            stream,
++            peer,
++            active,
++            builder,
++            app,
++            options,
++            lifecycle,
++        );
++        #[cfg(feature = "bench-diagnostics")]
++        let future = crate::bench_diagnostics::ProtocolFuture::new(future, observation);
++        future.await;
+@@ -823,2 +834,13 @@
+-    let stream = crate::bench_diagnostics::PlaintextIo::optional(stream, observation);
+-    serve_io(stream, peer, active, builder, app, options, lifecycle).await;
++    let stream = crate::bench_diagnostics::PlaintextIo::optional(stream, observation.clone());
++    let future = serve_io(
++        stream,
++        peer,
++        active,
++        builder,
++        app,
++        options,
++        lifecycle,
++    );
++    #[cfg(feature = "bench-diagnostics")]
++    let future = crate::bench_diagnostics::ProtocolFuture::new(future, observation);
++    future.await;
+--- a/examples/bench/src/client.rs
++++ b/examples/bench/src/client.rs
+@@ -1085,0 +1086,2 @@
++                Ok("all-features-protocol-fork") => "all-features-protocol-fork",
++                Ok("default-features-protocol-fork") => "default-features-protocol-fork",
+@@ -1092,0 +1095 @@
++            crate::health::protocol_provenance(&mut message);
+@@ -1222,0 +1226,2 @@
++                Ok("all-features-protocol-fork") => "all-features-protocol-fork",
++                Ok("default-features-protocol-fork") => "default-features-protocol-fork",
+@@ -1339,0 +1345 @@
++            wire.saturate_protocol();
+@@ -1509,2 +1515,8 @@
+-        assert_eq!(wire_core.0.matches("wc ").count(), 128);
+-        assert_eq!(wire_core.0.matches("ws ").count(), 48);
++        assert_eq!(
++            wire_core.0.lines().filter(|line| line.starts_with("c ")).count(),
++            128,
++        );
++        assert_eq!(
++            wire_core.0.lines().filter(|line| line.starts_with("s ")).count(),
++            48,
++        );
+@@ -1967 +1979 @@
+-            && matches!(metadata.line(), Some(491 | 521))
++            && matches!(metadata.line(), Some(514 | 544))
+@@ -2197 +2209,10 @@
+-            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
++            Some(wire) => {
++                let observer = Some(
++                    Arc::clone(&wire) as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>,
++                );
++                ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                    handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2),
++                    observer,
++                )
++                .await
++            }
+@@ -2832 +2853 @@
+-                    .find(|line| line.starts_with("wire Rx counts_hex="))
++                    .find(|line| line.starts_with("wire Rx c="))
+@@ -2834,2 +2855,2 @@
+-                let eof = "flags=0/1/1 hb=9 remaining_hex=7";
+-                let partial = "partial_hex=6/0/8/0";
++                let eof = "f=0/1/1 hb=9 r=7";
++                let partial = "x=6/0/8/0";
+@@ -3788,0 +3810 @@
++                            assert_eq!(wires[0].decoded_headers(), 2);
+--- a/examples/bench/src/health.rs
++++ b/examples/bench/src/health.rs
+@@ -14,0 +15,7 @@
++
++#[path = "../diagnostics/protocol.rs"]
++mod protocol;
++
++pub(crate) fn protocol_provenance(text: &mut impl Write) {
++    protocol::provenance(text);
++}
+@@ -220,0 +228 @@
++    protocol: Box<protocol::ProtocolState>,
+@@ -236,0 +245 @@
++            protocol: self.protocol.clone(),
+@@ -257,0 +267 @@
++            protocol: Box::default(),
+@@ -591,0 +602 @@
++    protocol_changed: tokio::sync::Notify,
+@@ -607,0 +619,9 @@
++    pub(crate) fn decoded_headers(&self) -> u64 {
++        self.snapshot().protocol.headers()
++    }
++
++    pub(crate) fn saturate_protocol(&self) {
++        self.state.lock().unwrap_or_else(|e| e.into_inner()).protocol =
++            Box::new(protocol::ProtocolState::saturated());
++    }
++
+@@ -620,0 +641,10 @@
++    fn protocol_event(&self, event: h2::alloy_diagnostics::Event) {
++        {
++            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
++            state.sequence = state.sequence.saturating_add(1);
++            let cursor = state.sequence;
++            state.protocol.event(event, cursor);
++        }
++        self.protocol_changed.notify_one();
++    }
++
+@@ -748,0 +779 @@
++        state.protocol.write(text);
+@@ -802,2 +833,2 @@
+-                "wire {direction:?} counts_hex={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
+-                 preface={}/24 flags={}/{}/{} hb={} remaining_hex=",
++                "wire {direction:?} c={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
++                 p={}/24 f={}/{}/{} hb={} r=",
+@@ -821 +852 @@
+-            let _ = write!(text, " partial_hex=");
++            let _ = write!(text, " x=");
+@@ -835,3 +866,3 @@
+-            let (operations, outcomes) = match direction {
+-                Direction::Tx => ("scalar/vector/flush/shutdown", &parser.outcomes[1..]),
+-                Direction::Rx => ("read", &parser.outcomes[..1]),
++            let outcomes = match direction {
++                Direction::Tx => &parser.outcomes[1..],
++                Direction::Rx => &parser.outcomes[..1],
+@@ -839,5 +870 @@
+-            let _ = writeln!(
+-                text,
+-                "wire {direction:?} outcomes_hex({operations})={outcomes:x?} \
+-                 fields=pending/ok/error",
+-            );
++            let _ = writeln!(text, "wo {direction:?} {outcomes:x?}");
+@@ -845,2 +872,2 @@
+-                ("last_header", parser.last_header),
+-                ("last_complete", parser.last_complete),
++                ("H", parser.last_header),
++                ("C", parser.last_complete),
+@@ -849 +876 @@
+-                    let _ = write!(text, "wire {direction:?} {stage} ");
++                    let _ = write!(text, "wp {direction:?} {stage} ");
+@@ -855 +882 @@
+-                let _ = write!(text, "wire {direction:?} eof_mark_hex=");
++                let _ = write!(text, "we {direction:?} ");
+@@ -869 +896,2 @@
+-                        "ws {direction:?} {:x} {:x} ",
++                        "s {} {:x} {:x} ",
++                        direction.index(),
+@@ -884,3 +912,2 @@
+-            "wire first owner={} gen={} endpoint={} remote={:?} \
+-             reset_direction={:?}",
+-            self.owner, self.generation, self.endpoint, self.remote, state.reset_direction,
++            "wire first owner={} gen={} endpoint={} reset={:?}",
++            self.owner, self.generation, self.endpoint, state.reset_direction,
+@@ -970,2 +997,2 @@
+-                    "wc {:?} {} ",
+-                    event.direction,
++                    "c {} {} ",
++                    event.direction.index(),
+@@ -988 +1015 @@
+-                        let _ = write!(text, " goaway={last_stream:x}:{reason:x}");
++                        let _ = write!(text, " g={last_stream:x}:{reason:x}");
+@@ -1418,0 +1446 @@
++            protocol_changed: tokio::sync::Notify::new(),
+@@ -1451,0 +1480 @@
++            protocol_changed: tokio::sync::Notify::new(),
+@@ -1631,3 +1660,2 @@
+-            "wire slots(connection,stream,control)=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
+-             connections_omitted={} boundary=client-plaintext-I/O \
+-             receipt_is_not_decode socket_ordinal_is_not_stream_id",
++            "wire slots=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) omitted={} \
++             boundary=client-plaintext-I/O receipt!=decode socket-ordinal!=stream-id",
+@@ -1641,5 +1669,3 @@
+-                "server wire slots(connection,stream,control)=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
+-                 connections_omitted={} boundary=server-plaintext-I/O \
+-                 client-Tx/server-Rx=preface server-Tx/client-Rx=no-preface \
+-                 server_owner=accepted-socket-ordinal handler_stream_id=unknown \
+-                 endpoint_samples=sequential-non-atomic TLS_acceptance_is_not_ciphertext_transmission",
++                "server wire slots=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) omitted={} \
++                 boundary=server-plaintext-I/O client-Tx/server-Rx=preface reverse=no-preface owner=socket-ordinal \
++                 handler_stream_id=unknown samples=sequential/non-atomic TLS-acceptance!=ciphertext",
+@@ -1659,0 +1686 @@
++            protocol::schema(text);
+@@ -1662,3 +1689,3 @@
+-                "wire compact_hex counts=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
+-                 flags=bad_preface/eof/eof_partial hb=header_bytes remaining=payload-bytes \
+-                 partial=type/flags/length/stream '-'=unobserved",
++                "wire compact_hex c=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
++                 p=preface f=bad_preface/eof/eof_partial hb=header_bytes r=payload-bytes \
++                 x=type/flags/length/stream '-'=unobserved wo=Tx(scalar/vector/flush/shutdown),Rx(read):pending/ok/error",
+@@ -1668 +1695,2 @@
+-                "wire compact_hex mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
++                "wire compact_hex wp=direction,H(header)/C(complete),point we=direction,mark \
++                 mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
+@@ -1670 +1698 @@
+-                 goaway(last-stream:reason)",
++                 g=goaway(last-stream:reason)",
+@@ -1676 +1704 @@
+-                 rows(wf/wc/ws)=first-stream/control/completed-SETTINGS",
++                 rows(wf/c/s)=first-stream/control/completed-SETTINGS dirs(c/s)=0(Tx)/1(Rx)",
+@@ -1680,4 +1708,3 @@
+-                "socket hex rows=0(read)/1(scalar+vector-write)/2(flush) \
+-                 columns=pending/ok/error,bytes,last_requested,wakes,in_poll/last_outcome/eof,last_poll/progress/last_wake \
+-                 outcome=0(Pending)/1(Ok)/2(error) marks=endpoint-seq:age_us '-'=unobserved \
+-                 progress=positive-bytes-or-Ok-flush shutdown=unobserved",
++                "socket hex ops=0(read)/1(scalar+vector-write)/2(flush) \
++                 fields=pending/ok/error,bytes,requested,wakes,in-poll/outcome/eof,poll/progress/wake \
++                 outcome=0/1/2 marks=seq:age_us '-'=unknown progress=bytes>0-or-flush-Ok shutdown=unknown",
+@@ -1687,4 +1714,3 @@
+-                "tls demand=wants_read/wants_write/handshaking,mark \
+-                 buffer_lengths/kernel_queues/need_flush=unknown \
+-                 socket_bytes=encrypted-if-tls TLS_flags=after-poll-sequential \
+-                 endpoint_copy=one-lock-records-only cross_endpoint=sequential-non-atomic",
++                "tls demand=wants_read/wants_write/handshaking,mark lengths/kernel/need_flush=unknown \
++                 socket-bytes=encrypted-if-tls flags=after-poll-sequential \
++                 endpoint-copy=one-lock-records cross-endpoint=sequential/non-atomic",
+@@ -3084 +3110 @@
+-        assert!(text.contains("ws Rx 4 ffff "));
++        assert!(text.contains("s 1 4 ffff "));
+@@ -3125,2 +3151,2 @@
+-        assert!(!frozen.contains(" goaway="));
+-        assert!(after.contains(" goaway=0:0"));
++        assert!(!frozen.contains(" g="));
++        assert!(after.contains(" g=0:0"));
+@@ -3200 +3226 @@
+-            .find(|line| line.starts_with("wire Tx counts_hex="))
++            .find(|line| line.starts_with("wire Tx c="))
+@@ -3202,2 +3228,2 @@
+-        assert!(tx.contains("counts_hex=1/2/3/4/5/6/7/8/9/a "));
+-        assert!(tx.ends_with("remaining_hex=- partial_hex=-/-/-/-"));
++        assert!(tx.contains("c=1/2/3/4/5/6/7/8/9/a "));
++        assert!(tx.ends_with("r=- x=-/-/-/-"));
+@@ -3206 +3232 @@
+-            .find(|line| line.starts_with("wire Rx counts_hex="))
++            .find(|line| line.starts_with("wire Rx c="))
+@@ -3208 +3234 @@
+-        assert!(rx.ends_with("remaining_hex=0 partial_hex=0/0/0/0"));
++        assert!(rx.ends_with("r=0 x=0/0/0/0"));
+@@ -3210,2 +3236,2 @@
+-        assert!(text.contains("wire Rx last_header hex=9:0 0/0/0/0 0/1\n"));
+-        assert!(text.contains("wire Rx eof_mark_hex=a:0\n"));
++        assert!(text.contains("wp Rx H hex=9:0 0/0/0/0 0/1\n"));
++        assert!(text.contains("we Rx a:0\n"));
+@@ -3264,0 +3291 @@
++            state.protocol = Box::new(protocol::ProtocolState::saturated());
+@@ -3370,5 +3397,4 @@
+-        // Shorter wf/wc/ws prefixes retain every original field and save
+-        // 3,760 bytes. Added socket rows <=12*174, drop rows <=4*17 and TLS
+-        // rows <=4*36 at zero ages, plus schemas, stay below the unchanged
+-        // 35,200-byte assertion. All 40 new marks reserve 15 extra age digits.
+-        // Combined maximum age/identity allowance is 13,864 bytes:
++        // All 776 original and 40 socket/TLS marks survive. The experiment
++        // adds no ages: 4*343 numeric bytes + <=512 schema bytes; provenance uses detail.
++        // Label compaction preserves every value, direction and endpoint;
++        // retain the original strict zero-age and maximum-age assertions.
+@@ -3386,2 +3412,8 @@
+-        assert_eq!(compact.matches("wc ").count(), 128);
+-        assert_eq!(compact.matches("ws ").count(), 48);
++        assert_eq!(
++            compact.lines().filter(|line| line.starts_with("c ")).count(),
++            128,
++        );
++        assert_eq!(
++            compact.lines().filter(|line| line.starts_with("s ")).count(),
++            48,
++        );
+@@ -3410 +3442 @@
+-        assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);
++        assert_eq!(compact.matches(" g=ffffffff:ffffffff\n").count(), 128);
+@@ -3422 +3454 @@
+-            compact.matches("eof_mark_hex=ffffffffffffffff:0\n").count(),
++            compact.lines().filter(|line| line.starts_with("we ")).count(),
+--- a/examples/bench/src/server.rs
++++ b/examples/bench/src/server.rs
+@@ -280,0 +281,4 @@
++        #[cfg(test)]
++        let protocol_observer = observation
++            .clone()
++            .map(|wire| wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>);
+@@ -302,3 +306,7 @@
+-                    let _ = builder
+-                        .serve_connection(TokioIo::new(stream), service)
+-                        .await;
++                    let connection = builder.serve_connection(TokioIo::new(stream), service);
++                    #[cfg(test)]
++                    let connection = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                        connection,
++                        protocol_observer,
++                    );
++                    let _ = connection.await;
+@@ -328,3 +336,7 @@
+-                    let _ = builder
+-                        .serve_connection(TokioIo::new(stream), service)
+-                        .await;
++                    let connection = builder.serve_connection(TokioIo::new(stream), service);
++                    #[cfg(test)]
++                    let connection = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                        connection,
++                        protocol_observer,
++                    );
++                    let _ = connection.await;
