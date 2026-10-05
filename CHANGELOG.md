@@ -9,9 +9,11 @@
   outside `default`/`full`, enabled by benchmark dev dependencies and attached
   only to instance-owned diagnostic fixtures at runtime. Observe accepted server
   TCP/TLS plaintext frame prefixes with real endpoints and bounded numerical
-  stream/control state within the existing 64 KiB snapshot. Keep handler-to-wire
-  stream mapping explicitly unknown. Add strict two-owner-2-header held/released
-  controls using the existing 4-worker/2-socket/32-cancellation swarm and fixed
+  stream/control state within the existing 64 KiB snapshot. Compact mandatory
+  wire rendering without losing fields, marks or rows from the 48 KiB reserve.
+  Keep handler-to-wire stream mapping explicitly unknown. Add strict
+  two-owner-2-header held/released controls using the existing
+  4-worker/2-socket/32-cancellation swarm and fixed
   1/5/15-second clocks, preserving existing gates and real matrices. Hosted gates
   and independent root review remain required; overhead and #142's cause remain
   unknown, and green PR #146/main evidence means nonreproduction only.

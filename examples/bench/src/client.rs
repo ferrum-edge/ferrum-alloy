@@ -854,12 +854,8 @@ pub(crate) mod tests {
         ) -> Option<Arc<crate::health::WireObservation>> {
             self.server_wire_enabled
                 .then(|| {
-                    self.observer.server_wire(
-                        &self.instance,
-                        local,
-                        remote,
-                        tls,
-                    )
+                    self.observer
+                        .server_wire(&self.instance, local, remote, tls)
                 })
                 .flatten()
         }
@@ -2440,10 +2436,7 @@ pub(crate) mod tests {
             );
             let sample_end = frozen.sample_end;
             runtime.shutdown();
-            assert_eq!(
-                diagnostics.failure_state().unwrap().sample_end,
-                sample_end,
-            );
+            assert_eq!(diagnostics.failure_state().unwrap().sample_end, sample_end,);
             assert!(result.unwrap().is_err());
             let mut retained = 0;
             for worker in 0..4 {
@@ -2571,13 +2564,13 @@ pub(crate) mod tests {
             if !protocol {
                 let rx = frame_text
                     .lines()
-                    .find(|line| line.starts_with("wire Rx bytes="))
+                    .find(|line| line.starts_with("wire Rx counts_hex="))
                     .unwrap();
-                let eof = "eof=true eof_partial=true header_bytes=9 remaining=Some(7)";
-                let partial = "partial(type,flags,length,stream)=(Some(6),Some(0),Some(8),Some(0))";
+                let eof = "flags=0/1/1 hb=9 remaining_hex=7";
+                let partial = "partial_hex=6/0/8/0";
                 assert!(rx.contains(eof));
                 assert!(rx.contains(partial));
-                assert!(rx.ends_with("errors=0")); // EOF, not a raw socket read error.
+                assert!(rx.contains("/0 preface=")); // EOF, not a raw socket read error.
             }
             assert!(!frame_text.contains("peer-private-marker"));
             assert!(!frame_text.contains("private!"));
@@ -2759,15 +2752,8 @@ pub(crate) mod tests {
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             HEALTH_COORDINATOR
                 .scope(Arc::clone(&diagnostics), async {
-                    measure_workers(
-                        load(4, 2),
-                        &phase,
-                        &mut readiness,
-                        &mut workers,
-                        2,
-                        || (),
-                    )
-                    .await
+                    measure_workers(load(4, 2), &phase, &mut readiness, &mut workers, 2, || ())
+                        .await
                 })
                 .await
         })
@@ -2843,7 +2829,10 @@ pub(crate) mod tests {
                 .is_some()
         );
         let frozen = diagnostics.failure_state().unwrap();
-        assert_eq!(frozen.boundary, "before-initial-dial-error-worker-set-unwind");
+        assert_eq!(
+            frozen.boundary,
+            "before-initial-dial-error-worker-set-unwind"
+        );
         for index in 0..2 {
             assert_eq!(frozen.workers[index].state.outcome, "running");
         }

@@ -98,11 +98,7 @@ impl<I: AsyncRead + Unpin> AsyncRead for PlaintextIo<I> {
                 observer.prefix(Operation::Read, bytes);
             }
             let eof = matches!(&result, Poll::Ready(Ok(()))) && bytes.is_empty() && capacity > 0;
-            observer.outcome(
-                Operation::Read,
-                Outcome::of(&result),
-                eof,
-            );
+            observer.outcome(Operation::Read, Outcome::of(&result), eof);
         }
         result
     }
@@ -120,11 +116,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PlaintextIo<I> {
             if let Poll::Ready(Ok(count)) = &result {
                 observer.prefix(Operation::Write, &buf[..*count]);
             }
-            observer.outcome(
-                Operation::Write,
-                Outcome::of(&result),
-                false,
-            );
+            observer.outcome(Operation::Write, Outcome::of(&result), false);
         }
         result
     }
@@ -150,11 +142,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PlaintextIo<I> {
                     }
                 }
             }
-            observer.outcome(
-                Operation::WriteVectored,
-                Outcome::of(&result),
-                false,
-            );
+            observer.outcome(Operation::WriteVectored, Outcome::of(&result), false);
         }
         result
     }
@@ -167,11 +155,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PlaintextIo<I> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_flush(cx);
         if let Some(observer) = &this.observer {
-            observer.outcome(
-                Operation::Flush,
-                Outcome::of(&result),
-                false,
-            );
+            observer.outcome(Operation::Flush, Outcome::of(&result), false);
         }
         result
     }
@@ -180,11 +164,7 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PlaintextIo<I> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.inner).poll_shutdown(cx);
         if let Some(observer) = &this.observer {
-            observer.outcome(
-                Operation::Shutdown,
-                Outcome::of(&result),
-                false,
-            );
+            observer.outcome(Operation::Shutdown, Outcome::of(&result), false);
         }
         result
     }

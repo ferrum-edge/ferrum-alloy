@@ -271,13 +271,9 @@ async fn serve_plain(
         };
         let _ = stream.set_nodelay(true);
         #[cfg(test)]
-        let observation = health.as_ref().and_then(|health| {
-            health.server_wire(
-                stream.local_addr().ok(),
-                _peer,
-                tls.is_some(),
-            )
-        });
+        let observation = health
+            .as_ref()
+            .and_then(|health| health.server_wire(stream.local_addr().ok(), _peer, tls.is_some()));
         #[cfg(test)]
         let router = router
             .clone()

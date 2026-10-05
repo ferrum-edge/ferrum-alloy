@@ -628,33 +628,41 @@ impl WireCapture {
         );
         for direction in [Direction::Tx, Direction::Rx] {
             let parser = &state.directions[direction.index()];
-            let _ = writeln!(
+            let _ = write!(
                 text,
-                "wire {direction:?} bytes={} seen={} complete={} headers={} blocks={} data={} \
-                 preface={}/24 bad_preface={} eof={} eof_partial={} header_bytes={} \
-                 remaining={:?} partial(type,flags,length,stream)=({:?},{:?},{:?},{:?}) \
-                 invalid_length={} invalid_stream={} settings_omitted={} errors={}",
+                "wire {direction:?} counts_hex={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
+                 preface={}/24 flags={}/{}/{} hb={} remaining_hex=",
                 parser.bytes,
                 parser.headers_seen,
                 parser.frames_complete,
                 parser.headers_complete,
                 parser.blocks_complete,
                 parser.data_complete,
-                parser.preface,
-                parser.preface_invalid,
-                parser.eof,
-                parser.eof_partial(),
-                parser.header_bytes,
-                parser.remaining,
-                (parser.header_bytes >= 4).then_some(parser.header.kind),
-                (parser.header_bytes >= 5).then_some(parser.header.flags),
-                (parser.header_bytes >= 3).then_some(parser.header.length),
-                (parser.header_bytes >= 9).then_some(parser.header.stream),
                 parser.invalid_lengths,
                 parser.invalid_streams,
                 parser.settings_omitted,
                 parser.errors,
+                parser.preface,
+                u8::from(parser.preface_invalid),
+                u8::from(parser.eof),
+                u8::from(parser.eof_partial()),
+                parser.header_bytes,
             );
+            write_optional_hex(text, parser.remaining);
+            let _ = write!(text, " partial_hex=");
+            let partial = [
+                (parser.header_bytes >= 4).then_some(u32::from(parser.header.kind)),
+                (parser.header_bytes >= 5).then_some(u32::from(parser.header.flags)),
+                (parser.header_bytes >= 3).then_some(parser.header.length),
+                (parser.header_bytes >= 9).then_some(parser.header.stream),
+            ];
+            for (index, value) in partial.into_iter().enumerate() {
+                if index > 0 {
+                    let _ = write!(text, "/");
+                }
+                write_optional_hex(text, value);
+            }
+            let _ = writeln!(text);
             let (operations, outcomes) = match direction {
                 Direction::Tx => ("scalar/vector/flush/shutdown", &parser.outcomes[1..]),
                 Direction::Rx => ("read", &parser.outcomes[..1]),
@@ -675,12 +683,9 @@ impl WireCapture {
                 }
             }
             if let Some(mark) = parser.eof_mark {
-                let _ = writeln!(
-                    text,
-                    "wire {direction:?} eof_seq={} eof_age_us={}",
-                    mark.sequence,
-                    now.saturating_duration_since(mark.at).as_micros(),
-                );
+                let _ = write!(text, "wire {direction:?} eof_mark_hex=");
+                write_mark(text, Some(mark), now);
+                let _ = writeln!(text);
             }
         }
         for direction in [Direction::Tx, Direction::Rx] {
@@ -692,7 +697,7 @@ impl WireCapture {
                 if let Some(setting) = setting {
                     let _ = write!(
                         text,
-                        "wire settings_complete {direction:?} id={} value={} mark=",
+                        "wire settings_complete {direction:?} {:x} {:x} ",
                         index + 1,
                         setting.value,
                     );
@@ -708,25 +713,23 @@ impl WireCapture {
         let _ = writeln!(
             text,
             "wire first owner={} gen={} endpoint={} remote={:?} \
-             marks_hex=seq:age_us s_hex=numeric-stream-id \
-             Tx/Rx=first-HEADERS-seen/complete/END_HEADERS cancel=first-complete-CANCEL \
-             rst=latest-complete-RST:reason_hex reset_direction={:?}",
+             reset_direction={:?}",
             self.owner, self.generation, self.endpoint, self.remote, state.reset_direction,
         );
         for stream in state.streams.iter().flatten() {
             let _ = write!(text, "wire first s_hex={:x}", stream.id);
             for direction in [Direction::Tx, Direction::Rx] {
                 let progress = stream.directions[direction.index()];
-                let _ = write!(text, " {direction:?}=");
+                let _ = write!(text, " ");
                 write_mark(text, progress.first_header, now);
                 let _ = write!(text, "/");
                 write_mark(text, progress.first_complete, now);
                 let _ = write!(text, "/");
                 write_mark(text, progress.first_block, now);
             }
-            let _ = write!(text, " cancel=");
+            let _ = write!(text, " ");
             write_mark(text, stream.first_cancel, now);
-            let _ = write!(text, " rst=");
+            let _ = write!(text, " ");
             write_mark(text, stream.reset, now);
             let _ = write!(text, ":");
             if let Some(reason) = stream.reset_reason {
@@ -795,14 +798,14 @@ impl WireCapture {
                 let header = event.point.header;
                 let _ = write!(
                     text,
-                    "wire control_hex {:?} c={} mark=",
+                    "wire control_hex {:?} {} ",
                     event.direction,
                     u8::from(event.complete),
                 );
                 write_mark(text, Some(event.point.mark), now);
                 let _ = write!(
                     text,
-                    " t={:x} f={:x} l={:x} s_hex={:x}",
+                    " {:x}/{:x}/{:x}/{:x}",
                     header.kind, header.flags, header.length, header.stream,
                 );
                 match event.value {
@@ -813,7 +816,7 @@ impl WireCapture {
                         last_stream,
                         reason,
                     }) => {
-                        let _ = write!(text, " goaway_last={last_stream:x} reason={reason:x}");
+                        let _ = write!(text, " goaway={last_stream:x}:{reason:x}");
                     }
                     Some(WireValue::Setting { id, value }) => {
                         let _ = write!(text, " setting={id:x}:{value:x}");
@@ -831,18 +834,26 @@ impl WireCapture {
 
 fn write_point(text: &mut impl Write, point: FramePoint, now: Instant) {
     let header = point.header;
+    let _ = write!(text, "hex=");
+    write_mark(text, Some(point.mark), now);
     let _ = write!(
         text,
-        "seq={} age_us={} type={} flags={} length={} stream={} invalid_length={} invalid_stream={}",
-        point.mark.sequence,
-        now.saturating_duration_since(point.mark.at).as_micros(),
+        " {:x}/{:x}/{:x}/{:x} {}/{}",
         header.kind,
         header.flags,
         header.length,
         header.stream,
-        header.invalid_length(),
-        header.invalid_stream(),
+        u8::from(header.invalid_length()),
+        u8::from(header.invalid_stream()),
     );
+}
+
+fn write_optional_hex(text: &mut impl Write, value: Option<u32>) {
+    if let Some(value) = value {
+        let _ = write!(text, "{value:x}");
+    } else {
+        let _ = write!(text, "-");
+    }
 }
 
 fn write_mark(text: &mut impl Write, mark: Option<WireMark>, now: Instant) {
@@ -1310,7 +1321,9 @@ impl Observer {
             requests,
             connections,
             server_connections: std::array::from_fn(|index| {
-                server.connections[index].as_ref().map(|wire| wire.capture())
+                server.connections[index]
+                    .as_ref()
+                    .map(|wire| wire.capture())
             }),
             server_connections_omitted: server.omitted,
             tasks_omitted,
@@ -1405,7 +1418,9 @@ impl ObserverCapture {
              receipt_is_not_decode socket_ordinal_is_not_stream_id",
             self.connections_omitted,
         );
-        if self.server_connections.iter().any(Option::is_some) || self.server_connections_omitted > 0 {
+        if self.server_connections.iter().any(Option::is_some)
+            || self.server_connections_omitted > 0
+        {
             let _ = writeln!(
                 text,
                 "server wire slots(connection,stream,control)=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
@@ -1419,6 +1434,25 @@ impl ObserverCapture {
             let _ = writeln!(
                 text,
                 "server wire observed_connections=0 status=no-retained-server-endpoint",
+            );
+        }
+        if self.connections.iter().chain(&self.server_connections).any(Option::is_some) {
+            let _ = writeln!(
+                text,
+                "wire compact_hex counts=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
+                 flags=bad_preface/eof/eof_partial hb=header_bytes remaining=payload-bytes \
+                 partial=type/flags/length/stream '-'=unobserved",
+            );
+            let _ = writeln!(
+                text,
+                "wire compact_hex mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
+                 settings=direction,id,value,mark control=direction,complete,mark,type/flags/length/stream \
+                 goaway(last-stream:reason)",
+            );
+            let _ = writeln!(
+                text,
+                "wire first columns=Tx,Rx,cancel,rst Tx/Rx=first-HEADERS-seen/complete/END_HEADERS \
+                 cancel=first-complete-CANCEL rst=latest-complete-RST:reason_hex",
             );
         }
         for observation in self
@@ -2003,9 +2037,7 @@ mod tests {
     fn server_preface_and_unaccepted_encoded_write_control_are_distinct() {
         let observer = Observer::default();
         let remote = "127.0.0.1:12345".parse().unwrap();
-        let wire = observer
-            .server_wire(INSTANCE, None, remote, false)
-            .unwrap();
+        let wire = observer.server_wire(INSTANCE, None, remote, false).unwrap();
         let mut request = H2_PREFACE.to_vec();
         request.extend(frame(1, 5, 17, b"private-request-hpack"));
         request.extend(frame(3, 0, 17, &8_u32.to_be_bytes()));
@@ -2074,7 +2106,11 @@ mod tests {
         assert!(!before.contains("private-"));
         assert_eq!(observer.server_wires().len(), 1);
         observer.server_wire(INSTANCE, None, remote, true).unwrap();
-        assert!(observer.server_wire(INSTANCE, None, remote, false).is_none());
+        assert!(
+            observer
+                .server_wire(INSTANCE, None, remote, false)
+                .is_none()
+        );
         assert!(observer.wires().is_empty());
         let mut bounded = String::new();
         observer.capture().write_wire(&mut bounded, now);
@@ -2464,7 +2500,7 @@ mod tests {
         let mut text = String::new();
         capture.write_wire_core(&mut text, Instant::now());
         assert!(text.contains("wire first s_hex=b"));
-        assert!(text.contains("settings_complete Rx id=4 value=65535"));
+        assert!(text.contains("settings_complete Rx 4 ffff "));
         assert!(!text.contains("private"));
         assert!(!format!("{retained:?}").contains("private"));
         wire.feed(Direction::Rx, &replacement[15..]);
@@ -2505,8 +2541,78 @@ mod tests {
         let mut after = String::new();
         observer.write_wire(&mut after, sampled_at);
         assert_ne!(frozen, after);
-        assert!(!frozen.contains("goaway_last="));
-        assert!(after.contains("goaway_last=0 reason=0"));
+        assert!(!frozen.contains(" goaway="));
+        assert!(after.contains(" goaway=0:0"));
+    }
+
+    #[test]
+    fn compact_wire_core_preserves_counter_order_distinct_marks_and_unknown_fields() {
+        let observer = Observer::default();
+        let now = Instant::now();
+        let mut empty = String::new();
+        observer.capture().write_wire_core(&mut empty, now);
+        assert!(empty.len() < 512);
+        assert!(!empty.contains("compact_hex"));
+        observer.wire(INSTANCE, 0, 1, None).unwrap();
+        let mark = |sequence| WireMark { sequence, at: now };
+        let mut capture = observer.capture();
+        let wire = capture.connections[0].as_mut().unwrap();
+        wire.state.streams[0] = Some(WireStream {
+            id: 13,
+            directions: [
+                StreamDirection {
+                    first_header: Some(mark(1)),
+                    first_complete: Some(mark(2)),
+                    first_block: Some(mark(3)),
+                    ..StreamDirection::default()
+                },
+                StreamDirection {
+                    first_header: Some(mark(4)),
+                    first_complete: Some(mark(5)),
+                    first_block: Some(mark(6)),
+                    ..StreamDirection::default()
+                },
+            ],
+            reset: Some(mark(8)),
+            reset_reason: Some(8),
+            first_cancel: Some(mark(7)),
+            late: DataProgress::default(),
+        });
+        let tx = &mut wire.state.directions[0];
+        tx.bytes = 1;
+        tx.headers_seen = 2;
+        tx.frames_complete = 3;
+        tx.headers_complete = 4;
+        tx.blocks_complete = 5;
+        tx.data_complete = 6;
+        tx.invalid_lengths = 7;
+        tx.invalid_streams = 8;
+        tx.settings_omitted = 9;
+        tx.errors = 10;
+        let rx = &mut wire.state.directions[1];
+        rx.header_bytes = 9;
+        rx.remaining = Some(0);
+        rx.last_header = Some(FramePoint {
+            mark: mark(9),
+            header: FrameHeader::default(),
+        });
+        rx.eof_mark = Some(mark(10));
+        let mut text = String::new();
+        capture.write_wire_core(&mut text, now);
+        let tx = text
+            .lines()
+            .find(|line| line.starts_with("wire Tx counts_hex="))
+            .unwrap();
+        assert!(tx.contains("counts_hex=1/2/3/4/5/6/7/8/9/a "));
+        assert!(tx.ends_with("remaining_hex=- partial_hex=-/-/-/-"));
+        let rx = text
+            .lines()
+            .find(|line| line.starts_with("wire Rx counts_hex="))
+            .unwrap();
+        assert!(rx.ends_with("remaining_hex=0 partial_hex=0/0/0/0"));
+        assert!(text.contains("wire first s_hex=d 1:0/2:0/3:0 4:0/5:0/6:0 7:0 8:0:8\n"));
+        assert!(text.contains("wire Rx last_header hex=9:0 0/0/0/0 0/1\n"));
+        assert!(text.contains("wire Rx eof_mark_hex=a:0\n"));
     }
 
     #[test]
@@ -2646,16 +2752,43 @@ mod tests {
         let mut compact = String::new();
         left.capture().write_wire_core(&mut compact, mark.at);
         // Reserve maximum-width ages for first HEADERS/CANCEL/latest reset,
-        // completed SETTINGS and every unowned control, plus decimal point ages.
+        // completed SETTINGS and every unowned control, plus point/EOF ages.
+        // Static zero-age row bounds: first=72*187, control=128*82,
+        // SETTINGS=48*56, point=16*74, EOF=8*42. Other row bounds:
+        // directions=8*280, outcomes=1,640, identities=4*288,
+        // schemas/headers=1,320, first identities=2*192, control identities=2*144.
+        // Total <=35,192, with a strict hosted assertion below 35,200 bytes;
+        // unchanged age/identity allowances add 13,264: 48,464 < 49,152.
         let widest_ages = WIRE_CONNECTIONS * ((WIRE_STREAMS * 8 + WIRE_EVENTS + 12) * 15 + 240);
         let widest_server_ages = SERVER_CONNECTIONS * (12 * 15 + 240);
         let widest_identity = (WIRE_CONNECTIONS + SERVER_CONNECTIONS) * 256;
         assert!(compact.len() + widest_ages + widest_server_ages + widest_identity < 48 * 1024);
+        assert!(compact.len() < 35_200);
         assert_eq!(compact.matches("wire first s_hex=").count(), 72);
         assert_eq!(compact.matches("wire control_hex ").count(), 128);
         assert_eq!(compact.matches("settings_complete ").count(), 48);
+        // Every mandatory mark and numerical control/setting/point value
+        // survives compaction; these counts include both server core records.
+        assert_eq!(compact.matches("ffffffffffffffff:0").count(), 776);
+        assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);
         assert_eq!(
-            compact.matches("endpoint=server-accepted-connection").count(),
+            compact.matches(" ffffffff ffffffffffffffff:0\n").count(),
+            48,
+        );
+        assert_eq!(
+            compact
+                .matches("hex=ffffffffffffffff:0 ff/ff/ffffffff/ffffffff 0/0\n")
+                .count(),
+            16,
+        );
+        assert_eq!(
+            compact.matches("eof_mark_hex=ffffffffffffffff:0\n").count(),
+            8,
+        );
+        assert_eq!(
+            compact
+                .matches("endpoint=server-accepted-connection")
+                .count(),
             2,
         );
     }
