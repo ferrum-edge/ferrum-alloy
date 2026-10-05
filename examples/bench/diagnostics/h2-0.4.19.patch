@@ -99,44 +99,45 @@
 +    observer: Option<std::sync::Arc<dyn crate::alloy_diagnostics::Observer>>,
 @@ -153,0 +156 @@
 +            observer: crate::alloy_diagnostics::current(),
-@@ -286,0 +290,8 @@
+@@ -286,0 +290,5 @@
 +        let observer = self.observer.clone();
-+        crate::alloy_diagnostics::scope(
-+            observer,
-+            || self.poll_observed(cx),
-+        )
++        crate::alloy_diagnostics::scope(observer, || self.poll_observed(cx))
 +    }
 +
 +    fn poll_observed(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
-@@ -328 +339,4 @@
+@@ -328 +336,4 @@
 -                    ready!(self.codec.shutdown(cx))?;
 +                    ready!(alloy_pending!(
 +                        self.codec.shutdown(cx),
 +                        crate::alloy_diagnostics::Pending::Shutdown
 +                    ))?;
-@@ -352 +366,4 @@
+@@ -352 +363,4 @@
 -            if let Some(reason) = ready!(self.poll_go_away(cx)?) {
 +            if let Some(reason) = ready!(alloy_pending!(
 +                self.poll_go_away(cx),
 +                crate::alloy_diagnostics::Pending::GoAway
 +            )?) {
-@@ -369 +386,4 @@
+@@ -369 +383,4 @@
 -            ready!(self.poll_ready(cx))?;
 +            ready!(alloy_pending!(
 +                self.poll_ready(cx),
 +                crate::alloy_diagnostics::Pending::Control
 +            ))?;
-@@ -374 +394,4 @@
+@@ -371,5 +388,4 @@
+-            match self
+-                .inner
+-                .as_dyn()
 -                .recv_frame(ready!(Pin::new(&mut self.codec).poll_next(cx)?))?
-+                .recv_frame(ready!(alloy_pending!(
-+                    Pin::new(&mut self.codec).poll_next(cx),
-+                    crate::alloy_diagnostics::Pending::Decode
-+                )?))?
-@@ -544,0 +568,3 @@
+-            {
++            match self.inner.as_dyn().recv_frame(ready!(alloy_pending!(
++                Pin::new(&mut self.codec).poll_next(cx),
++                crate::alloy_diagnostics::Pending::Decode
++            )?))? {
+@@ -544,0 +561,3 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Headers(
 +                    frame.stream_id().into(),
 +                ));
-@@ -552,0 +579,5 @@
+@@ -552,0 +572,5 @@
 +                if frame.reason() == Reason::CANCEL {
 +                    crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Cancel(
 +                        frame.stream_id().into(),
@@ -210,11 +211,12 @@
 +            crate::alloy_diagnostics::QueueState,
 +            crate::alloy_diagnostics::QueueState,
 +        )>,
-@@ -670,0 +694 @@
-+        let observe = frame.reason() == Reason::CANCEL && crate::alloy_diagnostics::current().is_some();
-@@ -710,0 +735 @@
+@@ -670,0 +694,2 @@
++        let observe =
++            frame.reason() == Reason::CANCEL && crate::alloy_diagnostics::current().is_some();
+@@ -710,0 +736 @@
 +            let before = observe.then(|| actions.send.alloy_diagnostic_state(stream));
-@@ -712,0 +738,3 @@
+@@ -712,0 +739,3 @@
 +            if let Some(before) = before {
 +                *diagnostic = Some((before, actions.send.alloy_diagnostic_state(stream)));
 +            }
