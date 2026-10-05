@@ -280,10 +280,11 @@ owner 2; selection uses the actual socket in endpoint and worker records.
 The only held transport boundary is client plaintext reads:
 `PlaintextIo<ReadGate<TlsIo<TlsStream<SocketIo<TcpStream>>>>>`. It starts open;
 scalar/vectored write, flush and shutdown delegate exactly once. Held reads register
-the current waker and recheck; release delegates with the original context. Owner 2's
-second quota-eighth completion arms it before returning drops that response, requiring
-both owners' eight real first-DATA completions. Before capture, assert later retained
-CANCEL application, actual earlier DATA plus an unread remainder, both NEXT IDs from
+the current waker and recheck; release delegates with the original context. All four
+quota-eighth completions rendezvous while retaining their real response bodies. The
+leader verifies all four exact counts of eight and arms the gate; a second rendezvous
+prevents any of those bodies from dropping before arming. Before capture, assert later
+retained CANCEL application, actual earlier DATA plus an unread remainder, both NEXT IDs from
 endpoint records, accepted response HEADERS after old DATA, zero NEXT client plaintext
 and decoded headers, and two already-Pending undropped callbacks on that socket.
 No callback ordinal is mapped to a stream ID. An absent prerequisite fails the
@@ -320,11 +321,22 @@ No replacement driver task or manufactured error is used.
 Reachability does not attribute the earlier macOS failure. The actual 100/200-ms
 health case retains its fatal zero-error assertion and unchanged 15-second wrapper.
 
-Published h2 error callsites remain original 491/521, now patched **516/546**.
+Published h2 error callsites remain original 491/521, now patched **514/544**.
 Both the diagnostic whitelist and I/O classifier follow those exact positions:
-only 516 formats typed `ErrorKind`; 546 omits peer details. Do not broaden the filter.
+only 514 formats typed `ErrorKind`; 544 omits peer details. Do not broaden the filter.
 Server saturation's omitted endpoint and plaintext-I/O label, compact `p=` EOF
 control, required controls/rows and ordinary graph gates remain strict.
+
+The actual `aac2334` hosted failures and bounded repair are recorded in
+[repair29.md](repair29.md). The receive rendezvous and stale callsite whitelist have
+source-supported corrections. Unexpected mTLS endpoint errors remain **UNKNOWN**.
+The strict zero-error check now captures all bounded endpoint/frame/typed protocol
+records before checking, emits that capture on assertion failure, then resumes the
+same panic. Unexpected retained public results also emit the bounded capture before
+their fatal unwrap. This precedes assertion-driven runtime/dispatcher cleanup, not
+every naturally completed future's teardown. It adds no observer slots or rendering budget.
+The separate ordinary short-warmup failure remains UNKNOWN; its post-teardown
+BrokenPipe/wire/write-error evidence does not establish an initiating cause.
 
 ## Retirement and delivery
 

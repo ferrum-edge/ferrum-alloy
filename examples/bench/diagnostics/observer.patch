@@ -38,6 +38,9 @@
 +        #[cfg(not(test))]
 @@ -217,0 +221 @@
 +                tests::protocol_tls_established(&stream);
+@@ -276 +280 @@
+-                tests::diagnostic_exchange_completed(sender, bytes);
++                tests::diagnostic_exchange_completed(sender, bytes).await;
 @@ -823,0 +828 @@
 +        protocol_control: Option<Arc<ProtocolControl>>,
 @@ -868,0 +874 @@
@@ -73,10 +76,10 @@
 +        );
 @@ -1967 +1993 @@
 -            && matches!(metadata.line(), Some(491 | 521))
-+            && matches!(metadata.line(), Some(516 | 546))
++            && matches!(metadata.line(), Some(514 | 544))
 @@ -1989 +2015 @@
 -            let io = event.metadata().line() == Some(491);
-+            let io = event.metadata().line() == Some(516);
++            let io = event.metadata().line() == Some(514);
 @@ -2197,2 +2223,38 @@
 -            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
 -            None => handshake(TokioIo::new(io), h2).await,
@@ -220,56 +223,65 @@
 +        })
 +        .await
 +        .unwrap();
-@@ -2226,0 +2390,5 @@
-+        let _ = HEALTH_WORKER.try_with(|(diagnostics, index)| {
-+            if let Some(control) = &diagnostics.protocol_control {
-+                control.exchange_completed(diagnostics, *index);
-+            }
-+        });
-@@ -2832 +3000 @@
+@@ -2217 +2380 @@
+-    pub(super) fn diagnostic_exchange_completed(sender: &Sender, bytes: u64) {
++    pub(super) async fn diagnostic_exchange_completed(sender: &mut Sender, bytes: u64) {
+@@ -2226,0 +2390,11 @@
++        let control = HEALTH_WORKER
++            .try_with(|(diagnostics, index)| {
++                diagnostics.protocol_control.as_ref().map(|control| {
++                    (Arc::clone(control), Arc::clone(diagnostics), *index)
++                })
++            })
++            .ok()
++            .flatten();
++        if let Some((control, diagnostics, index)) = control {
++            control.exchange_completed(&diagnostics, index).await;
++        }
+@@ -2832 +3006 @@
 -                    .find(|line| line.starts_with("wire Rx counts_hex="))
 +                    .find(|line| line.starts_with("wire Rx c="))
-@@ -2834,2 +3002,2 @@
+@@ -2834,2 +3008,2 @@
 -                let eof = "flags=0/1/1 hb=9 remaining_hex=7";
 -                let partial = "partial_hex=6/0/8/0";
 +                let eof = "f=0/1/1 hb=9 r=7";
 +                let partial = "x=6/0/8/0";
-@@ -2838 +3006 @@
+@@ -2838 +3012 @@
 -                assert!(rx.contains("/0 preface=")); // EOF, not a raw socket read error.
 +                assert!(rx.contains("/0 p=")); // EOF, not a raw socket read error.
-@@ -3193,0 +3362 @@
+@@ -3193,0 +3368 @@
 +        runtime_observer: Option<Arc<HealthDiagnostics>>,
-@@ -3198,0 +3368 @@
+@@ -3198,0 +3374 @@
 +                runtime_observer: None,
-@@ -3214,0 +3385,5 @@
+@@ -3214,0 +3391,5 @@
 +            if let Some(diagnostics) = &self.runtime_observer {
 +                for wire in diagnostics.observer.wires() {
 +                    wire.runtime_entry();
 +                }
 +            }
-@@ -3224,0 +3400,5 @@
+@@ -3224,0 +3406,5 @@
 +                if let Some(diagnostics) = &self.runtime_observer {
 +                    for wire in diagnostics.observer.wires() {
 +                        wire.runtime_entry();
 +                    }
 +                }
-@@ -3572 +3752,2 @@
+@@ -3572 +3758,2 @@
 -        inner: GatedBody,
 +        inner: axum::body::Body,
 +        cancelled: Option<oneshot::Sender<()>>,
-@@ -3579 +3760 @@
+@@ -3579 +3766 @@
 -        type Error = Infallible;
 +        type Error = axum::Error;
-@@ -3584 +3765 @@
+@@ -3584 +3771 @@
 -        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
 +        ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
-@@ -3590,0 +3772,3 @@
+@@ -3590,0 +3778,3 @@
 +            if let Some(cancelled) = self.cancelled.take() {
 +                let _ = cancelled.send(());
 +            }
-@@ -3788,0 +3973 @@
+@@ -3788,0 +3979 @@
 +                            assert_eq!(wires[0].decoded_headers(), 2);
-@@ -3818,0 +4004,571 @@
+@@ -3818,0 +4010,612 @@
 +    // Preserve the existing runtime destruction, including unwind paths. The
 +    // wrapper adds only its endpoint entry mark before dropping that same runtime.
 +    pub(crate) struct ProtocolRuntime {
@@ -343,6 +355,7 @@
 +        read: Arc<ferrum_alloy::bench_diagnostics::ReceiveGate>,
 +        armed: AtomicBool,
 +        public_held: AtomicBool,
++        measurement: tokio::sync::Barrier,
 +        dispatchers: Mutex<[Option<RetainedDispatcher>; 2]>,
 +    }
 +
@@ -353,23 +366,22 @@
 +                read: Arc::default(),
 +                armed: AtomicBool::new(false),
 +                public_held: AtomicBool::new(false),
++                measurement: tokio::sync::Barrier::new(4),
 +                dispatchers: Mutex::new([None, None]),
 +            }
 +        }
 +
-+        fn exchange_completed(&self, diagnostics: &HealthDiagnostics, index: usize) {
-+            if index < 2 {
-+                return;
-+            }
-+            let selected = diagnostics.workers[index].lock().unwrap();
-+            let phase = selected.exchange_phase;
-+            let completed = selected.exchanges[phase].completed;
-+            drop(selected);
++        async fn exchange_completed(&self, diagnostics: &HealthDiagnostics, index: usize) {
++            let (phase, completed) = {
++                let selected = diagnostics.workers[index].lock().unwrap();
++                let phase = selected.exchange_phase;
++                (phase, selected.exchanges[phase].completed)
++            };
 +            if self.mode == ProtocolMode::Receive && phase == 2 && completed == 8 {
-+                let complete = (2..4).all(|worker| {
-+                    diagnostics.workers[worker].lock().unwrap().exchanges[2].completed == 8
-+                });
-+                if complete && !self.armed.swap(true, Ordering::SeqCst) {
++                // Retain all four real eighth bodies until every first DATA
++                // completion is recorded. The second rendezvous prevents an
++                // owner-2 body from dropping before the leader arms the gate.
++                if self.measurement.wait().await.is_leader() {
 +                    for worker in 0..4 {
 +                        assert_eq!(
 +                            diagnostics.workers[worker].lock().unwrap().exchanges[2].completed,
@@ -378,8 +390,10 @@
 +                    }
 +                    // This is before returning from the real exchange drops its body.
 +                    self.read.hold();
++                    self.armed.store(true, Ordering::SeqCst);
 +                }
-+            } else if self.mode != ProtocolMode::Receive && phase == 3 {
++                self.measurement.wait().await;
++            } else if self.mode != ProtocolMode::Receive && index >= 2 && phase == 3 {
 +                let complete = (2..4).all(|worker| {
 +                    diagnostics.workers[worker].lock().unwrap().exchanges[3].completed == 1
 +                });
@@ -389,7 +403,7 @@
 +            }
 +        }
 +
-+        fn poll_dispatchers(&self, cx: &mut Context<'_>) {
++        fn poll_dispatchers(&self, cx: &mut Context<'_>, diagnostics: &HealthDiagnostics) {
 +            // On unwind the mutex guard also drops before these completed futures.
 +            let mut completed = [None, None];
 +            let mut dispatchers = self.dispatchers.lock().unwrap();
@@ -400,6 +414,9 @@
 +                if let Some(future) = dispatcher
 +                    && let Poll::Ready(result) = future.as_mut().poll(cx)
 +                {
++                    if result.is_err() {
++                        protocol_failure(diagnostics, "controlled-before-public-error-unwind");
++                    }
 +                    result.unwrap();
 +                    completed[index] = dispatcher.take();
 +                }
@@ -585,27 +602,59 @@
 +    }
 +
 +    fn protocol_zero_errors(diagnostics: &HealthDiagnostics) {
-+        for worker in 0..4 {
-+            diagnostics.worker(worker, |state| {
-+                assert_eq!(state.errors, 0);
-+                assert_eq!(state.error_events, 0);
-+                assert_eq!(state.wire_events, 0);
-+            });
-+        }
-+        for wire in diagnostics
-+            .observer
-+            .wires()
-+            .into_iter()
-+            .chain(diagnostics.observer.server_wires())
-+        {
-+            assert!(wire.snapshot().protocol_error_free());
-+            let protocol = wire.protocol_snapshot();
-+            assert_eq!(protocol.f & (1 << 16), 0);
-+            assert_ne!((protocol.f >> 24) & 3, 2);
-+            if (protocol.f >> 24) & 3 == 3 {
-+                assert_eq!(protocol.f >> 32, 0);
++        // Keep the complete bounded endpoint/typed protocol state before any
++        // assertion unwind can destroy the retained dispatcher or runtimes.
++        let mut capture = diagnostics.capture();
++        capture.boundary = "controlled-before-zero-error-check";
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            for worker in 0..4 {
++                diagnostics.worker(worker, |state| {
++                    assert_eq!(state.errors, 0);
++                    assert_eq!(state.error_events, 0);
++                    assert_eq!(state.wire_events, 0);
++                });
 +            }
++            for wire in diagnostics
++                .observer
++                .wires()
++                .into_iter()
++                .chain(diagnostics.observer.server_wires())
++            {
++                assert!(wire.snapshot().protocol_error_free());
++                let protocol = wire.protocol_snapshot();
++                assert_eq!(protocol.f & (1 << 16), 0);
++                assert_ne!((protocol.f >> 24) & 3, 2);
++                if (protocol.f >> 24) & 3 == 3 {
++                    assert_eq!(protocol.f >> 32, 0);
++                }
++            }
++        }));
++        if let Err(error) = result {
++            diagnostics.failure_capture(
++                crate::dims::Cell {
++                    scenario: crate::dims::Scenario::Plain,
++                    workload: Workload::Cancel,
++                    transport: Transport::H2Mtls,
++                },
++                "controlled-zero-error-assertion",
++                &capture,
++            );
++            std::panic::resume_unwind(error);
 +        }
++    }
++
++    fn protocol_failure(diagnostics: &HealthDiagnostics, boundary: &'static str) {
++        let mut capture = diagnostics.capture();
++        capture.boundary = boundary;
++        diagnostics.failure_capture(
++            crate::dims::Cell {
++                scenario: crate::dims::Scenario::Plain,
++                workload: Workload::Cancel,
++                transport: Transport::H2Mtls,
++            },
++            "controlled-protocol-error",
++            &capture,
++        );
 +    }
 +
 +    async fn protocol_retained_health<F>(
@@ -624,7 +673,7 @@
 +            let measured = std::future::poll_fn(|cx| {
 +                let result = health.as_mut().poll(cx);
 +                if result.is_pending() {
-+                    control.poll_dispatchers(cx);
++                    control.poll_dispatchers(cx, diagnostics);
 +                }
 +                result
 +            })
@@ -632,7 +681,11 @@
 +            if control.mode == ProtocolMode::Alive {
 +                protocol_origin_pending(control, diagnostics);
 +                let dispatcher = control.dispatchers.lock().unwrap()[1].take().unwrap();
-+                dispatcher.await.unwrap();
++                let result = dispatcher.await;
++                if result.is_err() {
++                    protocol_failure(diagnostics, "controlled-before-alive-error-unwind");
++                }
++                result.unwrap();
 +                protocol_zero_errors(diagnostics);
 +            }
 +            return Ok(measured);
@@ -841,7 +894,7 @@
 +        assert_eq!(client.protocol_snapshot().w[18], protocol.w[18]);
 +    }
 +
-@@ -3819,0 +4576,8 @@
+@@ -3819,0 +4623,8 @@
 +        retained_sender_protocol_case(release_gate, headers_shape, None);
 +    }
 +
@@ -850,7 +903,7 @@
 +        headers_shape: bool,
 +        mode: Option<ProtocolMode>,
 +    ) {
-@@ -3822 +4586,25 @@
+@@ -3822 +4633,25 @@
 -        let runtime = CancellationRuntime::new();
 +        let protocol_control = mode.map(|mode| Arc::new(ProtocolControl::new(mode)));
 +        let dispatcher_guard = protocol_control
@@ -877,7 +930,7 @@
 +        } else {
 +            CancellationRuntime::new()
 +        };
-@@ -3829 +4617,7 @@
+@@ -3829 +4664,7 @@
 -        let origin = if headers_shape && release_gate {
 +        let origin = if mode == Some(ProtocolMode::Receive) {
 +            "controlled-hyper-mtls-receive-release"
@@ -886,7 +939,7 @@
 +        } else if mode == Some(ProtocolMode::Alive) {
 +            "controlled-hyper-mtls-alive-origin-companion"
 +        } else if headers_shape && release_gate {
-@@ -3838,5 +4632,13 @@
+@@ -3838,5 +4679,13 @@
 -        let diagnostics = Arc::new(
 -            HealthDiagnostics::new(load)
 -                .with_transport(Transport::H2c)
@@ -905,36 +958,36 @@
 +        let server_runtime = server_runtime
 +            .map(|runtime| ProtocolRuntime::new(runtime, Some(Arc::clone(&diagnostics)), true));
 +        runtime.runtime_observer = Some(Arc::clone(&diagnostics));
-@@ -3850,0 +4653 @@
+@@ -3850,0 +4700 @@
 +        let mut held_snapshot = None;
-@@ -3851,0 +4655,4 @@
+@@ -3851,0 +4702,4 @@
 +            let pki = mode.map(|_| Pki::generate().unwrap());
 +            let tls = pki
 +                .as_ref()
 +                .map(|pki| TlsAcceptor::from(pki.server(true).unwrap().rustls));
-@@ -3855 +4662 @@
+@@ -3855 +4709 @@
 -                transport: Transport::H2c,
 +                transport,
-@@ -3857 +4664 @@
+@@ -3857 +4711 @@
 -                tls: None,
 +                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
-@@ -3868 +4675,5 @@
+@@ -3868 +4722,5 @@
 -            tokio::spawn(async move {
 +            let handle = server_runtime
 +                .as_ref()
 +                .map(|runtime| runtime.handle().clone())
 +                .unwrap_or_else(tokio::runtime::Handle::current);
 +            handle.spawn(async move {
-@@ -3884 +4695 @@
+@@ -3884 +4742 @@
 -                            .server_wire(stream.local_addr().ok(), peer, false)
 +                            .server_wire(stream.local_addr().ok(), peer, mode.is_some())
-@@ -3913 +4724,4 @@
+@@ -3913 +4771,4 @@
 -                            if headers_shape && let Some(gate) = release.take() {
 +                            if headers_shape
 +                                && mode.is_none()
 +                                && let Some(gate) = release.take()
 +                            {
-@@ -3915,0 +4730,14 @@
+@@ -3915,0 +4777,14 @@
 +                            let (inner, cancelled) = if mode.is_some() {
 +                                drop(release);
 +                                (crate::server::protocol_burst(), cancelled)
@@ -949,7 +1002,7 @@
 +                                    None,
 +                                )
 +                            };
-@@ -3917,6 +4745,2 @@
+@@ -3917,6 +4792,2 @@
 -                                inner: GatedBody {
 -                                    release,
 -                                    cancelled,
@@ -958,9 +1011,9 @@
 -                                },
 +                                inner,
 +                                cancelled,
-@@ -3932,0 +4757 @@
+@@ -3932,0 +4804 @@
 +                    let tls = tls.clone();
-@@ -3936,8 +4761,24 @@
+@@ -3936,8 +4808,24 @@
 -                        let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 -                            stream,
 -                            wire.map(|wire| {
@@ -993,7 +1046,7 @@
 +                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
 +                                connection, observer,
 +                            )
-@@ -3944,0 +4786,12 @@
+@@ -3944,0 +4833,12 @@
 +                        } else {
 +                            let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 +                                stream,
@@ -1006,7 +1059,7 @@
 +                            )
 +                            .await;
 +                        }
-@@ -3993,0 +4847,10 @@
+@@ -3993,0 +4894,10 @@
 +                if let Some(control) = &protocol_control {
 +                    return protocol_retained_health(
 +                        health.as_mut(),
@@ -1017,24 +1070,24 @@
 +                    )
 +                    .await;
 +                }
-@@ -4119 +4982 @@
+@@ -4119 +5029 @@
 -                    transport: Transport::H2c,
 +                    transport,
-@@ -4173,2 +5036,4 @@
+@@ -4173,2 +5083,4 @@
 -        let mut frozen = diagnostics.capture();
 -        frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        let mut frozen = held_snapshot.unwrap_or_else(|| diagnostics.capture());
 +        if mode != Some(ProtocolMode::Receive) {
 +            frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        }
-@@ -4178 +5043 @@
+@@ -4178 +5090 @@
 -            transport: Transport::H2c,
 +            transport,
-@@ -4226,0 +5092,3 @@
+@@ -4226,0 +5139,3 @@
 +        if let Some(control) = &protocol_control {
 +            protocol_origin_before_cleanup(control, &diagnostics);
 +        }
-@@ -4227,0 +5096,11 @@
+@@ -4227,0 +5143,11 @@
 +        if let Some(control) = &protocol_control
 +            && control.mode == ProtocolMode::Teardown
 +        {
@@ -1046,7 +1099,7 @@
 +        if let Some(server_runtime) = server_runtime {
 +            server_runtime.shutdown_timeout(Duration::from_secs(1));
 +        }
-@@ -4288,0 +5168,15 @@
+@@ -4288,0 +5215,15 @@
 +    #[test]
 +    fn retained_hyper_mtls_receive_gate_freezes_real_next_headers_and_callbacks() {
 +        retained_sender_protocol_case(true, true, Some(ProtocolMode::Receive));
