@@ -22,6 +22,19 @@ const WIRE_EVENTS: usize = 64;
 
 const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
+// Build one record at a time in heap storage. Converting the boxed slice
+// preserves its allocation; no full fixed-capacity array is returned by value.
+#[allow(clippy::unwrap_used, reason = "fixed-capacity test observation conversion")]
+pub(crate) fn boxed_slots<T, const N: usize>(capture: impl FnMut(usize) -> T) -> Box<[T; N]> {
+    (0..N)
+        .map(capture)
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+        .try_into()
+        .ok()
+        .unwrap()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Direction {
     Tx,
@@ -169,16 +182,31 @@ impl WireDirection {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct WireState {
     pub(crate) directions: [WireDirection; 2],
-    streams: [Option<WireStream>; WIRE_STREAMS],
-    events: [Option<WireEvent>; WIRE_EVENTS],
+    streams: Box<[Option<WireStream>; WIRE_STREAMS]>,
+    events: Box<[Option<WireEvent>; WIRE_EVENTS]>,
     sequence: u64,
     reset_direction: Direction,
     events_next: usize,
     pub(crate) events_overwritten: u64,
     pub(crate) streams_omitted: u64,
+}
+
+impl Clone for WireState {
+    fn clone(&self) -> Self {
+        Self {
+            directions: self.directions.clone(),
+            streams: boxed_slots(|index| self.streams[index]),
+            events: boxed_slots(|index| self.events[index]),
+            sequence: self.sequence,
+            reset_direction: self.reset_direction,
+            events_next: self.events_next,
+            events_overwritten: self.events_overwritten,
+            streams_omitted: self.streams_omitted,
+        }
+    }
 }
 
 impl Default for WireState {
@@ -188,8 +216,8 @@ impl Default for WireState {
         directions[1].preface = H2_PREFACE.len();
         Self {
             directions,
-            streams: [None; WIRE_STREAMS],
-            events: [None; WIRE_EVENTS],
+            streams: boxed_slots(|_| None),
+            events: boxed_slots(|_| None),
             sequence: 0,
             reset_direction: Direction::Tx,
             events_next: 0,
@@ -541,7 +569,7 @@ impl WireObservation {
             remote: self.remote,
             tls: self.tls,
             endpoint: self.endpoint,
-            state: self.snapshot(),
+            state: Box::new(self.snapshot()),
         }
     }
 
@@ -602,7 +630,7 @@ struct WireCapture {
     owner: usize,
     generation: u64,
     socket: Option<SocketAddr>,
-    state: WireState,
+    state: Box<WireState>,
     endpoint: &'static str,
     remote: Option<SocketAddr>,
     tls: bool,
@@ -1158,16 +1186,30 @@ struct RequestCapture {
     frames: u64,
 }
 
-#[derive(Clone)]
 pub(crate) struct ObserverCapture {
-    tasks: [Option<TaskCapture>; TASK_SLOTS],
-    requests: [Option<RequestCapture>; REQUEST_SLOTS],
+    tasks: Box<[Option<TaskCapture>; TASK_SLOTS]>,
+    requests: Box<[Option<RequestCapture>; REQUEST_SLOTS]>,
     connections: [Option<WireCapture>; WIRE_CONNECTIONS],
     server_connections: [Option<WireCapture>; SERVER_CONNECTIONS],
     server_connections_omitted: u64,
     tasks_omitted: u64,
     requests_omitted: u64,
     connections_omitted: u64,
+}
+
+impl Clone for ObserverCapture {
+    fn clone(&self) -> Self {
+        Self {
+            tasks: boxed_slots(|index| self.tasks[index].clone()),
+            requests: boxed_slots(|index| self.requests[index].clone()),
+            connections: self.connections.clone(),
+            server_connections: self.server_connections.clone(),
+            server_connections_omitted: self.server_connections_omitted,
+            tasks_omitted: self.tasks_omitted,
+            requests_omitted: self.requests_omitted,
+            connections_omitted: self.connections_omitted,
+        }
+    }
 }
 
 pub(crate) struct Observer {
@@ -1281,9 +1323,9 @@ impl Observer {
         slots.connections.iter().flatten().map(Arc::clone).collect()
     }
 
-    pub(crate) fn capture(&self) -> ObserverCapture {
+    pub(crate) fn capture(&self) -> Box<ObserverCapture> {
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
-        let tasks = std::array::from_fn(|index| {
+        let tasks = boxed_slots(|index| {
             slots.tasks[index].as_ref().map(|task| TaskCapture {
                 kind: task.kind,
                 owner: task.owner,
@@ -1293,7 +1335,7 @@ impl Observer {
                 state: task.observation.snapshot(),
             })
         });
-        let requests = std::array::from_fn(|index| {
+        let requests = boxed_slots(|index| {
             slots.requests[index]
                 .as_ref()
                 .map(|request| RequestCapture {
@@ -1316,7 +1358,7 @@ impl Observer {
         let connections_omitted = wire.omitted;
         drop(wire);
         let server = self.server_wire.lock().unwrap_or_else(|e| e.into_inner());
-        ObserverCapture {
+        Box::new(ObserverCapture {
             tasks,
             requests,
             connections,
@@ -1329,7 +1371,7 @@ impl Observer {
             tasks_omitted,
             requests_omitted,
             connections_omitted,
-        }
+        })
     }
 
     pub(crate) fn write_wire(&self, text: &mut impl Write, now: Instant) {
@@ -1405,6 +1447,38 @@ impl Observer {
 }
 
 impl ObserverCapture {
+    pub(crate) fn retained_counts(&self) -> [usize; 9] {
+        let clients = self.connections.iter().flatten();
+        let servers = self.server_connections.iter().flatten();
+        [
+            self.tasks.iter().flatten().count(),
+            self.requests.iter().flatten().count(),
+            clients.clone().count(),
+            servers.clone().count(),
+            clients
+                .clone()
+                .map(|wire| wire.state.streams.iter().flatten().count())
+                .sum(),
+            servers
+                .clone()
+                .map(|wire| wire.state.streams.iter().flatten().count())
+                .sum(),
+            clients
+                .clone()
+                .map(|wire| wire.state.events.iter().flatten().count())
+                .sum(),
+            servers
+                .clone()
+                .map(|wire| wire.state.events.iter().flatten().count())
+                .sum(),
+            clients
+                .chain(servers)
+                .flat_map(|wire| &wire.state.directions)
+                .map(|direction| direction.settings_complete.iter().flatten().count())
+                .sum(),
+        ]
+    }
+
     pub(crate) fn write_wire(&self, text: &mut impl Write, now: Instant) {
         self.write_wire_core(text, now);
         self.write_wire_detail(text, now);
@@ -1436,7 +1510,12 @@ impl ObserverCapture {
                 "server wire observed_connections=0 status=no-retained-server-endpoint",
             );
         }
-        if self.connections.iter().chain(&self.server_connections).any(Option::is_some) {
+        if self
+            .connections
+            .iter()
+            .chain(&self.server_connections)
+            .any(Option::is_some)
+        {
             let _ = writeln!(
                 text,
                 "wire compact_hex counts=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
@@ -2546,6 +2625,20 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_holders_have_bounded_value_footprints() {
+        // Full-capacity arrays stay on the heap during construction and deep
+        // cloning. These hosted bounds cover the remaining by-value records.
+        assert!(std::mem::size_of::<WireDirection>() <= 1024);
+        assert!(std::mem::size_of::<WireState>() <= 4096);
+        assert!(std::mem::size_of::<WireCapture>() <= 256);
+        assert!(std::mem::size_of::<ObserverCapture>() <= 1024);
+        assert!(std::mem::size_of::<TaskCapture>() <= 256);
+        assert!(std::mem::size_of::<RequestCapture>() <= 512);
+        assert!(std::mem::size_of::<Option<WireStream>>() <= 1024);
+        assert!(std::mem::size_of::<Option<WireEvent>>() <= 128);
+    }
+
+    #[test]
     fn compact_wire_core_preserves_counter_order_distinct_marks_and_unknown_fields() {
         let observer = Observer::default();
         let now = Instant::now();
@@ -2720,7 +2813,7 @@ mod tests {
         }
         for wire in left.wires() {
             let mut state = wire.state.lock().unwrap();
-            state.events = [Some(WireEvent {
+            state.events.fill(Some(WireEvent {
                 direction: Direction::Tx,
                 point: FramePoint {
                     mark,
@@ -2736,7 +2829,7 @@ mod tests {
                     last_stream: u32::MAX,
                     reason: u32::MAX,
                 }),
-            }); WIRE_EVENTS];
+            }));
         }
         for (index, wire) in left.wires().iter().enumerate() {
             let server = left

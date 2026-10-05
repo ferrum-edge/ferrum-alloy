@@ -11,6 +11,9 @@
   TCP/TLS plaintext frame prefixes with real endpoints and bounded numerical
   stream/control state within the existing 64 KiB snapshot. Compact mandatory
   wire rendering without losing fields, marks or rows from the 48 KiB reserve.
+  Own frozen diagnostic records in fixed-capacity heap storage, constructing
+  and cloning one record at a time before teardown and retaining the immutable
+  first-failure sample and its original interval.
   Keep handler-to-wire stream mapping explicitly unknown. Add strict
   two-owner-2-header held/released controls using the existing
   4-worker/2-socket/32-cancellation swarm and fixed

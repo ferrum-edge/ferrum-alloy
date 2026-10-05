@@ -769,15 +769,28 @@ pub(crate) mod tests {
         connection: Option<ConnectionCapture>,
     }
 
-    #[derive(Clone)]
     struct HealthCapture {
         sample_start: Instant,
         sample_end: Instant,
         before_health_drop: bool,
         boundary: &'static str,
         coordinator: CoordinatorDiagnostic,
-        workers: [WorkerCapture; 4],
-        observer: crate::health::ObserverCapture,
+        workers: Box<[WorkerCapture; 4]>,
+        observer: Box<crate::health::ObserverCapture>,
+    }
+
+    impl Clone for HealthCapture {
+        fn clone(&self) -> Self {
+            Self {
+                sample_start: self.sample_start,
+                sample_end: self.sample_end,
+                before_health_drop: self.before_health_drop,
+                boundary: self.boundary,
+                coordinator: self.coordinator.clone(),
+                workers: crate::health::boxed_slots(|index| self.workers[index].clone()),
+                observer: self.observer.clone(),
+            }
+        }
     }
 
     pub(crate) struct HealthDiagnostics {
@@ -976,14 +989,14 @@ pub(crate) mod tests {
             included
         }
 
-        fn capture(&self) -> HealthCapture {
+        fn capture(&self) -> Box<HealthCapture> {
             let sample_start = Instant::now();
             let coordinator = self
                 .coordinator
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            let workers = std::array::from_fn(|index| {
+            let workers = crate::health::boxed_slots(|index| {
                 let mut state = self.workers[index]
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -998,7 +1011,7 @@ pub(crate) mod tests {
                 WorkerCapture { state, connection }
             });
             let observer = self.observer.capture();
-            HealthCapture {
+            Box::new(HealthCapture {
                 sample_start,
                 sample_end: Instant::now(),
                 before_health_drop: false,
@@ -1006,7 +1019,7 @@ pub(crate) mod tests {
                 coordinator,
                 workers,
                 observer,
-            }
+            })
         }
 
         fn freeze_first_failure(&self, boundary: &'static str) {
@@ -1014,15 +1027,15 @@ pub(crate) mod tests {
             if first.is_none() {
                 let mut capture = self.capture();
                 capture.boundary = boundary;
-                *first = Some(Box::new(capture));
+                *first = Some(capture);
             }
         }
 
-        fn failure_state(&self) -> Option<HealthCapture> {
+        fn failure_state(&self) -> Option<Box<HealthCapture>> {
             self.first_failure
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .as_deref()
+                .as_ref()
                 .cloned()
         }
 
@@ -1031,7 +1044,7 @@ pub(crate) mod tests {
                 return;
             }
             let capture = self.failure_state().unwrap_or_else(|| self.capture());
-            self.failure_capture(cell, reason, capture);
+            self.failure_capture(cell, reason, &capture);
         }
 
         fn render(
@@ -1180,14 +1193,14 @@ pub(crate) mod tests {
             &self,
             cell: crate::dims::Cell,
             reason: &'static str,
-            capture: HealthCapture,
+            capture: &HealthCapture,
         ) {
             use crate::dims::Dimension;
 
             if self.printed.swap(true, Ordering::Relaxed) {
                 return;
             }
-            let message = self.render(cell, reason, &capture);
+            let message = self.render(cell, reason, capture);
             let feature = match std::env::var("ALLOY_BENCH_DIAGNOSTIC_FEATURE").as_deref() {
                 Ok("all-features") => "all-features",
                 Ok("default-features") => "default-features",
@@ -1301,6 +1314,33 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn saturated_history_keeps_server_rows_workers_and_pending_tasks() {
+        use ferrum_alloy::bench_diagnostics::{IoObserver, Operation, Outcome};
+
+        fn fill_wire(wire: &crate::health::WireObservation, request: Operation, response: Operation) {
+            wire.prefix(request, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+            let mut settings = vec![0, 0, 36, 4, 0, 0, 0, 0, 0];
+            for id in 1_u16..=6 {
+                settings.extend(id.to_be_bytes());
+                settings.extend(u32::MAX.to_be_bytes());
+            }
+            for operation in [request, response] {
+                wire.prefix(operation, &settings);
+                for stream in 1_u32..=36 {
+                    let mut header = [0, 0, 0, 1, 4, 0, 0, 0, 0];
+                    header[5..].copy_from_slice(&stream.to_be_bytes());
+                    wire.prefix(operation, &header);
+                }
+            }
+            let ping = [0, 0, 8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            for _ in 0..64 {
+                wire.prefix(request, &ping);
+            }
+            let state = wire.snapshot();
+            for direction in [crate::health::Direction::Tx, crate::health::Direction::Rx] {
+                assert_eq!(state.header_streams(direction).len(), 36);
+            }
+        }
+
         let diagnostics = HealthDiagnostics::new(load(4, 2));
         let other = HealthDiagnostics::new(load(4, 2));
         let socket = Some(
@@ -1308,6 +1348,23 @@ pub(crate) mod tests {
                 .parse()
                 .unwrap(),
         );
+        for owner in [0, 2] {
+            let client = diagnostics
+                .observer
+                .wire(&diagnostics.instance, owner, 1, socket)
+                .unwrap();
+            fill_wire(&client, Operation::Write, Operation::Read);
+            let server = diagnostics
+                .observer
+                .server_wire(
+                    &diagnostics.instance,
+                    socket,
+                    socket.unwrap(),
+                    false,
+                )
+                .unwrap();
+            fill_wire(&server, Operation::Read, Operation::Write);
+        }
         for _ in 0..72 {
             let request = diagnostics.observer.request(socket).unwrap();
             request.frames.store(u64::MAX, Ordering::Relaxed);
@@ -1350,6 +1407,12 @@ pub(crate) mod tests {
             diagnostics.worker(index, |state| {
                 state.stage = "response-headers";
                 state.outcome = "running";
+                state.connection = Some(ConnectionDiagnostic {
+                    owner: (index / 2) * 2,
+                    generation: 1,
+                    local_addr: socket,
+                    driver: Arc::new(AtomicUsize::new(1)),
+                });
                 state.exchanges = [ExchangeProgress {
                     started: u64::MAX,
                     completed: u64::MAX,
@@ -1377,8 +1440,26 @@ pub(crate) mod tests {
             workload: Workload::Cancel,
             transport: Transport::H2c,
         };
-        let capture = diagnostics.capture();
+        // Exercise construction, the immutable first-failure cache and deep
+        // clones at full capacity before destroying any pending observation.
+        diagnostics.freeze_first_failure("controlled-saturation-before-drop");
+        let capture = diagnostics.failure_state().unwrap();
+        let cloned = capture.clone();
+        let retained = [160, 72, 2, 2, 72, 72, 128, 128, 48];
+        assert_eq!(capture.observer.retained_counts(), retained);
+        assert_eq!(cloned.observer.retained_counts(), retained);
+        assert!(capture.sample_start <= capture.sample_end);
+        assert_eq!(cloned.sample_start, capture.sample_start);
+        assert_eq!(cloned.sample_end, capture.sample_end);
+        for worker in capture.workers.iter() {
+            assert!(worker.state.connection.is_none());
+            assert_eq!(worker.connection.unwrap().driver, 1);
+        }
         let rendered = diagnostics.render(cell, "controlled-saturation", &capture);
+        assert_eq!(
+            rendered,
+            diagnostics.render(cell, "controlled-saturation", &cloned)
+        );
         assert!(rendered.len() <= DIAGNOSTIC_SNAPSHOT_BYTES);
         assert_eq!(rendered.matches("server socket_ref=").count(), 72);
         assert_eq!(rendered.matches("stage=response-headers").count(), 4);
@@ -1397,15 +1478,73 @@ pub(crate) mod tests {
             assert!(task.contains(" drop=false "));
         }
         assert!(rendered.contains("required_detail=0 required_wire=0"));
+        let mut wire_core = SnapshotText::new(DIAGNOSTIC_WIRE_BYTES);
+        capture
+            .observer
+            .write_wire_core(&mut wire_core, capture.sample_end);
+        assert_eq!(wire_core.2, 0);
+        assert_eq!(wire_core.0.matches("wire first s_hex=").count(), 72);
+        assert_eq!(wire_core.0.matches("wire control_hex ").count(), 128);
+        assert_eq!(wire_core.0.matches("settings_complete ").count(), 48);
+        assert!(rendered.contains(&wire_core.0));
         assert!(!rendered.contains("detail_bytes=0 "));
         assert!(rendered.contains("socket_ref=0 socket=Some([ffff:"));
         let other_text = other.render(cell, "controlled-isolation", &other.capture());
         assert!(!other_text.contains(&diagnostics.instance));
         assert!(!other_text.contains("server socket_ref="));
         drop(pending);
+        diagnostics.coordinator_stage("after-saturation-teardown");
+        for index in 0..4 {
+            diagnostics.worker(index, |state| {
+                state.stage = "after-saturation-teardown";
+                state
+                    .connection
+                    .as_ref()
+                    .unwrap()
+                    .driver
+                    .store(4, Ordering::Relaxed);
+            });
+        }
+        for request in diagnostics.observer.requests() {
+            request.frames.store(0, Ordering::Relaxed);
+        }
+        for wire in diagnostics
+            .observer
+            .wires()
+            .into_iter()
+            .chain(diagnostics.observer.server_wires())
+        {
+            wire.outcome(Operation::Write, Outcome::Error, false);
+        }
+        diagnostics.freeze_first_failure("later-saturation-capture-must-not-replace-first");
+        let cached = diagnostics.failure_state().unwrap();
+        assert_eq!(cached.sample_start, capture.sample_start);
+        assert_eq!(cached.sample_end, capture.sample_end);
+        assert_eq!(cached.boundary, "controlled-saturation-before-drop");
+        assert_eq!(cached.observer.retained_counts(), retained);
         assert_eq!(
             rendered,
             diagnostics.render(cell, "controlled-saturation", &capture)
+        );
+        assert_eq!(
+            rendered,
+            diagnostics.render(cell, "controlled-saturation", &cloned)
+        );
+        assert_eq!(
+            rendered,
+            diagnostics.render(cell, "controlled-saturation", &cached)
+        );
+    }
+
+    #[test]
+    fn health_snapshot_holders_have_bounded_value_footprints() {
+        // Hosted checks constrain every value constructed, returned or cloned
+        // in the nested timeout path, independently of retained capacities.
+        assert!(std::mem::size_of::<HealthCapture>() <= 256);
+        assert!(std::mem::size_of::<WorkerCapture>() <= 1024);
+        assert_eq!(
+            std::mem::size_of::<Option<Box<HealthCapture>>>(),
+            std::mem::size_of::<usize>(),
         );
     }
 
@@ -1517,57 +1656,159 @@ pub(crate) mod tests {
         assert!(std::str::from_utf8(text.as_bytes()).is_ok());
     }
 
+    fn source_body<'a>(source: &'a str, signature: &str, closing: &str) -> &'a str {
+        source
+            .split_once(signature)
+            .unwrap()
+            .1
+            .split_once(closing)
+            .unwrap()
+            .0
+    }
+
+    fn assert_source_order(source: &str, steps: &[&str]) {
+        let mut remaining = source;
+        for step in steps {
+            remaining = remaining.split_once(step).unwrap().1;
+        }
+    }
+
     #[test]
     fn diagnostic_sources_preserve_health_gates_and_test_only_boundary() {
         let client = include_str!("client.rs");
-        let timeout = client
-            .split("\n    pub(crate) async fn cancellation_health_timeout<S>(")
-            .nth(1)
-            .unwrap()
-            .split("async fn cancellation_health_inner<S>(")
-            .next()
+        let (production, tests) = client
+            .split_once("\n#[cfg(test)]\npub(crate) mod tests {")
             .unwrap();
+        // Newline-anchored declarations and their matching indentation keep
+        // every check inside the complete function or branch being proved.
+        // Source literals in this test cannot satisfy those declarations.
+        let timeout = source_body(
+            tests,
+            "\n    pub(crate) async fn cancellation_health_timeout<S>(",
+            "\n    }\n",
+        );
         assert!(timeout.contains("timeout(Duration::from_secs(15), health.as_mut())"));
         assert!(timeout.contains("let mut health = Box::pin(health);"));
-        let helper = timeout.split("fn capture_before_drop<F>(").nth(1).unwrap();
-        let sampling = helper.find("diagnostics.capture()").unwrap();
-        let teardown = helper.find("drop(health)").unwrap();
-        assert!(sampling < teardown);
-        let budget = client
-            .split("\n    pub(crate) const HEALTH_EXCHANGES_PER_PHASE:")
-            .nth(1)
-            .unwrap();
+        for (branch, reason) in [
+            ("\n            Ok(Err(error)) => {", "driver-error"),
+            ("\n            Err(error) => {", "timeout"),
+        ] {
+            let branch = source_body(timeout, branch, "\n            }\n");
+            assert_source_order(
+                branch,
+                &[
+                    "let capture = capture_before_drop(health, diagnostics);",
+                    &format!("diagnostics.failure_capture(cell, \"{reason}\", &capture);"),
+                    "Err(",
+                ],
+            );
+        }
+        let helper = source_body(tests, "\n    fn capture_before_drop<F>(", "\n    }\n");
+        assert!(helper.contains(") -> Box<HealthCapture> {"));
+        let fallback = source_body(helper, "unwrap_or_else(|| {", "\n        });");
+        assert_source_order(
+            fallback,
+            &[
+                "let mut capture = diagnostics.capture();",
+                "capture.boundary = \"before-outer-health-future-drop\";",
+                "capture",
+            ],
+        );
+        let cache = source_body(
+            helper,
+            "\n        if first.is_none() {",
+            "\n        }\n",
+        );
+        assert_eq!(cache.trim(), "*first = Some(capture.clone());");
+        assert_source_order(
+            helper,
+            &[
+                "diagnostics.failure_state()",
+                "diagnostics.capture()",
+                "capture.before_health_drop = true;",
+                "if first.is_none() {",
+                "*first = Some(capture.clone());",
+                "drop(first);",
+                "drop(health);",
+            ],
+        );
+        assert_eq!(helper.matches("diagnostics.capture()").count(), 1);
+        assert_eq!(helper.split_once("drop(health);").unwrap().1.trim(), "capture");
+        assert!(!production.contains("fn capture_before_drop<"));
+        let freeze = source_body(
+            tests,
+            "\n        fn freeze_first_failure(",
+            "\n        }\n",
+        );
+        let first = source_body(
+            freeze,
+            "\n            if first.is_none() {",
+            "\n            }\n",
+        );
+        assert_eq!(
+            first.trim(),
+            "let mut capture = self.capture();\n                capture.boundary = boundary;\n                *first = Some(capture);",
+        );
+        assert_eq!(freeze.matches("self.capture()").count(), 1);
+        let cached = source_body(tests, "\n        fn failure_state(", "\n        }\n");
+        assert!(cached.contains("-> Option<Box<HealthCapture>>"));
+        assert!(cached.contains(".as_ref()\n                .cloned()"));
+        assert!(!cached.contains(".capture("));
+        let hook = source_body(
+            tests,
+            "\n    pub(super) fn diagnostic_first_failure(",
+            "\n    }\n",
+        );
+        assert!(hook.contains("diagnostics.freeze_first_failure(boundary);"));
+        let measurement = source_body(production, "\nasync fn measure_workers<S>(", "\n}\n");
+        let failed = source_body(measurement, "\n    if result.is_err() {", "\n    }\n");
+        assert_source_order(
+            failed,
+            &[
+                "#[cfg(test)]\n        tests::diagnostic_first_failure(\"before-explicit-worker-shutdown\");",
+                "tests::diagnostic_coordinator_stage(\"failed-worker-shutdown\");",
+                "workers.shutdown().await;",
+            ],
+        );
+        assert_eq!(measurement.matches("workers.shutdown().await").count(), 1);
+        let initial = source_body(
+            tests,
+            "\n    async fn cancellation_health_inner<S>(",
+            "\n    }\n",
+        );
+        assert_source_order(
+            initial,
+            &[
+                "let mut workers = JoinSet::new();",
+                "let sender = capture_initial_dial_result(sender, &diagnostics)?;",
+                "workers.spawn(diagnostic_worker(",
+                "measure_workers(",
+            ],
+        );
+        let dial = source_body(
+            tests,
+            "\n    fn capture_initial_dial_result<T>(",
+            "\n    }\n",
+        );
+        let failed = source_body(dial, "\n        if result.is_err() {", "\n        }\n");
+        assert_eq!(
+            failed.trim(),
+            "diagnostics.freeze_first_failure(\"before-initial-dial-error-worker-set-unwind\");",
+        );
+        assert!(dial.trim_end().ends_with("result"));
+        let budget = tests
+            .split_once("\n    pub(crate) const HEALTH_EXCHANGES_PER_PHASE:")
+            .unwrap()
+            .1;
         assert!(budget.starts_with(" usize = 8;"));
         let run = include_str!("run.rs");
-        let matrix = run
-            .split("fn assert_health_matrix(scenario: Scenario)")
-            .nth(1)
-            .unwrap()
-            .split("#[test]")
-            .next()
-            .unwrap();
-        let measurement = client
-            .split("async fn measure_workers<S>(")
-            .nth(1)
-            .unwrap()
-            .split("pub(crate) async fn drive<S>(")
-            .next()
-            .unwrap();
-        assert!(
-            measurement.find("diagnostic_first_failure(").unwrap()
-                < measurement.find("workers.shutdown().await").unwrap()
+        let matrix = source_body(
+            run,
+            "\n    fn assert_health_matrix(scenario: Scenario) {",
+            "\n    }\n",
         );
-        let initial = client
-            .split("async fn cancellation_health_inner<S>(")
-            .nth(1)
-            .unwrap();
-        assert!(initial.contains("capture_initial_dial_result(sender, &diagnostics)?"));
         let library = include_str!("../../../crates/ferrum-alloy/src/server.rs");
         assert!(library.contains("#[cfg(feature = \"bench-diagnostics\")]"));
-        let production = client
-            .split("#[cfg(test)]\npub(crate) mod tests")
-            .next()
-            .unwrap();
         assert!(!production.contains(".reset_stream_duration("));
         assert!(!production.contains(".max_local_error_reset_streams("));
         assert!(!production.contains(".initial_connection_window_size("));
@@ -1584,11 +1825,12 @@ pub(crate) mod tests {
         assert!(run.contains("assert_eq!(result[\"errors\"], 0"));
         assert!(include_str!("main.rs").contains("#[cfg(test)]\nmod health;"));
         let health = include_str!("health.rs")
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap();
+            .split_once("#[cfg(test)]\nmod tests")
+            .unwrap()
+            .0;
         for bound in [
             "const WIRE_CONNECTIONS: usize = 2;",
+            "const SERVER_CONNECTIONS: usize = 2;",
             "const WIRE_STREAMS: usize = 36;",
             "const WIRE_EVENTS: usize = 64;",
             "const TASK_SLOTS: usize = 160;",
@@ -2683,12 +2925,12 @@ pub(crate) mod tests {
             Ok(Ok(measured)) => Ok(measured),
             Ok(Err(error)) => {
                 let capture = capture_before_drop(health, diagnostics);
-                diagnostics.failure_capture(cell, "driver-error", capture);
+                diagnostics.failure_capture(cell, "driver-error", &capture);
                 Err(error)
             }
             Err(error) => {
                 let capture = capture_before_drop(health, diagnostics);
-                diagnostics.failure_capture(cell, "timeout", capture);
+                diagnostics.failure_capture(cell, "timeout", &capture);
                 Err(error.into())
             }
         }
@@ -2697,7 +2939,7 @@ pub(crate) mod tests {
     fn capture_before_drop<F>(
         health: Pin<Box<F>>,
         diagnostics: &HealthDiagnostics,
-    ) -> HealthCapture {
+    ) -> Box<HealthCapture> {
         let mut capture = diagnostics.failure_state().unwrap_or_else(|| {
             let mut capture = diagnostics.capture();
             capture.boundary = "before-outer-health-future-drop";
@@ -2709,7 +2951,7 @@ pub(crate) mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if first.is_none() {
-            *first = Some(Box::new(capture.clone()));
+            *first = Some(capture.clone());
         }
         drop(first);
         // Dropping the coordinator can abort JoinSet workers and release
