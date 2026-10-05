@@ -935,9 +935,8 @@ pub(crate) mod tests {
             } else {
                 DIAGNOSTIC_WIRE_EMPTY_BYTES
             };
-            let mut message = SnapshotText::new(
-                DIAGNOSTIC_SNAPSHOT_BYTES - wire_budget - DIAGNOSTIC_LOSS_BYTES,
-            );
+            let mut message =
+                SnapshotText::new(DIAGNOSTIC_SNAPSHOT_BYTES - wire_budget - DIAGNOSTIC_LOSS_BYTES);
             let feature = match std::env::var("ALLOY_BENCH_DIAGNOSTIC_FEATURE").as_deref() {
                 Ok("all-features") => "all-features",
                 Ok("default-features") => "default-features",
@@ -1442,13 +1441,7 @@ pub(crate) mod tests {
             })
             .flatten();
         match wire {
-            Some(wire) => {
-                handshake(
-                    TokioIo::new(crate::health::WireIo::new(io, wire)),
-                    h2,
-                )
-                .await
-            }
+            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
             None => handshake(TokioIo::new(io), h2).await,
         }
     }
@@ -2013,7 +2006,9 @@ pub(crate) mod tests {
                 assert_eq!(frames.directions[1].invalid_lengths, 0);
             }
             let mut frame_text = String::new();
-            diagnostics.observer.write_wire(&mut frame_text, Instant::now());
+            diagnostics
+                .observer
+                .write_wire(&mut frame_text, Instant::now());
             assert!(!frame_text.contains("peer-private-marker"));
             diagnostics.worker(0, |state| {
                 assert!(state.wire_events > 0);

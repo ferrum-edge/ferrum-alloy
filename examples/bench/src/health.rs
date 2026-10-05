@@ -589,7 +589,10 @@ impl WireObservation {
                     Some(WireValue::Reset(reason)) => {
                         let _ = write!(text, " rst_reason={reason}");
                     }
-                    Some(WireValue::GoAway { last_stream, reason }) => {
+                    Some(WireValue::GoAway {
+                        last_stream,
+                        reason,
+                    }) => {
                         let _ = write!(text, " goaway_last={last_stream} reason={reason}");
                     }
                     Some(WireValue::Setting { id, value }) => {
@@ -639,9 +642,7 @@ fn write_data(text: &mut impl Write, data: DataProgress, now: Instant) {
     let _ = write!(
         text,
         "{:x}/{:x}/{:x},",
-        data.seen,
-        data.complete,
-        data.bytes,
+        data.seen, data.complete, data.bytes,
     );
     if data.seen > 0 {
         let _ = write!(text, "{:x}:{:x}", data.length, data.flags);
@@ -1387,7 +1388,8 @@ mod tests {
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
             let this = self.get_mut();
-            this.scalar_calls.push((buf.as_ptr() as usize, buf.to_vec()));
+            this.scalar_calls
+                .push((buf.as_ptr() as usize, buf.to_vec()));
             let result = this.write_result(cx);
             if let Poll::Ready(Ok(count)) = &result {
                 this.accepted.extend_from_slice(&buf[..*count]);
@@ -1478,7 +1480,11 @@ mod tests {
         };
         let mut io = WireIo::new(inner, Arc::clone(&observation));
         assert!(io.is_write_vectored());
-        assert!(Pin::new(&mut io).poll_write(&mut cx, &transcript).is_pending());
+        assert!(
+            Pin::new(&mut io)
+                .poll_write(&mut cx, &transcript)
+                .is_pending()
+        );
         let error = match Pin::new(&mut io).poll_write(&mut cx, &transcript) {
             Poll::Ready(Err(error)) => error,
             _ => panic!("write error was changed"),
@@ -1497,7 +1503,11 @@ mod tests {
             IoSlice::new(&transcript[8..15]),
             IoSlice::new(&transcript[15..]),
         ];
-        assert!(Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs).is_pending());
+        assert!(
+            Pin::new(&mut io)
+                .poll_write_vectored(&mut cx, &bufs)
+                .is_pending()
+        );
         assert!(matches!(
             Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs),
             Poll::Ready(Err(_))
@@ -1653,12 +1663,7 @@ mod tests {
                 Poll::Ready(Ok(1))
             ));
         }
-        let mut rx = frame(
-            4,
-            0,
-            0,
-            &[0, 4, 0, 0, 255, 255, 0, 5, 0, 0, 64, 0],
-        );
+        let mut rx = frame(4, 0, 0, &[0, 4, 0, 0, 255, 255, 0, 5, 0, 0, 64, 0]);
         rx.extend(frame(4, 0, 0, &[255, 255, b'c', b'r', b'e', b'd']));
         rx.extend(frame(1, 0, 1, b"private-hpack"));
         rx.extend(frame(9, 4, 1, b"private-continuation"));
@@ -1715,19 +1720,36 @@ mod tests {
             .flatten()
             .filter_map(|event| event.value)
             .collect();
-        assert!(values.iter().any(|value| matches!(value, WireValue::Reset(8))));
-        assert!(values.iter().any(|value| matches!(value, WireValue::Window(42))));
+        assert!(
+            values
+                .iter()
+                .any(|value| matches!(value, WireValue::Reset(8)))
+        );
+        assert!(
+            values
+                .iter()
+                .any(|value| matches!(value, WireValue::Window(42)))
+        );
         assert!(values.iter().any(|value| matches!(
             value,
-            WireValue::Setting { id: 4, value: 65535 }
+            WireValue::Setting {
+                id: 4,
+                value: 65535
+            }
         )));
         assert!(values.iter().any(|value| matches!(
             value,
-            WireValue::Setting { id: 5, value: 16384 }
+            WireValue::Setting {
+                id: 5,
+                value: 16384
+            }
         )));
         assert!(values.iter().any(|value| matches!(
             value,
-            WireValue::GoAway { last_stream: 1, reason: 11 }
+            WireValue::GoAway {
+                last_stream: 1,
+                reason: 11
+            }
         )));
         let mut text = String::new();
         observer.write_wire(&mut text, Instant::now());
@@ -1749,7 +1771,11 @@ mod tests {
             .flatten()
             .map(|event| event.point.mark)
             .collect();
-        assert!(marks.windows(2).all(|pair| pair[0].sequence < pair[1].sequence));
+        assert!(
+            marks
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
         assert!(marks.windows(2).all(|pair| pair[0].at <= pair[1].at));
     }
 
@@ -1824,7 +1850,7 @@ mod tests {
             assert_eq!(rx.headers_seen, u64::from(cut >= 9));
             assert_eq!(rx.frames_complete, u64::from(cut == 17));
             assert_eq!(rx.eof_partial(), cut > 0 && cut < 17);
-            if cut >= 9 && cut < 17 {
+            if (9..17).contains(&cut) {
                 assert_eq!(rx.remaining, Some((17 - cut) as u32));
             }
             assert_eq!(rx.numeric, 0); // PING opaque bytes never enter scratch.
@@ -1848,7 +1874,13 @@ mod tests {
             malformed.feed(Direction::Rx, &bytes);
             assert_eq!(malformed.directions[1].invalid_lengths, 1);
             assert_eq!(malformed.directions[1].frames_complete, 1);
-            assert!(malformed.events.iter().flatten().all(|event| event.value.is_none()));
+            assert!(
+                malformed
+                    .events
+                    .iter()
+                    .flatten()
+                    .all(|event| event.value.is_none())
+            );
         }
         let observer = Observer::default();
         let observation = observer.wire(INSTANCE, 0, 1, None).unwrap();
