@@ -297,33 +297,43 @@ release and all runtime cleanup for exact equality, excluding the actual burst p
 marker of 32 consecutive `x` bytes. The burst supplies the existing one-KiB frames; all retained fixtures keep their exact 32-success/32-KiB accounting
 assertions. The actual short health gate is unchanged.
 
-The labelled teardown and alive-companion controls retain the existing public
-Hyper dispatcher outside client-runtime task ownership while its original wire child
-remains runtime-owned. Poll those same futures while real cancellation/reuse runs;
-stop owner 2's dispatcher at the final real reuse completion before sender release.
-Require zero errors and a Pending undropped original wire child. The alive companion
-polls that dispatcher after sender release under the same 15-second wrapper, with
-both runtimes alive, requiring normal completion and zero public/wire/socket errors.
+The labelled controls retain both actual H2 request senders through their required
+proofs. Retaining the public dispatcher alone does not keep its request channel open.
+Teardown and alive-companion controls retain the existing public Hyper dispatcher
+outside client-runtime task ownership while its original wire child remains runtime-owned.
+Poll those same futures while real cancellation/reuse runs; stop owner 2's dispatcher
+at the final real reuse completion. Require both retained senders open, zero errors,
+and Pending undropped original public and wire futures. The alive companion explicitly
+releases owner 2's sender, then polls that dispatcher under the same 15-second wrapper,
+with both runtimes alive. Require normal public/wire completion, the actual encoded
+NO_ERROR GOAWAY and zero public/wire/socket errors. Receive retains both senders through
+its held proof, release and strict all-four joins/reuse assertions.
 The teardown control marks runtime entry, destroys the client runtime, then polls
 the same retained dispatcher exactly once. Require drop-entry before first assignment,
 prior-error absent, destructor-EOF origin, before/after runtime flags true, no h2 Ready
 result, and the genuine public BrokenPipe chain. The expected error is confined to
 that labelled control. A fixture-scoped dispatcher guard is created before either
 retained slot can be filled and stays outside the diagnostics/control/future ownership
-cycle. On timeout or assertion unwind it takes both slots under the mutex, recovers
-poison, releases the mutex, then drops the public futures. Successful cleanup still
-runs after the same client-runtime destruction and single retained-dispatcher poll,
+cycle. On timeout or assertion unwind it takes both sender and dispatcher slot pairs,
+recovers either mutex's poison and releases both mutexes before dropping any owned
+public future or sender. Successful cleanup still runs after the same client-runtime
+destruction and single retained-dispatcher poll,
 before server-runtime cleanup. Completed dispatchers also drop outside the mutex.
 Two early-unwind fixtures store both actual diagnostic adapters with owned pending
-futures. Their destructors verify unlocked, empty slots; `Weak` diagnostics and control
-references prove reclamation for both ordinary and poisoned-mutex unwind paths.
+futures. Their destructors verify both slot pairs unlocked and empty; `Weak` diagnostics and control
+references prove reclamation for both ordinary and double-poisoned-mutex unwind paths.
 No replacement driver task or manufactured error is used.
 Reachability does not attribute the earlier macOS failure. The actual 100/200-ms
 health case retains its fatal zero-error assertion and unchanged 15-second wrapper.
 
 Published h2 error callsites remain original 491/521, now patched **514/544**.
 Both the diagnostic whitelist and I/O classifier follow those exact positions:
-only 514 formats typed `ErrorKind`; 544 omits peer details. Do not broaden the filter.
+only 514 formats typed `ErrorKind`; 544 records only an actual typed reason/initiator
+scalar from the private fork. Scalar 1 is library-initiated NO_ERROR completion;
+only that exact value is excluded from the error count. Nonzero reasons, other
+initiators and missing/opaque scalars remain errors without formatting peer bytes.
+The real protocol-error and truncated-input I/O controls remain fatal, and the scalar
+collector has negative controls for every excluded alternative. Do not broaden the filter.
 Server saturation's omitted endpoint and plaintext-I/O label, compact `p=` EOF
 control, required controls/rows and ordinary graph gates remain strict.
 
@@ -335,8 +345,14 @@ records before checking, emits that capture on assertion failure, then resumes t
 same panic. Unexpected retained public results also emit the bounded capture before
 their fatal unwrap. This precedes assertion-driven runtime/dispatcher cleanup, not
 every naturally completed future's teardown. It adds no observer slots or rendering budget.
-The separate ordinary short-warmup failure remains UNKNOWN; its post-teardown
+The separate ordinary short-warmup failure remains UNKNOWN; the older post-teardown
 BrokenPipe/wire/write-error evidence does not establish an initiating cause.
+
+The actual `d699ca7` controls and separate ordinary timeout are recorded in
+[repair30.md](repair30.md). This round corrects the retained-sender fixture lifetime
+and adds typed GOAWAY classification. It does not classify every old opaque event
+as benign: the Windows capture also contains a real server write error. Fresh hosted
+qualification is pending; ordinary workload and production code are unchanged.
 
 ## Retirement and delivery
 

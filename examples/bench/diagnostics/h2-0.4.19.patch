@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/alloy_diagnostics.rs
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,145 @@
 +//! Numerical observer for the isolated Alloy diagnostic fork only.
 +
 +use std::cell::RefCell;
@@ -78,6 +78,16 @@
 +    flags.map_or(false, |flags| {
 +        flags.load(std::sync::atomic::Ordering::Acquire) & (1 << 21) != 0
 +    })
++}
++
++// Scalar only: low two bits identify the initiator, upper bits are the reason.
++pub(crate) fn go_away(reason: crate::Reason, initiator: crate::proto::Initiator) -> u64 {
++    let initiator = match initiator {
++        crate::proto::Initiator::Library => 1,
++        crate::proto::Initiator::User => 2,
++        crate::proto::Initiator::Remote => 3,
++    };
++    (u64::from(u32::from(reason)) << 2) | initiator
 +}
 +
 +pub(crate) fn terminal(result: &Result<(), crate::proto::Error>) {
@@ -202,22 +212,28 @@
 +                Pin::new(&mut self.codec).poll_next(cx),
 +                crate::alloy_diagnostics::Pending::Decode
 +            )?))? {
-@@ -544,0 +568,3 @@
+@@ -521 +544,4 @@
+-        tracing::debug!(error = ?e, "Connection::poll; connection error");
++        tracing::debug!(
++            error = crate::alloy_diagnostics::go_away(reason, initiator),
++            "Connection::poll; connection error"
++        );
+@@ -544,0 +571,3 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Headers(
 +                    frame.stream_id().into(),
 +                ));
-@@ -548,0 +575,4 @@
+@@ -548,0 +578,4 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Data {
 +                    stream: frame.stream_id().into(),
 +                    bytes: frame.payload().len() as u64,
 +                });
-@@ -552,0 +583,5 @@
+@@ -552,0 +586,5 @@
 +                if frame.reason() == Reason::CANCEL {
 +                    crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Cancel(
 +                        frame.stream_id().into(),
 +                    ));
 +                }
-@@ -660,2 +695,7 @@
+@@ -660,2 +698,7 @@
 -        // Ignore errors as this indicates that the mutex is poisoned.
 -        let _ = self.inner.streams.recv_eof(true);
 +        let observer = self.observer.clone();
