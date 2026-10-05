@@ -31,6 +31,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["std", "registry", "fmt", "json"] }
 
 [dev-dependencies]
+# Compile the normally built library's seam only for explicit diagnostic tests.
+ferrum-alloy = { workspace = true, features = ["bench-diagnostics"] }
 toml = { workspace = true, features = ["parse", "serde"] }
 
 # The workspace lints, restated because the workspace forbids unsafe code and

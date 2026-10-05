@@ -502,6 +502,8 @@ impl AlloyApp {
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
             app_stats,
+            #[cfg(feature = "bench-diagnostics")]
+            bench_io: None,
             management_token,
             #[cfg(feature = "diagnostics")]
             diagnostics_retrieval,
@@ -568,6 +570,8 @@ pub struct AlloyParts {
     service_name: String,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     app_stats: Arc<ServerStats>,
+    #[cfg(feature = "bench-diagnostics")]
+    bench_io: Option<Arc<dyn crate::bench_diagnostics::ConnectionObserver>>,
     /// Whether the management router was built with a token.
     management_token: bool,
     /// Whether the management router serves diagnostic retrieval.
@@ -587,6 +591,17 @@ impl std::fmt::Debug for AlloyParts {
 }
 
 impl AlloyParts {
+    /// Internal benchmark seam. Requires a diagnostic build and explicit fixture ownership.
+    #[doc(hidden)]
+    #[cfg(feature = "bench-diagnostics")]
+    pub fn bench_plaintext_observer(
+        mut self,
+        observer: Arc<dyn crate::bench_diagnostics::ConnectionObserver>,
+    ) -> Self {
+        self.bench_io = Some(observer);
+        self
+    }
+
     /// Connection counters of the application listener, as rendered on the
     /// management `/metrics` endpoint. They stay readable after serving
     /// returns.
@@ -691,6 +706,8 @@ impl AlloyParts {
         let config = &self.config;
         let options = ServeOptions {
             name: "application",
+            #[cfg(feature = "bench-diagnostics")]
+            bench_io: self.bench_io.clone(),
             max_connections: config.server.max_connections,
             max_header_count: config.server.max_header_count,
             max_header_bytes: config.server.max_header_bytes,
@@ -737,6 +754,8 @@ impl AlloyParts {
                 router,
                 ServeOptions {
                     name: "management",
+                    #[cfg(feature = "bench-diagnostics")]
+                    bench_io: None,
                     max_connections: 64,
                     #[cfg(feature = "tls")]
                     tls: None,

@@ -172,6 +172,8 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
     let stream = TcpStream::connect(target.addr).await?;
     #[cfg(test)]
     tests::diagnostic_socket(stream.local_addr().ok());
+    #[cfg(test)]
+    let remote = stream.peer_addr().ok();
     stream.set_nodelay(true)?;
     let h2 = target.transport.http2();
     if target.workload == Workload::Cancel && !h2 {
@@ -185,7 +187,7 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             tests::diagnostic_worker_stage("http-handshake");
             #[cfg(test)]
             {
-                tests::diagnostic_handshake(stream, h2).await
+                tests::diagnostic_handshake(stream, h2, remote, false).await
             }
             #[cfg(not(test))]
             {
@@ -203,7 +205,7 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             tests::diagnostic_worker_stage("http-handshake");
             #[cfg(test)]
             {
-                tests::diagnostic_handshake(stream, h2).await
+                tests::diagnostic_handshake(stream, h2, remote, true).await
             }
             #[cfg(not(test))]
             {
@@ -592,6 +594,8 @@ async fn measure_workers<S>(
     }
     .await;
     if result.is_err() {
+        #[cfg(test)]
+        tests::diagnostic_first_failure("before-explicit-worker-shutdown");
         // Await cancellation so parked peers have released their senders and
         // connections before the failed run returns.
         #[cfg(test)]
@@ -759,15 +763,18 @@ pub(crate) mod tests {
         driver: usize,
     }
 
+    #[derive(Clone)]
     struct WorkerCapture {
         state: WorkerDiagnostic,
         connection: Option<ConnectionCapture>,
     }
 
+    #[derive(Clone)]
     struct HealthCapture {
         sample_start: Instant,
         sample_end: Instant,
         before_health_drop: bool,
+        boundary: &'static str,
         coordinator: CoordinatorDiagnostic,
         workers: [WorkerCapture; 4],
         observer: crate::health::ObserverCapture,
@@ -783,6 +790,8 @@ pub(crate) mod tests {
         workers: [Mutex<WorkerDiagnostic>; 4],
         worker_changed: [tokio::sync::Notify; 4],
         printed: AtomicBool,
+        server_wire_enabled: bool,
+        first_failure: Mutex<Option<Box<HealthCapture>>>,
     }
 
     impl HealthDiagnostics {
@@ -826,8 +835,33 @@ pub(crate) mod tests {
                     })
                 }),
                 printed: AtomicBool::new(false),
+                server_wire_enabled: false,
+                first_failure: Mutex::new(None),
                 worker_changed: std::array::from_fn(|_| tokio::sync::Notify::new()),
             }
+        }
+
+        pub(crate) fn with_transport(mut self, transport: Transport) -> Self {
+            self.server_wire_enabled = transport.http2();
+            self
+        }
+
+        pub(crate) fn server_wire(
+            &self,
+            local: Option<SocketAddr>,
+            remote: SocketAddr,
+            tls: bool,
+        ) -> Option<Arc<crate::health::WireObservation>> {
+            self.server_wire_enabled
+                .then(|| {
+                    self.observer.server_wire(
+                        &self.instance,
+                        local,
+                        remote,
+                        tls,
+                    )
+                })
+                .flatten()
         }
 
         pub(crate) fn with_origin(mut self, origin: &'static str) -> Self {
@@ -972,17 +1006,36 @@ pub(crate) mod tests {
                 sample_start,
                 sample_end: Instant::now(),
                 before_health_drop: false,
+                boundary: "current-state-after-possible-teardown",
                 coordinator,
                 workers,
                 observer,
             }
         }
 
+        fn freeze_first_failure(&self, boundary: &'static str) {
+            let mut first = self.first_failure.lock().unwrap_or_else(|e| e.into_inner());
+            if first.is_none() {
+                let mut capture = self.capture();
+                capture.boundary = boundary;
+                *first = Some(Box::new(capture));
+            }
+        }
+
+        fn failure_state(&self) -> Option<HealthCapture> {
+            self.first_failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref()
+                .cloned()
+        }
+
         pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
             if self.printed.load(Ordering::Relaxed) {
                 return;
             }
-            self.failure_capture(cell, reason, self.capture());
+            let capture = self.failure_state().unwrap_or_else(|| self.capture());
+            self.failure_capture(cell, reason, capture);
         }
 
         fn render(
@@ -1015,7 +1068,9 @@ pub(crate) mod tests {
             let _ = writeln!(
                 message,
                 "sample_start_us={} sample_end_us={} interval_us={} atomic=false \
-                 ages_to=sample_end before_health_future_drop={}",
+                 ages_to=sample_end before_health_future_drop={} capture_boundary={} \
+                 naturally-completed-failing-future-locals-may-already-be-destroyed \
+                 controlled-cleanup-order=fixture-asserted-only",
                 capture
                     .sample_start
                     .duration_since(self.started)
@@ -1023,6 +1078,7 @@ pub(crate) mod tests {
                 now.duration_since(self.started).as_micros(),
                 now.duration_since(capture.sample_start).as_micros(),
                 capture.before_health_drop,
+                capture.boundary,
             );
             let _ = writeln!(
                 message,
@@ -1031,7 +1087,9 @@ pub(crate) mod tests {
                  window_ms={} per_phase={} timeout_ms=15000 coordinator={} \
                  coordinator_stage_ms={} readiness={}/4 joined={}/4 \
                  coordinator_last_error_stage={:?} \
-                 wire_observer=client-plaintext-and-pinned-h2-poll wire_cause_may_be_unknown",
+                 wire_observer=client/server-plaintext-and-pinned-h2-client-poll \
+                 library_seam=bench-diagnostics/dev-dependency/runtime-instance-opt-in \
+                 wire_cause_may_be_unknown",
                 cell.scenario.name(),
                 cell.workload.name(),
                 cell.transport.name(),
@@ -1492,6 +1550,24 @@ pub(crate) mod tests {
             .split("#[test]")
             .next()
             .unwrap();
+        let measurement = client
+            .split("async fn measure_workers<S>(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) async fn drive<S>(")
+            .next()
+            .unwrap();
+        assert!(
+            measurement.find("diagnostic_first_failure(").unwrap()
+                < measurement.find("workers.shutdown().await").unwrap()
+        );
+        let initial = client
+            .split("async fn cancellation_health_inner<S>(")
+            .nth(1)
+            .unwrap();
+        assert!(initial.contains("capture_initial_dial_result(sender, &diagnostics)?"));
+        let library = include_str!("../../../crates/ferrum-alloy/src/server.rs");
+        assert!(library.contains("#[cfg(feature = \"bench-diagnostics\")]"));
         let production = client
             .split("#[cfg(test)]\npub(crate) mod tests")
             .next()
@@ -1826,7 +1902,12 @@ pub(crate) mod tests {
         });
     }
 
-    pub(super) async fn diagnostic_handshake<I>(io: I, h2: bool) -> Result<Sender, Failure>
+    pub(super) async fn diagnostic_handshake<I>(
+        io: I,
+        h2: bool,
+        remote: Option<SocketAddr>,
+        tls: bool,
+    ) -> Result<Sender, Failure>
     where
         I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -1837,11 +1918,13 @@ pub(crate) mod tests {
                         let mut connection = None;
                         diagnostics.worker(*index, |state| connection = state.connection.clone());
                         connection.and_then(|connection| {
-                            diagnostics.observer.wire(
+                            diagnostics.observer.wire_endpoint(
                                 &diagnostics.instance,
                                 connection.owner,
                                 connection.generation,
                                 connection.local_addr,
+                                remote,
+                                tls,
                             )
                         })
                     })
@@ -1941,6 +2024,12 @@ pub(crate) mod tests {
             if failed {
                 state.last_error_stage = Some(state.stage);
             }
+        });
+    }
+
+    pub(super) fn diagnostic_first_failure(boundary: &'static str) {
+        let _ = HEALTH_COORDINATOR.try_with(|diagnostics| {
+            diagnostics.freeze_first_failure(boundary);
         });
     }
 
@@ -2340,7 +2429,21 @@ pub(crate) mod tests {
                 )
                 .await
             });
+            let frozen = diagnostics.failure_state().unwrap();
+            assert_eq!(
+                frozen.boundary,
+                if preparation {
+                    "before-explicit-worker-shutdown"
+                } else {
+                    "before-initial-dial-error-worker-set-unwind"
+                },
+            );
+            let sample_end = frozen.sample_end;
             runtime.shutdown();
+            assert_eq!(
+                diagnostics.failure_state().unwrap().sample_end,
+                sample_end,
+            );
             assert!(result.unwrap().is_err());
             let mut retained = 0;
             for worker in 0..4 {
@@ -2602,12 +2705,161 @@ pub(crate) mod tests {
         health: Pin<Box<F>>,
         diagnostics: &HealthDiagnostics,
     ) -> HealthCapture {
-        let mut capture = diagnostics.capture();
+        let mut capture = diagnostics.failure_state().unwrap_or_else(|| {
+            let mut capture = diagnostics.capture();
+            capture.boundary = "before-outer-health-future-drop";
+            capture
+        });
         capture.before_health_drop = true;
+        let mut first = diagnostics
+            .first_failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if first.is_none() {
+            *first = Some(Box::new(capture.clone()));
+        }
+        drop(first);
         // Dropping the coordinator can abort JoinSet workers and release
         // senders. No subsequent rendering reads their evolving observations.
         drop(health);
         capture
+    }
+
+    #[tokio::test]
+    async fn first_error_freezes_live_peers_before_explicit_shutdown() {
+        struct LocalDrop(Arc<AtomicBool>);
+        impl Drop for LocalDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let peer_dropped = Arc::new(AtomicBool::new(false));
+        let failing_local_dropped = Arc::new(AtomicBool::new(false));
+        let mut workers = JoinSet::new();
+        let peer_guard = LocalDrop(Arc::clone(&peer_dropped));
+        workers.spawn(diagnostic_worker(Arc::clone(&diagnostics), 0, async move {
+            let _guard = peer_guard;
+            diagnostic_worker_stage("response-headers");
+            std::future::pending::<Result<Totals, Failure>>().await
+        }));
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            diagnostics.wait_stage(0, "response-headers"),
+        )
+        .await
+        .unwrap();
+        let failing_guard = LocalDrop(Arc::clone(&failing_local_dropped));
+        workers.spawn(diagnostic_worker(Arc::clone(&diagnostics), 1, async move {
+            let _guard = failing_guard;
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
+        }));
+        let (phase, _receiver) = watch::channel(Phase::Preparing);
+        let (_ready, mut readiness) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            HEALTH_COORDINATOR
+                .scope(Arc::clone(&diagnostics), async {
+                    measure_workers(
+                        load(4, 2),
+                        &phase,
+                        &mut readiness,
+                        &mut workers,
+                        2,
+                        || (),
+                    )
+                    .await
+                })
+                .await
+        })
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        assert!(peer_dropped.load(Ordering::SeqCst));
+        assert!(failing_local_dropped.load(Ordering::SeqCst));
+        let frozen = diagnostics.failure_state().unwrap();
+        assert_eq!(frozen.boundary, "before-explicit-worker-shutdown");
+        assert!(!frozen.before_health_drop);
+        assert_eq!(frozen.workers[0].state.outcome, "running");
+        assert_eq!(frozen.workers[1].state.outcome, "completed-error");
+        diagnostics.worker(0, |state| assert_eq!(state.outcome, "future-dropped"));
+        diagnostics.freeze_first_failure("later-capture-must-not-replace-first");
+        assert_eq!(
+            diagnostics.failure_state().unwrap().sample_end,
+            frozen.sample_end,
+        );
+    }
+
+    fn capture_initial_dial_result<T>(
+        result: Result<T, Failure>,
+        diagnostics: &HealthDiagnostics,
+    ) -> Result<T, Failure> {
+        if result.is_err() {
+            diagnostics.freeze_first_failure("before-initial-dial-error-worker-set-unwind");
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn real_dial_error_freezes_already_spawned_peers_before_unwind() {
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            addr: listener.local_addr().unwrap(),
+            transport: Transport::H2c,
+            workload: Workload::Cancel,
+            tls: None,
+        };
+        drop(listener);
+        let coordinator = Arc::clone(&diagnostics);
+        let result: Result<(), Failure> = async move {
+            let mut workers = JoinSet::new();
+            for index in 0..2 {
+                workers.spawn(diagnostic_worker(Arc::clone(&coordinator), index, async {
+                    diagnostic_worker_stage("response-headers");
+                    std::future::pending::<Result<Totals, Failure>>().await
+                }));
+            }
+            for index in 0..2 {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    coordinator.wait_stage(index, "response-headers"),
+                )
+                .await
+                .unwrap();
+            }
+            // Use the same result boundary as the real coordinator. The
+            // refused TCP future has naturally completed before sampling.
+            let failed = HEALTH_WORKER
+                .scope((Arc::clone(&coordinator), 2), dial(&target))
+                .await;
+            capture_initial_dial_result(failed, &coordinator)?;
+            Ok(())
+        }
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+        let frozen = diagnostics.failure_state().unwrap();
+        assert_eq!(frozen.boundary, "before-initial-dial-error-worker-set-unwind");
+        for index in 0..2 {
+            assert_eq!(frozen.workers[index].state.outcome, "running");
+        }
+        let tasks = diagnostics.observer.tasks("worker");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for task in tasks {
+                while !task.snapshot().dropped {
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        for index in 0..2 {
+            diagnostics.worker(index, |state| assert_eq!(state.outcome, "future-dropped"));
+        }
     }
 
     async fn cancellation_health_inner<S>(
@@ -2638,7 +2890,8 @@ pub(crate) mod tests {
                     }
                     result
                 })
-                .await?;
+                .await;
+            let sender = capture_initial_dial_result(sender, &diagnostics)?;
             let mut connection = None;
             diagnostics.worker(first, |state| connection = state.connection.clone());
             let mut senders = Vec::new();
@@ -3309,7 +3562,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn retained_sender_probe_gate_case(release_gate: bool) {
+    fn retained_sender_probe_gate_case(release_gate: bool, headers_shape: bool) {
         use crate::dims::{Cell, Scenario};
 
         let runtime = CancellationRuntime::new();
@@ -3319,12 +3572,20 @@ pub(crate) mod tests {
             duration: Duration::from_secs(5),
             ..load(4, 2)
         };
-        let origin = if release_gate {
+        let origin = if headers_shape && release_gate {
+            "controlled-two-headers-release"
+        } else if headers_shape {
+            "controlled-two-headers-blocked"
+        } else if release_gate {
             "controlled-retained-release"
         } else {
             "controlled-retained-blocked"
         };
-        let diagnostics = Arc::new(HealthDiagnostics::new(load).with_origin(origin));
+        let diagnostics = Arc::new(
+            HealthDiagnostics::new(load)
+                .with_transport(Transport::H2c)
+                .with_origin(origin),
+        );
         let accepted = Arc::new(AtomicUsize::new(0));
         let live = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
@@ -3349,6 +3610,7 @@ pub(crate) mod tests {
             let server_identities = Arc::clone(&identities);
             let server_drops = Arc::clone(&drops);
             let server_changed = Arc::clone(&changed);
+            let server_diagnostics = Arc::clone(&diagnostics);
             tokio::spawn(async move {
                 let _owner = LiveFixtureTask::new(Arc::clone(&server_live));
                 let mut connections = JoinSet::new();
@@ -3363,6 +3625,12 @@ pub(crate) mod tests {
                     let reuse_at = Arc::clone(&server_reuse_at);
                     let drops = Arc::clone(&server_drops);
                     let changed = Arc::clone(&server_changed);
+                    let wire = headers_shape.then(|| {
+                        server_diagnostics
+                            .server_wire(stream.local_addr().ok(), peer, false)
+                            .unwrap()
+                    });
+                    let observed = Arc::clone(&server_diagnostics);
                     let service = service_fn(move |_| {
                         let index = requests[connection].fetch_add(1, Ordering::SeqCst);
                         let threshold = reuse_at[connection].load(Ordering::SeqCst);
@@ -3381,21 +3649,42 @@ pub(crate) mod tests {
                         } else {
                             (None, None)
                         };
-                        std::future::ready(Ok::<_, Infallible>(Response::new(CountedGateBody {
-                            inner: GatedBody {
-                                release,
-                                cancelled,
-                                data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
-                                sent: false,
-                            },
-                            drops: Arc::clone(&drops),
-                            changed: Arc::clone(&changed),
-                        })))
+                        let observation = headers_shape
+                            .then(|| observed.observer.request(Some(peer)))
+                            .flatten();
+                        let drops = Arc::clone(&drops);
+                        let changed = Arc::clone(&changed);
+                        let response = async move {
+                            let mut release = release;
+                            if headers_shape && let Some(gate) = release.take() {
+                                gate.await.unwrap();
+                            }
+                            Response::new(axum::body::Body::new(CountedGateBody {
+                                inner: GatedBody {
+                                    release,
+                                    cancelled,
+                                    data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
+                                    sent: false,
+                                },
+                                drops,
+                                changed,
+                            }))
+                        };
+                        async move {
+                            let response = crate::health::response(response, observation).await;
+                            Ok::<_, Infallible>(response)
+                        }
                     });
                     let live = Arc::clone(&server_live);
                     connections.spawn(async move {
                         let _owner = LiveFixtureTask::new(live);
                         let builder = Builder::new(TokioExecutor::new());
+                        let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
+                            stream,
+                            wire.map(|wire| {
+                                wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                            }),
+                        );
                         let _ = builder
                             .serve_connection(TokioIo::new(stream), service)
                             .await;
@@ -3410,19 +3699,27 @@ pub(crate) mod tests {
                     // elapsed time or an assumed warm-up request count.
                     for connection in 0..2 {
                         let mut before = 0;
-                        for worker in (2 * connection)..(2 * connection + 2) {
+                        let peer = identities.lock().unwrap()[connection].unwrap();
+                        let mut owners = 0;
+                        for worker in 0..4 {
                             diagnostics.worker(worker, |state| {
+                                if state.connection.as_ref().unwrap().local_addr != Some(peer) {
+                                    return;
+                                }
+                                owners += 1;
                                 assert_eq!(state.phase, "draining");
                                 assert_eq!(state.exchanges[0].completed, 1);
                                 assert_eq!(
                                     state.exchanges[1].started,
                                     state.exchanges[1].completed,
                                 );
+                                assert!(state.exchanges[1].completed > 0);
                                 assert!(state.exchanges[1].completed <= 8);
                                 before += state.exchanges[0].completed as usize;
                                 before += state.exchanges[1].completed as usize;
                             });
                         }
+                        assert_eq!(owners, 2);
                         reuse_at[connection].store(before + 16, Ordering::SeqCst);
                     }
                 } else {
@@ -3466,8 +3763,8 @@ pub(crate) mod tests {
                         let connection = state.connection.as_ref().unwrap();
                         assert_eq!(connection.owner, (worker / 2) * 2);
                         assert_eq!(connection.generation, 1);
-                        let peer = identities.lock().unwrap()[worker / 2];
-                        assert_eq!(connection.local_addr, peer);
+                        assert!(identities.lock().unwrap().contains(&connection.local_addr));
+                        assert_eq!(state.connect_attempts, u64::from(worker.is_multiple_of(2)));
                     });
                 }
                 assert_eq!(measured, 32);
@@ -3480,11 +3777,78 @@ pub(crate) mod tests {
                 }
                 assert_eq!(drops.load(Ordering::SeqCst), before);
                 let held = if release_gate {
-                    None
+                    Vec::new()
+                } else if headers_shape {
+                    // Select owner 2 from its real original socket, never an
+                    // assumed accept order or a request/worker ordinal.
+                    let original = diagnostics.workers[2]
+                        .lock()
+                        .unwrap()
+                        .connection
+                        .as_ref()
+                        .unwrap()
+                        .local_addr
+                        .unwrap();
+                    let connection = identities
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .position(|peer| *peer == Some(original))
+                        .unwrap();
+                    let (held, released): (Vec<_>, Vec<_>) = std::mem::take(&mut probes)
+                        .into_iter()
+                        .partition(|probe| probe.connection == connection);
+                    assert_eq!(held.len(), 2);
+                    release_cancellations(released).await;
+                    for worker in 2..4 {
+                        diagnostics.wait_stage(worker, "response-headers").await;
+                    }
+                    let wires = diagnostics.observer.server_wires();
+                    let server = wires
+                        .iter()
+                        .find(|wire| wire.remote == Some(original))
+                        .unwrap();
+                    let server_state = server.snapshot();
+                    let received = server_state.header_streams(crate::health::Direction::Rx);
+                    let sent = server_state.header_streams(crate::health::Direction::Tx);
+                    let pending: Vec<_> = received
+                        .into_iter()
+                        .filter(|stream| !sent.contains(stream))
+                        .collect();
+                    assert_eq!(pending.len(), 2);
+                    let clients = diagnostics.observer.wires();
+                    let client = clients
+                        .iter()
+                        .find(|wire| wire.socket == Some(original))
+                        .unwrap();
+                    assert_eq!((client.owner, client.generation), (2, 1));
+                    let client_state = client.snapshot();
+                    let received = client_state.header_streams(crate::health::Direction::Rx);
+                    let sent = client_state.header_streams(crate::health::Direction::Tx);
+                    let client_pending: Vec<_> = sent
+                        .into_iter()
+                        .filter(|stream| !received.contains(stream))
+                        .collect();
+                    assert_eq!(client_pending, pending);
+                    let requests = diagnostics.observer.requests();
+                    assert_eq!(
+                        requests
+                            .iter()
+                            .filter(|request| {
+                                request.socket == Some(original)
+                                    && request.response.lock().unwrap().is_none()
+                                    && request.handler.snapshot().pending > 0
+                            })
+                            .count(),
+                        2,
+                    );
+                    held
                 } else {
-                    Some(probes.remove(0))
+                    vec![probes.remove(0)]
                 };
-                release_cancellations(probes).await;
+                if release_gate || !headers_shape {
+                    release_cancellations(probes).await;
+                }
                 let result = health.await;
                 // Own the whole retained gate through the await. Timeout drops
                 // it, but the current-thread owner destroys tasks before any
@@ -3526,7 +3890,8 @@ pub(crate) mod tests {
             assert!(error.is::<tokio::time::error::Elapsed>());
             let state = diagnostics.coordinator.lock().unwrap();
             assert_eq!(state.stage, "worker-joins-and-reuse");
-            assert_eq!(state.joined, 3);
+            assert_eq!(state.readiness, 4);
+            assert_eq!(state.joined, if headers_shape { 2 } else { 3 });
             drop(state);
             let mut pending = 0;
             for worker in 0..4 {
@@ -3536,17 +3901,80 @@ pub(crate) mod tests {
                     assert_eq!(state.exchanges[2].completed, 8);
                     if state.exchanges[3].completed == 0 {
                         pending += 1;
-                        assert_eq!(state.stage, "first-data-frame");
+                        assert_eq!(
+                            state.stage,
+                            if headers_shape {
+                                "response-headers"
+                            } else {
+                                "first-data-frame"
+                            },
+                        );
                         assert_eq!(state.exchanges[3].started, 1);
                         assert_eq!(state.exchanges[3].bytes, 0);
                     }
                 });
             }
-            assert_eq!(pending, 1);
+            assert_eq!(pending, if headers_shape { 2 } else { 1 });
+        }
+        let mut frozen = diagnostics.capture();
+        frozen.boundary = "controlled-before-server-runtime-cleanup";
+        let cell = Cell {
+            scenario: Scenario::Plain,
+            workload: Workload::Cancel,
+            transport: Transport::H2c,
+        };
+        let frozen_text = diagnostics.render(cell, "controlled-before-runtime-cleanup", &frozen);
+        if headers_shape {
+            if !release_gate {
+                let failure = diagnostics.failure_state().unwrap();
+                assert!(failure.before_health_drop);
+                assert_eq!(failure.boundary, "before-outer-health-future-drop");
+                assert_eq!(failure.coordinator.readiness, 4);
+                assert_eq!(failure.coordinator.joined, 2);
+                for worker in 2..4 {
+                    assert_eq!(failure.workers[worker].state.stage, "response-headers");
+                    assert_eq!(failure.workers[worker].state.outcome, "running");
+                    let connection = failure.workers[worker].connection.unwrap();
+                    assert_eq!((connection.owner, connection.generation), (2, 1));
+                    assert!(identities.lock().unwrap().contains(&connection.local_addr));
+                }
+            } else {
+                let state = diagnostics.coordinator.lock().unwrap();
+                assert_eq!(state.readiness, 4);
+                assert_eq!(state.joined, 4);
+            }
+            let servers = diagnostics.observer.server_wires();
+            let clients = diagnostics.observer.wires();
+            assert_eq!(servers.len(), 2);
+            assert_ne!(clients[0].socket, clients[1].socket);
+            for client in clients {
+                let server = servers
+                    .iter()
+                    .find(|wire| wire.remote == client.socket)
+                    .unwrap();
+                let server = server.snapshot();
+                let client = client.snapshot();
+                assert_eq!(
+                    server.header_streams(crate::health::Direction::Rx),
+                    client.header_streams(crate::health::Direction::Tx),
+                );
+                assert_eq!(
+                    server.header_streams(crate::health::Direction::Tx),
+                    client.header_streams(crate::health::Direction::Rx),
+                );
+                assert!(server.directions[0].data_complete > 0);
+                assert!(server.directions[1].bytes > 24);
+            }
+            assert!(frozen_text.contains("handler_stream_id=unknown"));
+            assert!(frozen_text.contains("boundary=server-plaintext-I/O"));
         }
         // Destruction is checked after shutdown, separately from the earlier
         // timeout snapshot. This includes discarded drivers and H2 children.
         runtime.shutdown();
+        assert_eq!(
+            frozen_text,
+            diagnostics.render(cell, "controlled-before-runtime-cleanup", &frozen),
+        );
         assert_eq!(metrics.num_alive_tasks(), 0);
         assert_eq!(live.load(Ordering::SeqCst), 0);
         let mut destroyed = 0;
@@ -3558,24 +3986,50 @@ pub(crate) mod tests {
                 assert!(matches!(driver.load(Ordering::Relaxed), 2..=4));
                 if state.outcome == "future-dropped" {
                     destroyed += 1;
-                    assert_eq!(state.stage, "first-data-frame");
+                    assert_eq!(
+                        state.stage,
+                        if headers_shape {
+                            "response-headers"
+                        } else {
+                            "first-data-frame"
+                        },
+                    );
                 } else {
                     assert_eq!(state.outcome, "completed-ok");
                     assert_eq!(state.exchanges[3].completed, 1);
                 }
             });
         }
-        assert_eq!(destroyed, usize::from(!release_gate));
+        assert_eq!(
+            destroyed,
+            if release_gate {
+                0
+            } else if headers_shape {
+                2
+            } else {
+                1
+            },
+        );
     }
 
     #[test]
     fn retained_sender_probe_timeout_preserves_reuse_evidence_and_destroys_tasks() {
-        retained_sender_probe_gate_case(false);
+        retained_sender_probe_gate_case(false, false);
     }
 
     #[test]
     fn released_retained_sender_probe_reuses_both_connections() {
-        retained_sender_probe_gate_case(true);
+        retained_sender_probe_gate_case(true, false);
+    }
+
+    #[test]
+    fn two_owner2_headers_reproduce_only_the_controlled_historical_pending_shape() {
+        retained_sender_probe_gate_case(false, true);
+    }
+
+    #[test]
+    fn released_two_header_control_completes_on_both_original_sockets() {
+        retained_sender_probe_gate_case(true, true);
     }
 
     /// Exercise real workers and transport identities without assuming that a

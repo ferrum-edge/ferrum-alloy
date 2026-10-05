@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
+use ferrum_alloy::bench_diagnostics::{IoObserver, Operation, Outcome};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 const TASK_SLOTS: usize = 160;
 const REQUEST_SLOTS: usize = 72;
 const WIRE_CONNECTIONS: usize = 2;
+const SERVER_CONNECTIONS: usize = 2;
 const WIRE_STREAMS: usize = 36;
 const WIRE_EVENTS: usize = 64;
 
@@ -156,6 +158,7 @@ pub(crate) struct WireDirection {
     settings_pending: [Option<u32>; 6],
     settings_complete: [Option<Setting>; 6],
     errors: u64,
+    outcomes: [[u64; 3]; 5],
     last_header: Option<FramePoint>,
     last_complete: Option<FramePoint>,
 }
@@ -172,6 +175,7 @@ pub(crate) struct WireState {
     streams: [Option<WireStream>; WIRE_STREAMS],
     events: [Option<WireEvent>; WIRE_EVENTS],
     sequence: u64,
+    reset_direction: Direction,
     events_next: usize,
     pub(crate) events_overwritten: u64,
     pub(crate) streams_omitted: u64,
@@ -187,6 +191,7 @@ impl Default for WireState {
             streams: [None; WIRE_STREAMS],
             events: [None; WIRE_EVENTS],
             sequence: 0,
+            reset_direction: Direction::Tx,
             events_next: 0,
             events_overwritten: 0,
             streams_omitted: 0,
@@ -195,6 +200,23 @@ impl Default for WireState {
 }
 
 impl WireState {
+    fn server() -> Self {
+        let mut state = Self::default();
+        state.directions[0].preface = H2_PREFACE.len();
+        state.directions[1].preface = 0;
+        state.reset_direction = Direction::Rx;
+        state
+    }
+
+    pub(crate) fn header_streams(&self, direction: Direction) -> Vec<u32> {
+        self.streams
+            .iter()
+            .flatten()
+            .filter(|stream| stream.directions[direction.index()].blocks_complete > 0)
+            .map(|stream| stream.id)
+            .collect()
+    }
+
     pub(crate) fn has_goaway(&self, direction: Direction, last_stream: u32, reason: u32) -> bool {
         self.events.iter().flatten().any(|event| {
             event.direction == direction
@@ -270,6 +292,7 @@ impl WireState {
         if header.kind == 4 {
             parser.settings_pending = [None; 6];
         }
+        let reset_direction = self.reset_direction;
         let mut late = false;
         if let Some(stream) = self.stream(header.stream, true) {
             let progress = &mut stream.directions[index];
@@ -283,7 +306,7 @@ impl WireState {
                 progress.data.flags = header.flags;
                 let _ = progress.data.first.get_or_insert(mark);
                 progress.data.last = Some(mark);
-                late = direction == Direction::Rx && stream.reset.is_some();
+                late = direction != reset_direction && stream.reset.is_some();
                 if late {
                     stream.late.seen = stream.late.seen.saturating_add(1);
                     stream.late.length = header.length;
@@ -348,6 +371,7 @@ impl WireState {
                 _ => None,
             }
         };
+        let reset_direction = self.reset_direction;
         if let Some(stream) = self.stream(header.stream, false) {
             let progress = &mut stream.directions[index];
             progress.headers_complete = progress
@@ -368,7 +392,7 @@ impl WireState {
                     stream.late.last = Some(mark);
                 }
             }
-            if direction == Direction::Tx
+            if direction == reset_direction
                 && let Some(WireValue::Reset(reason)) = value
             {
                 stream.reset = Some(mark);
@@ -502,9 +526,25 @@ pub(crate) struct WireObservation {
     pub(crate) generation: u64,
     pub(crate) socket: Option<SocketAddr>,
     state: Mutex<WireState>,
+    endpoint: &'static str,
+    pub(crate) remote: Option<SocketAddr>,
+    tls: bool,
 }
 
 impl WireObservation {
+    fn capture(&self) -> WireCapture {
+        WireCapture {
+            instance: self.instance,
+            owner: self.owner,
+            generation: self.generation,
+            socket: self.socket,
+            remote: self.remote,
+            tls: self.tls,
+            endpoint: self.endpoint,
+            state: self.snapshot(),
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> WireState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -517,12 +557,55 @@ impl WireObservation {
     }
 }
 
+impl IoObserver for WireObservation {
+    fn prefix(&self, operation: Operation, bytes: &[u8]) {
+        let direction = match operation {
+            Operation::Read => Direction::Rx,
+            Operation::Write | Operation::WriteVectored => Direction::Tx,
+            Operation::Flush | Operation::Shutdown => return,
+        };
+        self.feed(direction, bytes);
+    }
+
+    fn outcome(&self, operation: Operation, outcome: Outcome, eof: bool) {
+        let (direction, operation) = match operation {
+            Operation::Read => (1, 0),
+            Operation::Write => (0, 1),
+            Operation::WriteVectored => (0, 2),
+            Operation::Flush => (0, 3),
+            Operation::Shutdown => (0, 4),
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if eof {
+            let mark = state.mark();
+            state.directions[direction].eof = true;
+            let _ = state.directions[direction].eof_mark.get_or_insert(mark);
+        }
+        let parser = &mut state.directions[direction];
+        let result = match outcome {
+            Outcome::Pending => 0,
+            Outcome::Ok => 1,
+            Outcome::Error => 2,
+        };
+        let counter = &mut parser.outcomes[operation][result];
+        *counter = counter.saturating_add(1);
+        // Tx errors count actual scalar/vector writes, never flush/shutdown.
+        if result == 2 && operation <= 2 {
+            parser.errors = parser.errors.saturating_add(1);
+        }
+    }
+}
+
+#[derive(Clone)]
 struct WireCapture {
     instance: [u8; 36],
     owner: usize,
     generation: u64,
     socket: Option<SocketAddr>,
     state: WireState,
+    endpoint: &'static str,
+    remote: Option<SocketAddr>,
+    tls: bool,
 }
 
 impl WireCapture {
@@ -532,13 +615,16 @@ impl WireCapture {
         let _ = writeln!(
             text,
             "wire instance={instance} owner={} gen={} socket={:?} seq={} \
-             stream_header_omissions={} control_overwrites={}",
+             stream_header_omissions={} control_overwrites={} endpoint={} remote={:?} tls={}",
             self.owner,
             self.generation,
             self.socket,
             state.sequence,
             state.streams_omitted,
             state.events_overwritten,
+            self.endpoint,
+            self.remote,
+            self.tls,
         );
         for direction in [Direction::Tx, Direction::Rx] {
             let parser = &state.directions[direction.index()];
@@ -568,6 +654,15 @@ impl WireCapture {
                 parser.invalid_streams,
                 parser.settings_omitted,
                 parser.errors,
+            );
+            let (operations, outcomes) = match direction {
+                Direction::Tx => ("scalar/vector/flush/shutdown", &parser.outcomes[1..]),
+                Direction::Rx => ("read", &parser.outcomes[..1]),
+            };
+            let _ = writeln!(
+                text,
+                "wire {direction:?} outcomes_hex({operations})={outcomes:x?} \
+                 fields=pending/ok/error",
             );
             for (stage, point) in [
                 ("last_header", parser.last_header),
@@ -606,11 +701,17 @@ impl WireCapture {
                 }
             }
         }
+    }
+
+    fn write_first(&self, text: &mut impl Write, now: Instant) {
+        let state = &self.state;
         let _ = writeln!(
             text,
-            "wire first marks_hex=seq:age_us s_hex=numeric-stream-id \
-             Tx/Rx=first-HEADERS-seen/complete/END_HEADERS cancel=first-complete-Tx-CANCEL \
-             rst=latest-complete-Tx-RST:reason_hex",
+            "wire first owner={} gen={} endpoint={} remote={:?} \
+             marks_hex=seq:age_us s_hex=numeric-stream-id \
+             Tx/Rx=first-HEADERS-seen/complete/END_HEADERS cancel=first-complete-CANCEL \
+             rst=latest-complete-RST:reason_hex reset_direction={:?}",
+            self.owner, self.generation, self.endpoint, self.remote, state.reset_direction,
         );
         for stream in state.streams.iter().flatten() {
             let _ = write!(text, "wire first s_hex={:x}", stream.id);
@@ -641,9 +742,12 @@ impl WireCapture {
         let state = &self.state;
         let _ = writeln!(
             text,
-            "wire streams_hex s=numeric-stream-id h=seen/complete/blocks \
+            "wire streams_hex endpoint={} owner={:x} gen={:x} \
+             s=numeric-stream-id h=seen/complete/blocks \
              d(DATA)=seen/complete/payload_bytes,last_length:flags,first,last \
-             marks=seq:age_us late=Rx-DATA-header-after-complete-Tx-RST",
+             marks=seq:age_us late=opposite-direction-DATA-header-after-complete-RST \
+             reset_direction={:?}",
+            self.endpoint, self.owner, self.generation, state.reset_direction,
         );
         for stream in state.streams.iter().flatten() {
             let _ = write!(text, "wire s={:x}", stream.id);
@@ -674,8 +778,8 @@ impl WireCapture {
         let state = &self.state;
         let _ = writeln!(
             text,
-            "wire controls_hex owner={:x} gen={:x} unowned={unowned}",
-            self.owner, self.generation,
+            "wire controls_hex endpoint={} owner={:x} gen={:x} unowned={unowned}",
+            self.endpoint, self.owner, self.generation,
         );
         for offset in 0..WIRE_EVENTS {
             let index = (state.events_next + offset) % WIRE_EVENTS;
@@ -771,110 +875,9 @@ fn write_data(text: &mut impl Write, data: DataProgress, now: Instant) {
     write_mark(text, data.last, now);
 }
 
-// health.rs is compiled only under cfg(test). The wrapper owns no buffering
-// and never substitutes a context, waker, I/O call, result or vectored policy.
-pub(crate) struct WireIo<I> {
-    inner: I,
-    observation: Arc<WireObservation>,
-}
-
-impl<I> WireIo<I> {
-    pub(crate) fn new(inner: I, observation: Arc<WireObservation>) -> Self {
-        Self { inner, observation }
-    }
-}
-
-impl<I: AsyncRead + Unpin> AsyncRead for WireIo<I> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        let before = buf.filled().len();
-        let capacity = buf.remaining();
-        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
-        let bytes = &buf.filled()[before..];
-        if !bytes.is_empty() {
-            this.observation.feed(Direction::Rx, bytes);
-        }
-        if matches!(&result, Poll::Ready(Ok(()))) && bytes.is_empty() && capacity > 0 {
-            let mut state = this
-                .observation
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let mark = state.mark();
-            state.directions[1].eof = true;
-            let _ = state.directions[1].eof_mark.get_or_insert(mark);
-        }
-        if matches!(&result, Poll::Ready(Err(_))) {
-            let mut state = this
-                .observation
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let parser = &mut state.directions[1];
-            parser.errors = parser.errors.saturating_add(1);
-        }
-        result
-    }
-}
-
-impl<I: AsyncWrite + Unpin> AsyncWrite for WireIo<I> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(count)) = &result {
-            this.observation.feed(Direction::Tx, &buf[..*count]);
-        }
-        result
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        let result = Pin::new(&mut this.inner).poll_write_vectored(cx, bufs);
-        if let Poll::Ready(Ok(count)) = &result {
-            let mut state = this
-                .observation
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let mut remaining = *count;
-            for buf in bufs {
-                let count = remaining.min(buf.len());
-                if count > 0 {
-                    state.feed(Direction::Tx, &buf[..count]);
-                }
-                remaining -= count;
-                if remaining == 0 {
-                    break;
-                }
-            }
-        }
-        result
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
-    }
-}
+// Both endpoints use the identical one-delegation wrapper. The library is
+// explicitly compiled with the seam by the benchmark's dev dependency only.
+pub(crate) type WireIo<I> = ferrum_alloy::bench_diagnostics::PlaintextIo<I>;
 
 #[derive(Clone, Default)]
 pub(crate) struct PollState {
@@ -1118,11 +1121,12 @@ struct Slots {
     requests_omitted: u64,
 }
 
-struct WireSlots {
-    connections: [Option<Arc<WireObservation>>; WIRE_CONNECTIONS],
+struct WireSlots<const CONNECTIONS: usize> {
+    connections: [Option<Arc<WireObservation>>; CONNECTIONS],
     omitted: u64,
 }
 
+#[derive(Clone)]
 struct TaskCapture {
     kind: &'static str,
     owner: usize,
@@ -1132,6 +1136,7 @@ struct TaskCapture {
     state: PollState,
 }
 
+#[derive(Clone)]
 struct RequestCapture {
     socket: Option<SocketAddr>,
     ordinal: usize,
@@ -1142,10 +1147,13 @@ struct RequestCapture {
     frames: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct ObserverCapture {
     tasks: [Option<TaskCapture>; TASK_SLOTS],
     requests: [Option<RequestCapture>; REQUEST_SLOTS],
     connections: [Option<WireCapture>; WIRE_CONNECTIONS],
+    server_connections: [Option<WireCapture>; SERVER_CONNECTIONS],
+    server_connections_omitted: u64,
     tasks_omitted: u64,
     requests_omitted: u64,
     connections_omitted: u64,
@@ -1153,7 +1161,8 @@ pub(crate) struct ObserverCapture {
 
 pub(crate) struct Observer {
     slots: Mutex<Slots>,
-    wire: Mutex<WireSlots>,
+    wire: Mutex<WireSlots<WIRE_CONNECTIONS>>,
+    server_wire: Mutex<WireSlots<SERVER_CONNECTIONS>>,
     pub(crate) wire_gate: Mutex<Option<Arc<Gate>>>,
 }
 
@@ -1165,6 +1174,10 @@ impl Default for Observer {
                 requests: std::array::from_fn(|_| None),
                 tasks_omitted: 0,
                 requests_omitted: 0,
+            }),
+            server_wire: Mutex::new(WireSlots {
+                connections: std::array::from_fn(|_| None),
+                omitted: 0,
             }),
             wire_gate: Mutex::new(None),
             wire: Mutex::new(WireSlots {
@@ -1183,6 +1196,18 @@ impl Observer {
         generation: u64,
         socket: Option<SocketAddr>,
     ) -> Option<Arc<WireObservation>> {
+        self.wire_endpoint(instance, owner, generation, socket, None, false)
+    }
+
+    pub(crate) fn wire_endpoint(
+        &self,
+        instance: &str,
+        owner: usize,
+        generation: u64,
+        socket: Option<SocketAddr>,
+        remote: Option<SocketAddr>,
+        tls: bool,
+    ) -> Option<Arc<WireObservation>> {
         let mut slots = self.wire.lock().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = slots.connections.iter_mut().find(|slot| slot.is_none()) else {
             slots.omitted = slots.omitted.saturating_add(1);
@@ -1197,9 +1222,47 @@ impl Observer {
             generation,
             socket,
             state: Mutex::new(WireState::default()),
+            endpoint: "client",
+            remote,
+            tls,
         });
         *slot = Some(Arc::clone(&observation));
         Some(observation)
+    }
+
+    pub(crate) fn server_wire(
+        &self,
+        instance: &str,
+        local: Option<SocketAddr>,
+        remote: SocketAddr,
+        tls: bool,
+    ) -> Option<Arc<WireObservation>> {
+        let mut slots = self.server_wire.lock().unwrap_or_else(|e| e.into_inner());
+        let index = slots.connections.iter().position(Option::is_none);
+        let Some(index) = index else {
+            slots.omitted = slots.omitted.saturating_add(1);
+            return None;
+        };
+        let mut identity = [0; 36];
+        let count = instance.len().min(identity.len());
+        identity[..count].copy_from_slice(&instance.as_bytes()[..count]);
+        let observation = Arc::new(WireObservation {
+            instance: identity,
+            owner: index,
+            generation: 1,
+            socket: local,
+            remote: Some(remote),
+            tls,
+            endpoint: "server-accepted-connection",
+            state: Mutex::new(WireState::server()),
+        });
+        slots.connections[index] = Some(Arc::clone(&observation));
+        Some(observation)
+    }
+
+    pub(crate) fn server_wires(&self) -> Vec<Arc<WireObservation>> {
+        let slots = self.server_wire.lock().unwrap_or_else(|e| e.into_inner());
+        slots.connections.iter().flatten().map(Arc::clone).collect()
     }
 
     pub(crate) fn wires(&self) -> Vec<Arc<WireObservation>> {
@@ -1236,23 +1299,23 @@ impl Observer {
         let requests_omitted = slots.requests_omitted;
         drop(slots);
         let wire = self.wire.lock().unwrap_or_else(|e| e.into_inner());
+        let connections = std::array::from_fn(|index| {
+            wire.connections[index].as_ref().map(|wire| wire.capture())
+        });
+        let connections_omitted = wire.omitted;
+        drop(wire);
+        let server = self.server_wire.lock().unwrap_or_else(|e| e.into_inner());
         ObserverCapture {
             tasks,
             requests,
-            connections: std::array::from_fn(|index| {
-                wire.connections[index]
-                    .as_ref()
-                    .map(|observation| WireCapture {
-                        instance: observation.instance,
-                        owner: observation.owner,
-                        generation: observation.generation,
-                        socket: observation.socket,
-                        state: observation.snapshot(),
-                    })
+            connections,
+            server_connections: std::array::from_fn(|index| {
+                server.connections[index].as_ref().map(|wire| wire.capture())
             }),
+            server_connections_omitted: server.omitted,
             tasks_omitted,
             requests_omitted,
-            connections_omitted: wire.omitted,
+            connections_omitted,
         }
     }
 
@@ -1342,8 +1405,32 @@ impl ObserverCapture {
              receipt_is_not_decode socket_ordinal_is_not_stream_id",
             self.connections_omitted,
         );
-        for observation in self.connections.iter().flatten() {
+        if self.server_connections.iter().any(Option::is_some) || self.server_connections_omitted > 0 {
+            let _ = writeln!(
+                text,
+                "server wire slots(connection,stream,control)=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
+                 connections_omitted={} boundary=server-plaintext-I/O \
+                 client-Tx/server-Rx=preface server-Tx/client-Rx=no-preface \
+                 server_owner=accepted-socket-ordinal handler_stream_id=unknown \
+                 endpoint_samples=sequential-non-atomic TLS_acceptance_is_not_ciphertext_transmission",
+                self.server_connections_omitted,
+            );
+        } else {
+            let _ = writeln!(
+                text,
+                "server wire observed_connections=0 status=no-retained-server-endpoint",
+            );
+        }
+        for observation in self
+            .connections
+            .iter()
+            .chain(&self.server_connections)
+            .flatten()
+        {
             observation.write_core(text, now);
+        }
+        for observation in self.connections.iter().flatten() {
+            observation.write_first(text, now);
         }
         // Preserve controls without a retained stream owner, including stream
         // zero and omitted stream IDs, before potentially saturated DATA detail.
@@ -1353,6 +1440,12 @@ impl ObserverCapture {
     }
 
     pub(crate) fn write_wire_detail(&self, text: &mut impl Write, now: Instant) {
+        for observation in self.server_connections.iter().flatten() {
+            observation.write_first(text, now);
+            observation.write_events(text, now, true);
+            observation.write_events(text, now, false);
+            observation.write_streams(text, now);
+        }
         for observation in self.connections.iter().flatten() {
             observation.write_streams(text, now);
         }
@@ -1805,6 +1898,8 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(error.to_string(), "private-write-error");
         assert_eq!(observation.snapshot().directions[0].bytes, 0);
+        assert_eq!(observation.snapshot().directions[0].errors, 1);
+        assert_eq!(observation.snapshot().directions[0].outcomes[1], [1, 0, 1]);
         assert!(matches!(
             Pin::new(&mut io).poll_write(&mut cx, &transcript),
             Poll::Ready(Ok(5))
@@ -1826,6 +1921,8 @@ mod tests {
             Poll::Ready(Err(_))
         ));
         assert_eq!(observation.snapshot().directions[0].bytes, 5);
+        assert_eq!(observation.snapshot().directions[0].errors, 2);
+        assert_eq!(observation.snapshot().directions[0].outcomes[2], [1, 0, 1]);
         assert!(matches!(
             Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs),
             Poll::Ready(Ok(11))
@@ -1839,13 +1936,13 @@ mod tests {
             Pin::new(&mut io).poll_write(&mut cx, &transcript),
             Poll::Ready(Ok(0))
         ));
-        assert_eq!(io.inner.accepted, transcript);
-        assert_eq!(io.inner.scalar_calls.len(), 5);
-        for (pointer, bytes) in &io.inner.scalar_calls[..3] {
+        assert_eq!(io.inner_mut().accepted, transcript);
+        assert_eq!(io.inner_mut().scalar_calls.len(), 5);
+        for (pointer, bytes) in &io.inner_mut().scalar_calls[..3] {
             assert_eq!(*pointer, transcript.as_ptr() as usize);
             assert_eq!(*bytes, transcript);
         }
-        for call in &io.inner.vector_calls {
+        for call in &io.inner_mut().vector_calls {
             assert_eq!(call.len(), bufs.len());
             for ((pointer, bytes), buf) in call.iter().zip(&bufs) {
                 assert_eq!(*pointer, buf.as_ptr() as usize);
@@ -1868,7 +1965,7 @@ mod tests {
             Pin::new(&mut io).poll_read(&mut cx, &mut buf),
             Poll::Ready(Ok(()))
         ));
-        assert_eq!(io.inner.read_calls, [(pointer, 3, 13); 3]);
+        assert_eq!(io.inner_mut().read_calls, [(pointer, 3, 13); 3]);
         assert_eq!(observation.snapshot().directions[1].bytes, 0);
         assert!(observation.snapshot().directions[1].eof);
         for shutdown in [false, true] {
@@ -1886,13 +1983,102 @@ mod tests {
             }
         }
         assert_eq!(wake.0.load(Ordering::SeqCst), 5);
-        io.inner.vectored = false;
+        io.inner_mut().vectored = false;
         assert!(!io.is_write_vectored());
         let state = observation.snapshot();
         assert_eq!(state.directions[0].bytes, transcript.len() as u64);
         assert_eq!(state.directions[0].headers_seen, 2);
         assert_eq!(state.directions[0].frames_complete, 2);
+        assert_eq!(state.directions[0].errors, 2);
+        assert_eq!(state.directions[0].outcomes[1], [1, 3, 1]);
+        assert_eq!(state.directions[0].outcomes[2], [1, 1, 1]);
+        assert_eq!(state.directions[0].outcomes[3], [1, 1, 1]);
+        assert_eq!(state.directions[0].outcomes[4], [1, 1, 1]);
+        assert_eq!(state.directions[1].errors, 1);
+        assert_eq!(state.directions[1].outcomes[0], [1, 1, 1]);
         assert!(state.streams[0].unwrap().reset.is_some());
+    }
+
+    #[test]
+    fn server_preface_and_unaccepted_encoded_write_control_are_distinct() {
+        let observer = Observer::default();
+        let remote = "127.0.0.1:12345".parse().unwrap();
+        let wire = observer
+            .server_wire(INSTANCE, None, remote, false)
+            .unwrap();
+        let mut request = H2_PREFACE.to_vec();
+        request.extend(frame(1, 5, 17, b"private-request-hpack"));
+        request.extend(frame(3, 0, 17, &8_u32.to_be_bytes()));
+        let mut response = frame(1, 4, 17, b"private-response-hpack");
+        response.extend(frame(0, 0, 17, b"private-data"));
+        let inner = MockIo {
+            reads: request
+                .iter()
+                .map(|byte| ReadStep::Bytes(vec![*byte]))
+                .collect(),
+            writes: [
+                WriteStep::Pending,
+                WriteStep::Error,
+                WriteStep::Accept(8),
+                WriteStep::Accept(response.len() - 8),
+            ]
+            .into(),
+            ..MockIo::default()
+        };
+        let mut io = WireIo::new(inner, Arc::clone(&wire));
+        let waker = Waker::from(Arc::new(CountWake::default()));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..request.len() {
+            let mut storage = [0; 1];
+            let mut buf = ReadBuf::new(&mut storage);
+            assert!(matches!(
+                Pin::new(&mut io).poll_read(&mut cx, &mut buf),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        assert_eq!(wire.snapshot().header_streams(Direction::Rx), [17]);
+        assert_eq!(wire.snapshot().streams[0].unwrap().reset_reason, Some(8));
+        assert!(
+            Pin::new(&mut io)
+                .poll_write(&mut cx, &response)
+                .is_pending()
+        );
+        assert!(matches!(
+            Pin::new(&mut io).poll_write(&mut cx, &response),
+            Poll::Ready(Err(_))
+        ));
+        let state = wire.snapshot();
+        assert_eq!(state.directions[0].bytes, 0);
+        assert_eq!(state.directions[0].errors, 1);
+        assert!(state.header_streams(Direction::Tx).is_empty());
+        assert!(matches!(
+            Pin::new(&mut io).poll_write(&mut cx, &response),
+            Poll::Ready(Ok(8))
+        ));
+        assert!(wire.snapshot().header_streams(Direction::Tx).is_empty());
+        let frozen = observer.capture();
+        let now = Instant::now();
+        let mut before = String::new();
+        frozen.write_wire(&mut before, now);
+        assert!(matches!(
+            Pin::new(&mut io).poll_write(&mut cx, &response[8..]),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(wire.snapshot().header_streams(Direction::Tx), [17]);
+        assert_eq!(io.inner_mut().accepted, response);
+        assert_eq!(wire.snapshot().streams[0].unwrap().late.complete, 1);
+        assert!(!wire.snapshot().directions[1].preface_invalid);
+        let mut after = String::new();
+        frozen.write_wire(&mut after, now);
+        assert_eq!(before, after);
+        assert!(!before.contains("private-"));
+        assert_eq!(observer.server_wires().len(), 1);
+        observer.server_wire(INSTANCE, None, remote, true).unwrap();
+        assert!(observer.server_wire(INSTANCE, None, remote, false).is_none());
+        assert!(observer.wires().is_empty());
+        let mut bounded = String::new();
+        observer.capture().write_wire(&mut bounded, now);
+        assert!(bounded.contains("connections_omitted=1 boundary=server-plaintext-I/O"));
     }
 
     #[test]
@@ -1950,8 +2136,8 @@ mod tests {
         assert_eq!(state.directions[0].bytes, 37);
         let mut accepted = H2_PREFACE.to_vec();
         accepted.extend(reset);
-        assert_eq!(io.inner.accepted, accepted);
-        assert_eq!(io.inner.vector_calls.len(), 4);
+        assert_eq!(io.inner_mut().accepted, accepted);
+        assert_eq!(io.inner_mut().vector_calls.len(), 4);
     }
 
     #[test]
@@ -1989,7 +2175,7 @@ mod tests {
         goaway.extend(b"private-goaway-debug");
         rx.extend(frame(7, 0, 0, &goaway));
         let split = 34; // Fragment numerical SETTINGS; coalesce the rest.
-        io.inner.reads = rx[..split]
+        io.inner_mut().reads = rx[..split]
             .iter()
             .map(|byte| ReadStep::Bytes(vec![*byte]))
             .chain([ReadStep::Bytes(rx[split..].to_vec()), ReadStep::Eof])
@@ -2388,6 +2574,7 @@ mod tests {
                 direction.invalid_streams = u64::MAX;
                 direction.settings_omitted = u64::MAX;
                 direction.errors = u64::MAX;
+                direction.outcomes = [[u64::MAX; 3]; 5];
                 direction.settings_complete = [Some(Setting {
                     value: u32::MAX,
                     mark,
@@ -2445,16 +2632,32 @@ mod tests {
                 }),
             }); WIRE_EVENTS];
         }
+        for (index, wire) in left.wires().iter().enumerate() {
+            let server = left
+                .server_wire(
+                    INSTANCE,
+                    None,
+                    SocketAddr::from(([127, 0, 0, 1], 12345 + index as u16)),
+                    false,
+                )
+                .unwrap();
+            *server.state.lock().unwrap() = wire.snapshot();
+        }
         let mut compact = String::new();
         left.capture().write_wire_core(&mut compact, mark.at);
         // Reserve maximum-width ages for first HEADERS/CANCEL/latest reset,
         // completed SETTINGS and every unowned control, plus decimal point ages.
         let widest_ages = WIRE_CONNECTIONS * ((WIRE_STREAMS * 8 + WIRE_EVENTS + 12) * 15 + 240);
-        let widest_identity = WIRE_CONNECTIONS * 256;
-        assert!(compact.len() + widest_ages + widest_identity < 48 * 1024);
+        let widest_server_ages = SERVER_CONNECTIONS * (12 * 15 + 240);
+        let widest_identity = (WIRE_CONNECTIONS + SERVER_CONNECTIONS) * 256;
+        assert!(compact.len() + widest_ages + widest_server_ages + widest_identity < 48 * 1024);
         assert_eq!(compact.matches("wire first s_hex=").count(), 72);
         assert_eq!(compact.matches("wire control_hex ").count(), 128);
-        assert_eq!(compact.matches("settings_complete ").count(), 24);
+        assert_eq!(compact.matches("settings_complete ").count(), 48);
+        assert_eq!(
+            compact.matches("endpoint=server-accepted-connection").count(),
+            2,
+        );
     }
 
     #[test]

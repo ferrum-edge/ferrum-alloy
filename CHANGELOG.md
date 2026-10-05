@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Extend internal #142 diagnostics with first-failure freezing before explicit
+  worker shutdown or initial-dial error unwinding, precise capture boundaries,
+  and numerical read/scalar/vector/flush/shutdown outcomes, including actual Tx
+  write-error counts. Add an explicit `bench-diagnostics` library build seam
+  outside `default`/`full`, enabled by benchmark dev dependencies and attached
+  only to instance-owned diagnostic fixtures at runtime. Observe accepted server
+  TCP/TLS plaintext frame prefixes with real endpoints and bounded numerical
+  stream/control state within the existing 64 KiB snapshot. Keep handler-to-wire
+  stream mapping explicitly unknown. Add strict two-owner-2-header held/released
+  controls using the existing 4-worker/2-socket/32-cancellation swarm and fixed
+  1/5/15-second clocks, preserving existing gates and real matrices. Hosted gates
+  and independent root review remain required; overhead and #142's cause remain
+  unknown, and green PR #146/main evidence means nonreproduction only.
+
 - Repair test-only #142 evidence retention: freeze bounded observer state before
   dropping the borrowed, pinned health future on the unchanged 15-second
   timeout, label its sampling interval, and prioritize compact server records,

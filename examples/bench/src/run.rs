@@ -561,6 +561,7 @@ mod tests {
                     cell,
                     diagnostics: Arc::new(
                         client::tests::HealthDiagnostics::new(options.load)
+                            .with_transport(cell.transport)
                             .with_origin("real-matrix"),
                     ),
                 });
@@ -702,6 +703,7 @@ mod tests {
                 cell,
                 diagnostics: Arc::new(
                     client::tests::HealthDiagnostics::new(options.load)
+                        .with_transport(cell.transport)
                         .with_origin("warmed-short-window"),
                 ),
             };

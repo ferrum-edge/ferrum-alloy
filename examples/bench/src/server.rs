@@ -222,7 +222,7 @@ pub(crate) fn start(
                 .shutdown_signal(stopped(stop));
             let router = router();
             #[cfg(test)]
-            let router = observe_router(router, health);
+            let router = observe_router(router, health.clone());
             let app = if diagnostics {
                 let router = router.layer(middleware::from_fn(tag_tenant));
                 app.router(router).diagnostics_authorizer(deny)
@@ -232,6 +232,13 @@ pub(crate) fn start(
             let parts = app.into_parts();
             match parts {
                 Ok(parts) => {
+                    #[cfg(test)]
+                    let parts = match health {
+                        Some(health) => {
+                            parts.bench_plaintext_observer(Arc::new(ServerWire(health)))
+                        }
+                        None => parts,
+                    };
                     ready.ok();
                     let _ = parts.serve_on(listener, None).await;
                 }
@@ -252,7 +259,7 @@ async fn serve_plain(
 ) {
     let router = router();
     #[cfg(test)]
-    let router = observe_router(router, health);
+    let router = observe_router(router, health.clone());
     let mut stop = std::pin::pin!(stop);
     loop {
         let accepted = tokio::select! {
@@ -264,6 +271,14 @@ async fn serve_plain(
         };
         let _ = stream.set_nodelay(true);
         #[cfg(test)]
+        let observation = health.as_ref().and_then(|health| {
+            health.server_wire(
+                stream.local_addr().ok(),
+                _peer,
+                tls.is_some(),
+            )
+        });
+        #[cfg(test)]
         let router = router
             .clone()
             .layer(axum::Extension(axum::extract::ConnectInfo(_peer)));
@@ -273,6 +288,13 @@ async fn serve_plain(
             let builder = Builder::new(TokioExecutor::new());
             match tls {
                 None => {
+                    #[cfg(test)]
+                    let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
+                        stream,
+                        observation.map(|wire| {
+                            wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                        }),
+                    );
                     let _ = builder
                         .serve_connection(TokioIo::new(stream), service)
                         .await;
@@ -281,12 +303,43 @@ async fn serve_plain(
                     let Ok(stream) = acceptor.accept(stream).await else {
                         return;
                     };
+                    #[cfg(test)]
+                    let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
+                        stream,
+                        observation.map(|wire| {
+                            wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                        }),
+                    );
                     let _ = builder
                         .serve_connection(TokioIo::new(stream), service)
                         .await;
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+struct ServerWire(Arc<crate::client::tests::HealthDiagnostics>);
+
+#[cfg(test)]
+impl std::fmt::Debug for ServerWire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("instance-owned benchmark server observer")
+    }
+}
+
+#[cfg(test)]
+impl ferrum_alloy::bench_diagnostics::ConnectionObserver for ServerWire {
+    fn accepted(
+        &self,
+        local: Option<SocketAddr>,
+        remote: SocketAddr,
+        tls: bool,
+    ) -> Option<Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>> {
+        self.0
+            .server_wire(local, remote, tls)
+            .map(|wire| wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>)
     }
 }
 

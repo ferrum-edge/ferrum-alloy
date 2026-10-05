@@ -17,6 +17,8 @@ include = ["/src/**", "/assets/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCI
 
 [features]
 default = []
+# Internal observation seam for the benchmark's diagnostic fixtures. Not in `full`.
+bench-diagnostics = []
 otel = ["ferrum-alloy-telemetry/otel"]
 edge = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/axum"]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:x509-parser", "dep:zeroize", "ferrum-alloy-telemetry/x509"]

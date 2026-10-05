@@ -351,6 +351,8 @@ impl Drop for ActiveConnection {
 #[derive(Debug, Clone)]
 pub(crate) struct ServeOptions {
     pub(crate) name: &'static str,
+    #[cfg(feature = "bench-diagnostics")]
+    pub(crate) bench_io: Option<Arc<dyn crate::bench_diagnostics::ConnectionObserver>>,
     pub(crate) max_connections: usize,
     pub(crate) max_header_count: usize,
     pub(crate) max_header_bytes: usize,
@@ -746,6 +748,8 @@ async fn handle(
     options: &ServeOptions,
     lifecycle: &Lifecycle,
 ) {
+    #[cfg(feature = "bench-diagnostics")]
+    let local = stream.local_addr().ok();
     #[cfg(feature = "tls")]
     if let Some(tls) = &options.tls {
         let accept = tokio::time::timeout(tls.handshake_timeout, tls.acceptor().accept(stream));
@@ -782,6 +786,14 @@ async fn handle(
             remote_addr: Some(remote),
             tls: crate::tls::peer_identity(stream.get_ref().1),
         };
+        #[cfg(feature = "bench-diagnostics")]
+        let stream = crate::bench_diagnostics::PlaintextIo::optional(
+            stream,
+            options
+                .bench_io
+                .as_ref()
+                .and_then(|observer| observer.accepted(local, remote, true)),
+        );
         serve_io(stream, peer, active, builder, app, options, lifecycle).await;
         return;
     }
@@ -789,6 +801,14 @@ async fn handle(
         remote_addr: Some(remote),
         tls: None,
     };
+    #[cfg(feature = "bench-diagnostics")]
+    let stream = crate::bench_diagnostics::PlaintextIo::optional(
+        stream,
+        options
+            .bench_io
+            .as_ref()
+            .and_then(|observer| observer.accepted(local, remote, false)),
+    );
     serve_io(stream, peer, active, builder, app, options, lifecycle).await;
 }
 

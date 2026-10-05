@@ -7,7 +7,7 @@
 //!
 //! Optional integrations are Cargo features and are off by default:
 //! `otel`, `edge`, `tls`, `postgres`, `openapi`, `openapi-ui`, `jwt`,
-//! `http-client`, `compression`, `cors`, `diagnostics` (`full` enables all).
+//! `http-client`, `compression`, `cors`, `diagnostics` (`full` enables these integrations).
 
 pub mod config;
 pub mod error;
@@ -25,6 +25,10 @@ mod rate_limit;
 
 mod server;
 mod shadow;
+
+#[doc(hidden)]
+#[cfg(feature = "bench-diagnostics")]
+pub mod bench_diagnostics;
 
 #[cfg(feature = "openapi")]
 pub mod agents;
