@@ -121,7 +121,7 @@
 +    // poll's I/O error and GOAWAY paths. Restrict fields: no frame/header
 @@ -1967 +1993 @@
 -            && matches!(metadata.line(), Some(491 | 521))
-+            && matches!(metadata.line(), Some(514 | 544))
++            && matches!(metadata.line(), Some(523 | 554))
 @@ -1986,0 +2013,14 @@
 +    #[derive(Default)]
 +    struct GoAwayVisitor(Option<u64>);
@@ -139,7 +139,7 @@
 +
 @@ -1989 +2029,10 @@
 -            let io = event.metadata().line() == Some(491);
-+            let io = event.metadata().line() == Some(514);
++            let io = event.metadata().line() == Some(523);
 +            let mut goaway = GoAwayVisitor::default();
 +            if !io {
 +                event.record(&mut goaway);

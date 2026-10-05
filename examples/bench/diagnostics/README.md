@@ -280,6 +280,15 @@ These are hosted assertions, not local or production-heap qualification.
 The original concurrent raw-h2 retained-socket controls remain: real first DATA,
 actual CANCEL prefix/decode/application, queue clearing, staged invalidation, release
 of already staged DATA, and two real empty-GET responses on the original connection.
+The captured-observer no-reference close control also completes two actual empty
+GET/END_STREAM exchanges before releasing its last sender: the client handshake
+returns without reading the peer's SETTINGS. Both it and the explicit-None control
+join their original client and server tasks within the unchanged ten-second timeout;
+client connection errors and server accept errors remain fatal. The observed control
+requires two decoded request/response HEADERS, absent close branches before release,
+client first branch 1 and terminal OK after close, an actual server close branch,
+reciprocal UUID/generation/endpoints and zero foreign callbacks. This establishes
+connection progress before the close seam; it does not identify a kernel reset cause.
 Connection-capacity reassignment is permitted without claiming a reset source defect.
 Absent-observer, actual Hyper None adapter, socket/TLS gates, privacy and isolation
 controls remain. The frozen GOAWAY fixture now checks only actual `c ` control rows,
@@ -343,9 +352,9 @@ No replacement driver task or manufactured error is used.
 Reachability does not attribute the earlier macOS failure. The actual 100/200-ms
 health case retains its fatal zero-error assertion and unchanged 15-second wrapper.
 
-Published h2 error callsites remain original 491/521, now patched **514/544**.
+Published h2 error callsites remain original 491/521, now patched **523/554**.
 Both the diagnostic whitelist and I/O classifier follow those exact positions:
-only 514 formats typed `ErrorKind`; 544 records only an actual typed reason/initiator
+only 523 formats typed `ErrorKind`; 554 records only an actual typed reason/initiator
 scalar from the private fork. Scalar 1 is library-initiated NO_ERROR completion;
 only that exact value is excluded from the error count. Nonzero reasons, other
 initiators and missing/opaque scalars remain errors without formatting peer bytes.

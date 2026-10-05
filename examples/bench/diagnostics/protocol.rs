@@ -568,7 +568,9 @@ mod tests {
                         .await
                         .unwrap();
                     while let Some(request) = connection.accept().await {
-                        let (_, mut response) = request.unwrap();
+                        let (request, mut response) = request.unwrap();
+                        assert_eq!(request.method(), http::Method::GET);
+                        assert!(request.body().is_end_stream());
                         response
                             .send_response(http::Response::new(()), true)
                             .unwrap();
@@ -584,7 +586,7 @@ mod tests {
             .unwrap();
             tasks.spawn(AmbientPoll::new(
                 async move {
-                    let _ = connection.await;
+                    connection.await.unwrap();
                 },
                 &ambient,
             ));
@@ -636,7 +638,9 @@ mod tests {
                             .await
                             .unwrap();
                     while let Some(request) = connection.accept().await {
-                        let (_, mut response) = request.unwrap();
+                        let (request, mut response) = request.unwrap();
+                        assert_eq!(request.method(), http::Method::GET);
+                        assert!(request.body().is_end_stream());
                         response
                             .send_response(http::Response::new(()), true)
                             .unwrap();
@@ -644,19 +648,34 @@ mod tests {
                 },
                 &ambient,
             ));
-            let (sender, connection) = ProtocolFuture::new(
+            let (mut sender, connection) = ProtocolFuture::new(
                 h2::client::handshake(WireIo::new(socket, Arc::clone(&client))),
                 observer(&client),
             )
             .await
             .unwrap();
-            drop(sender);
             tasks.spawn(AmbientPoll::new(
                 async move {
                     connection.await.unwrap();
                 },
                 &ambient,
             ));
+            // The client handshake does not wait for the peer's SETTINGS.
+            // Complete real END_STREAM exchanges before releasing the last sender.
+            for _ in 0..2 {
+                std::future::poll_fn(|cx| sender.poll_ready(cx))
+                    .await
+                    .unwrap();
+                let (response, stream) = sender.send_request(http::Request::new(()), true).unwrap();
+                assert!(response.await.unwrap().body().is_end_stream());
+                drop(stream);
+            }
+            assert_eq!(client.protocol_snapshot().headers(), 2);
+            assert_eq!(server.protocol_snapshot().headers(), 2);
+            assert_eq!(client.protocol_snapshot().f & CLOSE_BRANCH, 0);
+            assert_eq!(server.protocol_snapshot().f & CLOSE_BRANCH, 0);
+            assert_eq!(ambient.0.load(Ordering::SeqCst), 0);
+            drop(sender);
             while let Some(result) = tasks.join_next().await {
                 result.unwrap();
             }
@@ -665,6 +684,10 @@ mod tests {
             assert_eq!((state.f >> 24) & 3, 1);
             assert_ne!(server.protocol_snapshot().f & CLOSE_BRANCH, 0);
             assert_eq!(ambient.0.load(Ordering::SeqCst), 0);
+            assert_eq!(client.instance.as_slice(), INSTANCE.as_bytes());
+            assert_eq!(client.instance, server.instance);
+            assert_eq!((client.owner, client.generation), (2, 1));
+            assert_eq!(server.generation, 1);
             assert_eq!(client.socket, server.remote);
             assert_eq!(client.remote, server.socket);
         })
