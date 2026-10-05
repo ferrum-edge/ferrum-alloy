@@ -5,13 +5,39 @@
 +mod protocol;
 +pub use protocol::{ProtocolFuture, ReadGate, ReceiveGate};
 +
-@@ -45,0 +50,6 @@
+@@ -45,0 +50,8 @@
 +    /// Fixed numerical events from the isolated h2 fork, after protocol locks release.
 +    fn protocol_event(&self, _event: h2::alloy_diagnostics::Event) {}
 +    /// Borrowed before protocol locks; only atomic loads occur inside those locks.
 +    fn protocol_flags(&self) -> Option<&std::sync::atomic::AtomicU64> {
 +        None
 +    }
++    /// Typed error after delegation, before the outcome callback; no error text or OS code.
++    fn io_error(&self, _socket: bool, _operation: Operation, _kind: io::ErrorKind) {}
+@@ -152,0 +165,3 @@
++            if let Poll::Ready(Err(error)) = result {
++                observer.io_error(true, operation, error.kind());
++            }
+@@ -393,0 +409,3 @@
++            if let Poll::Ready(Err(error)) = &result {
++                observer.io_error(false, Operation::Read, error.kind());
++            }
+@@ -411,0 +430,3 @@
++            if let Poll::Ready(Err(error)) = &result {
++                observer.io_error(false, Operation::Write, error.kind());
++            }
+@@ -437,0 +459,3 @@
++            if let Poll::Ready(Err(error)) = &result {
++                observer.io_error(false, Operation::WriteVectored, error.kind());
++            }
+@@ -450,0 +475,3 @@
++            if let Poll::Ready(Err(error)) = &result {
++                observer.io_error(false, Operation::Flush, error.kind());
++            }
+@@ -459,0 +487,3 @@
++            if let Poll::Ready(Err(error)) = &result {
++                observer.io_error(false, Operation::Shutdown, error.kind());
++            }
 --- a/crates/ferrum-alloy/src/server.rs
 +++ b/crates/ferrum-alloy/src/server.rs
 @@ -803,2 +803,5 @@
@@ -378,7 +404,7 @@
 +            }
 @@ -3788,0 +4056 @@
 +                            assert_eq!(wires[0].decoded_headers(), 2);
-@@ -3818,0 +4087,671 @@
+@@ -3818,0 +4087,675 @@
 +    // Preserve the existing runtime destruction, including unwind paths. The
 +    // wrapper adds only its endpoint entry mark before dropping that same runtime.
 +    pub(crate) struct ProtocolRuntime {
@@ -733,10 +759,8 @@
 +    }
 +
 +    fn protocol_zero_errors(diagnostics: &HealthDiagnostics) {
-+        // Keep the complete bounded endpoint/typed protocol state before any
-+        // assertion unwind can destroy the retained dispatcher or runtimes.
-+        let mut capture = diagnostics.capture();
-+        capture.boundary = "controlled-before-zero-error-check";
++        // Live assertions can observe progress after an earlier endpoint capture.
++        // On failure, copy cumulative evidence while outer fixture custody remains.
 +        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 +            for worker in 0..4 {
 +                diagnostics.worker(worker, |state| {
@@ -761,6 +785,8 @@
 +            }
 +        }));
 +        if let Err(error) = result {
++            let mut capture = diagnostics.capture();
++            capture.boundary = "controlled-after-zero-error-check-before-fixture-unwind";
 +            diagnostics.failure_capture(
 +                crate::dims::Cell {
 +                    scenario: crate::dims::Scenario::Plain,
@@ -811,14 +837,18 @@
 +            .await?;
 +            if control.mode == ProtocolMode::Alive {
 +                protocol_origin_pending(control, diagnostics);
++                let (client, server) = protocol_pair(diagnostics);
++                client.fixture_sender_release(false);
++                server.fixture_sender_release(false);
 +                control.release_sender(2);
++                client.fixture_sender_release(true);
++                server.fixture_sender_release(true);
 +                let dispatcher = control.dispatchers.lock().unwrap()[1].take().unwrap();
 +                let result = dispatcher.await;
 +                if result.is_err() {
 +                    protocol_failure(diagnostics, "controlled-before-alive-error-unwind");
 +                }
 +                result.unwrap();
-+                let (client, _) = protocol_pair(diagnostics);
 +                let wires = diagnostics
 +                    .observer
 +                    .socket_tasks("h2-wire-child-pinned-first-spawn", client.socket);
@@ -1050,7 +1080,7 @@
 +        assert_eq!(client.protocol_snapshot().w[18], protocol.w[18]);
 +    }
 +
-@@ -3819,0 +4759,8 @@
+@@ -3819,0 +4763,8 @@
 +        retained_sender_protocol_case(release_gate, headers_shape, None);
 +    }
 +
@@ -1059,7 +1089,7 @@
 +        headers_shape: bool,
 +        mode: Option<ProtocolMode>,
 +    ) {
-@@ -3822 +4769,25 @@
+@@ -3822 +4773,25 @@
 -        let runtime = CancellationRuntime::new();
 +        let protocol_control = mode.map(|mode| Arc::new(ProtocolControl::new(mode)));
 +        let dispatcher_guard = protocol_control
@@ -1086,7 +1116,7 @@
 +        } else {
 +            CancellationRuntime::new()
 +        };
-@@ -3829 +4800,7 @@
+@@ -3829 +4804,7 @@
 -        let origin = if headers_shape && release_gate {
 +        let origin = if mode == Some(ProtocolMode::Receive) {
 +            "controlled-hyper-mtls-receive-release"
@@ -1095,7 +1125,7 @@
 +        } else if mode == Some(ProtocolMode::Alive) {
 +            "controlled-hyper-mtls-alive-origin-companion"
 +        } else if headers_shape && release_gate {
-@@ -3838,5 +4815,13 @@
+@@ -3838,5 +4819,13 @@
 -        let diagnostics = Arc::new(
 -            HealthDiagnostics::new(load)
 -                .with_transport(Transport::H2c)
@@ -1114,36 +1144,36 @@
 +        let server_runtime = server_runtime
 +            .map(|runtime| ProtocolRuntime::new(runtime, Some(Arc::clone(&diagnostics)), true));
 +        runtime.runtime_observer = Some(Arc::clone(&diagnostics));
-@@ -3850,0 +4836 @@
+@@ -3850,0 +4840 @@
 +        let mut held_snapshot = None;
-@@ -3851,0 +4838,4 @@
+@@ -3851,0 +4842,4 @@
 +            let pki = mode.map(|_| Pki::generate().unwrap());
 +            let tls = pki
 +                .as_ref()
 +                .map(|pki| TlsAcceptor::from(pki.server(true).unwrap().rustls));
-@@ -3855 +4845 @@
+@@ -3855 +4849 @@
 -                transport: Transport::H2c,
 +                transport,
-@@ -3857 +4847 @@
+@@ -3857 +4851 @@
 -                tls: None,
 +                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
-@@ -3868 +4858,5 @@
+@@ -3868 +4862,5 @@
 -            tokio::spawn(async move {
 +            let handle = server_runtime
 +                .as_ref()
 +                .map(|runtime| runtime.handle().clone())
 +                .unwrap_or_else(tokio::runtime::Handle::current);
 +            handle.spawn(async move {
-@@ -3884 +4878 @@
+@@ -3884 +4882 @@
 -                            .server_wire(stream.local_addr().ok(), peer, false)
 +                            .server_wire(stream.local_addr().ok(), peer, mode.is_some())
-@@ -3913 +4907,4 @@
+@@ -3913 +4911,4 @@
 -                            if headers_shape && let Some(gate) = release.take() {
 +                            if headers_shape
 +                                && mode.is_none()
 +                                && let Some(gate) = release.take()
 +                            {
-@@ -3915,0 +4913,14 @@
+@@ -3915,0 +4917,14 @@
 +                            let (inner, cancelled) = if mode.is_some() {
 +                                drop(release);
 +                                (crate::server::protocol_burst(), cancelled)
@@ -1158,7 +1188,7 @@
 +                                    None,
 +                                )
 +                            };
-@@ -3917,6 +4928,2 @@
+@@ -3917,6 +4932,2 @@
 -                                inner: GatedBody {
 -                                    release,
 -                                    cancelled,
@@ -1167,9 +1197,9 @@
 -                                },
 +                                inner,
 +                                cancelled,
-@@ -3932,0 +4940 @@
+@@ -3932,0 +4944 @@
 +                    let tls = tls.clone();
-@@ -3936,8 +4944,24 @@
+@@ -3936,8 +4948,24 @@
 -                        let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 -                            stream,
 -                            wire.map(|wire| {
@@ -1202,7 +1232,7 @@
 +                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
 +                                connection, observer,
 +                            )
-@@ -3944,0 +4969,12 @@
+@@ -3944,0 +4973,12 @@
 +                        } else {
 +                            let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 +                                stream,
@@ -1215,7 +1245,7 @@
 +                            )
 +                            .await;
 +                        }
-@@ -3993,0 +5030,10 @@
+@@ -3993,0 +5034,10 @@
 +                if let Some(control) = &protocol_control {
 +                    return protocol_retained_health(
 +                        health.as_mut(),
@@ -1226,24 +1256,24 @@
 +                    )
 +                    .await;
 +                }
-@@ -4119 +5165 @@
+@@ -4119 +5169 @@
 -                    transport: Transport::H2c,
 +                    transport,
-@@ -4173,2 +5219,4 @@
+@@ -4173,2 +5223,4 @@
 -        let mut frozen = diagnostics.capture();
 -        frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        let mut frozen = held_snapshot.unwrap_or_else(|| diagnostics.capture());
 +        if mode != Some(ProtocolMode::Receive) {
 +            frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        }
-@@ -4178 +5226 @@
+@@ -4178 +5230 @@
 -            transport: Transport::H2c,
 +            transport,
-@@ -4226,0 +5275,3 @@
+@@ -4226,0 +5279,3 @@
 +        if let Some(control) = &protocol_control {
 +            protocol_origin_before_cleanup(control, &diagnostics);
 +        }
-@@ -4227,0 +5279,11 @@
+@@ -4227,0 +5283,11 @@
 +        if let Some(control) = &protocol_control
 +            && control.mode == ProtocolMode::Teardown
 +        {
@@ -1255,7 +1285,7 @@
 +        if let Some(server_runtime) = server_runtime {
 +            server_runtime.shutdown_timeout(Duration::from_secs(1));
 +        }
-@@ -4288,0 +5351,15 @@
+@@ -4288,0 +5355,15 @@
 +    #[test]
 +    fn retained_hyper_mtls_receive_gate_freezes_real_next_headers_and_callbacks() {
 +        retained_sender_protocol_case(true, true, Some(ProtocolMode::Receive));
@@ -1281,7 +1311,13 @@
 +    protocol::provenance(text);
 +}
 +
-@@ -279,0 +287,31 @@
+@@ -220,0 +228 @@
++    io_errors: u32,
+@@ -236,0 +245 @@
++            io_errors: self.io_errors,
+@@ -257,0 +267 @@
++            io_errors: 0,
+@@ -279,0 +290,31 @@
 +    pub(crate) fn stream_data(&self, id: u32, direction: Direction) -> (u64, u64, u64) {
 +        self.streams
 +            .iter()
@@ -1313,16 +1349,16 @@
 +            .map_or(0, |mark| mark.sequence)
 +    }
 +
-@@ -591,0 +630,2 @@
+@@ -591,0 +633,2 @@
 +    protocol_changed: tokio::sync::Notify,
 +    protocol: Box<protocol::LiveProtocol>,
-@@ -595,0 +636 @@
+@@ -595,0 +639 @@
 +        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-@@ -604 +645,2 @@
+@@ -604 +648,2 @@
 -            state: Box::new(self.snapshot()),
 +            state: Box::new(state.clone()),
 +            protocol: Box::new(self.protocol.snapshot()),
-@@ -607,0 +650,19 @@
+@@ -607,0 +653,24 @@
 +    pub(crate) fn decoded_headers(&self) -> u64 {
 +        self.protocol_snapshot().headers()
 +    }
@@ -1342,7 +1378,12 @@
 +        self.protocol.runtime_entry();
 +    }
 +
-@@ -620,0 +682,14 @@
++    pub(crate) fn fixture_sender_release(&self, returned: bool) {
++        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
++        state.io_errors |= 1 << (24 + u32::from(returned));
++    }
++
+@@ -620,0 +690,55 @@
 +    fn protocol_flags(&self) -> Option<&std::sync::atomic::AtomicU64> {
 +        Some(&self.protocol.flags)
 +    }
@@ -1357,26 +1398,75 @@
 +        self.protocol_changed.notify_one();
 +    }
 +
-@@ -725,0 +801 @@
++    fn io_error(&self, socket: bool, operation: Operation, kind: std::io::ErrorKind) {
++        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
++        let shift = if socket { 12 } else { 0 };
++        if state.io_errors & (0xfff << shift) != 0 {
++            return;
++        }
++        let kind = match kind {
++            std::io::ErrorKind::BrokenPipe => 1,
++            std::io::ErrorKind::ConnectionReset => 2,
++            std::io::ErrorKind::ConnectionAborted => 3,
++            std::io::ErrorKind::NotConnected => 4,
++            std::io::ErrorKind::UnexpectedEof => 5,
++            std::io::ErrorKind::TimedOut => 6,
++            std::io::ErrorKind::WouldBlock => 7,
++            std::io::ErrorKind::Interrupted => 8,
++            std::io::ErrorKind::WriteZero => 9,
++            std::io::ErrorKind::InvalidData => 10,
++            std::io::ErrorKind::InvalidInput => 11,
++            std::io::ErrorKind::PermissionDenied => 12,
++            std::io::ErrorKind::Other => 13,
++            _ => 15,
++        };
++        let operation = match operation {
++            Operation::Read => 0,
++            Operation::Write => 1,
++            Operation::WriteVectored => 2,
++            Operation::Flush => 3,
++            Operation::Shutdown => 4,
++        };
++        let release = (state.io_errors >> 24) & 3;
++        let runtime = u32::from(self.protocol.snapshot().f & (1 << 21) != 0);
++        let eof = u32::from(state.directions[1].eof || state.socket[0].eof);
++        let sample = kind
++            | (operation << 4)
++            | (release << 7)
++            | (runtime << 9)
++            | (eof << 10)
++            | (u32::from(state.socket_dropped) << 11);
++        state.io_errors |= sample << shift;
++    }
++
+@@ -725,0 +850 @@
 +    protocol: Box<protocol::ProtocolState>,
-@@ -748,0 +825 @@
+@@ -748,0 +874 @@
 +        self.protocol.write(text);
-@@ -802,2 +879,2 @@
+@@ -749 +875,6 @@
+-        let _ = writeln!(text, "socket dropped={}", u8::from(state.socket_dropped));
++        let _ = writeln!(
++            text,
++            "socket drop={}/{:07x}",
++            u8::from(state.socket_dropped),
++            state.io_errors,
++        );
+@@ -802,2 +933,2 @@
 -                "wire {direction:?} counts_hex={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
 -                 preface={}/24 flags={}/{}/{} hb={} remaining_hex=",
 +                "wire {direction:?} c={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
 +                 p={}/24 f={}/{}/{} hb={} r=",
-@@ -821 +898 @@
+@@ -821 +952 @@
 -            let _ = write!(text, " partial_hex=");
 +            let _ = write!(text, " x=");
-@@ -835,3 +912,3 @@
+@@ -835,3 +966,3 @@
 -            let (operations, outcomes) = match direction {
 -                Direction::Tx => ("scalar/vector/flush/shutdown", &parser.outcomes[1..]),
 -                Direction::Rx => ("read", &parser.outcomes[..1]),
 +            let outcomes = match direction {
 +                Direction::Tx => &parser.outcomes[1..],
 +                Direction::Rx => &parser.outcomes[..1],
-@@ -839,9 +916,2 @@
+@@ -839,9 +970,2 @@
 -            let _ = writeln!(
 -                text,
 -                "wire {direction:?} outcomes_hex({operations})={outcomes:x?} \
@@ -1388,37 +1478,37 @@
 -            ] {
 +            let _ = writeln!(text, "wo {direction:?} {outcomes:x?}");
 +            for (stage, point) in [("H", parser.last_header), ("C", parser.last_complete)] {
-@@ -849 +919 @@
+@@ -849 +973 @@
 -                    let _ = write!(text, "wire {direction:?} {stage} ");
 +                    let _ = write!(text, "wp {direction:?} {stage} ");
-@@ -855 +925 @@
+@@ -855 +979 @@
 -                let _ = write!(text, "wire {direction:?} eof_mark_hex=");
 +                let _ = write!(text, "we {direction:?} ");
-@@ -869 +939,2 @@
+@@ -869 +993,2 @@
 -                        "ws {direction:?} {:x} {:x} ",
 +                        "s {} {:x} {:x} ",
 +                        direction.index(),
-@@ -884,3 +955,2 @@
+@@ -884,3 +1009,2 @@
 -            "wire first owner={} gen={} endpoint={} remote={:?} \
 -             reset_direction={:?}",
 -            self.owner, self.generation, self.endpoint, self.remote, state.reset_direction,
 +            "wire first owner={} gen={} endpoint={} reset={:?}",
 +            self.owner, self.generation, self.endpoint, state.reset_direction,
-@@ -970,2 +1040,2 @@
+@@ -970,2 +1094,2 @@
 -                    "wc {:?} {} ",
 -                    event.direction,
 +                    "c {} {} ",
 +                    event.direction.index(),
-@@ -988 +1058 @@
+@@ -988 +1112 @@
 -                        let _ = write!(text, " goaway={last_stream:x}:{reason:x}");
 +                        let _ = write!(text, " g={last_stream:x}:{reason:x}");
-@@ -1418,0 +1489,2 @@
+@@ -1418,0 +1543,2 @@
 +            protocol_changed: tokio::sync::Notify::new(),
 +            protocol: Box::default(),
-@@ -1451,0 +1524,2 @@
+@@ -1451,0 +1578,2 @@
 +            protocol_changed: tokio::sync::Notify::new(),
 +            protocol: Box::default(),
-@@ -1532,0 +1607,15 @@
+@@ -1532,0 +1661,15 @@
 +    pub(crate) fn socket_tasks(
 +        &self,
 +        kind: &'static str,
@@ -1434,13 +1524,13 @@
 +            .collect()
 +    }
 +
-@@ -1631,3 +1720,2 @@
+@@ -1631,3 +1774,2 @@
 -            "wire slots(connection,stream,control)=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
 -             connections_omitted={} boundary=client-plaintext-I/O \
 -             receipt_is_not_decode socket_ordinal_is_not_stream_id",
 +            "wire slots=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) omitted={} \
 +             boundary=client-plaintext-I/O receipt!=decode socket-ordinal!=stream-id",
-@@ -1641,5 +1729,3 @@
+@@ -1641,5 +1783,3 @@
 -                "server wire slots(connection,stream,control)=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
 -                 connections_omitted={} boundary=server-plaintext-I/O \
 -                 client-Tx/server-Rx=preface server-Tx/client-Rx=no-preface \
@@ -1449,26 +1539,26 @@
 +                "server wire slots=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) omitted={} \
 +                 boundary=server-plaintext-I/O client-Tx/server-Rx=preface reverse=no-preface owner=socket-ordinal \
 +                 handler_stream_id=unknown samples=sequential/non-atomic TLS-acceptance!=ciphertext",
-@@ -1659,0 +1746 @@
+@@ -1659,0 +1800 @@
 +            protocol::schema(text);
-@@ -1662,3 +1749,3 @@
+@@ -1662,3 +1803,3 @@
 -                "wire compact_hex counts=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
 -                 flags=bad_preface/eof/eof_partial hb=header_bytes remaining=payload-bytes \
 -                 partial=type/flags/length/stream '-'=unobserved",
 +                "wire compact_hex c=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
 +                 p=preface f=bad_preface/eof/eof_partial hb=header_bytes r=payload-bytes \
 +                 x=type/flags/length/stream '-'=unobserved wo=Tx(scalar/vector/flush/shutdown),Rx(read):pending/ok/error",
-@@ -1668 +1755,2 @@
+@@ -1668 +1809,2 @@
 -                "wire compact_hex mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
 +                "wire compact_hex wp=direction,H(header)/C(complete),point we=direction,mark \
 +                 mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
-@@ -1670 +1758 @@
+@@ -1670 +1812 @@
 -                 goaway(last-stream:reason)",
 +                 g=goaway(last-stream:reason)",
-@@ -1676 +1764 @@
+@@ -1676 +1818 @@
 -                 rows(wf/wc/ws)=first-stream/control/completed-SETTINGS",
 +                 rows(wf/c/s)=first-stream/control/completed-SETTINGS dirs(c/s)=0(Tx)/1(Rx)",
-@@ -1680,4 +1768,3 @@
+@@ -1680,4 +1822,3 @@
 -                "socket hex rows=0(read)/1(scalar+vector-write)/2(flush) \
 -                 columns=pending/ok/error,bytes,last_requested,wakes,in_poll/last_outcome/eof,last_poll/progress/last_wake \
 -                 outcome=0(Pending)/1(Ok)/2(error) marks=endpoint-seq:age_us '-'=unobserved \
@@ -1476,7 +1566,7 @@
 +                "socket hex ops=0(read)/1(scalar+vector-write)/2(flush) \
 +                 fields=pending/ok/error,bytes,requested,wakes,in-poll/outcome/eof,poll/progress/wake \
 +                 outcome=0/1/2 marks=seq:age_us '-'=unknown progress=bytes>0-or-flush-Ok shutdown=unknown",
-@@ -1687,4 +1774,3 @@
+@@ -1687,4 +1828,3 @@
 -                "tls demand=wants_read/wants_write/handshaking,mark \
 -                 buffer_lengths/kernel_queues/need_flush=unknown \
 -                 socket_bytes=encrypted-if-tls TLS_flags=after-poll-sequential \
@@ -1484,13 +1574,75 @@
 +                "tls demand=wants_read/wants_write/handshaking,mark lengths/kernel/need_flush=unknown \
 +                 socket-bytes=encrypted-if-tls flags=after-poll-sequential \
 +                 endpoint-copy=one-lock-records cross-endpoint=sequential/non-atomic",
-@@ -2698 +2784 @@
+@@ -2208,0 +2349,2 @@
++        assert_eq!(state.io_errors, 2 << 12);
++        assert!(!state.protocol_error_free());
+@@ -2234 +2376 @@
+-        assert!(before.contains("socket dropped=0"));
++        assert!(before.contains("socket drop=0/"));
+@@ -2466 +2608 @@
+-            assert!(!before.contains("socket dropped=1"));
++            assert!(!before.contains("socket drop=1/"));
+@@ -2603,0 +2746,2 @@
++        assert_eq!(state.io_errors, 0x11);
++        assert!(!state.protocol_error_free());
+@@ -2616,0 +2761,49 @@
++    #[test]
++    fn typed_io_errors_keep_first_boundary_kind_and_sample_release_without_claiming_cause() {
++        let observer = Observer::default();
++        let socket = Some(SocketAddr::from(([127, 0, 0, 1], 12345)));
++        let wire = observer.wire(INSTANCE, 2, 1, socket).unwrap();
++        let other = observer.wire(INSTANCE, 0, 1, None).unwrap();
++        wire.io_error(false, Operation::Read, io::ErrorKind::UnexpectedEof);
++        wire.outcome(Operation::Read, Outcome::Error, false);
++        let frozen = observer.capture();
++        let sampled_at = Instant::now();
++        let mut before = String::new();
++        frozen.write_wire_core(&mut before, sampled_at);
++        wire.fixture_sender_release(false);
++        wire.runtime_entry();
++        wire.socket_outcome(Operation::Read, Outcome::Ok, 0, true);
++        wire.socket_drop();
++        wire.io_error(
++            true,
++            Operation::WriteVectored,
++            io::ErrorKind::ConnectionReset,
++        );
++        wire.socket_outcome(Operation::WriteVectored, Outcome::Error, 0, false);
++        wire.fixture_sender_release(true);
++        wire.io_error(false, Operation::Shutdown, io::ErrorKind::BrokenPipe);
++        let state = wire.snapshot();
++        assert_eq!(wire.socket, socket);
++        assert_eq!((wire.owner, wire.generation), (2, 1));
++        assert_eq!(state.io_errors & 0xfff, 5);
++        assert_eq!((state.io_errors >> 12) & 0xfff, 0xea2);
++        assert_eq!(state.io_errors >> 24, 3);
++        assert!(!state.protocol_error_free());
++        assert_eq!(other.snapshot().io_errors, 0);
++        assert!(other.snapshot().protocol_error_free());
++        let mut after = String::new();
++        frozen.clone().write_wire_core(&mut after, sampled_at);
++        assert_eq!(before, after);
++        assert!(before.contains("socket drop=0/0000005"));
++        assert!(!before.contains("BrokenPipe"));
++        assert!(!before.contains("ConnectionReset"));
++        let observer = Observer::default();
++        let unknown = observer.wire(INSTANCE, 0, 1, None).unwrap();
++        unknown.fixture_sender_release(false);
++        unknown.fixture_sender_release(true);
++        unknown.io_error(false, Operation::Flush, io::ErrorKind::AddrInUse);
++        unknown.outcome(Operation::Flush, Outcome::Error, false);
++        assert_eq!(unknown.snapshot().io_errors & 0xfff, 0x1bf);
++        assert!(!unknown.snapshot().protocol_error_free());
++    }
++
+@@ -2698 +2891 @@
 -        assert!(bounded.contains("connections_omitted=1 boundary=server-plaintext-I/O"));
 +        assert!(bounded.contains("omitted=1 boundary=server-plaintext-I/O"));
-@@ -3084 +3170 @@
+@@ -3084 +3277 @@
 -        assert!(text.contains("ws Rx 4 ffff "));
 +        assert!(text.contains("s 1 4 ffff "));
-@@ -3125,2 +3211,12 @@
+@@ -3125,2 +3318,12 @@
 -        assert!(!frozen.contains(" goaway="));
 -        assert!(after.contains(" goaway=0:0"));
 +        assert!(
@@ -1505,38 +1657,41 @@
 +                .filter(|line| line.starts_with("c "))
 +                .any(|line| line.contains(" g=0:0")),
 +        );
-@@ -3200 +3296 @@
+@@ -3200 +3403 @@
 -            .find(|line| line.starts_with("wire Tx counts_hex="))
 +            .find(|line| line.starts_with("wire Tx c="))
-@@ -3202,2 +3298,2 @@
+@@ -3202,2 +3405,2 @@
 -        assert!(tx.contains("counts_hex=1/2/3/4/5/6/7/8/9/a "));
 -        assert!(tx.ends_with("remaining_hex=- partial_hex=-/-/-/-"));
 +        assert!(tx.contains("c=1/2/3/4/5/6/7/8/9/a "));
 +        assert!(tx.ends_with("r=- x=-/-/-/-"));
-@@ -3206 +3302 @@
+@@ -3206 +3409 @@
 -            .find(|line| line.starts_with("wire Rx counts_hex="))
 +            .find(|line| line.starts_with("wire Rx c="))
-@@ -3208 +3304 @@
+@@ -3208 +3411 @@
 -        assert!(rx.ends_with("remaining_hex=0 partial_hex=0/0/0/0"));
 +        assert!(rx.ends_with("r=0 x=0/0/0/0"));
-@@ -3210,2 +3306,2 @@
+@@ -3210,2 +3413,2 @@
 -        assert!(text.contains("wire Rx last_header hex=9:0 0/0/0/0 0/1\n"));
 -        assert!(text.contains("wire Rx eof_mark_hex=a:0\n"));
 +        assert!(text.contains("wp Rx H hex=9:0 0/0/0/0 0/1\n"));
 +        assert!(text.contains("we Rx a:0\n"));
-@@ -3264,0 +3361 @@
+@@ -3264,0 +3468,2 @@
 +            wire.protocol.replace(&protocol::ProtocolState::saturated());
-@@ -3370,5 +3467,4 @@
++            state.io_errors = (1 << 26) - 1;
+@@ -3370,5 +3575,4 @@
 -        // Shorter wf/wc/ws prefixes retain every original field and save
 -        // 3,760 bytes. Added socket rows <=12*174, drop rows <=4*17 and TLS
 -        // rows <=4*36 at zero ages, plus schemas, stay below the unchanged
 -        // 35,200-byte assertion. All 40 new marks reserve 15 extra age digits.
 -        // Combined maximum age/identity allowance is 13,864 bytes:
 +        // All 776 original and 40 socket/TLS marks survive. The experiment
-+        // adds no ages: 4*428 numeric bytes + 142 schema bytes; provenance uses detail.
++        // adds no ages: 4*428 protocol bytes + 142 schema bytes, plus 4*5 I/O bytes.
 +        // Label compaction preserves every value, direction and endpoint;
 +        // retain the original strict zero-age and maximum-age assertions.
-@@ -3386,2 +3482,14 @@
+@@ -3384,0 +3589 @@
++        assert_eq!(compact.matches("/3ffffff\n").count(), 4);
+@@ -3386,2 +3591,14 @@
 -        assert_eq!(compact.matches("wc ").count(), 128);
 -        assert_eq!(compact.matches("ws ").count(), 48);
 +        assert_eq!(
@@ -1553,10 +1708,10 @@
 +                .count(),
 +            48,
 +        );
-@@ -3410 +3518 @@
+@@ -3410 +3627 @@
 -        assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);
 +        assert_eq!(compact.matches(" g=ffffffff:ffffffff\n").count(), 128);
-@@ -3422 +3530,4 @@
+@@ -3422 +3639,4 @@
 -            compact.matches("eof_mark_hex=ffffffffffffffff:0\n").count(),
 +            compact
 +                .lines()

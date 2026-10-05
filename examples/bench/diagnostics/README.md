@@ -359,6 +359,17 @@ in [repair32.md](repair32.md). All three OS jobs stopped at the same formatting
 region before protocol tests. The replacement head requires fresh hosted execution
 on all three OSes with both feature selections; no protocol pass is claimed.
 
+The actual `70b3837` alive-control failures and bounded typed I/O observations are
+recorded in [repair33.md](repair33.md). All five complete failure captures were
+inspected. Four contain paired-server socket/write or flush errors; Windows'
+earlier capture has zero errors before the live assertion fails. Their exact I/O
+kinds and initiating causes remain **UNKNOWN**. The overlay now retains the first
+numerical error kind and operation separately at the socket and plaintext
+boundaries, with sampled release/runtime/EOF/drop flags on the exact endpoint.
+`socket drop=bit/hex` is decoded in that report. Failure capture occurs after the
+strict live check fails, before outer fixture unwind. No errors are filtered,
+subtracted or classified as benign. Fresh hosted validation remains pending.
+
 ## Retirement and delivery
 
 Retire this directory/workflow when #142 has sufficient evidence or a reviewed typed
