@@ -1,144 +1,245 @@
 //! Included only by the reviewed experiment overlay, never the ordinary graph.
 
 use std::fmt::Write;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use h2::alloy_diagnostics::{Event, QueueState};
 
-// One first-CANCEL witness, not a per-stream registry or event history. Cursors
-// share the endpoint sequence; no timestamp marks are added to the reservation.
+const RUNTIME: u64 = 1 << 21;
+
+// README-v2 defines every index and flag. Cursor zero means absent. No history
+// or timestamp slots; the live and frozen records each occupy exactly 256 bytes.
 #[derive(Clone, Debug, Default)]
-pub(super) struct ProtocolState {
-    pub(super) observed: bool,
-    headers: u64,
-    last_headers: Option<(u32, u64)>,
-    cancels: u64,
-    first_cancel: Option<(u32, u64)>,
-    applied: u64,
-    first_application: Option<(u64, QueueState, QueueState)>,
-    pending: [u64; 6],
-    last_pending: Option<(u8, u64)>,
+#[repr(C)]
+pub(crate) struct ProtocolState {
+    pub(crate) w: [u64; 23],
+    pub(crate) n: [u32; 16],
+    pub(crate) f: u64,
+}
+
+#[repr(C)]
+pub(super) struct LiveProtocol {
+    w: [AtomicU64; 23],
+    n: [AtomicU32; 16],
+    pub(super) flags: AtomicU64,
+}
+
+impl Default for LiveProtocol {
+    fn default() -> Self {
+        Self {
+            w: std::array::from_fn(|_| AtomicU64::new(0)),
+            n: std::array::from_fn(|_| AtomicU32::new(0)),
+            flags: AtomicU64::new(0),
+        }
+    }
+}
+
+impl LiveProtocol {
+    // Caller holds the existing endpoint mutex, including for frozen copies.
+    pub(super) fn snapshot(&self) -> ProtocolState {
+        ProtocolState {
+            w: std::array::from_fn(|index| self.w[index].load(Ordering::Relaxed)),
+            n: std::array::from_fn(|index| self.n[index].load(Ordering::Relaxed)),
+            f: self.flags.load(Ordering::Acquire),
+        }
+    }
+
+    pub(super) fn replace(&self, state: &ProtocolState) {
+        for (target, value) in self.w.iter().zip(state.w) {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self.n.iter().zip(state.n) {
+            target.store(value, Ordering::Relaxed);
+        }
+        // Runtime entry can race with an event copy; never erase its sticky bit.
+        let _ = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+                Some(state.f | (flags & RUNTIME))
+            });
+    }
+
+    pub(super) fn event(&self, event: Event, cursor: u64) {
+        let mut state = self.snapshot();
+        state.event(event, cursor);
+        self.replace(&state);
+    }
+
+    pub(super) fn runtime_entry(&self) {
+        self.flags.fetch_or(RUNTIME, Ordering::AcqRel);
+    }
 }
 
 impl ProtocolState {
-    pub(super) fn headers(&self) -> u64 {
-        self.headers
+    pub(crate) fn headers(&self) -> u64 {
+        self.w[0]
     }
 
-    pub(super) fn event(&mut self, event: Event, cursor: u64) {
-        self.observed = true;
+    pub(crate) fn first_cancel(&self) -> Option<(u32, u64)> {
+        (self.w[3] != 0).then_some((self.n[1], self.w[3]))
+    }
+
+    pub(crate) fn first_application(&self) -> Option<(u64, QueueState, QueueState)> {
+        (self.w[5] != 0).then(|| {
+            let before = self.queue(19, 4, 1);
+            let after = self.queue(20, 7, 4);
+            (self.w[5], before, after)
+        })
+    }
+
+    fn queue(&self, w: usize, n: usize, bit: u32) -> QueueState {
+        QueueState {
+            empty: self.f & (1 << bit) != 0,
+            buffered: self.w[w] as usize,
+            requested: self.n[n],
+            stream_capacity: self.n[n + 1],
+            connection_capacity: self.n[n + 2],
+            staged: ((self.f >> (bit + 1)) & 3) as u8,
+        }
+    }
+
+    fn set_queue(&mut self, queue: QueueState, w: usize, n: usize, bit: u32) {
+        self.w[w] = queue.buffered as u64;
+        self.n[n..n + 3].copy_from_slice(&[
+            queue.requested,
+            queue.stream_capacity,
+            queue.connection_capacity,
+        ]);
+        self.f &= !(7 << bit);
+        self.f |= (u64::from(queue.empty) | (u64::from(queue.staged) << 1)) << bit;
+    }
+
+    fn event(&mut self, event: Event, cursor: u64) {
+        self.f |= 1;
         match event {
             Event::Headers(stream) => {
-                self.headers = self.headers.saturating_add(1);
-                self.last_headers = Some((stream, cursor));
+                self.w[0] = self.w[0].saturating_add(1);
+                self.w[1] = cursor;
+                self.n[0] = stream;
             }
             Event::Cancel(stream) => {
-                self.cancels = self.cancels.saturating_add(1);
-                let _ = self.first_cancel.get_or_insert((stream, cursor));
+                self.w[2] = self.w[2].saturating_add(1);
+                if self.w[3] == 0 {
+                    self.w[3] = cursor;
+                    self.n[1] = stream;
+                }
+            }
+            Event::Data { stream, bytes } => {
+                self.w[13] = self.w[13].saturating_add(1);
+                self.w[14] = self.w[14].saturating_add(bytes);
+                self.w[15] = cursor;
+                self.n[2] = stream;
             }
             Event::Applied {
                 stream,
                 before,
                 after,
             } => {
-                self.applied = self.applied.saturating_add(1);
-                if self.first_cancel.is_some_and(|(id, _)| id == stream) {
-                    let _ = self
-                        .first_application
-                        .get_or_insert((cursor, before, after));
+                self.w[4] = self.w[4].saturating_add(1);
+                if self.w[3] != 0 && self.n[1] == stream && self.w[5] == 0 {
+                    self.w[5] = cursor;
+                    self.set_queue(before, 19, 4, 1);
+                    self.set_queue(after, 20, 7, 4);
+                }
+                if self.f & (1 << 16) == 0 {
+                    self.w[16] = cursor;
+                    self.n[3] = stream;
+                    self.set_queue(before, 21, 10, 7);
+                    self.set_queue(after, 22, 13, 10);
+                    if !after.empty
+                        || after.buffered != 0
+                        || after.requested != 0
+                        || after.stream_capacity != 0
+                        || before.staged == 1 && after.staged != 3
+                    {
+                        self.f |= 1 << 16;
+                    }
                 }
             }
             Event::Pending(stage) => {
                 let index = stage as usize;
-                self.pending[index] = self.pending[index].saturating_add(1);
-                self.last_pending = Some((stage as u8, cursor));
+                self.w[6 + index] = self.w[6 + index].saturating_add(1);
+                self.w[12] = cursor;
+                self.f = (self.f & !(7 << 13)) | ((index as u64) << 13);
+            }
+            Event::Assignment {
+                origin,
+                runtime_before,
+                runtime_after,
+            } => {
+                if self.w[17] == 0 {
+                    self.w[17] = cursor;
+                    self.f |= (origin as u64) << 17;
+                    self.f |= u64::from(runtime_before) << 22;
+                    self.f |= u64::from(runtime_after) << 28;
+                }
+            }
+            Event::DropEntry(prior) => {
+                if self.w[18] == 0 {
+                    self.w[18] = cursor;
+                    if let Some(present) = prior {
+                        self.f |= 1 << 20;
+                        self.f |= u64::from(present) << 23;
+                    }
+                }
+            }
+            Event::Terminal {
+                class,
+                initiator,
+                code,
+            } => {
+                if self.f & (3 << 24) == 0 {
+                    self.f |= u64::from(class) << 24;
+                    self.f |= u64::from(initiator) << 26;
+                    self.f |= u64::from(code) << 32;
+                }
             }
         }
     }
 
     pub(super) fn write(&self, text: &mut impl Write) {
-        if !self.observed {
-            let _ = writeln!(text, "protocol absent");
-            return;
+        let _ = text.write_str("p2 ");
+        for value in self.w {
+            write_number(text, value, 13);
         }
-        let _ = write!(text, "pd {:x} ", self.headers);
-        write_pair(text, self.last_headers);
-        let _ = write!(text, " {:x} ", self.cancels);
-        write_pair(text, self.first_cancel);
-        let _ = write!(text, " {:x} ", self.applied);
-        if let Some((cursor, before, after)) = self.first_application {
-            let _ = write!(text, "{cursor:x} ");
-            write_queue(text, before);
-            let _ = write!(text, " ");
-            write_queue(text, after);
-        } else {
-            let _ = write!(text, "- - -");
+        for value in self.n {
+            write_number(text, u64::from(value), 7);
         }
-        let _ = write!(text, "\npp");
-        for count in self.pending {
-            let _ = write!(text, " {count:x}");
-        }
-        let _ = write!(text, " ");
-        write_pair(
-            text,
-            self.last_pending
-                .map(|(stage, cursor)| (u32::from(stage), cursor)),
-        );
-        let _ = writeln!(text);
+        write_number(text, self.f, 13);
+        let _ = text.write_char('\n');
     }
 
     pub(super) fn saturated() -> Self {
-        let queue = QueueState {
-            empty: true,
-            buffered: usize::MAX,
-            requested: u32::MAX,
-            stream_capacity: u32::MAX,
-            connection_capacity: u32::MAX,
-            staged: 3,
-        };
         Self {
-            observed: true,
-            headers: u64::MAX,
-            last_headers: Some((u32::MAX, u64::MAX)),
-            cancels: u64::MAX,
-            first_cancel: Some((u32::MAX, u64::MAX)),
-            applied: u64::MAX,
-            first_application: Some((u64::MAX, queue, queue)),
-            pending: [u64::MAX; 6],
-            last_pending: Some((5, u64::MAX)),
+            w: [u64::MAX; 23],
+            n: [u32::MAX; 16],
+            f: u64::MAX,
         }
     }
 }
 
-fn write_pair(text: &mut impl Write, pair: Option<(u32, u64)>) {
-    if let Some((id, cursor)) = pair {
-        let _ = write!(text, "{id:x}:{cursor:x}");
-    } else {
-        let _ = write!(text, "-");
+fn write_number(text: &mut impl Write, mut value: u64, width: usize) {
+    let mut digits = [b'0'; 13];
+    for digit in digits[..width].iter_mut().rev() {
+        let remainder = (value % 36) as u8;
+        *digit = if remainder < 10 {
+            b'0' + remainder
+        } else {
+            b'a' + remainder - 10
+        };
+        value /= 36;
     }
-}
-
-fn write_queue(text: &mut impl Write, queue: QueueState) {
-    let _ = write!(
-        text,
-        "{}/{:x}/{:x}/{:x}/{:x}/{:x}",
-        u8::from(queue.empty),
-        queue.buffered,
-        queue.requested,
-        queue.stream_capacity,
-        queue.connection_capacity,
-        queue.staged,
-    );
+    // Only the literal lowercase radix alphabet enters the scratch buffer.
+    if let Ok(number) = std::str::from_utf8(&digits[..width]) {
+        let _ = text.write_str(number);
+    }
 }
 
 pub(super) fn schema(text: &mut impl Write) {
     let _ = writeln!(
         text,
-        "protocol fork=h2-0.4.19/alloy-numeric-v1 qualification=false cursors=endpoint-seq \
-         pd=headers,last-id:cursor,cancels,first-id:cursor,applied,first-apply-cursor,before,after \
-         queue=empty/buffered/requested/stream-cap/conn-cap/staged \
-         staged=0(none)/1(this)/2(other)/3(invalidated) \
-         pp=goaway/control/decode/send-ready/send-flush/shutdown,last-stage:cursor \
-         counts=hex first-only '-'=unobserved waiter/runtime-readiness=unobserved"
+        "p2 fork=h2-0.4.19 qualification=false radix=36 widths=23x13,16x7,1x13 \
+         order=README-v2 cursor0=absent flags=README-v2 waiter/readiness=unknown"
     );
 }
 
@@ -243,7 +344,7 @@ mod tests {
     async fn until(wire: &WireObservation, ready: impl Fn(&ProtocolState) -> bool) {
         loop {
             let changed = wire.protocol_changed.notified();
-            if ready(&wire.snapshot().protocol) {
+            if ready(&wire.protocol_snapshot()) {
                 return;
             }
             changed.await;
@@ -325,19 +426,19 @@ mod tests {
             gate.blocked.notified().await;
         }
         reset.send_reset(h2::Reason::CANCEL);
-        until(&server, |state| state.first_application.is_some()).await;
+        until(&server, |state| state.first_application().is_some()).await;
         let applied = server.snapshot();
-        let protocol = &applied.protocol;
-        assert_eq!(protocol.first_cancel.unwrap().0, id);
-        let (cursor, before, after) = protocol.first_application.unwrap();
-        assert!(cursor > protocol.first_cancel.unwrap().1);
+        let protocol = server.protocol_snapshot();
+        assert_eq!(protocol.first_cancel().unwrap().0, id);
+        let (cursor, before, after) = protocol.first_application().unwrap();
+        assert!(cursor > protocol.first_cancel().unwrap().1);
         let prefix = applied
             .streams
             .iter()
             .flatten()
             .find(|stream| stream.id == id)
             .unwrap();
-        assert!(prefix.first_cancel.unwrap().sequence < protocol.first_cancel.unwrap().1);
+        assert!(prefix.first_cancel.unwrap().sequence < protocol.first_cancel().unwrap().1);
         assert!(after.empty);
         assert_eq!(after.buffered, 0);
         assert_eq!(after.requested, 0);
@@ -346,8 +447,7 @@ mod tests {
             assert!(before.buffered > 0);
             assert_eq!(before.staged, 1);
             assert_eq!(after.staged, 3);
-            assert!(after.connection_capacity >= before.connection_capacity);
-            assert!(protocol.pending[3] + protocol.pending[4] > 0);
+            assert!(protocol.w[9] + protocol.w[10] > 0);
         }
         let frozen = observations.capture();
         let sampled_at = std::time::Instant::now();
@@ -365,8 +465,8 @@ mod tests {
             assert!(response.await.unwrap().body().is_end_stream());
             drop(stream);
         }
-        until(&client, |state| state.headers == 3).await;
-        assert_eq!(server.snapshot().protocol.headers, 3);
+        until(&client, |state| state.headers() == 3).await;
+        assert_eq!(server.protocol_snapshot().headers(), 3);
         if staged {
             let drained = server.snapshot();
             let stream = drained
@@ -390,8 +490,8 @@ mod tests {
         frozen.clone().write_wire_core(&mut again, sampled_at);
         assert_eq!(frozen_text, again);
         assert!(!again.contains("private-first-data"));
-        assert_eq!(protocol.cancels, 1);
-        assert_eq!(protocol.applied, 1);
+        assert_eq!(protocol.w[2], 1);
+        assert_eq!(protocol.w[4], 1);
         drop(sender);
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
@@ -499,14 +599,95 @@ mod tests {
     }
 
     #[test]
+    fn later_cancel_selection_retains_first_violation_and_original_first_tuple() {
+        let live = LiveProtocol::default();
+        let before = QueueState {
+            buffered: 64,
+            requested: 32,
+            stream_capacity: 16,
+            connection_capacity: 8,
+            staged: 1,
+            ..QueueState::default()
+        };
+        let after = QueueState {
+            empty: true,
+            staged: 3,
+            // Reclaimed connection capacity may already have been reassigned.
+            connection_capacity: 0,
+            ..QueueState::default()
+        };
+        live.event(Event::Cancel(5), 1);
+        live.event(
+            Event::Applied {
+                stream: 5,
+                before,
+                after,
+            },
+            2,
+        );
+        let first = live.snapshot().first_application();
+        live.event(Event::Cancel(7), 3);
+        live.event(
+            Event::Applied {
+                stream: 7,
+                before,
+                after,
+            },
+            4,
+        );
+        let frozen = live.snapshot();
+        assert_eq!(frozen.n[3], 7);
+        assert_eq!(frozen.f & (1 << 16), 0);
+        let broken = QueueState {
+            buffered: 1,
+            ..after
+        };
+        live.event(Event::Cancel(9), 5);
+        live.event(
+            Event::Applied {
+                stream: 9,
+                before,
+                after: broken,
+            },
+            6,
+        );
+        live.event(
+            Event::Applied {
+                stream: 11,
+                before,
+                after,
+            },
+            7,
+        );
+        let state = live.snapshot();
+        assert_eq!(state.w[4], 4);
+        assert_eq!(state.first_cancel(), Some((5, 1)));
+        assert_eq!(state.first_application(), first);
+        assert_eq!((state.n[3], state.w[16], state.w[22]), (9, 6, 1));
+        assert_ne!(state.f & (1 << 16), 0);
+        assert_eq!((frozen.n[3], frozen.w[16], frozen.w[4]), (7, 4, 2));
+    }
+
+    #[test]
     fn protocol_counter_width_and_value_footprints_are_frozen() {
-        assert!(std::mem::size_of::<ProtocolState>() <= 256);
+        assert_eq!(std::mem::size_of::<ProtocolState>(), 256);
+        assert_eq!(std::mem::size_of::<LiveProtocol>(), 256);
         let mut text = String::new();
-        ProtocolState::saturated().write(&mut text);
-        assert_eq!(text.len(), 343);
+        let live = LiveProtocol::default();
+        live.replace(&ProtocolState::saturated());
+        let frozen = live.snapshot();
+        frozen.write(&mut text);
+        assert_eq!(frozen.w, [u64::MAX; 23]);
+        assert_eq!(frozen.n, [u32::MAX; 16]);
+        assert_eq!(frozen.f, u64::MAX);
+        assert_eq!(text.len(), 428);
         let mut schema_text = String::new();
         schema(&mut schema_text);
-        assert!(schema_text.len() <= 512);
+        assert_eq!(schema_text.len(), 142);
+        assert_eq!(4 * text.len() + schema_text.len(), 1854);
+        assert!(4 * text.len() + schema_text.len() <= 1884);
+        assert!(text.contains("3w5e11264sgsf"));
+        assert!(text.contains("1z141z3"));
         let mut provenance_text = String::new();
         provenance(&mut provenance_text);
         assert_eq!(provenance_text.len(), 332);

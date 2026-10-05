@@ -1,13 +1,17 @@
 --- a/crates/ferrum-alloy/src/bench_diagnostics.rs
 +++ b/crates/ferrum-alloy/src/bench_diagnostics.rs
-@@ -14,0 +15,4 @@
-+
+@@ -15,0 +16,4 @@
 +#[path = "../../../examples/bench/diagnostics/protocol_future.rs"]
 +mod protocol;
-+pub use protocol::ProtocolFuture;
-@@ -45,0 +50,2 @@
++pub use protocol::{ProtocolFuture, ReadGate, ReceiveGate};
++
+@@ -45,0 +50,6 @@
 +    /// Fixed numerical events from the isolated h2 fork, after protocol locks release.
 +    fn protocol_event(&self, _event: h2::alloy_diagnostics::Event) {}
++    /// Borrowed before protocol locks; only atomic loads occur inside those locks.
++    fn protocol_flags(&self) -> Option<&std::sync::atomic::AtomicU64> {
++        None
++    }
 --- a/crates/ferrum-alloy/src/server.rs
 +++ b/crates/ferrum-alloy/src/server.rs
 @@ -803,2 +803,5 @@
@@ -28,17 +32,27 @@
 +    future.await;
 --- a/examples/bench/src/client.rs
 +++ b/examples/bench/src/client.rs
-@@ -1085,0 +1086,2 @@
+@@ -157,0 +158,3 @@
++        #[cfg(test)]
++        tests::diagnostic_spawn(connection);
++        #[cfg(not(test))]
+@@ -217,0 +221 @@
++                tests::protocol_tls_established(&stream);
+@@ -823,0 +828 @@
++        protocol_control: Option<Arc<ProtocolControl>>,
+@@ -868,0 +874 @@
++                protocol_control: None,
+@@ -1085,0 +1092,2 @@
 +                Ok("all-features-protocol-fork") => "all-features-protocol-fork",
 +                Ok("default-features-protocol-fork") => "default-features-protocol-fork",
-@@ -1092,0 +1095 @@
+@@ -1092,0 +1101 @@
 +            crate::health::protocol_provenance(&mut message);
-@@ -1222,0 +1226,2 @@
+@@ -1222,0 +1232,2 @@
 +                Ok("all-features-protocol-fork") => "all-features-protocol-fork",
 +                Ok("default-features-protocol-fork") => "default-features-protocol-fork",
-@@ -1339,0 +1345 @@
+@@ -1339,0 +1351 @@
 +            wire.saturate_protocol();
-@@ -1509,2 +1515,16 @@
+@@ -1509,2 +1521,16 @@
 -        assert_eq!(wire_core.0.matches("wc ").count(), 128);
 -        assert_eq!(wire_core.0.matches("ws ").count(), 48);
 +        assert_eq!(
@@ -57,16 +71,26 @@
 +                .count(),
 +            48,
 +        );
-@@ -1967 +1987 @@
+@@ -1967 +1993 @@
 -            && matches!(metadata.line(), Some(491 | 521))
-+            && matches!(metadata.line(), Some(507 | 537))
-@@ -1989 +2009 @@
++            && matches!(metadata.line(), Some(516 | 546))
+@@ -1989 +2015 @@
 -            let io = event.metadata().line() == Some(491);
-+            let io = event.metadata().line() == Some(507);
-@@ -2197,2 +2217,16 @@
++            let io = event.metadata().line() == Some(516);
+@@ -2197,2 +2223,38 @@
 -            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
 -            None => handshake(TokioIo::new(io), h2).await,
 +            Some(wire) => {
++                let gate = HEALTH_WORKER
++                    .try_with(|(diagnostics, _)| {
++                        diagnostics.protocol_control.as_ref().and_then(|control| {
++                            (control.mode == ProtocolMode::Receive && wire.owner == 2)
++                                .then(|| Arc::clone(&control.read))
++                        })
++                    })
++                    .ok()
++                    .flatten();
++                let io = ferrum_alloy::bench_diagnostics::ReadGate::new(io, gate);
 +                let observer =
 +                    Some(Arc::clone(&wire) as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>);
 +                ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
@@ -82,7 +106,9 @@
 +                )
 +                .await
 +            }
-@@ -2201,0 +2236,113 @@
++        }
++    }
++
 +    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 +    async fn unobserved_hyper_adapter_masks_foreign_ambient_through_driver_close() {
 +        #[derive(Debug, Default)]
@@ -92,7 +118,7 @@
 +            fn event(&self, _event: h2::alloy_diagnostics::Event) {
 +                self.0.fetch_add(1, Ordering::SeqCst);
 +            }
-+        }
+@@ -2199,0 +2262,101 @@
 +
 +        tokio::time::timeout(Duration::from_secs(10), async {
 +            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -194,128 +220,910 @@
 +        })
 +        .await
 +        .unwrap();
-+    }
-+
-@@ -2832 +2979 @@
+@@ -2226,0 +2390,5 @@
++        let _ = HEALTH_WORKER.try_with(|(diagnostics, index)| {
++            if let Some(control) = &diagnostics.protocol_control {
++                control.exchange_completed(diagnostics, *index);
++            }
++        });
+@@ -2832 +3000 @@
 -                    .find(|line| line.starts_with("wire Rx counts_hex="))
 +                    .find(|line| line.starts_with("wire Rx c="))
-@@ -2834,2 +2981,2 @@
+@@ -2834,2 +3002,2 @@
 -                let eof = "flags=0/1/1 hb=9 remaining_hex=7";
 -                let partial = "partial_hex=6/0/8/0";
 +                let eof = "f=0/1/1 hb=9 r=7";
 +                let partial = "x=6/0/8/0";
-@@ -2838 +2985 @@
+@@ -2838 +3006 @@
 -                assert!(rx.contains("/0 preface=")); // EOF, not a raw socket read error.
 +                assert!(rx.contains("/0 p=")); // EOF, not a raw socket read error.
-@@ -3788,0 +3936 @@
+@@ -3193,0 +3362 @@
++        runtime_observer: Option<Arc<HealthDiagnostics>>,
+@@ -3198,0 +3368 @@
++                runtime_observer: None,
+@@ -3214,0 +3385,5 @@
++            if let Some(diagnostics) = &self.runtime_observer {
++                for wire in diagnostics.observer.wires() {
++                    wire.runtime_entry();
++                }
++            }
+@@ -3224,0 +3400,5 @@
++                if let Some(diagnostics) = &self.runtime_observer {
++                    for wire in diagnostics.observer.wires() {
++                        wire.runtime_entry();
++                    }
++                }
+@@ -3572 +3752,2 @@
+-        inner: GatedBody,
++        inner: axum::body::Body,
++        cancelled: Option<oneshot::Sender<()>>,
+@@ -3579 +3760 @@
+-        type Error = Infallible;
++        type Error = axum::Error;
+@@ -3584 +3765 @@
+-        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
++        ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+@@ -3590,0 +3772,3 @@
++            if let Some(cancelled) = self.cancelled.take() {
++                let _ = cancelled.send(());
++            }
+@@ -3788,0 +3973 @@
 +                            assert_eq!(wires[0].decoded_headers(), 2);
+@@ -3818,0 +4004,458 @@
++    // Preserve the existing runtime destruction, including unwind paths. The
++    // wrapper adds only its endpoint entry mark before dropping that same runtime.
++    pub(crate) struct ProtocolRuntime {
++        runtime: Option<Runtime>,
++        diagnostics: Option<Arc<HealthDiagnostics>>,
++        server: bool,
++    }
++
++    impl ProtocolRuntime {
++        pub(crate) fn new(
++            runtime: Runtime,
++            diagnostics: Option<Arc<HealthDiagnostics>>,
++            server: bool,
++        ) -> Self {
++            Self {
++                runtime: Some(runtime),
++                diagnostics,
++                server,
++            }
++        }
++
++        fn mark_entry(&self) {
++            if let Some(diagnostics) = &self.diagnostics {
++                let endpoints = if self.server {
++                    diagnostics.observer.server_wires()
++                } else {
++                    diagnostics.observer.wires()
++                };
++                for wire in endpoints {
++                    wire.runtime_entry();
++                }
++            }
++        }
++
++        fn shutdown_timeout(mut self, duration: Duration) {
++            if let Some(runtime) = self.runtime.take() {
++                self.mark_entry();
++                runtime.shutdown_timeout(duration);
++            }
++        }
++    }
++
++    impl std::ops::Deref for ProtocolRuntime {
++        type Target = Runtime;
++
++        fn deref(&self) -> &Self::Target {
++            self.runtime.as_ref().unwrap()
++        }
++    }
++
++    impl Drop for ProtocolRuntime {
++        fn drop(&mut self) {
++            if let Some(runtime) = self.runtime.take() {
++                self.mark_entry();
++                drop(runtime);
++            }
++        }
++    }
++
++    #[derive(Clone, Copy, PartialEq, Eq)]
++    enum ProtocolMode {
++        Receive,
++        Teardown,
++        Alive,
++    }
++
++    type RetainedDispatcher = Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>>;
++
++    struct ProtocolControl {
++        mode: ProtocolMode,
++        read: Arc<ferrum_alloy::bench_diagnostics::ReceiveGate>,
++        armed: AtomicBool,
++        public_held: AtomicBool,
++        dispatchers: Mutex<[Option<RetainedDispatcher>; 2]>,
++    }
++
++    impl ProtocolControl {
++        fn new(mode: ProtocolMode) -> Self {
++            Self {
++                mode,
++                read: Arc::default(),
++                armed: AtomicBool::new(false),
++                public_held: AtomicBool::new(false),
++                dispatchers: Mutex::new([None, None]),
++            }
++        }
++
++        fn exchange_completed(&self, diagnostics: &HealthDiagnostics, index: usize) {
++            if index < 2 {
++                return;
++            }
++            let selected = diagnostics.workers[index].lock().unwrap();
++            let phase = selected.exchange_phase;
++            let completed = selected.exchanges[phase].completed;
++            drop(selected);
++            if self.mode == ProtocolMode::Receive && phase == 2 && completed == 8 {
++                let complete = (2..4).all(|worker| {
++                    diagnostics.workers[worker].lock().unwrap().exchanges[2].completed == 8
++                });
++                if complete && !self.armed.swap(true, Ordering::SeqCst) {
++                    for worker in 0..4 {
++                        assert_eq!(
++                            diagnostics.workers[worker].lock().unwrap().exchanges[2].completed,
++                            8,
++                        );
++                    }
++                    // This is before returning from the real exchange drops its body.
++                    self.read.hold();
++                }
++            } else if self.mode != ProtocolMode::Receive && phase == 3 {
++                let complete = (2..4).all(|worker| {
++                    diagnostics.workers[worker].lock().unwrap().exchanges[3].completed == 1
++                });
++                if complete {
++                    self.public_held.store(true, Ordering::SeqCst);
++                }
++            }
++        }
++
++        fn poll_dispatchers(&self, cx: &mut Context<'_>) {
++            let mut dispatchers = self.dispatchers.lock().unwrap();
++            for (index, dispatcher) in dispatchers.iter_mut().enumerate() {
++                if index == 1 && self.public_held.load(Ordering::SeqCst) {
++                    continue;
++                }
++                if let Some(future) = dispatcher
++                    && let Poll::Ready(result) = future.as_mut().poll(cx)
++                {
++                    result.unwrap();
++                    *dispatcher = None;
++                }
++            }
++        }
++    }
++
++    pub(super) fn diagnostic_spawn<F>(connection: F)
++    where
++        F: Future<Output = Result<(), hyper::Error>> + Send + 'static,
++    {
++        let control = HEALTH_WORKER
++            .try_with(|(diagnostics, index)| {
++                diagnostics.protocol_control.as_ref().and_then(|control| {
++                    (control.mode != ProtocolMode::Receive)
++                        .then(|| (Arc::clone(control), *index / 2))
++                })
++            })
++            .ok()
++            .flatten();
++        if let Some((control, index)) = control {
++            let mut dispatchers = control.dispatchers.lock().unwrap();
++            assert!(dispatchers[index].is_none());
++            dispatchers[index] = Some(Box::pin(connection));
++        } else {
++            tokio::spawn(connection);
++        }
++    }
++
++    pub(super) fn protocol_tls_established<I>(stream: &tokio_rustls::client::TlsStream<I>) {
++        let _ = HEALTH_WORKER.try_with(|(diagnostics, _)| {
++            if diagnostics.protocol_control.is_some() {
++                assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
++                assert!(!stream.get_ref().1.peer_certificates().unwrap().is_empty());
++            }
++        });
++    }
++
++    fn protocol_pair(
++        diagnostics: &HealthDiagnostics,
++    ) -> (Arc<crate::health::WireObservation>, Arc<crate::health::WireObservation>) {
++        let original = diagnostics.workers[2]
++            .lock()
++            .unwrap()
++            .connection
++            .as_ref()
++            .unwrap()
++            .local_addr
++            .unwrap();
++        let client = diagnostics
++            .observer
++            .wires()
++            .into_iter()
++            .find(|wire| wire.socket == Some(original))
++            .unwrap();
++        let server = diagnostics
++            .observer
++            .server_wires()
++            .into_iter()
++            .find(|wire| wire.remote == Some(original))
++            .unwrap();
++        assert_eq!((client.owner, client.generation), (2, 1));
++        assert_eq!(client.remote, server.socket);
++        assert_eq!(client.socket, server.remote);
++        (client, server)
++    }
++
++    fn protocol_zero_errors(diagnostics: &HealthDiagnostics) {
++        for worker in 0..4 {
++            diagnostics.worker(worker, |state| {
++                assert_eq!(state.errors, 0);
++                assert_eq!(state.error_events, 0);
++                assert_eq!(state.wire_events, 0);
++            });
++        }
++        for wire in diagnostics
++            .observer
++            .wires()
++            .into_iter()
++            .chain(diagnostics.observer.server_wires())
++        {
++            assert!(wire.snapshot().protocol_error_free());
++            let protocol = wire.protocol_snapshot();
++            assert_eq!(protocol.f & (1 << 16), 0);
++            assert_ne!((protocol.f >> 24) & 3, 2);
++            if (protocol.f >> 24) & 3 == 3 {
++                assert_eq!(protocol.f >> 32, 0);
++            }
++        }
++    }
++
++    async fn protocol_retained_health<F>(
++        mut health: Pin<&mut F>,
++        control: &ProtocolControl,
++        diagnostics: &HealthDiagnostics,
++        arrivals: &mut mpsc::UnboundedReceiver<Cancellation>,
++        held_snapshot: &mut Option<Box<HealthCapture>>,
++    ) -> Result<Measured<usize>, Failure>
++    where
++        F: Future<Output = Result<Measured<usize>, Failure>>,
++    {
++        use crate::health::Direction::{Rx, Tx};
++
++        if control.mode != ProtocolMode::Receive {
++            let measured = std::future::poll_fn(|cx| {
++                let result = health.as_mut().poll(cx);
++                if result.is_pending() {
++                    control.poll_dispatchers(cx);
++                }
++                result
++            })
++            .await?;
++            if control.mode == ProtocolMode::Alive {
++                protocol_origin_pending(control, diagnostics);
++                let dispatcher = control.dispatchers.lock().unwrap()[1].take().unwrap();
++                dispatcher.await.unwrap();
++                protocol_zero_errors(diagnostics);
++            }
++            return Ok(measured);
++        }
++        let probes = tokio::select! {
++            result = health.as_mut() => {
++                return match result {
++                    Err(error) => Err(error),
++                    Ok(_) => panic!("receive control completed without the held prerequisites"),
++                };
++            }
++            probes = cancellations(arrivals, 4) => probes,
++        };
++        assert!(control.armed.load(Ordering::SeqCst));
++        let (client, server) = protocol_pair(diagnostics);
++        let next = loop {
++            let sent = client.snapshot().header_streams(Tx);
++            let received = client.snapshot().header_streams(Rx);
++            let next: Vec<_> = sent
++                .into_iter()
++                .filter(|id| !received.contains(id))
++                .collect();
++            let accepted = server.snapshot().header_streams(Tx);
++            let callbacks = diagnostics.observer.socket_tasks(
++                "h2-response-callback-child-empty-get",
++                client.socket,
++            );
++            let pending = callbacks
++                .iter()
++                .filter(|task| {
++                    let state = task.snapshot();
++                    state.pending > 0 && state.ready == 0 && !state.dropped
++                })
++                .count();
++            if next.len() == 2 && next.iter().all(|id| accepted.contains(id)) && pending == 2 {
++                break next;
++            }
++            tokio::select! {
++                result = health.as_mut() => {
++                    return match result {
++                        Err(error) => Err(error),
++                        Ok(_) => panic!("held receive control lost its two pending callbacks"),
++                    };
++                }
++                _ = tokio::task::yield_now() => {}
++            }
++        };
++        let protocol = server.protocol_snapshot();
++        assert!(protocol.w[4] > 1);
++        assert!(protocol.w[16] > protocol.w[5]);
++        assert_ne!(protocol.n[3], protocol.n[1]);
++        assert_eq!(protocol.f & (1 << 16), 0);
++        let old = protocol.n[3];
++        let old_sent = server.snapshot().stream_data(old, Tx);
++        let old_received = client.snapshot().stream_data(old, Rx);
++        assert!(old_received.0 > 0 && old_received.1 > 0);
++        assert!(
++            old_sent.1 > old_received.1,
++            "required old DATA remainder is absent",
++        );
++        for id in &next {
++            assert!(server.snapshot().header_cursor(*id, Tx) > old_sent.2);
++            assert_eq!(client.snapshot().header_cursor(*id, Rx), 0);
++            assert_eq!(client.snapshot().stream_data(*id, Rx), (0, 0, 0));
++            assert!(server.snapshot().header_streams(Rx).contains(id));
++        }
++        let decoded = client.protocol_snapshot();
++        assert!(next.iter().all(|id| *id > decoded.n[0]));
++        let callbacks: Vec<_> = diagnostics
++            .observer
++            .socket_tasks(
++                "h2-response-callback-child-empty-get",
++                client.socket,
++            )
++            .into_iter()
++            .filter(|task| {
++                let state = task.snapshot();
++                state.pending > 0 && state.ready == 0 && !state.dropped
++            })
++            .collect();
++        assert_eq!(callbacks.len(), 2);
++        let wakes: Vec<_> = callbacks.iter().map(|task| task.snapshot().wakes).collect();
++        for worker in 2..4 {
++            diagnostics.worker(worker, |state| {
++                assert_eq!(state.stage, "response-headers");
++                assert_eq!(state.exchanges[2].completed, 8);
++                assert_eq!(state.exchanges[3].completed, 0);
++                assert_eq!(state.exchanges[3].bytes, 0);
++            });
++        }
++        protocol_zero_errors(diagnostics);
++        let mut frozen = diagnostics.capture();
++        frozen.boundary = "controlled-held-client-plaintext-before-release";
++        let cell = crate::dims::Cell {
++            scenario: crate::dims::Scenario::Plain,
++            workload: Workload::Cancel,
++            transport: Transport::H2Mtls,
++        };
++        let before = diagnostics.render(cell, "controlled-before-runtime-cleanup", &frozen);
++        control.read.release();
++        drop(probes);
++        let measured = health.await?;
++        assert!(client.protocol_snapshot().w[13] > decoded.w[13]);
++        assert!(client.protocol_snapshot().w[14] > decoded.w[14]);
++        assert!(client.decoded_headers() >= decoded.headers() + 2);
++        for id in next {
++            assert!(client.snapshot().header_streams(Rx).contains(&id));
++            assert!(client.snapshot().stream_data(id, Rx).1 > 0);
++        }
++        for (callback, wakes) in callbacks.iter().zip(wakes) {
++            while !callback.snapshot().dropped {
++                tokio::task::yield_now().await;
++            }
++            let state = callback.snapshot();
++            assert!(state.wakes > wakes);
++            assert_eq!(state.ready, 1);
++        }
++        assert_eq!(diagnostics.coordinator.lock().unwrap().joined, 4);
++        for worker in 0..4 {
++            diagnostics.worker(worker, |state| {
++                assert_eq!(state.exchanges[3].completed, 1);
++                assert!(state.exchanges[3].bytes > 0);
++                assert_eq!(state.connection.as_ref().unwrap().generation, 1);
++            });
++        }
++        protocol_zero_errors(diagnostics);
++        assert_eq!(
++            before,
++            diagnostics.render(cell, "controlled-before-runtime-cleanup", &frozen),
++        );
++        // The original burst's real one-KiB payload contains this marker.
++        assert!(!before.contains("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
++        *held_snapshot = Some(frozen);
++        Ok(measured)
++    }
++
++    fn protocol_origin_before_cleanup(control: &ProtocolControl, diagnostics: &HealthDiagnostics) {
++        protocol_zero_errors(diagnostics);
++        if control.mode != ProtocolMode::Teardown {
++            return;
++        }
++        protocol_origin_pending(control, diagnostics);
++    }
++
++    fn protocol_origin_pending(control: &ProtocolControl, diagnostics: &HealthDiagnostics) {
++        protocol_zero_errors(diagnostics);
++        assert!(control.public_held.load(Ordering::SeqCst));
++        let (client, _) = protocol_pair(diagnostics);
++        let wires = diagnostics.observer.socket_tasks(
++            "h2-wire-child-pinned-first-spawn",
++            client.socket,
++        );
++        assert_eq!(wires.len(), 1);
++        let wire = wires[0].snapshot();
++        assert!(wire.pending > 0 && wire.ready == 0 && !wire.dropped);
++        assert_eq!(client.protocol_snapshot().w[17], 0);
++        assert_eq!(client.protocol_snapshot().w[18], 0);
++        assert_eq!(client.protocol_snapshot().f & (1 << 21), 0);
++        assert!(control.dispatchers.lock().unwrap()[1].is_some());
++    }
++
++    fn protocol_origin_after_runtime_drop(
++        control: &ProtocolControl,
++        diagnostics: &HealthDiagnostics,
++    ) {
++        let (client, _) = protocol_pair(diagnostics);
++        let protocol = client.protocol_snapshot();
++        assert!(protocol.w[18] > 0);
++        assert!(protocol.w[17] > protocol.w[18]);
++        assert_eq!((protocol.f >> 17) & 7, 5);
++        assert_ne!(protocol.f & (1 << 20), 0);
++        assert_eq!(protocol.f & (1 << 23), 0);
++        assert_ne!(protocol.f & (1 << 21), 0);
++        assert_ne!(protocol.f & (1 << 22), 0);
++        assert_ne!(protocol.f & (1 << 28), 0);
++        assert_eq!((protocol.f >> 24) & 3, 0); // Wire child never returned Ready.
++        let wire = diagnostics.observer.socket_tasks(
++            "h2-wire-child-pinned-first-spawn",
++            client.socket,
++        );
++        assert!(wire[0].snapshot().dropped);
++        assert_eq!(wire[0].snapshot().ready, 0);
++        let mut dispatcher = control.dispatchers.lock().unwrap()[1].take().unwrap();
++        struct Wake;
++        impl std::task::Wake for Wake {
++            fn wake(self: Arc<Self>) {}
++        }
++        let waker = std::task::Waker::from(Arc::new(Wake));
++        let mut cx = Context::from_waker(&waker);
++        let Poll::Ready(Err(error)) = dispatcher.as_mut().poll(&mut cx) else {
++            panic!("same retained Hyper dispatcher did not return the genuine drop error");
++        };
++        let mut source = std::error::Error::source(&error);
++        let mut broken_pipe = false;
++        while let Some(error) = source {
++            if let Some(error) = error.downcast_ref::<std::io::Error>() {
++                broken_pipe |= error.kind() == std::io::ErrorKind::BrokenPipe;
++            }
++            source = error.source();
++        }
++        assert!(broken_pipe);
++        diagnostics.worker(2, |state| {
++            assert_eq!(state.errors, 0);
++            assert_eq!(state.error_events, 1);
++            assert_eq!(state.wire_events, 0);
++            assert_eq!(
++                state.connection.as_ref().unwrap().driver.load(Ordering::Relaxed),
++                3,
++            );
++        });
++        assert_eq!(client.protocol_snapshot().w[17], protocol.w[17]);
++        assert_eq!(client.protocol_snapshot().w[18], protocol.w[18]);
++    }
++
+@@ -3819,0 +4463,8 @@
++        retained_sender_protocol_case(release_gate, headers_shape, None);
++    }
++
++    fn retained_sender_protocol_case(
++        release_gate: bool,
++        headers_shape: bool,
++        mode: Option<ProtocolMode>,
++    ) {
+@@ -3822 +4473,22 @@
+-        let runtime = CancellationRuntime::new();
++        let protocol_control = mode.map(|mode| Arc::new(ProtocolControl::new(mode)));
++        let server_runtime = mode.map(|_| {
++            tokio::runtime::Builder::new_multi_thread()
++                .worker_threads(crate::server::THREADS)
++                .enable_all()
++                .build()
++                .unwrap()
++        });
++        let mut runtime = if mode.is_some() {
++            CancellationRuntime {
++                runtime_observer: None,
++                runtime: Some(
++                    tokio::runtime::Builder::new_multi_thread()
++                        .worker_threads(crate::server::THREADS)
++                        .enable_all()
++                        .build()
++                        .unwrap(),
++                ),
++            }
++        } else {
++            CancellationRuntime::new()
++        };
+@@ -3829 +4501,7 @@
+-        let origin = if headers_shape && release_gate {
++        let origin = if mode == Some(ProtocolMode::Receive) {
++            "controlled-hyper-mtls-receive-release"
++        } else if mode == Some(ProtocolMode::Teardown) {
++            "controlled-hyper-mtls-runtime-drop-origin"
++        } else if mode == Some(ProtocolMode::Alive) {
++            "controlled-hyper-mtls-alive-origin-companion"
++        } else if headers_shape && release_gate {
+@@ -3838,5 +4516,18 @@
+-        let diagnostics = Arc::new(
+-            HealthDiagnostics::new(load)
+-                .with_transport(Transport::H2c)
+-                .with_origin(origin),
+-        );
++        let transport = if mode.is_some() {
++            Transport::H2Mtls
++        } else {
++            Transport::H2c
++        };
++        let mut observations = HealthDiagnostics::new(load)
++            .with_transport(transport)
++            .with_origin(origin);
++        observations.protocol_control = protocol_control.clone();
++        let diagnostics = Arc::new(observations);
++        let server_runtime = server_runtime.map(|runtime| {
++            ProtocolRuntime::new(
++                runtime,
++                Some(Arc::clone(&diagnostics)),
++                true,
++            )
++        });
++        runtime.runtime_observer = Some(Arc::clone(&diagnostics));
+@@ -3850,0 +4542 @@
++        let mut held_snapshot = None;
+@@ -3851,0 +4544,4 @@
++            let pki = mode.map(|_| Pki::generate().unwrap());
++            let tls = pki
++                .as_ref()
++                .map(|pki| TlsAcceptor::from(pki.server(true).unwrap().rustls));
+@@ -3855 +4551 @@
+-                transport: Transport::H2c,
++                transport,
+@@ -3857 +4553 @@
+-                tls: None,
++                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
+@@ -3868 +4564,5 @@
+-            tokio::spawn(async move {
++            let handle = server_runtime
++                .as_ref()
++                .map(|runtime| runtime.handle().clone())
++                .unwrap_or_else(tokio::runtime::Handle::current);
++            handle.spawn(async move {
+@@ -3884 +4584 @@
+-                            .server_wire(stream.local_addr().ok(), peer, false)
++                            .server_wire(stream.local_addr().ok(), peer, mode.is_some())
+@@ -3913 +4613,4 @@
+-                            if headers_shape && let Some(gate) = release.take() {
++                            if headers_shape
++                                && mode.is_none()
++                                && let Some(gate) = release.take()
++                            {
+@@ -3915,0 +4619,14 @@
++                            let (inner, cancelled) = if mode.is_some() {
++                                drop(release);
++                                (crate::server::protocol_burst(), cancelled)
++                            } else {
++                                (
++                                    axum::body::Body::new(GatedBody {
++                                        release,
++                                        cancelled,
++                                        data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
++                                        sent: false,
++                                    }),
++                                    None,
++                                )
++                            };
+@@ -3917,6 +4634,2 @@
+-                                inner: GatedBody {
+-                                    release,
+-                                    cancelled,
+-                                    data: Bytes::from_static(&[b'x'; FRAME_BYTES]),
+-                                    sent: false,
+-                                },
++                                inner,
++                                cancelled,
+@@ -3932,0 +4646 @@
++                    let tls = tls.clone();
+@@ -3936,8 +4650,25 @@
+-                        let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
+-                            stream,
+-                            wire.map(|wire| {
+-                                wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+-                            }),
+-                        );
+-                        let _ = builder
+-                            .serve_connection(TokioIo::new(stream), service)
++                        let observer = wire.map(|wire| {
++                            wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
++                        });
++                        if let Some(tls) = tls {
++                            let mut stream = tls
++                                .accept(ferrum_alloy::bench_diagnostics::SocketIo::new(stream))
++                                .await
++                                .unwrap();
++                            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
++                            assert!(!stream.get_ref().1.peer_certificates().unwrap().is_empty());
++                            stream.get_mut().0.observe(observer.clone());
++                            let stream = ferrum_alloy::bench_diagnostics::TlsIo::optional(
++                                stream.into(),
++                                observer.clone(),
++                            );
++                            let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
++                                stream,
++                                observer.clone(),
++                            );
++                            let connection =
++                                builder.serve_connection(TokioIo::new(stream), service);
++                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                                connection,
++                                observer,
++                            )
+@@ -3944,0 +4676,13 @@
++                        } else {
++                            let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
++                                stream,
++                                observer.clone(),
++                            );
++                            let connection =
++                                builder.serve_connection(TokioIo::new(stream), service);
++                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                                connection,
++                                observer,
++                            )
++                            .await;
++                        }
+@@ -3993,0 +4738,10 @@
++                if let Some(control) = &protocol_control {
++                    return protocol_retained_health(
++                        health.as_mut(),
++                        control,
++                        &diagnostics,
++                        &mut arrivals,
++                        &mut held_snapshot,
++                    )
++                    .await;
++                }
+@@ -4119 +4873 @@
+-                    transport: Transport::H2c,
++                    transport,
+@@ -4173,2 +4927,4 @@
+-        let mut frozen = diagnostics.capture();
+-        frozen.boundary = "controlled-before-server-runtime-cleanup";
++        let mut frozen = held_snapshot.unwrap_or_else(|| diagnostics.capture());
++        if mode != Some(ProtocolMode::Receive) {
++            frozen.boundary = "controlled-before-server-runtime-cleanup";
++        }
+@@ -4178 +4934 @@
+-            transport: Transport::H2c,
++            transport,
+@@ -4226,0 +4983,3 @@
++        if let Some(control) = &protocol_control {
++            protocol_origin_before_cleanup(control, &diagnostics);
++        }
+@@ -4227,0 +4987,12 @@
++        if let Some(control) = &protocol_control {
++            if control.mode == ProtocolMode::Teardown {
++                protocol_origin_after_runtime_drop(control, &diagnostics);
++            }
++            // Release any other retained public future after the frozen boundary.
++            for dispatcher in control.dispatchers.lock().unwrap().iter_mut() {
++                drop(dispatcher.take());
++            }
++        }
++        if let Some(server_runtime) = server_runtime {
++            server_runtime.shutdown_timeout(Duration::from_secs(1));
++        }
+@@ -4288,0 +5060,15 @@
++    #[test]
++    fn retained_hyper_mtls_receive_gate_freezes_real_next_headers_and_callbacks() {
++        retained_sender_protocol_case(true, true, Some(ProtocolMode::Receive));
++    }
++
++    #[test]
++    fn retained_hyper_mtls_runtime_drop_has_typed_synthetic_origin() {
++        retained_sender_protocol_case(true, true, Some(ProtocolMode::Teardown));
++    }
++
++    #[test]
++    fn retained_hyper_mtls_alive_dispatcher_completes_without_error() {
++        retained_sender_protocol_case(true, true, Some(ProtocolMode::Alive));
++    }
++
 --- a/examples/bench/src/health.rs
 +++ b/examples/bench/src/health.rs
-@@ -14,0 +15,7 @@
-+
+@@ -15,0 +16,7 @@
 +#[path = "../diagnostics/protocol.rs"]
 +mod protocol;
 +
 +pub(crate) fn protocol_provenance(text: &mut impl Write) {
 +    protocol::provenance(text);
 +}
-@@ -220,0 +228 @@
-+    protocol: Box<protocol::ProtocolState>,
-@@ -236,0 +245 @@
-+            protocol: self.protocol.clone(),
-@@ -257,0 +267 @@
-+            protocol: Box::default(),
-@@ -591,0 +602 @@
++
+@@ -279,0 +287,31 @@
++    pub(crate) fn stream_data(&self, id: u32, direction: Direction) -> (u64, u64, u64) {
++        self.streams
++            .iter()
++            .flatten()
++            .find(|stream| stream.id == id)
++            .map(|stream| {
++                let data = stream.directions[direction.index()].data;
++                (
++                    data.complete,
++                    data.bytes,
++                    data.last.map_or(0, |mark| mark.sequence),
++                )
++            })
++            .unwrap_or_default()
++    }
++
++    pub(crate) fn protocol_error_free(&self) -> bool {
++        self.directions.iter().all(|direction| {
++            direction.errors == 0 && direction.outcomes.iter().all(|outcome| outcome[2] == 0)
++        }) && self.socket.iter().all(|socket| socket.outcomes[2] == 0)
++    }
++
++    pub(crate) fn header_cursor(&self, id: u32, direction: Direction) -> u64 {
++        self.streams
++            .iter()
++            .flatten()
++            .find(|stream| stream.id == id)
++            .and_then(|stream| stream.directions[direction.index()].first_block)
++            .map_or(0, |mark| mark.sequence)
++    }
++
+@@ -591,0 +630,2 @@
 +    protocol_changed: tokio::sync::Notify,
-@@ -607,0 +619,12 @@
++    protocol: Box<protocol::LiveProtocol>,
+@@ -595,0 +636 @@
++        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+@@ -604 +645,2 @@
+-            state: Box::new(self.snapshot()),
++            state: Box::new(state.clone()),
++            protocol: Box::new(self.protocol.snapshot()),
+@@ -607,0 +650,19 @@
 +    pub(crate) fn decoded_headers(&self) -> u64 {
-+        self.snapshot().protocol.headers()
++        self.protocol_snapshot().headers()
 +    }
 +
 +    pub(crate) fn saturate_protocol(&self) {
-+        *self
-+            .state
-+            .lock()
-+            .unwrap_or_else(|e| e.into_inner())
-+            .protocol = protocol::ProtocolState::saturated();
++        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
++        self.protocol.replace(&protocol::ProtocolState::saturated());
 +    }
 +
-@@ -620,0 +644,10 @@
++    pub(crate) fn protocol_snapshot(&self) -> protocol::ProtocolState {
++        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
++        self.protocol.snapshot()
++    }
++
++    pub(crate) fn runtime_entry(&self) {
++        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
++        self.protocol.runtime_entry();
++    }
++
+@@ -620,0 +682,14 @@
++    fn protocol_flags(&self) -> Option<&std::sync::atomic::AtomicU64> {
++        Some(&self.protocol.flags)
++    }
++
 +    fn protocol_event(&self, event: h2::alloy_diagnostics::Event) {
 +        {
 +            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 +            state.sequence = state.sequence.saturating_add(1);
 +            let cursor = state.sequence;
-+            state.protocol.event(event, cursor);
++            self.protocol.event(event, cursor);
 +        }
 +        self.protocol_changed.notify_one();
 +    }
 +
-@@ -748,0 +782 @@
-+        state.protocol.write(text);
-@@ -802,2 +836,2 @@
+@@ -725,0 +801 @@
++    protocol: Box<protocol::ProtocolState>,
+@@ -748,0 +825 @@
++        self.protocol.write(text);
+@@ -802,2 +879,2 @@
 -                "wire {direction:?} counts_hex={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
 -                 preface={}/24 flags={}/{}/{} hb={} remaining_hex=",
 +                "wire {direction:?} c={:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x}/{:x} \
 +                 p={}/24 f={}/{}/{} hb={} r=",
-@@ -821 +855 @@
+@@ -821 +898 @@
 -            let _ = write!(text, " partial_hex=");
 +            let _ = write!(text, " x=");
-@@ -835,3 +869,3 @@
+@@ -835,3 +912,3 @@
 -            let (operations, outcomes) = match direction {
 -                Direction::Tx => ("scalar/vector/flush/shutdown", &parser.outcomes[1..]),
 -                Direction::Rx => ("read", &parser.outcomes[..1]),
 +            let outcomes = match direction {
 +                Direction::Tx => &parser.outcomes[1..],
 +                Direction::Rx => &parser.outcomes[..1],
-@@ -839,5 +873 @@
+@@ -839,9 +916,2 @@
 -            let _ = writeln!(
 -                text,
 -                "wire {direction:?} outcomes_hex({operations})={outcomes:x?} \
 -                 fields=pending/ok/error",
 -            );
-+            let _ = writeln!(text, "wo {direction:?} {outcomes:x?}");
-@@ -844,4 +874 @@
 -            for (stage, point) in [
 -                ("last_header", parser.last_header),
 -                ("last_complete", parser.last_complete),
 -            ] {
++            let _ = writeln!(text, "wo {direction:?} {outcomes:x?}");
 +            for (stage, point) in [("H", parser.last_header), ("C", parser.last_complete)] {
-@@ -849 +876 @@
+@@ -849 +919 @@
 -                    let _ = write!(text, "wire {direction:?} {stage} ");
 +                    let _ = write!(text, "wp {direction:?} {stage} ");
-@@ -855 +882 @@
+@@ -855 +925 @@
 -                let _ = write!(text, "wire {direction:?} eof_mark_hex=");
 +                let _ = write!(text, "we {direction:?} ");
-@@ -869 +896,2 @@
+@@ -869 +939,2 @@
 -                        "ws {direction:?} {:x} {:x} ",
 +                        "s {} {:x} {:x} ",
 +                        direction.index(),
-@@ -884,3 +912,2 @@
+@@ -884,3 +955,2 @@
 -            "wire first owner={} gen={} endpoint={} remote={:?} \
 -             reset_direction={:?}",
 -            self.owner, self.generation, self.endpoint, self.remote, state.reset_direction,
 +            "wire first owner={} gen={} endpoint={} reset={:?}",
 +            self.owner, self.generation, self.endpoint, state.reset_direction,
-@@ -970,2 +997,2 @@
+@@ -970,2 +1040,2 @@
 -                    "wc {:?} {} ",
 -                    event.direction,
 +                    "c {} {} ",
 +                    event.direction.index(),
-@@ -988 +1015 @@
+@@ -988 +1058 @@
 -                        let _ = write!(text, " goaway={last_stream:x}:{reason:x}");
 +                        let _ = write!(text, " g={last_stream:x}:{reason:x}");
-@@ -1418,0 +1446 @@
+@@ -1418,0 +1489,2 @@
 +            protocol_changed: tokio::sync::Notify::new(),
-@@ -1451,0 +1480 @@
++            protocol: Box::default(),
+@@ -1451,0 +1524,2 @@
 +            protocol_changed: tokio::sync::Notify::new(),
-@@ -1631,3 +1660,2 @@
++            protocol: Box::default(),
+@@ -1532,0 +1607,15 @@
++    pub(crate) fn socket_tasks(
++        &self,
++        kind: &'static str,
++        socket: Option<SocketAddr>,
++    ) -> Vec<Arc<PollObservation>> {
++        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
++        slots
++            .tasks
++            .iter()
++            .flatten()
++            .filter(|task| task.kind == kind && task.socket == socket && task.generation == 1)
++            .map(|task| Arc::clone(&task.observation))
++            .collect()
++    }
++
+@@ -1631,3 +1720,2 @@
 -            "wire slots(connection,stream,control)=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
 -             connections_omitted={} boundary=client-plaintext-I/O \
 -             receipt_is_not_decode socket_ordinal_is_not_stream_id",
 +            "wire slots=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) omitted={} \
 +             boundary=client-plaintext-I/O receipt!=decode socket-ordinal!=stream-id",
-@@ -1641,5 +1669,3 @@
+@@ -1641,5 +1729,3 @@
 -                "server wire slots(connection,stream,control)=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
 -                 connections_omitted={} boundary=server-plaintext-I/O \
 -                 client-Tx/server-Rx=preface server-Tx/client-Rx=no-preface \
@@ -324,26 +1132,26 @@
 +                "server wire slots=({SERVER_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) omitted={} \
 +                 boundary=server-plaintext-I/O client-Tx/server-Rx=preface reverse=no-preface owner=socket-ordinal \
 +                 handler_stream_id=unknown samples=sequential/non-atomic TLS-acceptance!=ciphertext",
-@@ -1659,0 +1686 @@
+@@ -1659,0 +1746 @@
 +            protocol::schema(text);
-@@ -1662,3 +1689,3 @@
+@@ -1662,3 +1749,3 @@
 -                "wire compact_hex counts=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
 -                 flags=bad_preface/eof/eof_partial hb=header_bytes remaining=payload-bytes \
 -                 partial=type/flags/length/stream '-'=unobserved",
 +                "wire compact_hex c=bytes/seen/complete/headers/blocks/data/invalid_length/invalid_stream/settings_omitted/errors \
 +                 p=preface f=bad_preface/eof/eof_partial hb=header_bytes r=payload-bytes \
 +                 x=type/flags/length/stream '-'=unobserved wo=Tx(scalar/vector/flush/shutdown),Rx(read):pending/ok/error",
-@@ -1668 +1695,2 @@
+@@ -1668 +1755,2 @@
 -                "wire compact_hex mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
 +                "wire compact_hex wp=direction,H(header)/C(complete),point we=direction,mark \
 +                 mark=seq:age_us point=mark,type/flags/length/stream,invalid_length/invalid_stream \
-@@ -1670 +1698 @@
+@@ -1670 +1758 @@
 -                 goaway(last-stream:reason)",
 +                 g=goaway(last-stream:reason)",
-@@ -1676 +1704 @@
+@@ -1676 +1764 @@
 -                 rows(wf/wc/ws)=first-stream/control/completed-SETTINGS",
 +                 rows(wf/c/s)=first-stream/control/completed-SETTINGS dirs(c/s)=0(Tx)/1(Rx)",
-@@ -1680,4 +1708,3 @@
+@@ -1680,4 +1768,3 @@
 -                "socket hex rows=0(read)/1(scalar+vector-write)/2(flush) \
 -                 columns=pending/ok/error,bytes,last_requested,wakes,in_poll/last_outcome/eof,last_poll/progress/last_wake \
 -                 outcome=0(Pending)/1(Ok)/2(error) marks=endpoint-seq:age_us '-'=unobserved \
@@ -351,7 +1159,7 @@
 +                "socket hex ops=0(read)/1(scalar+vector-write)/2(flush) \
 +                 fields=pending/ok/error,bytes,requested,wakes,in-poll/outcome/eof,poll/progress/wake \
 +                 outcome=0/1/2 marks=seq:age_us '-'=unknown progress=bytes>0-or-flush-Ok shutdown=unknown",
-@@ -1687,4 +1714,3 @@
+@@ -1687,4 +1774,3 @@
 -                "tls demand=wants_read/wants_write/handshaking,mark \
 -                 buffer_lengths/kernel_queues/need_flush=unknown \
 -                 socket_bytes=encrypted-if-tls TLS_flags=after-poll-sequential \
@@ -359,49 +1167,59 @@
 +                "tls demand=wants_read/wants_write/handshaking,mark lengths/kernel/need_flush=unknown \
 +                 socket-bytes=encrypted-if-tls flags=after-poll-sequential \
 +                 endpoint-copy=one-lock-records cross-endpoint=sequential/non-atomic",
-@@ -2698 +2724 @@
+@@ -2698 +2784 @@
 -        assert!(bounded.contains("connections_omitted=1 boundary=server-plaintext-I/O"));
 +        assert!(bounded.contains("omitted=1 boundary=server-plaintext-I/O"));
-@@ -3084 +3110 @@
+@@ -3084 +3170 @@
 -        assert!(text.contains("ws Rx 4 ffff "));
 +        assert!(text.contains("s 1 4 ffff "));
-@@ -3125,2 +3151,2 @@
+@@ -3125,2 +3211,12 @@
 -        assert!(!frozen.contains(" goaway="));
 -        assert!(after.contains(" goaway=0:0"));
-+        assert!(!frozen.contains(" g="));
-+        assert!(after.contains(" g=0:0"));
-@@ -3200 +3226 @@
++        assert!(
++            frozen
++                .lines()
++                .filter(|line| line.starts_with("c "))
++                .all(|line| !line.contains(" g=")),
++        );
++        assert!(
++            after
++                .lines()
++                .filter(|line| line.starts_with("c "))
++                .any(|line| line.contains(" g=0:0")),
++        );
+@@ -3200 +3296 @@
 -            .find(|line| line.starts_with("wire Tx counts_hex="))
 +            .find(|line| line.starts_with("wire Tx c="))
-@@ -3202,2 +3228,2 @@
+@@ -3202,2 +3298,2 @@
 -        assert!(tx.contains("counts_hex=1/2/3/4/5/6/7/8/9/a "));
 -        assert!(tx.ends_with("remaining_hex=- partial_hex=-/-/-/-"));
 +        assert!(tx.contains("c=1/2/3/4/5/6/7/8/9/a "));
 +        assert!(tx.ends_with("r=- x=-/-/-/-"));
-@@ -3206 +3232 @@
+@@ -3206 +3302 @@
 -            .find(|line| line.starts_with("wire Rx counts_hex="))
 +            .find(|line| line.starts_with("wire Rx c="))
-@@ -3208 +3234 @@
+@@ -3208 +3304 @@
 -        assert!(rx.ends_with("remaining_hex=0 partial_hex=0/0/0/0"));
 +        assert!(rx.ends_with("r=0 x=0/0/0/0"));
-@@ -3210,2 +3236,2 @@
+@@ -3210,2 +3306,2 @@
 -        assert!(text.contains("wire Rx last_header hex=9:0 0/0/0/0 0/1\n"));
 -        assert!(text.contains("wire Rx eof_mark_hex=a:0\n"));
 +        assert!(text.contains("wp Rx H hex=9:0 0/0/0/0 0/1\n"));
 +        assert!(text.contains("we Rx a:0\n"));
-@@ -3264,0 +3291 @@
-+            *state.protocol = protocol::ProtocolState::saturated();
-@@ -3370,5 +3397,4 @@
+@@ -3264,0 +3361 @@
++            wire.protocol.replace(&protocol::ProtocolState::saturated());
+@@ -3370,5 +3467,4 @@
 -        // Shorter wf/wc/ws prefixes retain every original field and save
 -        // 3,760 bytes. Added socket rows <=12*174, drop rows <=4*17 and TLS
 -        // rows <=4*36 at zero ages, plus schemas, stay below the unchanged
 -        // 35,200-byte assertion. All 40 new marks reserve 15 extra age digits.
 -        // Combined maximum age/identity allowance is 13,864 bytes:
 +        // All 776 original and 40 socket/TLS marks survive. The experiment
-+        // adds no ages: 4*343 numeric bytes + <=512 schema bytes; provenance uses detail.
++        // adds no ages: 4*428 numeric bytes + 142 schema bytes; provenance uses detail.
 +        // Label compaction preserves every value, direction and endpoint;
 +        // retain the original strict zero-age and maximum-age assertions.
-@@ -3386,2 +3412,14 @@
+@@ -3386,2 +3482,14 @@
 -        assert_eq!(compact.matches("wc ").count(), 128);
 -        assert_eq!(compact.matches("ws ").count(), 48);
 +        assert_eq!(
@@ -418,10 +1236,10 @@
 +                .count(),
 +            48,
 +        );
-@@ -3410 +3448 @@
+@@ -3410 +3518 @@
 -        assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);
 +        assert_eq!(compact.matches(" g=ffffffff:ffffffff\n").count(), 128);
-@@ -3422 +3460,4 @@
+@@ -3422 +3530,4 @@
 -            compact.matches("eof_mark_hex=ffffffffffffffff:0\n").count(),
 +            compact
 +                .lines()
@@ -429,12 +1247,35 @@
 +                .count(),
 --- a/examples/bench/src/server.rs
 +++ b/examples/bench/src/server.rs
-@@ -280,0 +281,4 @@
+@@ -80,0 +81,5 @@
++#[cfg(test)]
++pub(crate) fn protocol_burst() -> Body {
++    Frames::body(CANCEL_FRAMES)
++}
++
+@@ -137 +142,6 @@
+-fn spawn<F, Fut>(name: &'static str, role: Role, serve: F) -> Result<Server, Failure>
++fn spawn<F, Fut>(
++    name: &'static str,
++    role: Role,
++    serve: F,
++    #[cfg(test)] runtime_observer: Option<Arc<crate::client::tests::HealthDiagnostics>>,
++) -> Result<Server, Failure>
+@@ -160,0 +171,2 @@
++            #[cfg(test)]
++            let runtime = crate::client::tests::ProtocolRuntime::new(runtime, runtime_observer, true);
+@@ -193,0 +206,2 @@
++    #[cfg(test)]
++    let runtime_observer = health.clone();
+@@ -247,0 +262,2 @@
++        #[cfg(test)]
++        runtime_observer,
+@@ -280,0 +297,4 @@
 +        #[cfg(test)]
 +        let protocol_observer = observation
 +            .clone()
 +            .map(|wire| wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>);
-@@ -302,3 +306,7 @@
+@@ -302,3 +322,7 @@
 -                    let _ = builder
 -                        .serve_connection(TokioIo::new(stream), service)
 -                        .await;
@@ -445,7 +1286,7 @@
 +                        protocol_observer,
 +                    );
 +                    let _ = connection.await;
-@@ -328,3 +336,7 @@
+@@ -328,3 +352,7 @@
 -                    let _ = builder
 -                        .serve_connection(TokioIo::new(stream), service)
 -                        .await;
@@ -456,3 +1297,15 @@
 +                        protocol_observer,
 +                    );
 +                    let _ = connection.await;
+@@ -419,0 +448,2 @@
++        #[cfg(test)]
++        None,
+--- a/examples/bench/src/run.rs
++++ b/examples/bench/src/run.rs
+@@ -287,0 +288,6 @@
++    #[cfg(test)]
++    let runtime = client::tests::ProtocolRuntime::new(
++        runtime,
++        diagnostics.clone(),
++        false,
++    );
