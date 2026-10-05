@@ -157,13 +157,11 @@
 +    observer: Option<std::sync::Arc<dyn crate::alloy_diagnostics::Observer>>,
 @@ -153,0 +156 @@
 +            observer: crate::alloy_diagnostics::current(),
-@@ -235 +238,4 @@
+@@ -235 +238,2 @@
 -        self.inner.as_dyn().go_away_from_user(e)
 +        let observer = self.observer.clone();
-+        crate::alloy_diagnostics::scope(observer, || {
-+            self.inner.as_dyn().go_away_from_user(e)
-+        })
-@@ -286,0 +293,11 @@
++        crate::alloy_diagnostics::scope(observer, || self.inner.as_dyn().go_away_from_user(e))
+@@ -286,0 +291,11 @@
 +        let observer = self.observer.clone();
 +        crate::alloy_diagnostics::scope(observer, || {
 +            let result = self.poll_observed(cx);
@@ -175,19 +173,19 @@
 +    }
 +
 +    fn poll_observed(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
-@@ -328 +345,4 @@
+@@ -328 +343,4 @@
 -                    ready!(self.codec.shutdown(cx))?;
 +                    ready!(alloy_pending!(
 +                        self.codec.shutdown(cx),
 +                        crate::alloy_diagnostics::Pending::Shutdown
 +                    ))?;
-@@ -352 +372,4 @@
+@@ -352 +370,4 @@
 -            if let Some(reason) = ready!(self.poll_go_away(cx)?) {
 +            if let Some(reason) = ready!(alloy_pending!(
 +                self.poll_go_away(cx),
 +                crate::alloy_diagnostics::Pending::GoAway
 +            )?) {
-@@ -369,7 +392,9 @@
+@@ -369,7 +390,9 @@
 -            ready!(self.poll_ready(cx))?;
 -
 -            match self
@@ -204,22 +202,22 @@
 +                Pin::new(&mut self.codec).poll_next(cx),
 +                crate::alloy_diagnostics::Pending::Decode
 +            )?))? {
-@@ -544,0 +570,3 @@
+@@ -544,0 +568,3 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Headers(
 +                    frame.stream_id().into(),
 +                ));
-@@ -548,0 +577,4 @@
+@@ -548,0 +575,4 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Data {
 +                    stream: frame.stream_id().into(),
 +                    bytes: frame.payload().len() as u64,
 +                });
-@@ -552,0 +585,5 @@
+@@ -552,0 +583,5 @@
 +                if frame.reason() == Reason::CANCEL {
 +                    crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Cancel(
 +                        frame.stream_id().into(),
 +                    ));
 +                }
-@@ -660,2 +697,7 @@
+@@ -660,2 +695,7 @@
 -        // Ignore errors as this indicates that the mutex is poisoned.
 -        let _ = self.inner.streams.recv_eof(true);
 +        let observer = self.observer.clone();
@@ -298,45 +296,35 @@
 +            .as_ref()
 +            .and_then(|observer| observer.runtime_flags());
 +        let mut diagnostic = None;
-@@ -408 +432,11 @@
+@@ -408 +432,6 @@
 -        me.handle_error(self.send_buffer, err)
-+        let result = me.handle_error(
-+            self.send_buffer,
-+            err,
-+            flags,
-+            &mut diagnostic,
-+        );
++        let result = me.handle_error(self.send_buffer, err, flags, &mut diagnostic);
 +        drop(me);
 +        if let Some(event) = diagnostic {
 +            crate::alloy_diagnostics::emit(event);
 +        }
 +        result
-@@ -411,0 +446,5 @@
+@@ -411,0 +441,5 @@
 +        let observer = crate::alloy_diagnostics::current();
 +        let flags = observer
 +            .as_ref()
 +            .and_then(|observer| observer.runtime_flags());
 +        let mut diagnostic = None;
-@@ -413 +452,11 @@
+@@ -413 +447,6 @@
 -        me.recv_go_away(self.send_buffer, frame)
-+        let result = me.recv_go_away(
-+            self.send_buffer,
-+            frame,
-+            flags,
-+            &mut diagnostic,
-+        );
++        let result = me.recv_go_away(self.send_buffer, frame, flags, &mut diagnostic);
 +        drop(me);
 +        if let Some(event) = diagnostic {
 +            crate::alloy_diagnostics::emit(event);
 +        }
 +        result
-@@ -430,0 +480,5 @@
+@@ -430,0 +470,5 @@
 +        let observer = crate::alloy_diagnostics::current();
 +        let flags = observer
 +            .as_ref()
 +            .and_then(|observer| observer.runtime_flags());
 +        let mut diagnostic = None;
-@@ -432 +486,11 @@
+@@ -432 +476,11 @@
 -        me.recv_eof(self.send_buffer, clear_pending_accept)
 +        let result = me.recv_eof(
 +            self.send_buffer,
@@ -349,21 +337,21 @@
 +            crate::alloy_diagnostics::emit(event);
 +        }
 +        result
-@@ -668,0 +733,4 @@
+@@ -668,0 +723,4 @@
 +        diagnostic: &mut Option<(
 +            crate::alloy_diagnostics::QueueState,
 +            crate::alloy_diagnostics::QueueState,
 +        )>,
-@@ -670,0 +739,2 @@
+@@ -670,0 +729,2 @@
 +        let observe =
 +            frame.reason() == Reason::CANCEL && crate::alloy_diagnostics::current().is_some();
-@@ -710,0 +781 @@
+@@ -710,0 +771 @@
 +            let before = observe.then(|| actions.send.alloy_diagnostic_state(stream));
-@@ -712,0 +784,3 @@
+@@ -712,0 +774,3 @@
 +            if let Some(before) = before {
 +                *diagnostic = Some((before, actions.send.alloy_diagnostic_state(stream)));
 +            }
-@@ -770 +844,7 @@
+@@ -770 +834,7 @@
 -    fn handle_error<B>(&mut self, send_buffer: &SendBuffer<B>, err: proto::Error) -> StreamId {
 +    fn handle_error<B>(
 +        &mut self,
@@ -372,7 +360,7 @@
 +        flags: Option<&std::sync::atomic::AtomicU64>,
 +        diagnostic: &mut Option<crate::alloy_diagnostics::Event>,
 +    ) -> StreamId {
-@@ -784,0 +865,7 @@
+@@ -784,0 +855,7 @@
 +        let origin = match &err {
 +            Error::Io(..) => crate::alloy_diagnostics::Origin::HandleIo,
 +            Error::GoAway(..) => crate::alloy_diagnostics::Origin::HandleGoAway,
@@ -380,7 +368,7 @@
 +        };
 +        let first = actions.conn_error.is_none();
 +        let runtime_before = crate::alloy_diagnostics::runtime_begun(flags);
-@@ -785,0 +873,8 @@
+@@ -785,0 +863,8 @@
 +        let runtime_after = crate::alloy_diagnostics::runtime_begun(flags);
 +        if first {
 +            *diagnostic = Some(crate::alloy_diagnostics::Event::Assignment {
@@ -389,13 +377,13 @@
 +                runtime_after,
 +            });
 +        }
-@@ -793,0 +889,2 @@
+@@ -793,0 +879,2 @@
 +        flags: Option<&std::sync::atomic::AtomicU64>,
 +        diagnostic: &mut Option<crate::alloy_diagnostics::Event>,
-@@ -815,0 +913,2 @@
+@@ -815,0 +903,2 @@
 +        let first = actions.conn_error.is_none();
 +        let runtime_before = crate::alloy_diagnostics::runtime_begun(flags);
-@@ -816,0 +916,8 @@
+@@ -816,0 +906,8 @@
 +        let runtime_after = crate::alloy_diagnostics::runtime_begun(flags);
 +        if first {
 +            *diagnostic = Some(crate::alloy_diagnostics::Event::Assignment {
@@ -404,12 +392,12 @@
 +                runtime_after,
 +            });
 +        }
-@@ -926,0 +1034,2 @@
+@@ -926,0 +1024,2 @@
 +        flags: Option<&std::sync::atomic::AtomicU64>,
 +        diagnostic: &mut Option<crate::alloy_diagnostics::Event>,
-@@ -933,0 +1043 @@
+@@ -933,0 +1033 @@
 +            let runtime_before = crate::alloy_diagnostics::runtime_begun(flags);
-@@ -940,0 +1051,10 @@
+@@ -940,0 +1041,10 @@
 +            let runtime_after = crate::alloy_diagnostics::runtime_begun(flags);
 +            *diagnostic = Some(crate::alloy_diagnostics::Event::Assignment {
 +                origin: if clear_pending_accept {
@@ -420,7 +408,7 @@
 +                runtime_before,
 +                runtime_after,
 +            });
-@@ -1109,0 +1230,7 @@
+@@ -1109,0 +1220,7 @@
 +    pub(crate) fn alloy_prior_error(&self) -> Option<bool> {
 +        self.inner
 +            .lock()
