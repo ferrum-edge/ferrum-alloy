@@ -48,9 +48,6 @@ impl<F: Future> Future for ProtocolFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        h2::alloy_diagnostics::scope(
-            this.observer.clone(),
-            || this.inner.poll(cx),
-        )
+        h2::alloy_diagnostics::scope(this.observer.clone(), || this.inner.poll(cx))
     }
 }

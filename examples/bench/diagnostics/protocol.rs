@@ -42,7 +42,9 @@ impl ProtocolState {
             } => {
                 self.applied = self.applied.saturating_add(1);
                 if self.first_cancel.is_some_and(|(id, _)| id == stream) {
-                    let _ = self.first_application.get_or_insert((cursor, before, after));
+                    let _ = self
+                        .first_application
+                        .get_or_insert((cursor, before, after));
                 }
             }
             Event::Pending(stage) => {
@@ -78,7 +80,8 @@ impl ProtocolState {
         let _ = write!(text, " ");
         write_pair(
             text,
-            self.last_pending.map(|(stage, cursor)| (u32::from(stage), cursor)),
+            self.last_pending
+                .map(|(stage, cursor)| (u32::from(stage), cursor)),
         );
         let _ = writeln!(text);
     }
@@ -274,12 +277,10 @@ mod tests {
         let (body_tx, body_rx) = oneshot::channel();
         let server_observer = observer(&server);
         tasks.spawn(async move {
-            let mut connection = ProtocolFuture::new(
-                h2::server::handshake(server_io),
-                server_observer,
-            )
-            .await
-            .unwrap();
+            let mut connection =
+                ProtocolFuture::new(h2::server::handshake(server_io), server_observer)
+                    .await
+                    .unwrap();
             let mut body_tx = Some(body_tx);
             while let Some(request) = connection.accept().await {
                 let (request, mut response) = request.unwrap();
@@ -290,11 +291,8 @@ mod tests {
                     .send_response(http::Response::new(()), !first)
                     .unwrap();
                 if first {
-                    body.send_data(
-                        Bytes::from_static(b"private-first-data"),
-                        false,
-                    )
-                    .unwrap();
+                    body.send_data(Bytes::from_static(b"private-first-data"), false)
+                        .unwrap();
                     body_tx.take().unwrap().send(body).unwrap();
                 }
             }
@@ -308,24 +306,22 @@ mod tests {
         tasks.spawn(async move {
             let _ = connection.await;
         });
-        let (response, mut reset) = sender
-            .send_request(http::Request::new(()), true)
-            .unwrap();
+        let (response, mut reset) = sender.send_request(http::Request::new(()), true).unwrap();
         let response = response.await.unwrap();
         let id = response.body().stream_id().as_u32();
         let mut received = response.into_body();
         let first = received.data().await.unwrap().unwrap();
-        received.flow_control().release_capacity(first.len()).unwrap();
+        received
+            .flow_control()
+            .release_capacity(first.len())
+            .unwrap();
         assert_eq!(first, "private-first-data");
         assert!(server.snapshot().directions[Direction::Tx.index()].data_complete > 0);
         let mut body = body_rx.await.unwrap();
         if staged {
             gate.held.store(true, Ordering::SeqCst);
-            body.send_data(
-                Bytes::from(vec![b'x'; 32 * 1024]),
-                false,
-            )
-            .unwrap();
+            body.send_data(Bytes::from(vec![b'x'; 32 * 1024]), false)
+                .unwrap();
             gate.blocked.notified().await;
         }
         reset.send_reset(h2::Reason::CANCEL);
@@ -362,10 +358,10 @@ mod tests {
         drop(received);
         drop(reset);
         for _ in 0..2 {
-            std::future::poll_fn(|cx| sender.poll_ready(cx)).await.unwrap();
-            let (response, stream) = sender
-                .send_request(http::Request::new(()), true)
+            std::future::poll_fn(|cx| sender.poll_ready(cx))
+                .await
                 .unwrap();
+            let (response, stream) = sender.send_request(http::Request::new(()), true).unwrap();
             assert!(response.await.unwrap().body().is_end_stream());
             drop(stream);
         }
@@ -466,7 +462,9 @@ mod tests {
                         .unwrap();
                     while let Some(request) = connection.accept().await {
                         let (_, mut response) = request.unwrap();
-                        response.send_response(http::Response::new(()), true).unwrap();
+                        response
+                            .send_response(http::Response::new(()), true)
+                            .unwrap();
                     }
                 },
                 &server_ambient,
@@ -484,10 +482,10 @@ mod tests {
                 &ambient,
             ));
             for _ in 0..2 {
-                std::future::poll_fn(|cx| sender.poll_ready(cx)).await.unwrap();
-                let (response, stream) = sender
-                    .send_request(http::Request::new(()), true)
+                std::future::poll_fn(|cx| sender.poll_ready(cx))
+                    .await
                     .unwrap();
+                let (response, stream) = sender.send_request(http::Request::new(()), true).unwrap();
                 assert!(response.await.unwrap().body().is_end_stream());
                 drop(stream);
             }
