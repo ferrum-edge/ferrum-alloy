@@ -20,8 +20,13 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def read_utf8(path):
+    # No locale decoding, BOM stripping or universal-newline translation.
+    return path.read_bytes().decode("utf-8")
+
+
 def verify(root, manifest):
-    for line in manifest.read_text().splitlines():
+    for line in read_utf8(manifest).splitlines():
         expected, name = line.split("  ", 1)
         path = root / name
         if path.resolve().is_relative_to(root.resolve()) and digest(path) == expected:
@@ -32,7 +37,7 @@ def verify(root, manifest):
 def apply_exact(root, patch):
     # Deliberately no search, offsets or fuzz: every hunk uses its declared
     # original line and matches the complete old/context text byte for byte.
-    lines = patch.read_text().splitlines(keepends=True)
+    lines = read_utf8(patch).splitlines(keepends=True)
     index = 0
     while index < len(lines):
         if not lines[index].startswith("--- "):
@@ -46,7 +51,7 @@ def apply_exact(root, patch):
             raise ValueError("patch path outside experiment")
         if old_name != "/dev/null" and old_name != "a/" + new_name[2:]:
             raise ValueError("renames are not allowed")
-        original = path.read_text().splitlines(keepends=True) if old_name != "/dev/null" else []
+        original = read_utf8(path).splitlines(keepends=True) if old_name != "/dev/null" else []
         if old_name == "/dev/null" and path.exists():
             raise ValueError("new patch target already exists")
         result = []
@@ -88,15 +93,15 @@ def apply_exact(root, patch):
             cursor = start + old_count
         result.extend(original[cursor:])
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes("".join(result).encode())
+        path.write_bytes("".join(result).encode("utf-8"))
 
 
 def add_dependency(path):
-    text = path.read_text()
+    text = read_utf8(path)
     anchor = "[dependencies]\n"
     if text.count(anchor) != 1:
         raise ValueError("unexpected manifest dependencies")
-    path.write_bytes(text.replace(anchor, anchor + 'h2 = "=0.4.19"\n').encode())
+    path.write_bytes(text.replace(anchor, anchor + 'h2 = "=0.4.19"\n').encode("utf-8"))
 
 
 def expected_lock(text):
@@ -141,16 +146,18 @@ verify(workspace, diagnostics / "alloy-patched.sha256")
 add_dependency(workspace / "crates/ferrum-alloy/Cargo.toml")
 add_dependency(workspace / "examples/bench/Cargo.toml")
 manifest = workspace / "Cargo.toml"
-with manifest.open("a") as output:
-    output.write(f'\n[patch.crates-io]\nh2 = {{ path = "{h2.as_posix()}" }}\n')
-(workspace.parent / "expected-protocol.lock").write_bytes(
-    expected_lock((workspace / "Cargo.lock").read_text()).encode()
+manifest.write_bytes(
+    manifest.read_bytes()
+    + f'\n[patch.crates-io]\nh2 = {{ path = "{h2.as_posix()}" }}\n'.encode("utf-8")
 )
-with Path(os.environ["GITHUB_ENV"]).open("a") as output:
+(workspace.parent / "expected-protocol.lock").write_bytes(
+    expected_lock(read_utf8(workspace / "Cargo.lock")).encode("utf-8")
+)
+with Path(os.environ["GITHUB_ENV"]).open("ab") as output:
     for name, value in {
         "ALLOY_PROTOCOL_WORKSPACE": workspace.as_posix(),
         "ALLOY_PROTOCOL_H2": h2.as_posix(),
         "ALLOY_BENCH_H2_PATCH_SHA256": digest(diagnostics / "h2-0.4.19.patch"),
         "ALLOY_BENCH_OBSERVER_PATCH_SHA256": digest(diagnostics / "observer.patch"),
     }.items():
-        output.write(f"{name}={value}\n")
+        output.write(f"{name}={value}\n".encode("utf-8"))

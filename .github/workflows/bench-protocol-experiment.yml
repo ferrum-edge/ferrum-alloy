@@ -66,7 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
-      - name: Resolve only the reviewed temporary graph delta
+      - name: Validate only the reviewed temporary graph delta
         id: resolve
         working-directory: ${{ env.ALLOY_PROTOCOL_WORKSPACE }}
         run: |
@@ -77,13 +77,25 @@ jobs:
             ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16 \
             "$ALLOY_BENCH_H2_PATCH_SHA256" "$ALLOY_BENCH_OBSERVER_PATCH_SHA256" \
             >> "$ALLOY_BENCH_DIAGNOSTIC_DIR/source.txt"
-          cargo update -p h2 --precise 0.4.19
+          cp ../expected-protocol.lock Cargo.lock
+          all_status=0
+          default_status=0
+          cargo metadata --locked --all-features --format-version=1 \
+            > "$ALLOY_BENCH_DIAGNOSTIC_DIR/graph-all.json" || all_status=$?
+          cargo metadata --locked --format-version=1 \
+            > "$ALLOY_BENCH_DIAGNOSTIC_DIR/graph-default.json" || default_status=$?
           cp Cargo.lock "$ALLOY_BENCH_DIAGNOSTIC_DIR/instrumented.lock"
+          printf 'metadata_all_status=%s\nmetadata_default_status=%s\n' \
+            "$all_status" "$default_status" >> "$ALLOY_BENCH_DIAGNOSTIC_DIR/source.txt"
           if ! cmp Cargo.lock ../expected-protocol.lock; then
             diff -u ../expected-protocol.lock Cargo.lock \
               | tee "$ALLOY_BENCH_DIAGNOSTIC_DIR/lock-diff.txt" || true
             exit 1
           fi
+          test "$all_status" -eq 0
+          test "$default_status" -eq 0
+          python examples/bench/diagnostics/record-graph.py graph-all.json
+          python examples/bench/diagnostics/record-graph.py graph-default.json
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         if: matrix.os == 'ubuntu-latest'
         with:
@@ -104,14 +116,12 @@ jobs:
             "$ALLOY_PROTOCOL_H2/src/proto/streams/streams.rs" \
             "$ALLOY_PROTOCOL_H2/src/proto/streams/send.rs" \
             "$ALLOY_PROTOCOL_H2/src/proto/streams/prioritize.rs"
-      - name: Record all-features dependency graph
+      - name: Select validated all-features dependency graph
         working-directory: ${{ env.ALLOY_PROTOCOL_WORKSPACE }}
         env:
           ALLOY_BENCH_DIAGNOSTIC_FEATURE: all-features-protocol-fork
         run: |
           set -euo pipefail
-          cargo metadata --locked --all-features --format-version=1 \
-            > "$ALLOY_BENCH_DIAGNOSTIC_DIR/graph-all.json"
           python examples/bench/diagnostics/record-graph.py graph-all.json
           printf 'ALLOY_BENCH_DIAGNOSTIC_FEATURE=all-features-protocol-fork\n' >> "$GITHUB_ENV"
       - name: All-features strict observer controls and lint
@@ -126,15 +136,13 @@ jobs:
         run: >-
           cargo test --locked -p example-bench --bin alloy-bench --all-features
           serves_every_workload_over_every_transport -- --test-threads=2 --nocapture
-      - name: Record default-features dependency graph
+      - name: Select validated default-features dependency graph
         # Run this feature section even if the other real matrix failed.
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' && steps.format.outcome == 'success' }}
         id: default-graph
         working-directory: ${{ env.ALLOY_PROTOCOL_WORKSPACE }}
         run: |
           set -euo pipefail
-          cargo metadata --locked --format-version=1 \
-            > "$ALLOY_BENCH_DIAGNOSTIC_DIR/graph-default.json"
           python examples/bench/diagnostics/record-graph.py graph-default.json
           printf 'ALLOY_BENCH_DIAGNOSTIC_FEATURE=default-features-protocol-fork\n' >> "$GITHUB_ENV"
       - name: Default-features strict observer controls and lint

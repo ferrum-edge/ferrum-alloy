@@ -68,8 +68,12 @@
 @@ -1967 +1979 @@
 -            && matches!(metadata.line(), Some(491 | 521))
 +            && matches!(metadata.line(), Some(514 | 544))
-@@ -2197 +2209,10 @@
+@@ -1989 +2001 @@
+-            let io = event.metadata().line() == Some(491);
++            let io = event.metadata().line() == Some(514);
+@@ -2197,2 +2209,17 @@
 -            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
+-            None => handshake(TokioIo::new(io), h2).await,
 +            Some(wire) => {
 +                let observer = Some(
 +                    Arc::clone(&wire) as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>,
@@ -80,15 +84,135 @@
 +                )
 +                .await
 +            }
-@@ -2832 +2853 @@
++            None => {
++                ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                    handshake(TokioIo::new(io), h2),
++                    None,
++                )
++                .await
++            }
+@@ -2201,0 +2229,109 @@
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn unobserved_hyper_adapter_masks_foreign_ambient_through_driver_close() {
++        #[derive(Debug, Default)]
++        struct Foreign(AtomicUsize);
++
++        impl h2::alloy_diagnostics::Observer for Foreign {
++            fn event(&self, _event: h2::alloy_diagnostics::Event) {
++                self.0.fetch_add(1, Ordering::SeqCst);
++            }
++        }
++
++        tokio::time::timeout(Duration::from_secs(10), async {
++            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let address = listener.local_addr().unwrap();
++            let client = TcpStream::connect(address).await.unwrap();
++            let original = client.local_addr().unwrap();
++            let (server, remote) = listener.accept().await.unwrap();
++            assert_eq!(original, remote);
++            let peer = tokio::spawn(async move {
++                let mut connection = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
++                    h2::server::handshake(server),
++                    None,
++                )
++                .await
++                .unwrap();
++                for _ in 0..2 {
++                    let (request, mut response) = connection.accept().await.unwrap().unwrap();
++                    assert_eq!(request.method(), http::Method::GET);
++                    assert_eq!(request.uri().path(), "/");
++                    assert!(request.body().is_end_stream());
++                    response.send_response(http::Response::new(()), true).unwrap();
++                }
++                connection.graceful_shutdown();
++                assert!(connection.accept().await.is_none());
++            });
++            let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
++            let foreign = Arc::new(Foreign::default());
++            let ambient = Arc::clone(&foreign) as Arc<dyn h2::alloy_diagnostics::Observer>;
++            HEALTH_WORKER
++                .scope((Arc::clone(&diagnostics), 0), async {
++                    diagnostic_dial();
++                    diagnostic_socket(Some(original));
++                    let mut driver = None;
++                    diagnostics.worker(0, |state| {
++                        driver = Some(Arc::clone(&state.connection.as_ref().unwrap().driver));
++                    });
++                    let driver = driver.unwrap();
++                    // Poll the actual Hyper adapter's None branch under a foreign
++                    // scope. The fixture must not mask that branch itself.
++                    let handshake = diagnostic_handshake(client, true, None);
++                    tokio::pin!(handshake);
++                    let sender = std::future::poll_fn(|cx| {
++                        h2::alloy_diagnostics::scope(
++                            Some(Arc::clone(&ambient)),
++                            || {
++                                let result = handshake.as_mut().poll(cx);
++                                assert!(Arc::ptr_eq(
++                                    &h2::alloy_diagnostics::current().unwrap(),
++                                    &ambient,
++                                ));
++                                result
++                            },
++                        )
++                    })
++                    .await
++                    .unwrap();
++                    let Sender::H2(mut sender) = sender else {
++                        panic!("expected the actual Hyper HTTP/2 adapter");
++                    };
++                    for _ in 0..2 {
++                        sender.ready().await.unwrap();
++                        let request = Request::get(format!("http://{address}/"))
++                            .body(Empty::new())
++                            .unwrap();
++                        let response = sender.send_request(request).await.unwrap();
++                        assert_eq!(response.status(), http::StatusCode::OK);
++                        assert!(hyper::body::Body::is_end_stream(response.body()));
++                    }
++                    drop(sender);
++                    peer.await.unwrap();
++                    while matches!(driver.load(Ordering::Relaxed), 0..=1) {
++                        tokio::task::yield_now().await;
++                    }
++                    assert_eq!(driver.load(Ordering::Relaxed), 2);
++                    let public = diagnostics.observer.tasks("public-dispatcher");
++                    assert_eq!(public.len(), 1);
++                    let public = public[0].snapshot();
++                    assert_eq!(public.ready, 1);
++                    assert!(public.dropped);
++                    let children = diagnostics.observer.tasks("h2-wire-child-pinned-first-spawn");
++                    assert_eq!(children.len(), 1);
++                    while !children[0].snapshot().dropped {
++                        tokio::task::yield_now().await;
++                    }
++                    assert_eq!(children[0].snapshot().ready, 1);
++                    diagnostics.worker(0, |state| {
++                        assert_eq!(state.connect_attempts, 1);
++                        assert_eq!(state.connection.as_ref().unwrap().local_addr, Some(original));
++                    });
++                })
++                .await;
++            assert!(diagnostics.observer.wires().is_empty());
++            assert!(diagnostics.observer.server_wires().is_empty());
++            assert_eq!(foreign.0.load(Ordering::SeqCst), 0);
++        })
++        .await
++        .unwrap();
++    }
++
+@@ -2832 +2968 @@
 -                    .find(|line| line.starts_with("wire Rx counts_hex="))
 +                    .find(|line| line.starts_with("wire Rx c="))
-@@ -2834,2 +2855,2 @@
+@@ -2834,2 +2970,2 @@
 -                let eof = "flags=0/1/1 hb=9 remaining_hex=7";
 -                let partial = "partial_hex=6/0/8/0";
 +                let eof = "f=0/1/1 hb=9 r=7";
 +                let partial = "x=6/0/8/0";
-@@ -3788,0 +3810 @@
+@@ -2838 +2974 @@
+-                assert!(rx.contains("/0 preface=")); // EOF, not a raw socket read error.
++                assert!(rx.contains("/0 p=")); // EOF, not a raw socket read error.
+@@ -3788,0 +3925 @@
 +                            assert_eq!(wires[0].decoded_headers(), 2);
 --- a/examples/bench/src/health.rs
 +++ b/examples/bench/src/health.rs
@@ -236,6 +360,9 @@
 +                "tls demand=wants_read/wants_write/handshaking,mark lengths/kernel/need_flush=unknown \
 +                 socket-bytes=encrypted-if-tls flags=after-poll-sequential \
 +                 endpoint-copy=one-lock-records cross-endpoint=sequential/non-atomic",
+@@ -2698 +2724 @@
+-        assert!(bounded.contains("connections_omitted=1 boundary=server-plaintext-I/O"));
++        assert!(bounded.contains("omitted=1 boundary=server-plaintext-I/O"));
 @@ -3084 +3110 @@
 -        assert!(text.contains("ws Rx 4 ffff "));
 +        assert!(text.contains("s 1 4 ffff "));

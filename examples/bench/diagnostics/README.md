@@ -18,6 +18,9 @@ no repetition, reconnect workaround, relaxed gate or soft failure.
 On Windows the workflow converts `RUNNER_TEMP` to a Git Bash path for archive
 extraction, then passes native paths to Python and the diagnostic environment.
 Source identity, run/attempt and OS are recorded before export/preparation can fail.
+Preparation reads source, patches, integrity manifests and locks as strict UTF-8
+bytes, with no BOM removal or newline translation, and writes UTF-8 bytes explicitly.
+Appending the temporary manifest override also preserves all preceding bytes.
 
 ## Provenance
 
@@ -39,21 +42,48 @@ preimages require regeneration and review of patches and integrity manifests.
 
 Only the temporary workspace gets the h2 override and direct h2 dependencies in
 Alloy/example-bench. CI requires the exact expected lock delta: remove h2's registry
-source/checksum and add those two edges, preserving every other package pin. Each
-feature graph's full Cargo metadata is retained and its single local h2 node
+source/checksum and add those two edges, preserving every other package pin and edge.
+Each feature graph's full Cargo metadata is retained and its single local h2 node
 validated. Snapshot `pf` records archive, both patches, graph SHA-256 and source
 head. Artifacts retain the graphs, instrumented manifest/lock, identity, outcome
 and bounded captures. `fork=true` / `qualification=false` excludes interpreting a
 fork pass as ordinary qualification.
 
-Before the exact byte comparison, artifacts retain the complete generated
+The reviewed expected lock is seeded only into the `RUNNER_TEMP` workspace.
+Both feature graphs must resolve with `cargo metadata --locked` and pass the strict
+local-h2 source check before controls can run. No `cargo update` re-resolves allowed
+transitive ranges. Later policy, lint, controls and real matrices remain locked.
+Graph selection sets each feature section's own full metadata fingerprint.
+
+Before reporting metadata failure or an exact byte mismatch, artifacts retain the complete
 `instrumented.lock`, `expected-protocol.lock`, instrumented manifest and patch
 provenance. A mismatch prints and retains `lock-diff.txt`, then exits with failure;
-no serialization or pin normalization is applied. Run 37288726272 at `69485db`
-failed Windows export because `tar` received an unconverted native drive path.
-Linux/macOS stopped at the lock comparison (byte/char 19877, line 791) without
-retaining either lockfile. Their actual complete graph delta remains unknown;
-the next hosted artifacts are required before changing the expected graph.
+both attempted metadata files and their exit statuses are retained even on failure.
+No serialization, semver, pin or target-specific edge normalization is applied.
+If Cargo rejects the seeded graph, preparation fails rather than rewriting it.
+
+Run 37290098822 at `159d8f9` failed preparation on all three OSes; it supplied no
+compilation or observer qualification. Windows passed original-source verification
+then failed the patched `src/proto/connection.rs` checksum. Its untouched line 288
+contains a UTF-8 em dash. The old platform-default `read_text()` followed by UTF-8
+encoding can transcode those bytes on Windows; binary UTF-8 decoding preserves them.
+The archive, original and patched checksum gates remain unchanged.
+
+The complete Linux/macOS lock artifacts show exactly five transitive edges changing
+from `windows-sys 0.61.2` to `0.52.0` after `cargo update`. They are real graph changes,
+not serialization. The affected published manifests allow the original locked version:
+
+| Published package | Windows dependency requirement | Archive SHA-256 (matches ordinary lock) |
+| --- | --- | --- |
+| [errno 0.3.14](https://static.crates.io/crates/errno/errno-0.3.14.crate) | `>=0.52, <0.62` | `39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb` |
+| [rustix 1.1.5](https://static.crates.io/crates/rustix/rustix-1.1.5.crate) | `>=0.52, <0.62` | `891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d` |
+| [rustls-platform-verifier 0.7.1](https://static.crates.io/crates/rustls-platform-verifier/rustls-platform-verifier-0.7.1.crate) | `>=0.52.0, <0.62.0` | `1167586491e2b18b8bfbb293e8180ec17c201c4f076d7cb3070ca964e7598f98` |
+| [tempfile 3.27.0](https://static.crates.io/crates/tempfile/tempfile-3.27.0.crate) | `>=0.52, <0.62` | `32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd` |
+| [winapi-util 0.1.11](https://static.crates.io/crates/winapi-util/winapi-util-0.1.11.crate) | `>=0.48.0, <=0.61.*` | `c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22` |
+
+`rustls-native-certs` and `windows-link` themselves retain their original edges.
+These static constraints justify retaining the reviewed graph; hosted locked
+metadata still must validate the entire graph on all three OSes and both features.
 
 ## Boundaries and limits
 
@@ -125,7 +155,16 @@ acceptance cannot automatically mean fresh post-reset production. Frozen renderi
 must survive release/cleanup unchanged and exclude the private DATA marker.
 
 Another original-socket control constructs unobserved connections under a different
-ambient poll observer and requires zero callbacks through two real GETs. The existing
+ambient poll observer and requires zero callbacks through two real GETs. A separate
+control polls the actual Hyper `diagnostic_handshake(..., None)` adapter under a
+foreign observer without fixture masking, verifies scope restoration, two real GETs
+on its original accepted socket, public-driver completion and wire-child drop, and requires zero
+foreign callbacks through closure. The `Some(wire)` adapter remains unchanged.
+The existing transport/protocol error control preserves the published whitelist at
+patched lines 514/544: only 514 formats `std::io::ErrorKind`; 544 keeps peer details
+omitted. Server saturation still requires exactly one omitted endpoint and its
+server-plaintext-I/O boundary. The EOF control uses the compact `p=` preface label
+while preserving its zero raw-read-error assertion. The existing
 released Hyper gate additionally requires actual client decoder HEADERS. Held-HEADERS
 fixtures remain controls, never causal evidence for the genuine failure.
 
