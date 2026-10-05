@@ -370,6 +370,16 @@ boundaries, with sampled release/runtime/EOF/drop flags on the exact endpoint.
 strict live check fails, before outer fixture unwind. No errors are filtered,
 subtracted or classified as benign. Fresh hosted validation remains pending.
 
+The five actual `8101a0c` alive-control captures are classified in
+[repair35.md](repair35.md): paired-server first socket and plaintext vectored-write
+kinds are BrokenPipe on Ubuntu, ConnectionAborted on Windows and ConnectionReset
+on macOS. The initiating cause remains **UNKNOWN**. A fixture-only pairing now
+samples client socket shutdown entry, successful return and wrapper-drop entry
+before the server socket poll and at its first socket error callback. The report
+defines the eight-digit packed word and the observation's ordering limits.
+Shutdown still delegates once and returns the original result; every observed
+typed error also fails the strict check. No error is filtered or reclassified.
+
 ## Retirement and delivery
 
 Retire this directory/workflow when #142 has sufficient evidence or a reviewed typed
