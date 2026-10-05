@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- Repair test-only #142 evidence retention: freeze bounded observer state before
+  dropping the borrowed, pinned health future on the unchanged 15-second
+  timeout, label its sampling interval, and prioritize compact server records,
+  worker state and pending tasks before historical detail. Retain first
+  HEADERS/CANCEL marks and completed SETTINGS outside the existing control ring,
+  prioritizing controls without a retained stream owner within the same 64 KiB
+  output bound. Add saturation, pre/post-destruction, ring overwrite, UTF-8 and
+  source-invariant controls for hosted CI. The real `8cc2` failures, historical
+  d00/d09 causes and server CANCEL/encoded-response boundary remain unresolved;
+  later `89d1004` passes show nonreproduction only. Observer overhead is unmeasured.
+- Add a test-only transparent client plaintext H2 wire observer for #142, with
+  fixed connection/stream/control bounds, numerical frame progress and reasons,
+  aggregate DATA/reset/late-DATA summaries, and explicit retention/rendering loss
+  within the existing 64 KiB snapshot budget. Extend existing controlled gates
+  and malformed/truncated-frame regressions; add fragmented I/O, short/vectored
+  write, redaction, bounds and isolation proofs for hosted CI. Keep all transport,
+  cancellation, reuse, clock and production benchmark behavior unchanged. The
+  original d00 cause and genuine d09 recurrence remain unresolved; passing CI
+  means nonreproduction, and controlled transcripts do not establish a cause.
 - Adopt published `contracts-edge-0.9.11` at
   `390edbd5b2485af0988e02f7827fde778d76ae0a`: vendor all 16 adopted files
   byte-exact and pin every SHA-256. Record root's accepted unchanged report and
