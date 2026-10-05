@@ -720,6 +720,7 @@ pub(crate) mod tests {
         driver: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
     struct WorkerDiagnostic {
         phase: &'static str,
         exchange_phase: usize,
@@ -741,12 +742,35 @@ pub(crate) mod tests {
         wire_samples: Vec<WireSample>,
     }
 
+    #[derive(Clone)]
     struct CoordinatorDiagnostic {
         stage: &'static str,
         since: Instant,
         readiness: usize,
         joined: usize,
         last_error_stage: Option<&'static str>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ConnectionCapture {
+        owner: usize,
+        generation: u64,
+        local_addr: Option<SocketAddr>,
+        driver: usize,
+    }
+
+    struct WorkerCapture {
+        state: WorkerDiagnostic,
+        connection: Option<ConnectionCapture>,
+    }
+
+    struct HealthCapture {
+        sample_start: Instant,
+        sample_end: Instant,
+        before_health_drop: bool,
+        coordinator: CoordinatorDiagnostic,
+        workers: [WorkerCapture; 4],
+        observer: crate::health::ObserverCapture,
     }
 
     pub(crate) struct HealthDiagnostics {
@@ -922,14 +946,55 @@ pub(crate) mod tests {
             included
         }
 
-        pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
-            use crate::dims::Dimension;
+        fn capture(&self) -> HealthCapture {
+            let sample_start = Instant::now();
+            let coordinator = self
+                .coordinator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let workers = std::array::from_fn(|index| {
+                let mut state = self.workers[index]
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                // Remove all live atomic/Arc references from the frozen state.
+                let connection = state.connection.take().map(|connection| ConnectionCapture {
+                    owner: connection.owner,
+                    generation: connection.generation,
+                    local_addr: connection.local_addr,
+                    driver: connection.driver.load(Ordering::Relaxed),
+                });
+                WorkerCapture { state, connection }
+            });
+            let observer = self.observer.capture();
+            HealthCapture {
+                sample_start,
+                sample_end: Instant::now(),
+                before_health_drop: false,
+                coordinator,
+                workers,
+                observer,
+            }
+        }
 
-            if self.printed.swap(true, Ordering::Relaxed) {
+        pub(crate) fn failure(&self, cell: crate::dims::Cell, reason: &'static str) {
+            if self.printed.load(Ordering::Relaxed) {
                 return;
             }
-            let now = Instant::now();
-            let state = self.coordinator.lock().unwrap_or_else(|e| e.into_inner());
+            self.failure_capture(cell, reason, self.capture());
+        }
+
+        fn render(
+            &self,
+            cell: crate::dims::Cell,
+            reason: &'static str,
+            capture: &HealthCapture,
+        ) -> String {
+            use crate::dims::Dimension;
+
+            let now = capture.sample_end;
+            let state = &capture.coordinator;
             let wire_budget = if cell.transport.http2() {
                 DIAGNOSTIC_WIRE_BYTES
             } else {
@@ -946,6 +1011,15 @@ pub(crate) mod tests {
                 message,
                 "instance={} origin={} feature={feature}",
                 self.instance, self.origin,
+            );
+            let _ = writeln!(
+                message,
+                "sample_start_us={} sample_end_us={} interval_us={} atomic=false \
+                 ages_to=sample_end before_health_future_drop={}",
+                capture.sample_start.duration_since(self.started).as_micros(),
+                now.duration_since(self.started).as_micros(),
+                now.duration_since(capture.sample_start).as_micros(),
+                capture.before_health_drop,
             );
             let _ = writeln!(
                 message,
@@ -970,11 +1044,15 @@ pub(crate) mod tests {
                 state.joined,
                 state.last_error_stage,
             );
-            drop(state);
-            for (index, worker) in self.workers.iter().enumerate() {
-                let state = worker.lock().unwrap_or_else(|e| e.into_inner());
-                let connection = state.connection.as_ref().map(|connection| {
-                    let driver = match connection.driver.load(Ordering::Relaxed) {
+            let _ = writeln!(
+                message,
+                "exchanges_hex phases=preparation,warmup,measurement,reuse \
+                 fields=started/completed/bytes;included-count/bytes;excluded-count/bytes",
+            );
+            for (index, worker) in capture.workers.iter().enumerate() {
+                let state = &worker.state;
+                let connection = worker.connection.map(|connection| {
+                    let driver = match connection.driver {
                         0 => "not-polled",
                         1 => "running",
                         2 => "public-dispatch-completed-ok-wire-health-unknown",
@@ -988,35 +1066,76 @@ pub(crate) mod tests {
                         driver,
                     )
                 });
-                let _ = writeln!(
+                let _ = write!(
                     message,
                     "worker={index} phase={} stage={} stage_ms={} outcome={} \
                      connect_attempts={} connection(owner,generation,local,driver)={connection:?} \
                      sender_closed_last_observed={:?} \
-                     exchanges(preparation,warmup,measurement,reuse)={:?} \
                      measured={} errors={} body_bytes={} last_error_stage={:?} \
-                     error_events={} error_samples={:?} wire_events={} wire_samples={:?}",
+                     error_events={} wire_events={} exchanges_hex=",
                     state.phase,
                     state.stage,
                     now.saturating_duration_since(state.since).as_millis(),
                     state.outcome,
                     state.connect_attempts,
                     state.sender_closed,
-                    state.exchanges,
                     state.measured,
                     state.errors,
                     state.body_bytes,
                     state.last_error_stage,
                     state.error_events,
-                    state.error_samples,
                     state.wire_events,
-                    state.wire_samples,
+                );
+                for progress in state.exchanges {
+                    let _ = write!(
+                        message,
+                        " [{:x}/{:x}/{:x};{:x}/{:x};{:x}/{:x}]",
+                        progress.started,
+                        progress.completed,
+                        progress.bytes,
+                        progress.included.count,
+                        progress.included.bytes,
+                        progress.excluded.count,
+                        progress.excluded.bytes,
+                    );
+                }
+                let _ = writeln!(message);
+            }
+            capture.observer.write_required(&mut message, now);
+            message.checkpoint();
+            for (index, worker) in capture.workers.iter().enumerate() {
+                let state = &worker.state;
+                let _ = writeln!(
+                    message,
+                    "worker={index} error_samples={:?} wire_samples={:?}",
+                    state.error_samples, state.wire_samples,
                 );
             }
-            self.observer.write(&mut message, now);
+            capture.observer.write_history(&mut message, now);
             let mut wire = SnapshotText::new(wire_budget);
-            self.observer.write_wire(&mut wire, now);
-            let message = message.finish(wire);
+            capture.observer.write_wire_core(&mut wire, now);
+            wire.checkpoint();
+            capture.observer.write_wire_detail(&mut wire, now);
+            message.finish(wire)
+        }
+
+        fn failure_capture(
+            &self,
+            cell: crate::dims::Cell,
+            reason: &'static str,
+            capture: HealthCapture,
+        ) {
+            use crate::dims::Dimension;
+
+            if self.printed.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            let message = self.render(cell, reason, &capture);
+            let feature = match std::env::var("ALLOY_BENCH_DIAGNOSTIC_FEATURE").as_deref() {
+                Ok("all-features") => "all-features",
+                Ok("default-features") => "default-features",
+                _ => "unspecified-features",
+            };
             let _ = std::io::stderr().lock().write_all(message.as_bytes());
             // Test-only, opt-in artifact output. One fixed-size snapshot per
             // cell; I/O failure must never replace the Result or unwind.
@@ -1062,11 +1181,15 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    struct SnapshotText(String, usize, usize);
+    struct SnapshotText(String, usize, usize, usize);
 
     impl SnapshotText {
         fn new(limit: usize) -> Self {
-            Self(String::new(), limit, 0)
+            Self(String::new(), limit, 0, 0)
+        }
+
+        fn checkpoint(&mut self) {
+            self.3 = self.2;
         }
 
         fn finish(mut self, wire: Self) -> String {
@@ -1075,12 +1198,14 @@ pub(crate) mod tests {
             let _ = writeln!(
                 self.0,
                 "\nsnapshot_loss detail_bytes={} wire_bytes={} budget={} wire_reserve={} \
-                 compact_ages_cap_us={}",
+                 compact_ages_cap_us={} required_detail={} required_wire={}",
                 self.2,
                 wire.2,
                 DIAGNOSTIC_SNAPSHOT_BYTES,
                 wire.1,
                 u64::MAX,
+                self.3,
+                wire.3,
             );
             self.0
         }
@@ -1117,6 +1242,273 @@ pub(crate) mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn saturated_history_keeps_server_rows_workers_and_pending_tasks() {
+        let diagnostics = HealthDiagnostics::new(load(4, 2));
+        let other = HealthDiagnostics::new(load(4, 2));
+        let socket = Some(
+            "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+                .parse()
+                .unwrap(),
+        );
+        for _ in 0..72 {
+            let request = diagnostics.observer.request(socket).unwrap();
+            request.frames.store(u64::MAX, Ordering::Relaxed);
+            *request.response.lock().unwrap() = Some(Instant::now());
+        }
+        let mut pending = Vec::new();
+        // Fill every task slot: old completions must not displace pending tasks
+        // or any server row. No live transport or causal claim is involved.
+        for ordinal in 0..160 {
+            let observation = diagnostics
+                .observer
+                .task(
+                    "h2-response-callback-child-empty-get",
+                    2,
+                    1,
+                    socket,
+                    ordinal,
+                )
+                .unwrap();
+            if ordinal < 148 {
+                let mut task = Box::pin(crate::health::Observed::new(
+                    std::future::ready(()),
+                    Some(observation),
+                ));
+                std::future::poll_fn(|cx| task.as_mut().poll(cx)).await;
+            } else {
+                let mut task = Box::pin(crate::health::Observed::new(
+                    std::future::pending::<()>(),
+                    Some(observation),
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(task.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                pending.push(task);
+            }
+        }
+        for index in 0..4 {
+            diagnostics.worker(index, |state| {
+                state.stage = "response-headers";
+                state.outcome = "running";
+                state.exchanges = [ExchangeProgress {
+                    started: u64::MAX,
+                    completed: u64::MAX,
+                    bytes: u64::MAX,
+                    included: SuccessfulExchanges {
+                        count: u64::MAX,
+                        bytes: u64::MAX,
+                    },
+                    excluded: SuccessfulExchanges {
+                        count: u64::MAX,
+                        bytes: u64::MAX,
+                    },
+                }; 4];
+                for _ in 0..5 {
+                    state.error_samples.push(ErrorIdentity {
+                        stage: "response-headers",
+                        chain: vec!["é".repeat(128); DIAGNOSTIC_CHAIN_DEPTH],
+                        source_end: "bounded controlled sample",
+                    });
+                }
+            });
+        }
+        let cell = crate::dims::Cell {
+            scenario: crate::dims::Scenario::Plain,
+            workload: Workload::Cancel,
+            transport: Transport::H2c,
+        };
+        let capture = diagnostics.capture();
+        let rendered = diagnostics.render(cell, "controlled-saturation", &capture);
+        assert!(rendered.len() <= DIAGNOSTIC_SNAPSHOT_BYTES);
+        assert_eq!(rendered.matches("server socket_ref=").count(), 72);
+        assert_eq!(rendered.matches("stage=response-headers").count(), 4);
+        assert_eq!(rendered.matches("drop=false").count(), 12);
+        assert!(rendered.contains("required_detail=0 required_wire=0"));
+        assert!(!rendered.contains("detail_bytes=0 "));
+        assert!(rendered.contains("socket_ref=0 socket=Some([ffff:"));
+        let other_text = other.render(cell, "controlled-isolation", &other.capture());
+        assert!(!other_text.contains(&diagnostics.instance));
+        assert!(!other_text.contains("server socket_ref="));
+        drop(pending);
+        assert_eq!(
+            rendered,
+            diagnostics.render(cell, "controlled-saturation", &capture)
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_precedes_health_drop_and_joinset_abort_effects() {
+        struct CoordinatorDrop(Arc<HealthDiagnostics>);
+        impl Drop for CoordinatorDrop {
+            fn drop(&mut self) {
+                self.0.coordinator_stage("after-future-drop");
+            }
+        }
+        struct ChildDrop(Option<oneshot::Sender<()>>);
+        impl Drop for ChildDrop {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let diagnostics = Arc::new(HealthDiagnostics::new(load(4, 2)));
+        diagnostics.coordinator_stage("before-future-drop");
+        let child_diagnostics = Arc::clone(&diagnostics);
+        let coordinator_diagnostics = Arc::clone(&diagnostics);
+        let (destroyed, destruction) = oneshot::channel();
+        let mut health = Box::pin(async move {
+            let _guard = CoordinatorDrop(coordinator_diagnostics);
+            let mut children = JoinSet::new();
+            children.spawn(diagnostic_worker(child_diagnostics, 0, async move {
+                let _guard = ChildDrop(Some(destroyed));
+                diagnostic_dial();
+                diagnostic_socket(Some("127.0.0.1:12345".parse().unwrap()));
+                diagnostic_worker_stage("response-headers");
+                diagnostic_driver(std::future::pending::<Result<(), hyper::Error>>()).await?;
+                Ok(Totals::default())
+            }));
+            std::future::pending::<()>().await;
+            drop(children);
+        });
+        std::future::poll_fn(|cx| {
+            assert!(health.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            diagnostics.wait_stage(0, "response-headers"),
+        )
+        .await
+        .unwrap();
+        let capture = capture_before_drop(health, &diagnostics);
+        assert!(capture.sample_start <= capture.sample_end);
+        assert!(capture.before_health_drop);
+        assert_eq!(capture.coordinator.stage, "before-future-drop");
+        assert_eq!(capture.workers[0].state.outcome, "running");
+        assert_eq!(capture.workers[0].connection.unwrap().driver, 1);
+        assert!(capture.workers[0].state.connection.is_none());
+        let cell = crate::dims::Cell {
+            scenario: crate::dims::Scenario::Plain,
+            workload: Workload::Cancel,
+            transport: Transport::H2c,
+        };
+        let frozen = diagnostics.render(cell, "controlled-before-drop", &capture);
+        tokio::time::timeout(Duration::from_secs(10), destruction)
+            .await
+            .unwrap()
+            .unwrap();
+        diagnostics.worker(0, |state| {
+            assert_eq!(state.outcome, "future-dropped");
+            assert_eq!(
+                state.connection.as_ref().unwrap().driver.load(Ordering::Relaxed),
+                4
+            );
+        });
+        assert_eq!(
+            diagnostics.coordinator.lock().unwrap().stage,
+            "after-future-drop"
+        );
+        assert_eq!(
+            frozen,
+            diagnostics.render(cell, "controlled-before-drop", &capture)
+        );
+        assert!(frozen.contains("atomic=false"));
+        assert!(frozen.contains("before_health_future_drop=true"));
+        assert!(!frozen.contains("future-dropped"));
+        let after = diagnostics.render(
+            cell,
+            "controlled-after-drop",
+            &diagnostics.capture(),
+        );
+        assert!(after.contains("future-dropped"));
+        assert!(after.contains("drop=true"));
+    }
+
+    #[test]
+    fn snapshot_footer_and_utf8_remain_bounded_at_maximum_loss_counts() {
+        let mut detail = SnapshotText::new(
+            DIAGNOSTIC_SNAPSHOT_BYTES - DIAGNOSTIC_WIRE_BYTES - DIAGNOSTIC_LOSS_BYTES,
+        );
+        let mut wire = SnapshotText::new(DIAGNOSTIC_WIRE_BYTES);
+        for text in [&mut detail, &mut wire] {
+            let _ = write!(text, "{}", "🦀".repeat(DIAGNOSTIC_SNAPSHOT_BYTES));
+            text.2 = usize::MAX;
+            text.checkpoint();
+        }
+        let text = detail.finish(wire);
+        assert!(text.len() <= DIAGNOSTIC_SNAPSHOT_BYTES);
+        assert!(text.contains(&format!("required_wire={}", usize::MAX)));
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn diagnostic_sources_preserve_health_gates_and_test_only_boundary() {
+        let client = include_str!("client.rs");
+        let timeout = client
+            .split("\n    pub(crate) async fn cancellation_health_timeout<S>(")
+            .nth(1)
+            .unwrap()
+            .split("async fn cancellation_health_inner<S>(")
+            .next()
+            .unwrap();
+        assert!(timeout.contains("timeout(Duration::from_secs(15), health.as_mut())"));
+        assert!(timeout.contains("let mut health = Box::pin(health);"));
+        let helper = timeout.split("fn capture_before_drop<F>(").nth(1).unwrap();
+        let sampling = helper.find("diagnostics.capture()").unwrap();
+        let teardown = helper.find("drop(health)").unwrap();
+        assert!(sampling < teardown);
+        let budget = client
+            .split("\n    pub(crate) const HEALTH_EXCHANGES_PER_PHASE:")
+            .nth(1)
+            .unwrap();
+        assert!(budget.starts_with(" usize = 8;"));
+        let run = include_str!("run.rs");
+        let matrix = run
+            .split("fn assert_health_matrix(scenario: Scenario)")
+            .nth(1)
+            .unwrap()
+            .split("#[test]")
+            .next()
+            .unwrap();
+        let production = client
+            .split("#[cfg(test)]\npub(crate) mod tests")
+            .next()
+            .unwrap();
+        assert!(!production.contains(".reset_stream_duration("));
+        assert!(!production.contains(".max_local_error_reset_streams("));
+        assert!(!production.contains(".initial_connection_window_size("));
+        assert!(!production.contains(".initial_stream_window_size("));
+        assert!(run.contains("concurrency: 4,\n                streams: 2,"));
+        assert!(matrix.contains("options(5.0)"));
+        assert!(matrix.contains("options.load.warmup = Duration::from_secs(1)"));
+        assert!(matrix.contains("for transport in Transport::ALL"));
+        assert!(matrix.contains("for workload in Workload::ALL"));
+        assert!(matrix.contains("assert_eq!(result[\"requests\"], requests"));
+        assert!(matrix.contains("assert_eq!(result[\"seconds\"], 5.0"));
+        assert!(matrix.contains("assert_eq!(result[\"warmup_seconds\"], 1.0"));
+        assert!(matrix.contains("assert_body_accounting(&result, *workload, *transport)"));
+        assert!(run.contains("assert_eq!(result[\"errors\"], 0"));
+        assert!(include_str!("main.rs").contains("#[cfg(test)]\nmod health;"));
+        let health = include_str!("health.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        for bound in [
+            "const WIRE_CONNECTIONS: usize = 2;",
+            "const WIRE_STREAMS: usize = 36;",
+            "const WIRE_EVENTS: usize = 64;",
+            "const TASK_SLOTS: usize = 160;",
+            "const REQUEST_SLOTS: usize = 72;",
+        ] {
+            assert!(health.contains(bound));
+        }
+    }
+
     #[derive(Default)]
     struct BoundedText(String);
 
@@ -1126,7 +1518,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     struct ErrorIdentity {
         stage: &'static str,
         chain: Vec<String>,
@@ -1207,7 +1599,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     struct WireSample {
         generation: u64,
         local_addr: Option<SocketAddr>,
@@ -2108,17 +2500,30 @@ pub(crate) mod tests {
     ) -> Result<Measured<S>, Failure> {
         // Shared by the real matrices and the controlled reuse regression.
         // Keep the original strict failure bound and original Result.
-        match tokio::time::timeout(Duration::from_secs(15), health).await {
+        let mut health = Box::pin(health);
+        let result = tokio::time::timeout(Duration::from_secs(15), health.as_mut()).await;
+        match result {
             Ok(Ok(measured)) => Ok(measured),
             Ok(Err(error)) => {
-                diagnostics.failure(cell, "driver-error");
+                let capture = capture_before_drop(health, diagnostics);
+                diagnostics.failure_capture(cell, "driver-error", capture);
                 Err(error)
             }
             Err(error) => {
-                diagnostics.failure(cell, "timeout");
+                let capture = capture_before_drop(health, diagnostics);
+                diagnostics.failure_capture(cell, "timeout", capture);
                 Err(error.into())
             }
         }
+    }
+
+    fn capture_before_drop<F>(health: Pin<Box<F>>, diagnostics: &HealthDiagnostics) -> HealthCapture {
+        let mut capture = diagnostics.capture();
+        capture.before_health_drop = true;
+        // Dropping the coordinator can abort JoinSet workers and release
+        // senders. No subsequent rendering reads their evolving observations.
+        drop(health);
+        capture
     }
 
     async fn cancellation_health_inner<S>(

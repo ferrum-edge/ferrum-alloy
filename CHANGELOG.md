@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Repair test-only #142 evidence retention: freeze bounded observer state before
+  dropping the borrowed, pinned health future on the unchanged 15-second
+  timeout, label its sampling interval, and prioritize compact server records,
+  worker state and pending tasks before historical detail. Retain first
+  HEADERS/CANCEL marks and completed SETTINGS outside the existing control ring,
+  prioritizing controls without a retained stream owner within the same 64 KiB
+  output bound. Add saturation, pre/post-destruction, ring overwrite, UTF-8 and
+  source-invariant controls for hosted CI. The real `8cc2` failures, historical
+  d00/d09 causes and server CANCEL/encoded-response boundary remain unresolved;
+  later `89d1004` passes show nonreproduction only. Observer overhead is unmeasured.
 - Add a test-only transparent client plaintext H2 wire observer for #142, with
   fixed connection/stream/control bounds, numerical frame progress and reasons,
   aggregate DATA/reset/late-DATA summaries, and explicit retention/rendering loss

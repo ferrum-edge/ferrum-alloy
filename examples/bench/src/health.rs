@@ -35,7 +35,7 @@ impl Direction {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WireMark {
     sequence: u64,
     at: Instant,
@@ -110,6 +110,9 @@ struct StreamDirection {
     headers_seen: u64,
     headers_complete: u64,
     blocks_complete: u64,
+    first_header: Option<WireMark>,
+    first_complete: Option<WireMark>,
+    first_block: Option<WireMark>,
     data: DataProgress,
 }
 
@@ -119,7 +122,14 @@ struct WireStream {
     directions: [StreamDirection; 2],
     reset: Option<WireMark>,
     reset_reason: Option<u32>,
+    first_cancel: Option<WireMark>,
     late: DataProgress,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Setting {
+    value: u32,
+    mark: WireMark,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,6 +153,8 @@ pub(crate) struct WireDirection {
     pub(crate) invalid_lengths: u64,
     pub(crate) invalid_streams: u64,
     settings_omitted: u64,
+    settings_pending: [Option<u32>; 6],
+    settings_complete: [Option<Setting>; 6],
     errors: u64,
     last_header: Option<FramePoint>,
     last_complete: Option<FramePoint>,
@@ -227,6 +239,7 @@ impl WireState {
             directions: [StreamDirection::default(); 2],
             reset: None,
             reset_reason: None,
+            first_cancel: None,
             late: DataProgress::default(),
         }))
     }
@@ -254,11 +267,15 @@ impl WireState {
         parser.remaining = Some(header.length);
         parser.last_header = Some(FramePoint { mark, header });
         parser.late = false;
+        if header.kind == 4 {
+            parser.settings_pending = [None; 6];
+        }
         let mut late = false;
         if let Some(stream) = self.stream(header.stream, true) {
             let progress = &mut stream.directions[index];
             if header.kind == 1 {
                 progress.headers_seen = progress.headers_seen.saturating_add(1);
+                let _ = progress.first_header.get_or_insert(mark);
             }
             if header.kind == 0 {
                 progress.data.seen = progress.data.seen.saturating_add(1);
@@ -307,6 +324,17 @@ impl WireState {
         parser.header_bytes = 0;
         parser.remaining = None;
         parser.numeric = 0;
+        if header.kind == 4 && !header.invalid_length() && !header.invalid_stream() {
+            for (pending, completed) in parser
+                .settings_pending
+                .iter_mut()
+                .zip(&mut parser.settings_complete)
+            {
+                if let Some(value) = pending.take() {
+                    *completed = Some(Setting { value, mark });
+                }
+            }
+        }
         let value = if header.invalid_length() || header.invalid_stream() {
             None
         } else {
@@ -326,6 +354,12 @@ impl WireState {
                 .headers_complete
                 .saturating_add(u64::from(header.kind == 1));
             progress.blocks_complete = progress.blocks_complete.saturating_add(u64::from(block));
+            if header.kind == 1 {
+                let _ = progress.first_complete.get_or_insert(mark);
+            }
+            if block {
+                let _ = progress.first_block.get_or_insert(mark);
+            }
             if header.kind == 0 {
                 progress.data.complete = progress.data.complete.saturating_add(1);
                 progress.data.last = Some(mark);
@@ -339,6 +373,9 @@ impl WireState {
             {
                 stream.reset = Some(mark);
                 stream.reset_reason = Some(reason);
+                if reason == 8 {
+                    let _ = stream.first_cancel.get_or_insert(mark);
+                }
             }
         }
         if header.kind != 0 {
@@ -423,6 +460,7 @@ impl WireState {
                         parser.numeric = 0;
                         parser.setting_id = 0;
                         if matches!(id, 1..=6) {
+                            parser.settings_pending[usize::from(id - 1)] = Some(value);
                             let mark = self.mark();
                             self.event(WireEvent {
                                 direction,
@@ -477,9 +515,19 @@ impl WireObservation {
             .unwrap_or_else(|e| e.into_inner())
             .feed(direction, bytes);
     }
+}
 
-    fn write(&self, text: &mut impl Write, now: Instant) {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+struct WireCapture {
+    instance: [u8; 36],
+    owner: usize,
+    generation: u64,
+    socket: Option<SocketAddr>,
+    state: WireState,
+}
+
+impl WireCapture {
+    fn write_core(&self, text: &mut impl Write, now: Instant) {
+        let state = &self.state;
         let instance = std::str::from_utf8(&self.instance).unwrap_or("invalid-instance");
         let _ = writeln!(
             text,
@@ -540,12 +588,60 @@ impl WireObservation {
                 );
             }
         }
-        // Compact state precedes the lossy control ring. Hexadecimal counters
-        // and seq:age_us marks keep all 72 stream summaries within the reserve,
-        // even at u64 maxima. '-' means unobserved, never zero.
+        for direction in [Direction::Tx, Direction::Rx] {
+            for (index, setting) in state.directions[direction.index()]
+                .settings_complete
+                .iter()
+                .enumerate()
+            {
+                if let Some(setting) = setting {
+                    let _ = write!(
+                        text,
+                        "wire settings_complete {direction:?} id={} value={} mark=",
+                        index + 1,
+                        setting.value,
+                    );
+                    write_mark(text, Some(setting.mark), now);
+                    let _ = writeln!(text);
+                }
+            }
+        }
         let _ = writeln!(
             text,
-            "wire streams_hex h=seen/complete/blocks \
+            "wire first marks_hex=seq:age_us s_hex=numeric-stream-id \
+             Tx/Rx=first-HEADERS-seen/complete/END_HEADERS cancel=first-complete-Tx-CANCEL \
+             rst=latest-complete-Tx-RST:reason_hex",
+        );
+        for stream in state.streams.iter().flatten() {
+            let _ = write!(text, "wire first s_hex={:x}", stream.id);
+            for direction in [Direction::Tx, Direction::Rx] {
+                let progress = stream.directions[direction.index()];
+                let _ = write!(text, " {direction:?}=");
+                write_mark(text, progress.first_header, now);
+                let _ = write!(text, "/");
+                write_mark(text, progress.first_complete, now);
+                let _ = write!(text, "/");
+                write_mark(text, progress.first_block, now);
+            }
+            let _ = write!(text, " cancel=");
+            write_mark(text, stream.first_cancel, now);
+            let _ = write!(text, " rst=");
+            write_mark(text, stream.reset, now);
+            let _ = write!(text, ":");
+            if let Some(reason) = stream.reset_reason {
+                let _ = write!(text, "{reason:x}");
+            } else {
+                let _ = write!(text, "-");
+            }
+            let _ = writeln!(text);
+        }
+    }
+
+    fn write_streams(&self, text: &mut impl Write, now: Instant) {
+        let state = &self.state;
+        let _ = writeln!(
+            text,
+            "wire streams_hex s=numeric-stream-id h=seen/complete/blocks \
              d(DATA)=seen/complete/payload_bytes,last_length:flags,first,last \
              marks=seq:age_us late=Rx-DATA-header-after-complete-Tx-RST",
         );
@@ -574,32 +670,51 @@ impl WireObservation {
         }
     }
 
-    fn write_events(&self, text: &mut impl Write, now: Instant) {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    fn write_events(&self, text: &mut impl Write, now: Instant, unowned: bool) {
+        let state = &self.state;
+        let _ = writeln!(
+            text,
+            "wire controls_hex owner={:x} gen={:x} unowned={unowned}",
+            self.owner, self.generation,
+        );
         for offset in 0..WIRE_EVENTS {
             let index = (state.events_next + offset) % WIRE_EVENTS;
             if let Some(event) = state.events[index] {
+                let retained = state
+                    .streams
+                    .iter()
+                    .flatten()
+                    .any(|s| s.id == event.point.header.stream);
+                if unowned == retained {
+                    continue;
+                }
+                let header = event.point.header;
                 let _ = write!(
                     text,
-                    "wire control owner={} gen={} {:?} complete={} ",
-                    self.owner, self.generation, event.direction, event.complete,
+                    "wire control_hex {:?} c={} mark=",
+                    event.direction, u8::from(event.complete),
                 );
-                write_point(text, event.point, now);
+                write_mark(text, Some(event.point.mark), now);
+                let _ = write!(
+                    text,
+                    " t={:x} f={:x} l={:x} s_hex={:x}",
+                    header.kind, header.flags, header.length, header.stream,
+                );
                 match event.value {
                     Some(WireValue::Reset(reason)) => {
-                        let _ = write!(text, " rst_reason={reason}");
+                        let _ = write!(text, " rst_reason={reason:x}");
                     }
                     Some(WireValue::GoAway {
                         last_stream,
                         reason,
                     }) => {
-                        let _ = write!(text, " goaway_last={last_stream} reason={reason}");
+                        let _ = write!(text, " goaway_last={last_stream:x} reason={reason:x}");
                     }
                     Some(WireValue::Setting { id, value }) => {
-                        let _ = write!(text, " setting={id}:{value}");
+                        let _ = write!(text, " setting={id:x}:{value:x}");
                     }
                     Some(WireValue::Window(increment)) => {
-                        let _ = write!(text, " window_increment={increment}");
+                        let _ = write!(text, " window_increment={increment:x}");
                     }
                     None => {}
                 }
@@ -824,9 +939,11 @@ impl PollObservation {
     fn dropped(&self) {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).dropped = true;
     }
+}
 
+impl PollState {
     fn write(&self, text: &mut impl Write, now: Instant) {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self;
         let age = |at: Option<Instant>| at.map(|at| now.saturating_duration_since(at).as_micros());
         let _ = write!(
             text,
@@ -1005,6 +1122,34 @@ struct WireSlots {
     omitted: u64,
 }
 
+struct TaskCapture {
+    kind: &'static str,
+    owner: usize,
+    generation: u64,
+    socket: Option<SocketAddr>,
+    ordinal: usize,
+    state: PollState,
+}
+
+struct RequestCapture {
+    socket: Option<SocketAddr>,
+    ordinal: usize,
+    entered: Instant,
+    response: Option<Instant>,
+    handler: PollState,
+    body: PollState,
+    frames: u64,
+}
+
+pub(crate) struct ObserverCapture {
+    tasks: [Option<TaskCapture>; TASK_SLOTS],
+    requests: [Option<RequestCapture>; REQUEST_SLOTS],
+    connections: [Option<WireCapture>; WIRE_CONNECTIONS],
+    tasks_omitted: u64,
+    requests_omitted: u64,
+    connections_omitted: u64,
+}
+
 pub(crate) struct Observer {
     slots: Mutex<Slots>,
     wire: Mutex<WireSlots>,
@@ -1061,21 +1206,55 @@ impl Observer {
         slots.connections.iter().flatten().map(Arc::clone).collect()
     }
 
+    pub(crate) fn capture(&self) -> ObserverCapture {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let tasks = std::array::from_fn(|index| {
+            slots.tasks[index].as_ref().map(|task| TaskCapture {
+                kind: task.kind,
+                owner: task.owner,
+                generation: task.generation,
+                socket: task.socket,
+                ordinal: task.ordinal,
+                state: task.observation.snapshot(),
+            })
+        });
+        let requests = std::array::from_fn(|index| {
+            slots.requests[index].as_ref().map(|request| RequestCapture {
+                socket: request.socket,
+                ordinal: request.ordinal,
+                entered: request.entered,
+                response: *request.response.lock().unwrap_or_else(|e| e.into_inner()),
+                handler: request.handler.snapshot(),
+                body: request.body.snapshot(),
+                frames: request.frames.load(Ordering::Relaxed),
+            })
+        });
+        let tasks_omitted = slots.tasks_omitted;
+        let requests_omitted = slots.requests_omitted;
+        drop(slots);
+        let wire = self.wire.lock().unwrap_or_else(|e| e.into_inner());
+        ObserverCapture {
+            tasks,
+            requests,
+            connections: std::array::from_fn(|index| {
+                wire.connections[index]
+                    .as_ref()
+                    .map(|observation| WireCapture {
+                        instance: observation.instance,
+                        owner: observation.owner,
+                        generation: observation.generation,
+                        socket: observation.socket,
+                        state: observation.snapshot(),
+                    })
+            }),
+            tasks_omitted,
+            requests_omitted,
+            connections_omitted: wire.omitted,
+        }
+    }
+
     pub(crate) fn write_wire(&self, text: &mut impl Write, now: Instant) {
-        let slots = self.wire.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = writeln!(
-            text,
-            "wire slots(connection,stream,control)=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
-             connections_omitted={} boundary=client-plaintext-I/O \
-             receipt_is_not_decode socket_ordinal_is_not_stream_id",
-            slots.omitted,
-        );
-        for observation in slots.connections.iter().flatten() {
-            observation.write(text, now);
-        }
-        for observation in slots.connections.iter().flatten() {
-            observation.write_events(text, now);
-        }
+        self.capture().write_wire(text, now);
     }
 
     pub(crate) fn tasks(&self, kind: &'static str) -> Vec<Arc<PollObservation>> {
@@ -1144,37 +1323,122 @@ impl Observer {
         *slot = Some(Arc::clone(&request));
         Some(request)
     }
+}
 
-    pub(crate) fn write(&self, text: &mut impl Write, now: Instant) {
-        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+impl ObserverCapture {
+    pub(crate) fn write_wire(&self, text: &mut impl Write, now: Instant) {
+        self.write_wire_core(text, now);
+        self.write_wire_detail(text, now);
+    }
+
+    pub(crate) fn write_wire_core(&self, text: &mut impl Write, now: Instant) {
+        let _ = writeln!(
+            text,
+            "wire slots(connection,stream,control)=({WIRE_CONNECTIONS},{WIRE_STREAMS},{WIRE_EVENTS}) \
+             connections_omitted={} boundary=client-plaintext-I/O \
+             receipt_is_not_decode socket_ordinal_is_not_stream_id",
+            self.connections_omitted,
+        );
+        for observation in self.connections.iter().flatten() {
+            observation.write_core(text, now);
+        }
+        // Preserve controls without a retained stream owner, including stream
+        // zero and omitted stream IDs, before potentially saturated DATA detail.
+        for observation in self.connections.iter().flatten() {
+            observation.write_events(text, now, true);
+        }
+    }
+
+    pub(crate) fn write_wire_detail(&self, text: &mut impl Write, now: Instant) {
+        for observation in self.connections.iter().flatten() {
+            observation.write_streams(text, now);
+        }
+        for observation in self.connections.iter().flatten() {
+            observation.write_events(text, now, false);
+        }
+    }
+
+    pub(crate) fn write_required(&self, text: &mut impl Write, now: Instant) {
         let _ = writeln!(
             text,
             "observer slots(task,request)=({TASK_SLOTS},{REQUEST_SLOTS}) omitted=({},{}) \
              child_ready=unit-completion-inner-wire-result-unknown socket_ordinal_is_not_stream_id",
-            slots.tasks_omitted, slots.requests_omitted,
+            self.tasks_omitted, self.requests_omitted,
         );
-        for (id, task) in slots.tasks.iter().enumerate() {
-            if let Some(task) = task {
-                let _ = write!(
+        let _ = writeln!(
+            text,
+            "server compact_hex entry/response=age_us r/b=router/body-had-Pending/Ready/dropped \
+             '-'=unobserved socket_ref=first-request-slot ordinal_is_not_stream_id",
+        );
+        for (index, request) in self.requests.iter().enumerate() {
+            let Some(request) = request else { continue };
+            let reference = self
+                .requests
+                .iter()
+                .position(|slot| {
+                    slot.as_ref().is_some_and(|other| other.socket == request.socket)
+                })
+                .unwrap_or(index);
+            if reference == index {
+                let _ = writeln!(
                     text,
-                    "task={id} kind={} owner={} gen={} socket={:?} ordinal={} ",
-                    task.kind, task.owner, task.generation, task.socket, task.ordinal,
+                    "server identity socket_ref={reference:x} socket={:?}",
+                    request.socket,
                 );
-                task.observation.write(text, now);
-                let _ = writeln!(text);
             }
-        }
-        for request in slots.requests.iter().flatten() {
-            let response = *request.response.lock().unwrap_or_else(|e| e.into_inner());
             let _ = write!(
                 text,
-                "server socket={:?} ordinal={} entry_age_us={} response_age_us={:?} \
-                 frames={} router_future(",
-                request.socket,
+                "server socket_ref={reference:x} ordinal={:x} entry={:x} response=",
                 request.ordinal,
-                now.saturating_duration_since(request.entered).as_micros(),
-                response.map(|at| now.saturating_duration_since(at).as_micros()),
-                request.frames.load(Ordering::Relaxed),
+                age_us(now, request.entered),
+            );
+            if let Some(at) = request.response {
+                let _ = write!(text, "{:x}", age_us(now, at));
+            } else {
+                let _ = write!(text, "-");
+            }
+            let _ = writeln!(
+                text,
+                " frames={:x} r={}/{}/{} b={}/{}/{}",
+                request.frames,
+                u8::from(request.handler.pending > 0),
+                u8::from(request.handler.ready > 0),
+                u8::from(request.handler.dropped),
+                u8::from(request.body.pending > 0),
+                u8::from(request.body.ready > 0),
+                u8::from(request.body.dropped),
+            );
+        }
+        // Pending and never-polled tasks precede completed/destroyed history.
+        for (id, task) in self.tasks.iter().enumerate() {
+            if let Some(task) = task
+                && task.state.ready == 0 && !task.state.dropped
+            {
+                task.write_required(text, id, now);
+            }
+        }
+    }
+
+    pub(crate) fn write_history(&self, text: &mut impl Write, now: Instant) {
+        for (id, task) in self.tasks.iter().enumerate() {
+            if let Some(task) = task
+                && task.state.ready == 0 && !task.state.dropped
+            {
+                task.write(text, id, now);
+            }
+        }
+        for (id, task) in self.tasks.iter().enumerate() {
+            if let Some(task) = task
+                && (task.state.ready > 0 || task.state.dropped)
+            {
+                task.write(text, id, now);
+            }
+        }
+        for request in self.requests.iter().flatten() {
+            let _ = write!(
+                text,
+                "server detail socket={:?} ordinal={} router_future(",
+                request.socket, request.ordinal,
             );
             request.handler.write(text, now);
             let _ = write!(text, ") body(");
@@ -1182,6 +1446,49 @@ impl Observer {
             let _ = writeln!(text, ")");
         }
     }
+}
+
+impl TaskCapture {
+    fn write_required(&self, text: &mut impl Write, id: usize, now: Instant) {
+        let _ = write!(
+            text,
+            "task={id} kind={} owner={} gen={} socket={:?} ordinal={} \
+             polls_hex(polls,inner,pending,ready,wakes)={:x}/{:x}/{:x}/{:x}/{:x} \
+             drop=false last_age_us_hex=",
+            self.kind,
+            self.owner,
+            self.generation,
+            self.socket,
+            self.ordinal,
+            self.state.polls,
+            self.state.inner_polls,
+            self.state.pending,
+            self.state.ready,
+            self.state.wakes,
+        );
+        if let Some(at) = self.state.last {
+            let _ = write!(text, "{:x}", age_us(now, at));
+        } else {
+            let _ = write!(text, "-");
+        }
+        let _ = writeln!(text);
+    }
+
+    fn write(&self, text: &mut impl Write, id: usize, now: Instant) {
+        let _ = write!(
+            text,
+            "task={id} kind={} owner={} gen={} socket={:?} ordinal={} ",
+            self.kind, self.owner, self.generation, self.socket, self.ordinal,
+        );
+        self.state.write(text, now);
+        let _ = writeln!(text);
+    }
+}
+
+fn age_us(now: Instant, at: Instant) -> u64 {
+    now.saturating_duration_since(at)
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 pub(crate) async fn response(
@@ -1908,6 +2215,107 @@ mod tests {
     }
 
     #[test]
+    fn first_headers_cancel_and_completed_settings_survive_ring_overwrite() {
+        // CONTROLLED numerical frames exercise retention, not a live cause.
+        let observer = Observer::default();
+        let wire = observer.wire(INSTANCE, 0, 1, None).unwrap();
+        wire.feed(Direction::Tx, H2_PREFACE);
+        wire.feed(Direction::Tx, &frame(1, 1, 11, b"private-request-hpack"));
+        wire.feed(Direction::Tx, &frame(9, 4, 11, b"private-continuation"));
+        wire.feed(Direction::Rx, &frame(1, 4, 11, b"private-response-hpack"));
+        wire.feed(Direction::Tx, &frame(3, 0, 11, &8_u32.to_be_bytes()));
+        let settings = frame(4, 0, 0, &[0, 4, 0, 0, 255, 255, 0, 5, 0, 0, 64, 0]);
+        wire.feed(Direction::Rx, &settings[..15]);
+        assert!(wire.snapshot().directions[1].settings_complete[3].is_none());
+        wire.feed(Direction::Rx, &settings[15..]);
+        let first = wire.snapshot();
+        let original = first.streams[0].unwrap();
+        assert_eq!(
+            first.directions[1].settings_complete[3].unwrap().value,
+            65535
+        );
+        assert_eq!(
+            first.directions[1].settings_complete[4].unwrap().value,
+            16384
+        );
+        let tx = original.directions[0];
+        assert!(tx.first_header.unwrap().sequence < tx.first_complete.unwrap().sequence);
+        assert!(tx.first_complete.unwrap().sequence < tx.first_block.unwrap().sequence);
+        for _ in 0..WIRE_EVENTS {
+            wire.feed(Direction::Tx, &frame(3, 0, 11, &5_u32.to_be_bytes()));
+            wire.feed(Direction::Rx, &frame(6, 0, 0, b"private!"));
+        }
+        // An incomplete replacement SETTINGS frame must not commit its tuple.
+        let replacement = frame(4, 0, 0, &[0, 4, 0, 0, 0, 42, 0, 1, 0, 0, 0, 0]);
+        wire.feed(Direction::Rx, &replacement[..15]);
+        let retained = wire.snapshot();
+        let stream = retained.streams[0].unwrap();
+        assert!(retained.events_overwritten > 0);
+        for direction in [0, 1] {
+            let before = original.directions[direction];
+            let after = stream.directions[direction];
+            assert_eq!(after.first_header, before.first_header);
+            assert_eq!(after.first_complete, before.first_complete);
+            assert_eq!(after.first_block, before.first_block);
+        }
+        assert_eq!(stream.first_cancel, original.first_cancel);
+        assert!(stream.reset.unwrap().sequence > stream.first_cancel.unwrap().sequence);
+        assert_eq!(stream.reset_reason, Some(5));
+        assert_eq!(
+            retained.directions[1].settings_complete[3].unwrap().value,
+            65535
+        );
+        assert!(retained.events.iter().flatten().all(|event| {
+            event.point.header.kind != 1 && !matches!(event.value, Some(WireValue::Reset(8)))
+        }));
+        let capture = observer.capture();
+        let mut text = String::new();
+        capture.write_wire_core(&mut text, Instant::now());
+        assert!(text.contains("wire first s_hex=b"));
+        assert!(text.contains("settings_complete Rx id=4 value=65535"));
+        assert!(!text.contains("private"));
+        assert!(!format!("{retained:?}").contains("private"));
+        wire.feed(Direction::Rx, &replacement[15..]);
+        assert_eq!(
+            wire.snapshot().directions[1].settings_complete[3].unwrap().value,
+            42
+        );
+    }
+
+    #[test]
+    fn frozen_wire_capture_excludes_later_drop_reset_and_goaway() {
+        struct DropFrames(Arc<WireObservation>);
+        impl Drop for DropFrames {
+            fn drop(&mut self) {
+                self.0
+                    .feed(Direction::Tx, &frame(3, 0, 13, &8_u32.to_be_bytes()));
+                self.0.feed(Direction::Tx, &frame(7, 0, 0, &[0; 8]));
+            }
+        }
+        let observer = Observer::default();
+        let wire = observer.wire(INSTANCE, 2, 1, None).unwrap();
+        wire.feed(Direction::Tx, H2_PREFACE);
+        wire.feed(Direction::Tx, &frame(1, 5, 13, b"private-hpack"));
+        let guard = DropFrames(Arc::clone(&wire));
+        let capture = observer.capture();
+        let sampled_at = Instant::now();
+        let mut before = String::new();
+        capture.write_wire(&mut before, sampled_at);
+        drop(guard);
+        let mut frozen = String::new();
+        capture.write_wire(&mut frozen, sampled_at);
+        assert_eq!(before, frozen);
+        let state = wire.snapshot();
+        assert!(state.streams[0].unwrap().first_cancel.is_some());
+        assert!(state.has_goaway(Direction::Tx, 0, 0));
+        let mut after = String::new();
+        observer.write_wire(&mut after, sampled_at);
+        assert_ne!(frozen, after);
+        assert!(!frozen.contains("goaway_last="));
+        assert!(after.contains("goaway_last=0 reason=0"));
+    }
+
+    #[test]
     fn wire_capacity_loss_concurrent_isolation_and_compact_reserve_are_bounded() {
         let left = Observer::default();
         let right = Observer::default();
@@ -1941,7 +2349,8 @@ mod tests {
                 }
             }
         }
-        // Worst-width compact numbers must fit BEFORE rendering the lossy ring.
+        // First marks/settings and controls without a retained stream owner
+        // must fit before optional DATA and owned-control history.
         let mark = WireMark {
             sequence: u64::MAX,
             at: Instant::now(),
@@ -1971,6 +2380,10 @@ mod tests {
                 direction.invalid_streams = u64::MAX;
                 direction.settings_omitted = u64::MAX;
                 direction.errors = u64::MAX;
+                direction.settings_complete = [Some(Setting {
+                    value: u32::MAX,
+                    mark,
+                }); 6];
                 let point = FramePoint {
                     mark,
                     header: FrameHeader {
@@ -1993,23 +2406,47 @@ mod tests {
                     headers_seen: u64::MAX,
                     headers_complete: u64::MAX,
                     blocks_complete: u64::MAX,
+                    first_header: Some(mark),
+                    first_complete: Some(mark),
+                    first_block: Some(mark),
                     data,
                 }; 2];
                 stream.reset = Some(mark);
                 stream.reset_reason = Some(u32::MAX);
+                stream.first_cancel = Some(mark);
                 stream.late = data;
             }
         }
-        let mut compact = String::new();
         for wire in left.wires() {
-            wire.write(&mut compact, mark.at);
+            let mut state = wire.state.lock().unwrap();
+            state.events = [Some(WireEvent {
+                direction: Direction::Tx,
+                point: FramePoint {
+                    mark,
+                    header: FrameHeader {
+                        length: u32::MAX,
+                        kind: 7,
+                        flags: u8::MAX,
+                        stream: 0,
+                    },
+                },
+                complete: true,
+                value: Some(WireValue::GoAway {
+                    last_stream: u32::MAX,
+                    reason: u32::MAX,
+                }),
+            }); WIRE_EVENTS];
         }
-        // Allow a full 16 hex digits for each of seven retained ages per stream,
-        // without manufacturing a platform-dependent far-future Instant.
-        let widest_ages = WIRE_CONNECTIONS * (WIRE_STREAMS * 7 * 16 + 2 * 3 * 40);
+        let mut compact = String::new();
+        left.capture().write_wire_core(&mut compact, mark.at);
+        // Reserve maximum-width ages for first HEADERS/CANCEL/latest reset,
+        // completed SETTINGS and every unowned control, plus decimal point ages.
+        let widest_ages = WIRE_CONNECTIONS * ((WIRE_STREAMS * 8 + WIRE_EVENTS + 12) * 15 + 240);
         let widest_identity = WIRE_CONNECTIONS * 256;
         assert!(compact.len() + widest_ages + widest_identity < 48 * 1024);
-        assert_eq!(compact.matches("wire s=").count(), 72);
+        assert_eq!(compact.matches("wire first s_hex=").count(), 72);
+        assert_eq!(compact.matches("wire control_hex ").count(), 128);
+        assert_eq!(compact.matches("settings_complete ").count(), 24);
     }
 
     #[test]
