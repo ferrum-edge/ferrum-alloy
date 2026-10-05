@@ -49,7 +49,7 @@ fn version_reports_contract_versions() {
     let output = run(&["version", "--format", "json"]);
     assert_eq!(code(&output), 0);
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["edge_contract"]["release"], "v0.9.11");
+    assert_eq!(json["edge_contract"]["release"], "v0.9.12");
     assert!(
         json["diagnostic_report_schema"]
             .as_str()
