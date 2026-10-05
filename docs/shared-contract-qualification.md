@@ -4,10 +4,33 @@
 `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`; canonical publication is complete.**
 [`contracts-edge-0.9.11`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
 at `390edbd5b2485af0988e02f7827fde778d76ae0a` marks `ferrum.diagnostic_report` v1
-and `ferrum.service_manifest` v1 EXISTING/implemented. This branch adopts that actual
-tag and verified Edge v0.9.11; its new hosted qualification remains pending.
+and `ferrum.service_manifest` v1 EXISTING/implemented. This branch now adopts
+[`contracts-edge-0.9.12`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12)
+at `31f0a21d707795be293d15837c2f77c3d84219d8` and verified Edge v0.9.12;
+its new hosted qualification remains pending.
 No producer wire fields, bounds, enums, reader rules or fixture payloads change.
 The only generated snapshot changes are the known Edge release/source headers.
+
+## Current adoption (2026-10-05)
+
+The canonical v0.9.12 release was published at 13:58:38 UTC after its sole
+main PUSH [Validate contracts run 37320780987](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/37320780987)
+succeeded. All 16 existing adopted paths match that immutable Git tree. The
+report and all 12 diagnostic fixtures are byte-identical to the v0.9.11 pin;
+the diagnostic-ref schema refreshes only provenance. The report's original
+v0.9.11 coordinated-release metadata and owner-unreleased status remain intact.
+The two gateway vocabularies refresh Edge provenance, and admin ETag/If-Match
+wording adds deployment-v1. Alloy consumes no new admin deployment surface or
+schema. The [inventory](edge-contract-inventory.md#revisions-inspected) records
+the static re-audit and unchanged data-plane/trust/lifecycle boundaries.
+
+The preceding bot head `39e9404` passed both release-specific Edge jobs in
+[run 37328114541](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37328114541)
+but failed all three OS test jobs and feature combinations because both
+canonical vocabularies still named v0.9.11. Its separate PR workflow ran no
+jobs (`action_required`). The pin repair requires fresh whole-head hosted
+qualification; those earlier passing subsets and upstream publication do not
+qualify the repaired commit. Historical freeze/publication evidence follows.
 
 ## Qualified inputs
 
@@ -71,10 +94,10 @@ post-default bounds, derived IDs and endpoint relationships remain owner rules.
 
 1. **Adoption candidate (this branch):** pin all 16 adopted files byte-exact from
    the canonical tag, update every checksum and local report status metadata,
-   and pair the Edge baseline with `v0.9.11` at
-   `c764084b3b51c3f7ffde268c039688d35e49c553`, default image index
-   `sha256:2476b502855940e28157858fc24008545cb3baeb3084c9610e1d4505cbe0d36e`.
-   Keep v0.9.10 as the previous release under the existing latest-plus-previous policy.
+   and pair the Edge baseline with `v0.9.12` at
+   `0d917701b63ef38210c49df830f48cf0457cbc7d`, default image index
+   `sha256:80526b59cbbdc2bfcc8bae9241da4e5395414cf07bf0be4effd4c73c51684ee4`.
+   Keep v0.9.11 as the previous release under the existing latest-plus-previous policy.
 2. **Fresh hosted adoption gates (root):** require formatting, full pairing/schema
    parity, strict fixtures, HTTP lookup and both Edge matrix jobs on the new Alloy
    commit; qualified owner/canonical CI does not establish this branch's CI result.

@@ -105,10 +105,11 @@ The management listener binds to loopback by default, but loopback does not auth
 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
 This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures.
-The adopted tag is [`contracts-edge-0.9.11`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11) at `390edbd5b2485af0988e02f7827fde778d76ae0a`.
+The adopted tag is [`contracts-edge-0.9.12`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12) at `31f0a21d707795be293d15837c2f77c3d84219d8`.
 Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented with root's accepted unchanged wire freeze at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`. Alloy remains unreleased (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
+The report retains its original v0.9.11 shared-freeze metadata; the diagnostic-ref schema refreshes only Edge provenance, and the diagnostic fixtures are unchanged. The new canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
 The canonical report preserves historical `PROPOSED` descriptions byte for byte outside `$id`/`x-contract`; current shared status lives in `x-contract`. Tagged prepared/pending-publication wording records the source's pre-publication state. This adoption requires fresh hosted CI; earlier owner/consumer qualification does not qualify this branch or close [#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 

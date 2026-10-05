@@ -58,7 +58,7 @@ Any other observation is kept in the report but never enters a subtraction, domi
 
 ## Span linkage
 
-Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Supported Ferrum Edge v0.9.11 and v0.9.10 hand the service a CLIENT span per backend attempt as its parent, so a service span is linked to a gateway request when its parent is the Edge SERVER span or an Edge attempt span (`edge.backend.attempt`) whose parent is that SERVER span. Only one attempt hop is followed, both for linking service spans and for attributing degraded evidence. A service span whose attempt span was not exported (Edge drops spans when its export buffer is full) is not linked. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
+Span ids are unique only within one trace, so diagnosis identifies a span by its trace id and span id together. A parent span id names a span in the child's own trace. Two observations are linked only through explicit parent span ids within one trace. Supported Ferrum Edge v0.9.12 and v0.9.11 hand the service a CLIENT span per backend attempt as its parent, so a service span is linked to a gateway request when its parent is the Edge SERVER span or an Edge attempt span (`edge.backend.attempt`) whose parent is that SERVER span. Only one attempt hop is followed, both for linking service spans and for attributing degraded evidence. A service span whose attempt span was not exported (Edge drops spans when its export buffer is full) is not linked. Observations from different traces are never joined, even when their span ids match. An observation without a span is never linked to a span. The one exception is weaker than a link: when exactly one gateway request has no service telemetry, rule `alloy.r004` cites unsampled, dropped, or unexported evidence without a span, or from that request's trace, on that request as a possible explanation. Degraded evidence it cannot attribute, including evidence from another trace, is cited once on `alloy.telemetry.degraded_evidence_unlinked`.
 
 ## Alloy service measurements
 
@@ -96,7 +96,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.
 
-## Ferrum Edge measurements (supported v0.9.11 and v0.9.10; legacy v0.9.8 input)
+## Ferrum Edge measurements (supported v0.9.12 and v0.9.11; legacy v0.9.8 input)
 
 These come from Edge's own spans and logs. Alloy interprets only the documented attempt and timing fields. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
 
