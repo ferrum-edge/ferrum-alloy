@@ -1891,7 +1891,7 @@
 +        // Label compaction preserves every value, direction and endpoint;
 +        // retain the original strict zero-age and maximum-age assertions.
 @@ -3384,0 +3764 @@
-+        assert_eq!(compact.matches("/ffffffff\n").count(), 4);
++        assert_eq!(compact.matches("\nsocket drop=0/ffffffff\n").count(), 4);
 @@ -3386,2 +3766,14 @@
 -        assert_eq!(compact.matches("wc ").count(), 128);
 -        assert_eq!(compact.matches("ws ").count(), 48);

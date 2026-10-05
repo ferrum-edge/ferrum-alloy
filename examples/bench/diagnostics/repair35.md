@@ -209,7 +209,7 @@ Final Alloy retained hashes:
 31cc8190037ce8c46a0281e2c13609fda780603baece499d41e208bd82d1fc01  crates/ferrum-alloy/src/server.rs
 7fbd18e1de4f2bfae3005befdfdf2b28eac5cccd31a344cc18646beceff123f5  examples/bench/src/client.rs
 f9b24528ff7922f23d66e2f5e16d056c53447884b71dc153c96e84bd94b116f1  examples/bench/src/server.rs
-e7308fb63b03610f32386d2e543f66626acaef804769905b97a6c1ee3370c355  examples/bench/src/health.rs
+2959005e3ee5655890c90b893741b4c9cc46e23b2d40617fe3b7172cb0e09934  examples/bench/src/health.rs
 13f1c5d5691177f03ac7fc010835c46d02c2dd755bd78f3549210cd1c35d54db  examples/bench/src/run.rs
 ```
 
