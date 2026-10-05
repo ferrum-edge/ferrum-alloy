@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/alloy_diagnostics.rs
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,163 @@
 +//! Numerical observer for the isolated Alloy diagnostic fork only.
 +
 +use std::cell::RefCell;
@@ -43,6 +43,20 @@
 +        after: QueueState,
 +    },
 +    Pending(Pending),
++    CloseBranch(CloseBranch),
++}
++
++// Executed branches only, not transport cause. Zero is absent in protocol F.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[repr(u8)]
++pub enum CloseBranch {
++    NoReferences = 1,
++    IdleGoAway = 2,
++    CodecEof = 3,
++    CloseNow = 4,
++    NormalClosing = 5,
++    GoAwayClosing = 6,
++    UnexpectedEof = 7,
 +}
 +
 +#[derive(Clone, Copy, Debug)]
@@ -140,6 +154,10 @@
 +    }
 +}
 +
++pub(crate) fn close_branch(branch: CloseBranch) {
++    emit(Event::CloseBranch(branch));
++}
++
 +pub(crate) fn pending<T>(result: Poll<T>, stage: Pending) -> Poll<T> {
 +    if result.is_pending() {
 +        emit(Event::Pending(stage));
@@ -162,16 +180,25 @@
 +
 --- a/src/proto/connection.rs
 +++ b/src/proto/connection.rs
-@@ -26,0 +27,2 @@
+@@ -0,0 +1 @@
++use crate::alloy_diagnostics::{self, CloseBranch};
+@@ -26,0 +28,2 @@
 +
 +    observer: Option<std::sync::Arc<dyn crate::alloy_diagnostics::Observer>>,
-@@ -153,0 +156 @@
+@@ -153,0 +157 @@
 +            observer: crate::alloy_diagnostics::current(),
-@@ -235 +238,2 @@
+@@ -235 +239,2 @@
 -        self.inner.as_dyn().go_away_from_user(e)
 +        let observer = self.observer.clone();
 +        crate::alloy_diagnostics::scope(observer, || self.inner.as_dyn().go_away_from_user(e))
-@@ -286,0 +291,11 @@
+@@ -265 +270,5 @@
+-            self.inner.as_dyn().go_away_now(Reason::NO_ERROR);
++            let observer = self.observer.clone();
++            alloy_diagnostics::scope(observer, || {
++                alloy_diagnostics::close_branch(CloseBranch::NoReferences);
++                self.inner.as_dyn().go_away_now(Reason::NO_ERROR);
++            });
+@@ -286,0 +296,11 @@
 +        let observer = self.observer.clone();
 +        crate::alloy_diagnostics::scope(observer, || {
 +            let result = self.poll_observed(cx);
@@ -183,19 +210,25 @@
 +    }
 +
 +    fn poll_observed(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
-@@ -328 +343,4 @@
+@@ -314,0 +335 @@
++                                alloy_diagnostics::close_branch(CloseBranch::IdleGoAway);
+@@ -328 +349,4 @@
 -                    ready!(self.codec.shutdown(cx))?;
 +                    ready!(alloy_pending!(
 +                        self.codec.shutdown(cx),
 +                        crate::alloy_diagnostics::Pending::Shutdown
 +                    ))?;
-@@ -352 +370,4 @@
+@@ -352 +376,4 @@
 -            if let Some(reason) = ready!(self.poll_go_away(cx)?) {
 +            if let Some(reason) = ready!(alloy_pending!(
 +                self.poll_go_away(cx),
 +                crate::alloy_diagnostics::Pending::GoAway
 +            )?) {
-@@ -369,7 +390,9 @@
+@@ -356,0 +384 @@
++                        alloy_diagnostics::close_branch(CloseBranch::CloseNow);
+@@ -358,0 +387 @@
++                        alloy_diagnostics::close_branch(CloseBranch::CloseNow);
+@@ -369,7 +398,9 @@
 -            ready!(self.poll_ready(cx))?;
 -
 -            match self
@@ -212,28 +245,36 @@
 +                Pin::new(&mut self.codec).poll_next(cx),
 +                crate::alloy_diagnostics::Pending::Decode
 +            )?))? {
-@@ -521 +544,4 @@
+@@ -455,0 +487 @@
++                alloy_diagnostics::close_branch(CloseBranch::NormalClosing);
+@@ -508,0 +541 @@
++                    alloy_diagnostics::close_branch(CloseBranch::UnexpectedEof);
+@@ -521 +554,4 @@
 -        tracing::debug!(error = ?e, "Connection::poll; connection error");
 +        tracing::debug!(
 +            error = crate::alloy_diagnostics::go_away(reason, initiator),
 +            "Connection::poll; connection error"
 +        );
-@@ -544,0 +571,3 @@
+@@ -530,0 +567 @@
++            alloy_diagnostics::close_branch(CloseBranch::GoAwayClosing);
+@@ -544,0 +582,3 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Headers(
 +                    frame.stream_id().into(),
 +                ));
-@@ -548,0 +578,4 @@
+@@ -548,0 +589,4 @@
 +                crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Data {
 +                    stream: frame.stream_id().into(),
 +                    bytes: frame.payload().len() as u64,
 +                });
-@@ -552,0 +586,5 @@
+@@ -552,0 +597,5 @@
 +                if frame.reason() == Reason::CANCEL {
 +                    crate::alloy_diagnostics::emit(crate::alloy_diagnostics::Event::Cancel(
 +                        frame.stream_id().into(),
 +                    ));
 +                }
-@@ -660,2 +698,7 @@
+@@ -594,0 +644 @@
++                alloy_diagnostics::close_branch(CloseBranch::CodecEof);
+@@ -660,2 +710,7 @@
 -        // Ignore errors as this indicates that the mutex is poisoned.
 -        let _ = self.inner.streams.recv_eof(true);
 +        let observer = self.observer.clone();

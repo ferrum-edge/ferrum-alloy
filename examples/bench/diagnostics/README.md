@@ -140,6 +140,14 @@ existing user-GOAWAY API also restores its captured observer. Actual h2
 which can bypass read-error assignment. Stream resets consumed by `poll2` are not
 connection terminal results. No peer error Debug/string or OS-code inference is added.
 
+The first executed close branch is frozen in protocol F bits 29–31 under the
+same endpoint mutex. Zero means no observed branch. Each callback runs immediately
+before its unchanged close action; later branches never replace the first. The
+no-stream/reference helper restores the connection's captured observer, including
+explicit None, because it runs before the inner poll scope. This field records
+an executed branch only. It does not establish kernel close/reset causality,
+remote TLS/frame decoding, completed shutdown or a passing strict control.
+
 Runtime entry is marked for each bounded endpoint immediately before its owning
 runtime's existing destruction. This includes the real matrix client runtime and
 the server runtime after its existing accept-loop future returns, including unwind.
@@ -220,7 +228,7 @@ IDs and queue zeroes are interpreted only when their corresponding cursor is pre
 | 24–25 | First actual h2 terminal: 0 absent, 1 OK, 2 I/O, 3 GOAWAY |
 | 26–27 | GOAWAY initiator: 0 absent, 1 library, 2 user, 3 remote |
 | 28 | Runtime-begun immediately after first assignment |
-| 29–31 | Reserved zero |
+| 29–31 | First executed close branch; 0 absent, values below |
 | 32–63 | Terminal ErrorKind discriminant or GOAWAY reason |
 
 Origins are 0 absent, 1 handle-error I/O, 2 handle-error GOAWAY, 3 received GOAWAY,
@@ -230,6 +238,15 @@ cross-toolchain or OS codes. Terminal code zero requires its class/initiator bit
 it does not mean unknown information is zero. Destructor inspection is a separate
 pre-EOF locked sample; poison leaves bit 20 clear. No payload, TLS credentials,
 PING opaque bytes, peer GOAWAY debug data or strings enter these records.
+
+Close branches are 1 no streams or other references, before `go_away_now(NO_ERROR)`;
+2 idle after peer GOAWAY or local close-on-idle, before `go_away_now(NO_ERROR)`;
+3 codec EOF, before `recv_eof(false)`; 4 close-now, before either unchanged return;
+5 normal `poll2` completion, before the `Closing(NO_ERROR, Library)` transition;
+6 already going away with the same reason, before the GOAWAY `Closing` transition;
+7 buffer-empty UnexpectedEof with the existing server/peer-NO_ERROR condition,
+before the `Closed(NO_ERROR, Library)` transition. These values belong to protocol
+F, independently of socket `io_errors` bits 29–31, which retain paired close flags.
 
 Each endpoint prints `p2 `, then W as 23 zero-padded 13-digit base36 integers,
 N as 16 zero-padded 7-digit base36 integers, F as one 13-digit integer, and LF.

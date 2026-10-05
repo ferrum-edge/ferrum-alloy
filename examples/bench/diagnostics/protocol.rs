@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use h2::alloy_diagnostics::{Event, QueueState};
 
 const RUNTIME: u64 = 1 << 21;
+const CLOSE_BRANCH: u64 = 7 << 29;
 
 // README-v2 defines every index and flag. Cursor zero means absent. No history
 // or timestamp slots; the live and frozen records each occupy exactly 256 bytes.
@@ -194,6 +195,11 @@ impl ProtocolState {
                     self.f |= u64::from(code) << 32;
                 }
             }
+            Event::CloseBranch(branch) => {
+                if self.f & CLOSE_BRANCH == 0 {
+                    self.f |= (branch as u64) << 29;
+                }
+            }
         }
     }
 
@@ -268,6 +274,7 @@ mod tests {
 
     use bytes::Bytes;
     use ferrum_alloy::bench_diagnostics::{IoObserver, ProtocolFuture};
+    use h2::alloy_diagnostics::{CloseBranch, Origin, Pending};
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{Notify, oneshot};
@@ -591,11 +598,155 @@ mod tests {
             }
             assert_eq!(ambient.0.load(Ordering::SeqCst), 0);
             drop(sender);
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
+            // Drive the no-reference helper outside the inner h2 poll scope.
+            // Its captured None must mask the surrounding foreign observer.
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+            assert_eq!(ambient.0.load(Ordering::SeqCst), 0);
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_reference_close_uses_captured_endpoint_under_foreign_observer() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let socket = TcpStream::connect(address).await.unwrap();
+            let local = socket.local_addr().unwrap();
+            let (server_socket, remote) = listener.accept().await.unwrap();
+            assert_eq!(local, remote);
+            let observations = Observer::default();
+            let client = observations
+                .wire_endpoint(INSTANCE, 2, 1, Some(local), Some(address), false)
+                .unwrap();
+            let server = observations
+                .server_wire(INSTANCE, Some(address), remote, false)
+                .unwrap();
+            let ambient = Arc::new(Ambient::default());
+            let mut tasks = JoinSet::new();
+            let server_io = WireIo::new(server_socket, Arc::clone(&server));
+            let server_observer = observer(&server);
+            tasks.spawn(AmbientPoll::new(
+                async move {
+                    let mut connection =
+                        ProtocolFuture::new(h2::server::handshake(server_io), server_observer)
+                            .await
+                            .unwrap();
+                    while let Some(request) = connection.accept().await {
+                        let (_, mut response) = request.unwrap();
+                        response
+                            .send_response(http::Response::new(()), true)
+                            .unwrap();
+                    }
+                },
+                &ambient,
+            ));
+            let (sender, connection) = ProtocolFuture::new(
+                h2::client::handshake(WireIo::new(socket, Arc::clone(&client))),
+                observer(&client),
+            )
+            .await
+            .unwrap();
+            drop(sender);
+            tasks.spawn(AmbientPoll::new(
+                async move {
+                    connection.await.unwrap();
+                },
+                &ambient,
+            ));
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+            let state = client.protocol_snapshot();
+            assert_eq!((state.f >> 29) & 7, CloseBranch::NoReferences as u64);
+            assert_eq!((state.f >> 24) & 3, 1);
+            assert_ne!(server.protocol_snapshot().f & CLOSE_BRANCH, 0);
+            assert_eq!(ambient.0.load(Ordering::SeqCst), 0);
+            assert_eq!(client.socket, server.remote);
+            assert_eq!(client.remote, server.socket);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn first_close_branch_freezes_and_other_protocol_fields_keep_their_meanings() {
+        let branches = [
+            CloseBranch::NoReferences,
+            CloseBranch::IdleGoAway,
+            CloseBranch::CodecEof,
+            CloseBranch::CloseNow,
+            CloseBranch::NormalClosing,
+            CloseBranch::GoAwayClosing,
+            CloseBranch::UnexpectedEof,
+        ];
+        let queue = QueueState {
+            empty: true,
+            staged: 3,
+            ..QueueState::default()
+        };
+        let events = [
+            Event::Headers(1),
+            Event::Cancel(1),
+            Event::Applied {
+                stream: 1,
+                before: queue,
+                after: queue,
+            },
+            Event::Applied {
+                stream: 3,
+                before: queue,
+                after: QueueState {
+                    buffered: 1,
+                    ..queue
+                },
+            },
+            Event::Data {
+                stream: 1,
+                bytes: u64::MAX,
+            },
+            Event::Pending(Pending::GoAway),
+            Event::Pending(Pending::Control),
+            Event::Pending(Pending::Decode),
+            Event::Pending(Pending::SendReady),
+            Event::Pending(Pending::SendFlush),
+            Event::Pending(Pending::Shutdown),
+            Event::Assignment {
+                origin: Origin::HandleIo,
+                runtime_before: true,
+                runtime_after: true,
+            },
+            Event::DropEntry(Some(true)),
+            Event::Terminal {
+                class: 3,
+                initiator: 3,
+                code: u32::MAX,
+            },
+        ];
+        for first in branches {
+            let live = LiveProtocol::default();
+            let unmarked = LiveProtocol::default();
+            assert_eq!(live.snapshot().f & CLOSE_BRANCH, 0);
+            live.event(Event::CloseBranch(first), 1);
+            live.runtime_entry();
+            unmarked.runtime_entry();
+            for (index, event) in events.into_iter().enumerate() {
+                live.event(event, index as u64 + 2);
+                unmarked.event(event, index as u64 + 2);
+                for later in branches {
+                    live.event(Event::CloseBranch(later), 99);
+                }
+                let state = live.snapshot();
+                let expected = unmarked.snapshot();
+                assert_eq!(state.f & !CLOSE_BRANCH, expected.f);
+                assert_eq!((state.f >> 29) & 7, first as u64);
+                assert_eq!(state.w, expected.w);
+                assert_eq!(state.n, expected.n);
+            }
+        }
     }
 
     #[test]

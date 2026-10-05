@@ -1918,6 +1918,58 @@
 +                .lines()
 +                .filter(|line| line.starts_with("we "))
 +                .count(),
+@@ -3432,0 +3828,51 @@
++    #[test]
++    fn close_branch_is_endpoint_local_and_does_not_mask_paired_socket_errors() {
++        use h2::alloy_diagnostics::{CloseBranch, Event};
++
++        let observer = Observer::default();
++        let local = SocketAddr::from(([127, 0, 0, 1], 12345));
++        let remote = SocketAddr::from(([127, 0, 0, 1], 12346));
++        let client = observer
++            .wire_endpoint(INSTANCE, 2, 1, Some(local), Some(remote), true)
++            .unwrap();
++        let server = observer
++            .server_wire(INSTANCE, Some(remote), local, true)
++            .unwrap();
++        let sibling = observer.wire(INSTANCE, 0, 1, None).unwrap();
++        let unrelated = Observer::default();
++        let other = unrelated
++            .wire("22222222-2222-4222-8222-222222222222", 2, 2, None)
++            .unwrap();
++        client.fixture_pair_close(&server);
++        client.protocol_event(Event::CloseBranch(CloseBranch::NoReferences));
++        let frozen = observer.capture();
++        let at = Instant::now();
++        let mut before = String::new();
++        frozen.write_wire_core(&mut before, at);
++        server.protocol_event(Event::CloseBranch(CloseBranch::IdleGoAway));
++        client.protocol_event(Event::CloseBranch(CloseBranch::CodecEof));
++        assert_eq!((client.protocol_snapshot().f >> 29) & 7, 1);
++        assert_eq!((server.protocol_snapshot().f >> 29) & 7, 2);
++        assert_eq!(sibling.protocol_snapshot().f, 0);
++        assert_eq!(other.protocol_snapshot().f, 0);
++        assert_eq!(client.snapshot().io_errors, 0);
++        assert_eq!(server.snapshot().io_errors, 0);
++        assert!(client.snapshot().protocol_error_free());
++        assert!(server.snapshot().protocol_error_free());
++        client.socket_shutdown(None);
++        client.socket_shutdown(Some(Outcome::Ok));
++        client.socket_drop();
++        server.socket_start(Operation::WriteVectored, Some(16));
++        server.io_error(true, Operation::WriteVectored, io::ErrorKind::BrokenPipe);
++        server.socket_outcome(Operation::WriteVectored, Outcome::Error, 0, false);
++        assert_eq!((server.snapshot().io_errors >> 26) & 7, 7);
++        assert_eq!(server.snapshot().io_errors >> 29, 7);
++        assert!(!server.snapshot().protocol_error_free());
++        assert_eq!((server.protocol_snapshot().f >> 29) & 7, 2);
++        assert_eq!(sibling.snapshot().io_errors, 0);
++        assert_eq!(other.snapshot().io_errors, 0);
++        let mut after = String::new();
++        frozen.clone().write_wire_core(&mut after, at);
++        assert_eq!(before, after);
++    }
++
 --- a/examples/bench/src/server.rs
 +++ b/examples/bench/src/server.rs
 @@ -80,0 +81,5 @@
