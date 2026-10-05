@@ -354,6 +354,11 @@ and adds typed GOAWAY classification. It does not classify every old opaque even
 as benign: the Windows capture also contains a real server write error. Fresh hosted
 qualification is pending; ordinary workload and production code are unchanged.
 
+The literal formatting repair for protocol run 37336660480 at `9d18a2a` is recorded
+in [repair32.md](repair32.md). All three OS jobs stopped at the same formatting
+region before protocol tests. The replacement head requires fresh hosted execution
+on all three OSes with both feature selections; no protocol pass is claimed.
+
 ## Retirement and delivery
 
 Retire this directory/workflow when #142 has sufficient evidence or a reviewed typed

@@ -117,7 +117,7 @@
 +                    format!("goaway reason={} initiator={}", scalar >> 2, scalar & 3)
 +                } else {
 +                    "unknown; typed GOAWAY scalar missing".into()
-@@ -2021,0 +2070,49 @@
+@@ -2021,0 +2070,51 @@
 +    #[test]
 +    fn typed_goaway_collector_keeps_errors_and_never_formats_unknown_values() {
 +        struct Opaque;
@@ -154,20 +154,22 @@
 +            assert_eq!(state.wire_samples[2].error, "goaway reason=0 initiator=3");
 +            assert_eq!(state.wire_samples[3].error, "goaway reason=0 initiator=0");
 +        });
-+        let filtered = Dispatch::new(registry().with(
-+            WireLayer {
-+                diagnostics: Arc::clone(&diagnostics),
-+                connection,
-+            }
-+            .with_filter(filter_fn(wire_metadata)),
-+        ));
++        let filtered = Dispatch::new(
++            registry().with(
++                WireLayer {
++                    diagnostics: Arc::clone(&diagnostics),
++                    connection,
++                }
++                .with_filter(filter_fn(wire_metadata)),
++            ),
++        );
 +        tracing::dispatcher::with_default(&filtered, || {
 +            tracing::debug!(error = ?Opaque, "outside the pinned source callsites");
 +        });
 +        diagnostics.worker(0, |state| assert_eq!(state.wire_events, 7));
 +    }
 +
-@@ -2197,2 +2294,38 @@
+@@ -2197,2 +2296,38 @@
 -            Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
 -            None => handshake(TokioIo::new(io), h2).await,
 +            Some(wire) => {
@@ -208,7 +210,7 @@
 +            fn event(&self, _event: h2::alloy_diagnostics::Event) {
 +                self.0.fetch_add(1, Ordering::SeqCst);
 +            }
-@@ -2199,0 +2333,101 @@
+@@ -2199,0 +2335,101 @@
 +
 +        tokio::time::timeout(Duration::from_secs(10), async {
 +            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -310,10 +312,10 @@
 +        })
 +        .await
 +        .unwrap();
-@@ -2217 +2451 @@
+@@ -2217 +2453 @@
 -    pub(super) fn diagnostic_exchange_completed(sender: &Sender, bytes: u64) {
 +    pub(super) async fn diagnostic_exchange_completed(sender: &mut Sender, bytes: u64) {
-@@ -2226,0 +2461,12 @@
+@@ -2226,0 +2463,12 @@
 +        let control = HEALTH_WORKER
 +            .try_with(|(diagnostics, index)| {
 +                diagnostics
@@ -326,57 +328,57 @@
 +        if let Some((control, diagnostics, index)) = control {
 +            control.exchange_completed(&diagnostics, index).await;
 +        }
-@@ -2832 +3078 @@
+@@ -2832 +3080 @@
 -                    .find(|line| line.starts_with("wire Rx counts_hex="))
 +                    .find(|line| line.starts_with("wire Rx c="))
-@@ -2834,2 +3080,2 @@
+@@ -2834,2 +3082,2 @@
 -                let eof = "flags=0/1/1 hb=9 remaining_hex=7";
 -                let partial = "partial_hex=6/0/8/0";
 +                let eof = "f=0/1/1 hb=9 r=7";
 +                let partial = "x=6/0/8/0";
-@@ -2838 +3084 @@
+@@ -2838 +3086 @@
 -                assert!(rx.contains("/0 preface=")); // EOF, not a raw socket read error.
 +                assert!(rx.contains("/0 p=")); // EOF, not a raw socket read error.
-@@ -2852 +3098 @@
+@@ -2852 +3100 @@
 -                    assert!(sample.error.starts_with("unknown"));
 +                    assert_eq!(sample.error, "goaway reason=1 initiator=1");
-@@ -3148,0 +3395,3 @@
+@@ -3148,0 +3397,3 @@
 +            if let Some(control) = &diagnostics.protocol_control {
 +                control.retain_sender(first, &sender);
 +            }
-@@ -3193,0 +3443 @@
+@@ -3193,0 +3445 @@
 +        runtime_observer: Option<Arc<HealthDiagnostics>>,
-@@ -3198,0 +3449 @@
+@@ -3198,0 +3451 @@
 +                runtime_observer: None,
-@@ -3214,0 +3466,5 @@
+@@ -3214,0 +3468,5 @@
 +            if let Some(diagnostics) = &self.runtime_observer {
 +                for wire in diagnostics.observer.wires() {
 +                    wire.runtime_entry();
 +                }
 +            }
-@@ -3224,0 +3481,5 @@
+@@ -3224,0 +3483,5 @@
 +                if let Some(diagnostics) = &self.runtime_observer {
 +                    for wire in diagnostics.observer.wires() {
 +                        wire.runtime_entry();
 +                    }
 +                }
-@@ -3572 +3833,2 @@
+@@ -3572 +3835,2 @@
 -        inner: GatedBody,
 +        inner: axum::body::Body,
 +        cancelled: Option<oneshot::Sender<()>>,
-@@ -3579 +3841 @@
+@@ -3579 +3843 @@
 -        type Error = Infallible;
 +        type Error = axum::Error;
-@@ -3584 +3846 @@
+@@ -3584 +3848 @@
 -        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
 +        ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
-@@ -3590,0 +3853,3 @@
+@@ -3590,0 +3855,3 @@
 +            if let Some(cancelled) = self.cancelled.take() {
 +                let _ = cancelled.send(());
 +            }
-@@ -3788,0 +4054 @@
+@@ -3788,0 +4056 @@
 +                            assert_eq!(wires[0].decoded_headers(), 2);
-@@ -3818,0 +4085,671 @@
+@@ -3818,0 +4087,671 @@
 +    // Preserve the existing runtime destruction, including unwind paths. The
 +    // wrapper adds only its endpoint entry mark before dropping that same runtime.
 +    pub(crate) struct ProtocolRuntime {
@@ -1048,7 +1050,7 @@
 +        assert_eq!(client.protocol_snapshot().w[18], protocol.w[18]);
 +    }
 +
-@@ -3819,0 +4757,8 @@
+@@ -3819,0 +4759,8 @@
 +        retained_sender_protocol_case(release_gate, headers_shape, None);
 +    }
 +
@@ -1057,7 +1059,7 @@
 +        headers_shape: bool,
 +        mode: Option<ProtocolMode>,
 +    ) {
-@@ -3822 +4767,25 @@
+@@ -3822 +4769,25 @@
 -        let runtime = CancellationRuntime::new();
 +        let protocol_control = mode.map(|mode| Arc::new(ProtocolControl::new(mode)));
 +        let dispatcher_guard = protocol_control
@@ -1084,7 +1086,7 @@
 +        } else {
 +            CancellationRuntime::new()
 +        };
-@@ -3829 +4798,7 @@
+@@ -3829 +4800,7 @@
 -        let origin = if headers_shape && release_gate {
 +        let origin = if mode == Some(ProtocolMode::Receive) {
 +            "controlled-hyper-mtls-receive-release"
@@ -1093,7 +1095,7 @@
 +        } else if mode == Some(ProtocolMode::Alive) {
 +            "controlled-hyper-mtls-alive-origin-companion"
 +        } else if headers_shape && release_gate {
-@@ -3838,5 +4813,13 @@
+@@ -3838,5 +4815,13 @@
 -        let diagnostics = Arc::new(
 -            HealthDiagnostics::new(load)
 -                .with_transport(Transport::H2c)
@@ -1112,36 +1114,36 @@
 +        let server_runtime = server_runtime
 +            .map(|runtime| ProtocolRuntime::new(runtime, Some(Arc::clone(&diagnostics)), true));
 +        runtime.runtime_observer = Some(Arc::clone(&diagnostics));
-@@ -3850,0 +4834 @@
+@@ -3850,0 +4836 @@
 +        let mut held_snapshot = None;
-@@ -3851,0 +4836,4 @@
+@@ -3851,0 +4838,4 @@
 +            let pki = mode.map(|_| Pki::generate().unwrap());
 +            let tls = pki
 +                .as_ref()
 +                .map(|pki| TlsAcceptor::from(pki.server(true).unwrap().rustls));
-@@ -3855 +4843 @@
+@@ -3855 +4845 @@
 -                transport: Transport::H2c,
 +                transport,
-@@ -3857 +4845 @@
+@@ -3857 +4847 @@
 -                tls: None,
 +                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
-@@ -3868 +4856,5 @@
+@@ -3868 +4858,5 @@
 -            tokio::spawn(async move {
 +            let handle = server_runtime
 +                .as_ref()
 +                .map(|runtime| runtime.handle().clone())
 +                .unwrap_or_else(tokio::runtime::Handle::current);
 +            handle.spawn(async move {
-@@ -3884 +4876 @@
+@@ -3884 +4878 @@
 -                            .server_wire(stream.local_addr().ok(), peer, false)
 +                            .server_wire(stream.local_addr().ok(), peer, mode.is_some())
-@@ -3913 +4905,4 @@
+@@ -3913 +4907,4 @@
 -                            if headers_shape && let Some(gate) = release.take() {
 +                            if headers_shape
 +                                && mode.is_none()
 +                                && let Some(gate) = release.take()
 +                            {
-@@ -3915,0 +4911,14 @@
+@@ -3915,0 +4913,14 @@
 +                            let (inner, cancelled) = if mode.is_some() {
 +                                drop(release);
 +                                (crate::server::protocol_burst(), cancelled)
@@ -1156,7 +1158,7 @@
 +                                    None,
 +                                )
 +                            };
-@@ -3917,6 +4926,2 @@
+@@ -3917,6 +4928,2 @@
 -                                inner: GatedBody {
 -                                    release,
 -                                    cancelled,
@@ -1165,9 +1167,9 @@
 -                                },
 +                                inner,
 +                                cancelled,
-@@ -3932,0 +4938 @@
+@@ -3932,0 +4940 @@
 +                    let tls = tls.clone();
-@@ -3936,8 +4942,24 @@
+@@ -3936,8 +4944,24 @@
 -                        let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 -                            stream,
 -                            wire.map(|wire| {
@@ -1200,7 +1202,7 @@
 +                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
 +                                connection, observer,
 +                            )
-@@ -3944,0 +4967,12 @@
+@@ -3944,0 +4969,12 @@
 +                        } else {
 +                            let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 +                                stream,
@@ -1213,7 +1215,7 @@
 +                            )
 +                            .await;
 +                        }
-@@ -3993,0 +5028,10 @@
+@@ -3993,0 +5030,10 @@
 +                if let Some(control) = &protocol_control {
 +                    return protocol_retained_health(
 +                        health.as_mut(),
@@ -1224,24 +1226,24 @@
 +                    )
 +                    .await;
 +                }
-@@ -4119 +5163 @@
+@@ -4119 +5165 @@
 -                    transport: Transport::H2c,
 +                    transport,
-@@ -4173,2 +5217,4 @@
+@@ -4173,2 +5219,4 @@
 -        let mut frozen = diagnostics.capture();
 -        frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        let mut frozen = held_snapshot.unwrap_or_else(|| diagnostics.capture());
 +        if mode != Some(ProtocolMode::Receive) {
 +            frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        }
-@@ -4178 +5224 @@
+@@ -4178 +5226 @@
 -            transport: Transport::H2c,
 +            transport,
-@@ -4226,0 +5273,3 @@
+@@ -4226,0 +5275,3 @@
 +        if let Some(control) = &protocol_control {
 +            protocol_origin_before_cleanup(control, &diagnostics);
 +        }
-@@ -4227,0 +5277,11 @@
+@@ -4227,0 +5279,11 @@
 +        if let Some(control) = &protocol_control
 +            && control.mode == ProtocolMode::Teardown
 +        {
@@ -1253,7 +1255,7 @@
 +        if let Some(server_runtime) = server_runtime {
 +            server_runtime.shutdown_timeout(Duration::from_secs(1));
 +        }
-@@ -4288,0 +5349,15 @@
+@@ -4288,0 +5351,15 @@
 +    #[test]
 +    fn retained_hyper_mtls_receive_gate_freezes_real_next_headers_and_callbacks() {
 +        retained_sender_protocol_case(true, true, Some(ProtocolMode::Receive));
