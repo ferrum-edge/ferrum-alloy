@@ -72,7 +72,8 @@ impl ReceiveGate {
 
     /// The control releases exactly once, forwarding the registered read waker.
     pub fn release(&self) {
-        self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.held.store(false, std::sync::atomic::Ordering::SeqCst);
         let target = self.target.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(target) = target {

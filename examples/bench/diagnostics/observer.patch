@@ -269,7 +269,7 @@
 +            }
 @@ -3788,0 +3973 @@
 +                            assert_eq!(wires[0].decoded_headers(), 2);
-@@ -3818,0 +4004,458 @@
+@@ -3818,0 +4004,576 @@
 +    // Preserve the existing runtime destruction, including unwind paths. The
 +    // wrapper adds only its endpoint entry mark before dropping that same runtime.
 +    pub(crate) struct ProtocolRuntime {
@@ -390,6 +390,8 @@
 +        }
 +
 +        fn poll_dispatchers(&self, cx: &mut Context<'_>) {
++            // On unwind the mutex guard also drops before these completed futures.
++            let mut completed = [None, None];
 +            let mut dispatchers = self.dispatchers.lock().unwrap();
 +            for (index, dispatcher) in dispatchers.iter_mut().enumerate() {
 +                if index == 1 && self.public_held.load(Ordering::SeqCst) {
@@ -399,10 +401,124 @@
 +                    && let Poll::Ready(result) = future.as_mut().poll(cx)
 +                {
 +                    result.unwrap();
-+                    *dispatcher = None;
++                    completed[index] = dispatcher.take();
 +                }
 +            }
++            drop(dispatchers);
++            drop(completed);
 +        }
++    }
++
++    // Owned by the fixture stack, never by diagnostics or a retained future.
++    // Create before storing any dispatcher and keep through runtime destruction.
++    struct ProtocolDispatcherGuard(Arc<ProtocolControl>);
++
++    impl Drop for ProtocolDispatcherGuard {
++        fn drop(&mut self) {
++            let retained = {
++                let mut dispatchers = self
++                    .0
++                    .dispatchers
++                    .lock()
++                    .unwrap_or_else(|error| error.into_inner());
++                [dispatchers[0].take(), dispatchers[1].take()]
++            };
++            // Public future destructors may reenter diagnostics and this control.
++            drop(retained);
++        }
++    }
++
++    fn retained_dispatcher_unwind_case(poison: bool) {
++        struct DropProbe {
++            diagnostics: Arc<HealthDiagnostics>,
++            dropped: Arc<AtomicUsize>,
++            released: Arc<AtomicUsize>,
++        }
++
++        impl Drop for DropProbe {
++            fn drop(&mut self) {
++                let control = self.diagnostics.protocol_control.as_ref().unwrap();
++                let empty = match control.dispatchers.try_lock() {
++                    Ok(slots) => slots.iter().all(Option::is_none),
++                    Err(std::sync::TryLockError::Poisoned(error)) => {
++                        error.into_inner().iter().all(Option::is_none)
++                    }
++                    Err(std::sync::TryLockError::WouldBlock) => false,
++                };
++                if empty {
++                    self.released.fetch_add(1, Ordering::SeqCst);
++                }
++                self.dropped.fetch_add(1, Ordering::SeqCst);
++            }
++        }
++
++        let control = Arc::new(ProtocolControl::new(ProtocolMode::Teardown));
++        let mut observations = HealthDiagnostics::new(load(4, 2));
++        observations.protocol_control = Some(Arc::clone(&control));
++        let diagnostics = Arc::new(observations);
++        let weak_control = Arc::downgrade(&control);
++        let weak_diagnostics = Arc::downgrade(&diagnostics);
++        let dropped = Arc::new(AtomicUsize::new(0));
++        let released = Arc::new(AtomicUsize::new(0));
++        let future_drops = Arc::clone(&dropped);
++        let future_releases = Arc::clone(&released);
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
++            let _dispatchers = ProtocolDispatcherGuard(Arc::clone(&control));
++            let runtime = tokio::runtime::Builder::new_current_thread()
++                .enable_all()
++                .build()
++                .unwrap();
++            for worker in [0, 2] {
++                runtime.block_on(async {
++                    HEALTH_WORKER
++                        .scope((Arc::clone(&diagnostics), worker), async {
++                            diagnostic_dial();
++                            let probe = DropProbe {
++                                diagnostics: Arc::clone(&diagnostics),
++                                dropped: Arc::clone(&future_drops),
++                                released: Arc::clone(&future_releases),
++                            };
++                            let driver = diagnostic_driver(async move {
++                                let _probe = probe;
++                                std::future::pending::<Result<(), hyper::Error>>().await
++                            });
++                            diagnostic_spawn(driver);
++                        })
++                        .await;
++                });
++            }
++            assert!(
++                control
++                    .dispatchers
++                    .lock()
++                    .unwrap()
++                    .iter()
++                    .all(Option::is_some),
++            );
++            // Only the stored futures now retain diagnostics. Their real adapter
++            // and DropProbe each own it; diagnostics in turn owns this control.
++            drop(diagnostics);
++            if poison {
++                let _lock = control.dispatchers.lock().unwrap();
++                panic!("intentional assertion unwind with the dispatcher mutex held");
++            }
++            panic!("intentional assertion unwind before normal dispatcher cleanup");
++        }));
++        assert!(result.is_err());
++        assert_eq!(dropped.load(Ordering::SeqCst), 2);
++        assert_eq!(released.load(Ordering::SeqCst), 2);
++        assert!(weak_diagnostics.upgrade().is_none());
++        assert!(weak_control.upgrade().is_none());
++    }
++
++    #[test]
++    fn retained_dispatcher_guard_breaks_owned_cycle_on_early_unwind() {
++        retained_dispatcher_unwind_case(false);
++    }
++
++    #[test]
++    fn retained_dispatcher_guard_recovers_poison_before_dropping_owned_futures() {
++        retained_dispatcher_unwind_case(true);
 +    }
 +
 +    pub(super) fn diagnostic_spawn<F>(connection: F)
@@ -438,7 +554,10 @@
 +
 +    fn protocol_pair(
 +        diagnostics: &HealthDiagnostics,
-+    ) -> (Arc<crate::health::WireObservation>, Arc<crate::health::WireObservation>) {
++    ) -> (
++        Arc<crate::health::WireObservation>,
++        Arc<crate::health::WireObservation>,
++    ) {
 +        let original = diagnostics.workers[2]
 +            .lock()
 +            .unwrap()
@@ -537,10 +656,9 @@
 +                .filter(|id| !received.contains(id))
 +                .collect();
 +            let accepted = server.snapshot().header_streams(Tx);
-+            let callbacks = diagnostics.observer.socket_tasks(
-+                "h2-response-callback-child-empty-get",
-+                client.socket,
-+            );
++            let callbacks = diagnostics
++                .observer
++                .socket_tasks("h2-response-callback-child-empty-get", client.socket);
 +            let pending = callbacks
 +                .iter()
 +                .filter(|task| {
@@ -584,10 +702,7 @@
 +        assert!(next.iter().all(|id| *id > decoded.n[0]));
 +        let callbacks: Vec<_> = diagnostics
 +            .observer
-+            .socket_tasks(
-+                "h2-response-callback-child-empty-get",
-+                client.socket,
-+            )
++            .socket_tasks("h2-response-callback-child-empty-get", client.socket)
 +            .into_iter()
 +            .filter(|task| {
 +                let state = task.snapshot();
@@ -662,10 +777,9 @@
 +        protocol_zero_errors(diagnostics);
 +        assert!(control.public_held.load(Ordering::SeqCst));
 +        let (client, _) = protocol_pair(diagnostics);
-+        let wires = diagnostics.observer.socket_tasks(
-+            "h2-wire-child-pinned-first-spawn",
-+            client.socket,
-+        );
++        let wires = diagnostics
++            .observer
++            .socket_tasks("h2-wire-child-pinned-first-spawn", client.socket);
 +        assert_eq!(wires.len(), 1);
 +        let wire = wires[0].snapshot();
 +        assert!(wire.pending > 0 && wire.ready == 0 && !wire.dropped);
@@ -690,10 +804,9 @@
 +        assert_ne!(protocol.f & (1 << 22), 0);
 +        assert_ne!(protocol.f & (1 << 28), 0);
 +        assert_eq!((protocol.f >> 24) & 3, 0); // Wire child never returned Ready.
-+        let wire = diagnostics.observer.socket_tasks(
-+            "h2-wire-child-pinned-first-spawn",
-+            client.socket,
-+        );
++        let wire = diagnostics
++            .observer
++            .socket_tasks("h2-wire-child-pinned-first-spawn", client.socket);
 +        assert!(wire[0].snapshot().dropped);
 +        assert_eq!(wire[0].snapshot().ready, 0);
 +        let mut dispatcher = control.dispatchers.lock().unwrap()[1].take().unwrap();
@@ -720,7 +833,12 @@
 +            assert_eq!(state.error_events, 1);
 +            assert_eq!(state.wire_events, 0);
 +            assert_eq!(
-+                state.connection.as_ref().unwrap().driver.load(Ordering::Relaxed),
++                state
++                    .connection
++                    .as_ref()
++                    .unwrap()
++                    .driver
++                    .load(Ordering::Relaxed),
 +                3,
 +            );
 +        });
@@ -728,7 +846,7 @@
 +        assert_eq!(client.protocol_snapshot().w[18], protocol.w[18]);
 +    }
 +
-@@ -3819,0 +4463,8 @@
+@@ -3819,0 +4581,8 @@
 +        retained_sender_protocol_case(release_gate, headers_shape, None);
 +    }
 +
@@ -737,9 +855,12 @@
 +        headers_shape: bool,
 +        mode: Option<ProtocolMode>,
 +    ) {
-@@ -3822 +4473,22 @@
+@@ -3822 +4591,25 @@
 -        let runtime = CancellationRuntime::new();
 +        let protocol_control = mode.map(|mode| Arc::new(ProtocolControl::new(mode)));
++        let dispatcher_guard = protocol_control
++            .as_ref()
++            .map(|control| ProtocolDispatcherGuard(Arc::clone(control)));
 +        let server_runtime = mode.map(|_| {
 +            tokio::runtime::Builder::new_multi_thread()
 +                .worker_threads(crate::server::THREADS)
@@ -761,7 +882,7 @@
 +        } else {
 +            CancellationRuntime::new()
 +        };
-@@ -3829 +4501,7 @@
+@@ -3829 +4622,7 @@
 -        let origin = if headers_shape && release_gate {
 +        let origin = if mode == Some(ProtocolMode::Receive) {
 +            "controlled-hyper-mtls-receive-release"
@@ -770,7 +891,7 @@
 +        } else if mode == Some(ProtocolMode::Alive) {
 +            "controlled-hyper-mtls-alive-origin-companion"
 +        } else if headers_shape && release_gate {
-@@ -3838,5 +4516,18 @@
+@@ -3838,5 +4637,13 @@
 -        let diagnostics = Arc::new(
 -            HealthDiagnostics::new(load)
 -                .with_transport(Transport::H2c)
@@ -786,44 +907,39 @@
 +            .with_origin(origin);
 +        observations.protocol_control = protocol_control.clone();
 +        let diagnostics = Arc::new(observations);
-+        let server_runtime = server_runtime.map(|runtime| {
-+            ProtocolRuntime::new(
-+                runtime,
-+                Some(Arc::clone(&diagnostics)),
-+                true,
-+            )
-+        });
++        let server_runtime = server_runtime
++            .map(|runtime| ProtocolRuntime::new(runtime, Some(Arc::clone(&diagnostics)), true));
 +        runtime.runtime_observer = Some(Arc::clone(&diagnostics));
-@@ -3850,0 +4542 @@
+@@ -3850,0 +4658 @@
 +        let mut held_snapshot = None;
-@@ -3851,0 +4544,4 @@
+@@ -3851,0 +4660,4 @@
 +            let pki = mode.map(|_| Pki::generate().unwrap());
 +            let tls = pki
 +                .as_ref()
 +                .map(|pki| TlsAcceptor::from(pki.server(true).unwrap().rustls));
-@@ -3855 +4551 @@
+@@ -3855 +4667 @@
 -                transport: Transport::H2c,
 +                transport,
-@@ -3857 +4553 @@
+@@ -3857 +4669 @@
 -                tls: None,
 +                tls: pki.as_ref().map(|pki| pki.client(transport).unwrap()),
-@@ -3868 +4564,5 @@
+@@ -3868 +4680,5 @@
 -            tokio::spawn(async move {
 +            let handle = server_runtime
 +                .as_ref()
 +                .map(|runtime| runtime.handle().clone())
 +                .unwrap_or_else(tokio::runtime::Handle::current);
 +            handle.spawn(async move {
-@@ -3884 +4584 @@
+@@ -3884 +4700 @@
 -                            .server_wire(stream.local_addr().ok(), peer, false)
 +                            .server_wire(stream.local_addr().ok(), peer, mode.is_some())
-@@ -3913 +4613,4 @@
+@@ -3913 +4729,4 @@
 -                            if headers_shape && let Some(gate) = release.take() {
 +                            if headers_shape
 +                                && mode.is_none()
 +                                && let Some(gate) = release.take()
 +                            {
-@@ -3915,0 +4619,14 @@
+@@ -3915,0 +4735,14 @@
 +                            let (inner, cancelled) = if mode.is_some() {
 +                                drop(release);
 +                                (crate::server::protocol_burst(), cancelled)
@@ -838,7 +954,7 @@
 +                                    None,
 +                                )
 +                            };
-@@ -3917,6 +4634,2 @@
+@@ -3917,6 +4750,2 @@
 -                                inner: GatedBody {
 -                                    release,
 -                                    cancelled,
@@ -847,9 +963,9 @@
 -                                },
 +                                inner,
 +                                cancelled,
-@@ -3932,0 +4646 @@
+@@ -3932,0 +4762 @@
 +                    let tls = tls.clone();
-@@ -3936,8 +4650,25 @@
+@@ -3936,8 +4766,24 @@
 -                        let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 -                            stream,
 -                            wire.map(|wire| {
@@ -880,10 +996,9 @@
 +                            let connection =
 +                                builder.serve_connection(TokioIo::new(stream), service);
 +                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
-+                                connection,
-+                                observer,
++                                connection, observer,
 +                            )
-@@ -3944,0 +4676,13 @@
+@@ -3944,0 +4791,12 @@
 +                        } else {
 +                            let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
 +                                stream,
@@ -892,12 +1007,11 @@
 +                            let connection =
 +                                builder.serve_connection(TokioIo::new(stream), service);
 +                            let _ = ferrum_alloy::bench_diagnostics::ProtocolFuture::new(
-+                                connection,
-+                                observer,
++                                connection, observer,
 +                            )
 +                            .await;
 +                        }
-@@ -3993,0 +4738,10 @@
+@@ -3993,0 +4852,10 @@
 +                if let Some(control) = &protocol_control {
 +                    return protocol_retained_health(
 +                        health.as_mut(),
@@ -908,37 +1022,36 @@
 +                    )
 +                    .await;
 +                }
-@@ -4119 +4873 @@
+@@ -4119 +4987 @@
 -                    transport: Transport::H2c,
 +                    transport,
-@@ -4173,2 +4927,4 @@
+@@ -4173,2 +5041,4 @@
 -        let mut frozen = diagnostics.capture();
 -        frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        let mut frozen = held_snapshot.unwrap_or_else(|| diagnostics.capture());
 +        if mode != Some(ProtocolMode::Receive) {
 +            frozen.boundary = "controlled-before-server-runtime-cleanup";
 +        }
-@@ -4178 +4934 @@
+@@ -4178 +5048 @@
 -            transport: Transport::H2c,
 +            transport,
-@@ -4226,0 +4983,3 @@
+@@ -4226,0 +5097,3 @@
 +        if let Some(control) = &protocol_control {
 +            protocol_origin_before_cleanup(control, &diagnostics);
 +        }
-@@ -4227,0 +4987,12 @@
+@@ -4227,0 +5101,11 @@
 +        if let Some(control) = &protocol_control {
 +            if control.mode == ProtocolMode::Teardown {
 +                protocol_origin_after_runtime_drop(control, &diagnostics);
 +            }
-+            // Release any other retained public future after the frozen boundary.
-+            for dispatcher in control.dispatchers.lock().unwrap().iter_mut() {
-+                drop(dispatcher.take());
-+            }
 +        }
++        // After the same runtime-drop/single-poll boundary, clear both slots
++        // before dropping either public future, with the mutex released.
++        drop(dispatcher_guard);
 +        if let Some(server_runtime) = server_runtime {
 +            server_runtime.shutdown_timeout(Duration::from_secs(1));
 +        }
-@@ -4288,0 +5060,15 @@
+@@ -4288,0 +5173,15 @@
 +    #[test]
 +    fn retained_hyper_mtls_receive_gate_freezes_real_next_headers_and_callbacks() {
 +        retained_sender_protocol_case(true, true, Some(ProtocolMode::Receive));
@@ -1261,21 +1374,22 @@
 +    serve: F,
 +    #[cfg(test)] runtime_observer: Option<Arc<crate::client::tests::HealthDiagnostics>>,
 +) -> Result<Server, Failure>
-@@ -160,0 +171,2 @@
+@@ -160,0 +171,3 @@
 +            #[cfg(test)]
-+            let runtime = crate::client::tests::ProtocolRuntime::new(runtime, runtime_observer, true);
-@@ -193,0 +206,2 @@
++            let runtime =
++                crate::client::tests::ProtocolRuntime::new(runtime, runtime_observer, true);
+@@ -193,0 +207,2 @@
 +    #[cfg(test)]
 +    let runtime_observer = health.clone();
-@@ -247,0 +262,2 @@
+@@ -247,0 +263,2 @@
 +        #[cfg(test)]
 +        runtime_observer,
-@@ -280,0 +297,4 @@
+@@ -280,0 +298,4 @@
 +        #[cfg(test)]
 +        let protocol_observer = observation
 +            .clone()
 +            .map(|wire| wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>);
-@@ -302,3 +322,7 @@
+@@ -302,3 +323,7 @@
 -                    let _ = builder
 -                        .serve_connection(TokioIo::new(stream), service)
 -                        .await;
@@ -1286,7 +1400,7 @@
 +                        protocol_observer,
 +                    );
 +                    let _ = connection.await;
-@@ -328,3 +352,7 @@
+@@ -328,3 +353,7 @@
 -                    let _ = builder
 -                        .serve_connection(TokioIo::new(stream), service)
 -                        .await;
@@ -1297,15 +1411,11 @@
 +                        protocol_observer,
 +                    );
 +                    let _ = connection.await;
-@@ -419,0 +448,2 @@
+@@ -419,0 +449,2 @@
 +        #[cfg(test)]
 +        None,
 --- a/examples/bench/src/run.rs
 +++ b/examples/bench/src/run.rs
-@@ -287,0 +288,6 @@
+@@ -287,0 +288,2 @@
 +    #[cfg(test)]
-+    let runtime = client::tests::ProtocolRuntime::new(
-+        runtime,
-+        diagnostics.clone(),
-+        false,
-+    );
++    let runtime = client::tests::ProtocolRuntime::new(runtime, diagnostics.clone(), false);

@@ -300,7 +300,16 @@ The teardown control marks runtime entry, destroys the client runtime, then poll
 the same retained dispatcher exactly once. Require drop-entry before first assignment,
 prior-error absent, destructor-EOF origin, before/after runtime flags true, no h2 Ready
 result, and the genuine public BrokenPipe chain. The expected error is confined to
-that labelled control. No replacement driver task or manufactured error is used.
+that labelled control. A fixture-scoped dispatcher guard is created before either
+retained slot can be filled and stays outside the diagnostics/control/future ownership
+cycle. On timeout or assertion unwind it takes both slots under the mutex, recovers
+poison, releases the mutex, then drops the public futures. Successful cleanup still
+runs after the same client-runtime destruction and single retained-dispatcher poll,
+before server-runtime cleanup. Completed dispatchers also drop outside the mutex.
+Two early-unwind fixtures store both actual diagnostic adapters with owned pending
+futures. Their destructors verify unlocked, empty slots; `Weak` diagnostics and control
+references prove reclamation for both ordinary and poisoned-mutex unwind paths.
+No replacement driver task or manufactured error is used.
 Reachability does not attribute the earlier macOS failure. The actual 100/200-ms
 health case retains its fatal zero-error assertion and unchanged 15-second wrapper.
 
