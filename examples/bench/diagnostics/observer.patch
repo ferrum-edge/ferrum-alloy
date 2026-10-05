@@ -1689,7 +1689,7 @@
 @@ -2603,0 +2824,2 @@
 +        assert_eq!(state.io_errors, 0x11);
 +        assert!(!state.protocol_error_free());
-@@ -2616,0 +2839,138 @@
+@@ -2616,0 +2839,143 @@
 +    #[test]
 +    fn typed_io_errors_keep_first_boundary_kind_and_sample_release_without_claiming_cause() {
 +        let observer = Observer::default();
@@ -1767,7 +1767,10 @@
 +            server.io_error(false, Operation::WriteVectored, io::ErrorKind::BrokenPipe);
 +            server.outcome(Operation::WriteVectored, Outcome::Error, false);
 +            let state = server.snapshot();
-+            assert_eq!((state.io_errors >> 26) & 7, if before_entry { 7 } else { 0 });
++            assert_eq!(
++                (state.io_errors >> 26) & 7,
++                if before_entry { 7 } else { 0 }
++            );
 +            assert_eq!(state.io_errors >> 29, if before_entry { 7 } else { 1 });
 +            assert!(!state.protocol_error_free());
 +            let frozen = observer.capture();
@@ -1824,17 +1827,19 @@
 +        assert_eq!(wake.0.load(Ordering::SeqCst), 1);
 +        assert_eq!(wire.snapshot().io_errors, 0x42 << 12);
 +        let mut text = String::new();
-+        observer.capture().write_wire_core(&mut text, Instant::now());
++        observer
++            .capture()
++            .write_wire_core(&mut text, Instant::now());
 +        assert!(!text.contains("private-terminal-error"));
 +    }
 +
-@@ -2698 +3058 @@
+@@ -2698 +3063 @@
 -        assert!(bounded.contains("connections_omitted=1 boundary=server-plaintext-I/O"));
 +        assert!(bounded.contains("omitted=1 boundary=server-plaintext-I/O"));
-@@ -3084 +3444 @@
+@@ -3084 +3449 @@
 -        assert!(text.contains("ws Rx 4 ffff "));
 +        assert!(text.contains("s 1 4 ffff "));
-@@ -3125,2 +3485,12 @@
+@@ -3125,2 +3490,12 @@
 -        assert!(!frozen.contains(" goaway="));
 -        assert!(after.contains(" goaway=0:0"));
 +        assert!(
@@ -1849,33 +1854,33 @@
 +                .filter(|line| line.starts_with("c "))
 +                .any(|line| line.contains(" g=0:0")),
 +        );
-@@ -3141,0 +3512,3 @@
+@@ -3141,0 +3517,3 @@
 +        assert!(std::mem::size_of::<FixtureClose>() <= 16);
 +        assert!(std::mem::size_of::<OnceLock<FixtureClose>>() <= 32);
 +        assert_eq!(std::mem::size_of::<AtomicU32>(), 4);
-@@ -3200 +3573 @@
+@@ -3200 +3578 @@
 -            .find(|line| line.starts_with("wire Tx counts_hex="))
 +            .find(|line| line.starts_with("wire Tx c="))
-@@ -3202,2 +3575,2 @@
+@@ -3202,2 +3580,2 @@
 -        assert!(tx.contains("counts_hex=1/2/3/4/5/6/7/8/9/a "));
 -        assert!(tx.ends_with("remaining_hex=- partial_hex=-/-/-/-"));
 +        assert!(tx.contains("c=1/2/3/4/5/6/7/8/9/a "));
 +        assert!(tx.ends_with("r=- x=-/-/-/-"));
-@@ -3206 +3579 @@
+@@ -3206 +3584 @@
 -            .find(|line| line.starts_with("wire Rx counts_hex="))
 +            .find(|line| line.starts_with("wire Rx c="))
-@@ -3208 +3581 @@
+@@ -3208 +3586 @@
 -        assert!(rx.ends_with("remaining_hex=0 partial_hex=0/0/0/0"));
 +        assert!(rx.ends_with("r=0 x=0/0/0/0"));
-@@ -3210,2 +3583,2 @@
+@@ -3210,2 +3588,2 @@
 -        assert!(text.contains("wire Rx last_header hex=9:0 0/0/0/0 0/1\n"));
 -        assert!(text.contains("wire Rx eof_mark_hex=a:0\n"));
 +        assert!(text.contains("wp Rx H hex=9:0 0/0/0/0 0/1\n"));
 +        assert!(text.contains("we Rx a:0\n"));
-@@ -3264,0 +3638,2 @@
+@@ -3264,0 +3643,2 @@
 +            wire.protocol.replace(&protocol::ProtocolState::saturated());
 +            state.io_errors = u32::MAX;
-@@ -3370,5 +3745,4 @@
+@@ -3370,5 +3750,4 @@
 -        // Shorter wf/wc/ws prefixes retain every original field and save
 -        // 3,760 bytes. Added socket rows <=12*174, drop rows <=4*17 and TLS
 -        // rows <=4*36 at zero ages, plus schemas, stay below the unchanged
@@ -1885,9 +1890,9 @@
 +        // adds no ages: 4*428 protocol bytes + 142 schema bytes, plus 4*6 I/O bytes.
 +        // Label compaction preserves every value, direction and endpoint;
 +        // retain the original strict zero-age and maximum-age assertions.
-@@ -3384,0 +3759 @@
+@@ -3384,0 +3764 @@
 +        assert_eq!(compact.matches("/ffffffff\n").count(), 4);
-@@ -3386,2 +3761,14 @@
+@@ -3386,2 +3766,14 @@
 -        assert_eq!(compact.matches("wc ").count(), 128);
 -        assert_eq!(compact.matches("ws ").count(), 48);
 +        assert_eq!(
@@ -1904,10 +1909,10 @@
 +                .count(),
 +            48,
 +        );
-@@ -3410 +3797 @@
+@@ -3410 +3802 @@
 -        assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);
 +        assert_eq!(compact.matches(" g=ffffffff:ffffffff\n").count(), 128);
-@@ -3422 +3809,4 @@
+@@ -3422 +3814,4 @@
 -            compact.matches("eof_mark_hex=ffffffffffffffff:0\n").count(),
 +            compact
 +                .lines()
