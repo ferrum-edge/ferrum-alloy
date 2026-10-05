@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 const TASK_SLOTS: usize = 160;
 const REQUEST_SLOTS: usize = 72;
+const SERVER_PROGRESS_ROWS: usize = 4;
 const WIRE_CONNECTIONS: usize = 2;
 const WIRE_STREAMS: usize = 36;
 const WIRE_EVENTS: usize = 64;
@@ -888,6 +889,8 @@ pub(crate) struct PollState {
     last: Option<Instant>,
     last_wake: Option<Instant>,
     max_sync: Option<Duration>,
+    last_task: Option<tokio::task::Id>,
+    drop_task: Option<tokio::task::Id>,
 }
 
 #[derive(Default)]
@@ -919,6 +922,7 @@ impl PollObservation {
         state.polls = state.polls.saturating_add(1);
         let _ = state.first.get_or_insert(now);
         state.last = Some(now);
+        state.last_task = tokio::task::try_id();
         now
     }
 
@@ -938,7 +942,9 @@ impl PollObservation {
     }
 
     fn dropped(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).dropped = true;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.dropped = true;
+        state.drop_task = tokio::task::try_id();
     }
 }
 
@@ -1101,6 +1107,37 @@ struct Task {
     observation: Arc<PollObservation>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct ServerIdentity {
+    version: Option<http::Version>,
+    tls: Option<bool>,
+    verified_client: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BodyResult {
+    #[default]
+    Unpolled,
+    GatePending,
+    Pending,
+    Data,
+    Trailers,
+    Other,
+    End,
+    Error,
+}
+
+#[derive(Clone, Default)]
+struct CustodyState {
+    last_result: BodyResult,
+    issued_buffers: u64,
+    issued_bytes: u64,
+    retained_buffers: u64,
+    retained_bytes: u64,
+    last_release: Option<Instant>,
+    release_task: Option<tokio::task::Id>,
+}
+
 pub(crate) struct RequestObservation {
     pub(crate) socket: Option<SocketAddr>,
     pub(crate) ordinal: usize,
@@ -1109,6 +1146,8 @@ pub(crate) struct RequestObservation {
     pub(crate) handler: Arc<PollObservation>,
     pub(crate) body: Arc<PollObservation>,
     pub(crate) frames: AtomicU64,
+    identity: ServerIdentity,
+    custody: Mutex<CustodyState>,
 }
 
 struct Slots {
@@ -1140,6 +1179,8 @@ struct RequestCapture {
     handler: PollState,
     body: PollState,
     frames: u64,
+    identity: ServerIdentity,
+    custody: CustodyState,
 }
 
 pub(crate) struct ObserverCapture {
@@ -1230,6 +1271,12 @@ impl Observer {
                     handler: request.handler.snapshot(),
                     body: request.body.snapshot(),
                     frames: request.frames.load(Ordering::Relaxed),
+                    identity: request.identity,
+                    custody: request
+                        .custody
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone(),
                 })
         });
         let tasks_omitted = slots.tasks_omitted;
@@ -1302,6 +1349,39 @@ impl Observer {
     }
 
     pub(crate) fn request(&self, socket: Option<SocketAddr>) -> Option<Arc<RequestObservation>> {
+        self.request_identity(socket, ServerIdentity::default())
+    }
+
+    pub(crate) fn server_request<B>(
+        &self,
+        request: &http::Request<B>,
+    ) -> Option<Arc<RequestObservation>> {
+        let peer = request
+            .extensions()
+            .get::<ferrum_alloy::telemetry::peer::PeerInfo>();
+        let socket = peer.and_then(|peer| peer.remote_addr).or_else(|| {
+            request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|info| info.0)
+        });
+        let identity = ServerIdentity {
+            version: Some(request.version()),
+            tls: peer.map(|peer| peer.tls.is_some()),
+            verified_client: peer.map(|peer| {
+                peer.tls
+                    .as_ref()
+                    .is_some_and(|tls| tls.client_cert_verified)
+            }),
+        };
+        self.request_identity(socket, identity)
+    }
+
+    fn request_identity(
+        &self,
+        socket: Option<SocketAddr>,
+        identity: ServerIdentity,
+    ) -> Option<Arc<RequestObservation>> {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let ordinal = slots
             .requests
@@ -1322,6 +1402,8 @@ impl Observer {
             handler: Arc::new(PollObservation::default()),
             body: Arc::new(PollObservation::default()),
             frames: AtomicU64::new(0),
+            identity,
+            custody: Mutex::new(CustodyState::default()),
         });
         *slot = Some(Arc::clone(&request));
         Some(request)
@@ -1329,6 +1411,63 @@ impl Observer {
 }
 
 impl ObserverCapture {
+    pub(crate) fn write_server_progress(&self, text: &mut impl Write, now: Instant) {
+        let active = |row: &&RequestCapture| {
+            row.response.is_none() || !row.body.dropped || row.custody.retained_buffers > 0
+        };
+        let count = self.requests.iter().flatten().filter(active).count();
+        let _ = writeln!(
+            text,
+            "server progress rows_max={SERVER_PROGRESS_ROWS} omitted={} newest_active_first \
+             boundary=router-body native_stream_id=unobserved transport_progress=unobserved \
+             ordinal_is_not_stream_id task_id_may_be_reused \
+             buffers/bytes=issued/retained-original-buffer-size \
+             buffer_release_is_not_transport_write",
+            count.saturating_sub(SERVER_PROGRESS_ROWS),
+        );
+        for request in self
+            .requests
+            .iter()
+            .flatten()
+            .rev()
+            .filter(active)
+            .take(SERVER_PROGRESS_ROWS)
+        {
+            let connection = request.socket.and_then(|socket| {
+                self.connections
+                    .iter()
+                    .flatten()
+                    .find(|connection| connection.socket == Some(socket))
+                    .map(|connection| (connection.owner, connection.generation))
+            });
+            let _ = writeln!(
+                text,
+                "server progress socket={:?} client_owner_generation={connection:?} \
+                 ordinal={} version={:?} tls={:?} \
+                 verified_client={:?} router_task={:?} body_task={:?} body_drop_task={:?} \
+                 last={:?} last_poll_age_us={:?} buffers={}/{} bytes={}/{} \
+                 release_age_us={:?} release_task={:?} body_drop={}",
+                request.socket,
+                request.ordinal,
+                request.identity.version,
+                request.identity.tls,
+                request.identity.verified_client,
+                request.handler.last_task,
+                request.body.last_task,
+                request.body.drop_task,
+                request.custody.last_result,
+                request.body.last.map(|at| age_us(now, at)),
+                request.custody.issued_buffers,
+                request.custody.retained_buffers,
+                request.custody.issued_bytes,
+                request.custody.retained_bytes,
+                request.custody.last_release.map(|at| age_us(now, at)),
+                request.custody.release_task,
+                request.body.dropped,
+            );
+        }
+    }
+
     pub(crate) fn write_wire(&self, text: &mut impl Write, now: Instant) {
         self.write_wire_core(text, now);
         self.write_wire_detail(text, now);
@@ -1535,7 +1674,7 @@ struct ObservedBody<B> {
     gate: Option<Arc<Gate>>,
 }
 
-impl<B: hyper::body::Body> hyper::body::Body for ObservedBody<B> {
+impl<B: hyper::body::Body<Data = bytes::Bytes>> hyper::body::Body for ObservedBody<B> {
     type Data = B::Data;
     type Error = B::Error;
 
@@ -1548,15 +1687,39 @@ impl<B: hyper::body::Body> hyper::body::Body for ObservedBody<B> {
         if let Some(gate) = &this.gate
             && gate.poll(cx).is_pending()
         {
+            this.observation
+                .custody
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .last_result = BodyResult::GatePending;
             this.observation.body.finish(start, false, false);
             return Poll::Pending;
         }
         let result = this.inner.as_mut().poll_frame(cx);
+        let last_result = match &result {
+            Poll::Pending => BodyResult::Pending,
+            Poll::Ready(None) => BodyResult::End,
+            Poll::Ready(Some(Err(_))) => BodyResult::Error,
+            Poll::Ready(Some(Ok(frame))) if frame.is_data() => BodyResult::Data,
+            Poll::Ready(Some(Ok(frame))) if frame.is_trailers() => BodyResult::Trailers,
+            Poll::Ready(Some(Ok(_))) => BodyResult::Other,
+        };
+        this.observation
+            .custody
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_result = last_result;
         this.observation.body.finish(start, result.is_ready(), true);
         if matches!(&result, Poll::Ready(Some(Ok(_)))) {
             this.observation.frames.fetch_add(1, Ordering::Relaxed);
         }
-        result
+        result.map(|frame| {
+            frame.map(|frame| {
+                frame.map(|frame| {
+                    frame.map_data(|data| ObservedData::wrap(data, &this.observation))
+                })
+            })
+        })
     }
 
     fn is_end_stream(&self) -> bool {
@@ -1571,6 +1734,56 @@ impl<B: hyper::body::Body> hyper::body::Body for ObservedBody<B> {
 impl<B> Drop for ObservedBody<B> {
     fn drop(&mut self) {
         self.observation.body.dropped();
+    }
+}
+
+// Native Bytes ownership follows clones/slices through Alloy, Hyper and h2.
+// We retain only counters in the observer, never a payload reference. The
+// original buffer can be released on copy, reset or write; none proves delivery.
+struct ObservedData {
+    inner: bytes::Bytes,
+    observation: Arc<RequestObservation>,
+    bytes: u64,
+}
+
+impl ObservedData {
+    fn wrap(inner: bytes::Bytes, observation: &Arc<RequestObservation>) -> bytes::Bytes {
+        if inner.is_empty() {
+            return inner;
+        }
+        let bytes = inner.len() as u64;
+        {
+            let mut state = observation.custody.lock().unwrap_or_else(|e| e.into_inner());
+            state.issued_buffers = state.issued_buffers.saturating_add(1);
+            state.issued_bytes = state.issued_bytes.saturating_add(bytes);
+            state.retained_buffers = state.retained_buffers.saturating_add(1);
+            state.retained_bytes = state.retained_bytes.saturating_add(bytes);
+        }
+        bytes::Bytes::from_owner(Self {
+            inner,
+            observation: Arc::clone(observation),
+            bytes,
+        })
+    }
+}
+
+impl AsRef<[u8]> for ObservedData {
+    fn as_ref(&self) -> &[u8] {
+        &self.inner
+    }
+}
+
+impl Drop for ObservedData {
+    fn drop(&mut self) {
+        let mut state = self
+            .observation
+            .custody
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.retained_buffers = state.retained_buffers.saturating_sub(1);
+        state.retained_bytes = state.retained_bytes.saturating_sub(self.bytes);
+        state.last_release = Some(Instant::now());
+        state.release_task = tokio::task::try_id();
     }
 }
 
@@ -2479,5 +2692,192 @@ mod tests {
         assert_eq!(slots.requests_omitted, 5);
         assert!(other.tasks("test").is_empty());
         assert!(other.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn server_custody_follows_native_bytes_owners_after_body_drop() {
+        use axum::body::Body;
+        use axum::response::Response;
+        use bytes::Buf;
+        use ferrum_alloy::telemetry::peer::{PeerInfo, TlsPeer};
+        use http_body_util::BodyExt;
+
+        let observer = Observer::default();
+        let mut request = http::Request::builder()
+            .version(http::Version::HTTP_2)
+            .header("x-private", "RAW-HEADER")
+            .body(())
+            .unwrap();
+        request.extensions_mut().insert(PeerInfo {
+            remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
+            tls: Some(TlsPeer {
+                client_cert_verified: true,
+                spiffe_id: Some("RAW-SPIFFE".into()),
+                dns_names: vec!["RAW-DNS".into()],
+            }),
+        });
+        let observation = observer.server_request(&request).unwrap();
+        let socket = observation.socket;
+        observer.wire(INSTANCE, 2, 1, socket).unwrap();
+        let observed = Arc::clone(&observation);
+        let (mut data, poll_task) = tokio::spawn(async move {
+            let task = tokio::task::id();
+            let future = std::future::ready(Response::new(Body::from("RAW-BODY")));
+            let response = response(future, Some(observed)).await;
+            let mut body = response.into_body();
+            let data = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert!(body.frame().await.is_none());
+            drop(body);
+            (data, task)
+        })
+        .await
+        .unwrap();
+        assert_eq!(data.as_ref(), b"RAW-BODY");
+        let clone = data.copy_to_bytes(3).clone();
+        drop(data);
+        let body = observation.body.snapshot();
+        assert!(body.dropped);
+        assert_eq!(body.last_task, Some(poll_task));
+        assert_eq!(body.drop_task, Some(poll_task));
+        let handler = observation.handler.snapshot();
+        assert_eq!(handler.last_task, Some(poll_task));
+        let state = observation.custody.lock().unwrap().clone();
+        assert_eq!(state.last_result, BodyResult::End);
+        assert_eq!((state.issued_buffers, state.retained_buffers), (1, 1));
+        assert_eq!((state.issued_bytes, state.retained_bytes), (8, 8));
+        assert!(state.last_release.is_none());
+        let capture = observer.capture();
+        let now = Instant::now();
+        let mut before = String::new();
+        capture.write_server_progress(&mut before, now);
+        assert!(before.contains("client_owner_generation=Some((2, 1))"));
+        assert!(before.contains("version=Some(HTTP/2.0) tls=Some(true)"));
+        assert!(before.contains("verified_client=Some(true)"));
+        assert!(before.contains("bytes=8/8"));
+        assert!(before.contains("body_drop=true"));
+        assert!(!before.contains("RAW-"));
+        let release_task = tokio::spawn(async move {
+            let task = tokio::task::id();
+            drop(clone);
+            task
+        })
+        .await
+        .unwrap();
+        let state = observation.custody.lock().unwrap().clone();
+        assert_eq!((state.retained_buffers, state.retained_bytes), (0, 0));
+        assert!(state.last_release.is_some());
+        assert_eq!(state.release_task, Some(release_task));
+        let mut frozen = String::new();
+        capture.write_server_progress(&mut frozen, now);
+        assert_eq!(before, frozen);
+        let mut after = String::new();
+        observer.capture().write_server_progress(&mut after, now);
+        assert!(!after.contains("server progress socket="));
+        assert!(after.contains("transport_progress=unobserved"));
+        assert!(after.contains("buffer_release_is_not_transport_write"));
+    }
+
+    #[tokio::test]
+    async fn server_progress_distinguishes_gate_pending_and_opaque_body_error() {
+        use axum::body::Body;
+        use axum::response::Response;
+        use http_body_util::BodyExt;
+        use hyper::body::Body as _;
+
+        struct FailedBody;
+
+        impl hyper::body::Body for FailedBody {
+            type Data = bytes::Bytes;
+            type Error = io::Error;
+
+            fn poll_frame(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(Some(Err(io::Error::other("RAW-BODY-ERROR"))))
+            }
+        }
+
+        let observer = Observer::default();
+        let observation = observer.request(None).unwrap();
+        let gate = Arc::new(Gate::default());
+        let future = std::future::ready(Response::new(Body::new(FailedBody)));
+        let response = response_with_gates(
+            future,
+            Some(Arc::clone(&observation)),
+            None,
+            Some(Arc::clone(&gate)),
+        )
+        .await;
+        let mut body = response.into_body();
+        std::future::poll_fn(|cx| {
+            assert!(Pin::new(&mut body).poll_frame(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(observation.body.snapshot().inner_polls, 0);
+        assert_eq!(
+            observation.custody.lock().unwrap().last_result,
+            BodyResult::GatePending
+        );
+        gate.release();
+        assert!(body.frame().await.unwrap().is_err());
+        assert_eq!(observation.body.snapshot().inner_polls, 1);
+        let mut text = String::new();
+        observer
+            .capture()
+            .write_server_progress(&mut text, Instant::now());
+        assert!(text.contains("last=Error"));
+        assert!(text.contains("bytes=0/0"));
+        assert!(!text.contains("RAW-"));
+    }
+
+    #[test]
+    fn server_progress_bounds_rows_without_retiring_buffer_custody() {
+        let observer = Observer::default();
+        let other = Observer::default();
+        let socket = Some(SocketAddr::from(([127, 0, 0, 1], 12345)));
+        let mut data = Vec::new();
+        for ordinal in 1..=REQUEST_SLOTS + 5 {
+            let observation = observer.request(socket);
+            assert_eq!(observation.is_some(), ordinal <= REQUEST_SLOTS);
+            if let Some(observation) = observation {
+                observation.body.dropped();
+                data.push(ObservedData::wrap(
+                    bytes::Bytes::from_static(b"RAW-BUFFER"),
+                    &observation,
+                ));
+            }
+        }
+        let capture = observer.capture();
+        assert_eq!(capture.requests_omitted, 5);
+        assert_eq!(capture.requests.iter().flatten().count(), REQUEST_SLOTS);
+        for request in capture.requests.iter().flatten() {
+            assert!(request.body.dropped);
+            assert_eq!(request.custody.retained_buffers, 1);
+        }
+        let now = Instant::now();
+        let mut text = String::new();
+        capture.write_server_progress(&mut text, now);
+        assert_eq!(
+            text.matches("server progress socket=").count(),
+            SERVER_PROGRESS_ROWS
+        );
+        assert!(text.contains("rows_max=4 omitted=68"));
+        for ordinal in 69..=72 {
+            assert!(text.contains(&format!("ordinal={ordinal} ")));
+        }
+        assert!(!text.contains("RAW-"));
+        assert!(text.len() < 2048);
+        drop(data);
+        for request in observer.requests() {
+            assert_eq!(request.custody.lock().unwrap().retained_buffers, 0);
+        }
+        let mut frozen = String::new();
+        capture.write_server_progress(&mut frozen, now);
+        assert_eq!(text, frozen);
+        let mut isolated = String::new();
+        other.capture().write_server_progress(&mut isolated, now);
+        assert!(!isolated.contains("server progress socket="));
     }
 }
