@@ -1365,14 +1365,13 @@ impl Observer {
                 .get::<axum::extract::ConnectInfo<SocketAddr>>()
                 .map(|info| info.0)
         });
+        // This optional client-certificate identity does not distinguish
+        // plaintext from TLS without a client certificate.
+        let tls_identity = peer.and_then(|peer| peer.tls.as_ref());
         let identity = ServerIdentity {
             version: Some(request.version()),
-            tls: peer.map(|peer| peer.tls.is_some()),
-            verified_client: peer.map(|peer| {
-                peer.tls
-                    .as_ref()
-                    .is_some_and(|tls| tls.client_cert_verified)
-            }),
+            tls: tls_identity.map(|_| true),
+            verified_client: tls_identity.map(|tls| tls.client_cert_verified),
         };
         self.request_identity(socket, identity)
     }
@@ -2694,6 +2693,88 @@ mod tests {
         assert_eq!(slots.requests_omitted, 5);
         assert!(other.tasks("test").is_empty());
         assert!(other.requests().is_empty());
+    }
+
+    #[test]
+    fn server_progress_keeps_missing_tls_identity_unknown() {
+        use ferrum_alloy::telemetry::peer::PeerInfo;
+
+        for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+            let observer = Observer::default();
+            let socket = Some(SocketAddr::from(([127, 0, 0, 1], 12345)));
+            let mut request = http::Request::builder().version(version).body(()).unwrap();
+            request.extensions_mut().insert(PeerInfo {
+                remote_addr: socket,
+                tls: None,
+            });
+            let observation = observer.server_request(&request).unwrap();
+            observer.wire(INSTANCE, 2, 1, socket).unwrap();
+            assert_eq!(observation.socket, socket);
+            assert_eq!(observation.identity.version, Some(version));
+            assert_eq!(observation.identity.tls, None);
+            assert_eq!(observation.identity.verified_client, None);
+            let mut text = String::new();
+            observer
+                .capture()
+                .write_server_progress(&mut text, Instant::now());
+            assert!(text.contains("client_owner_generation=Some((2, 1))"));
+            assert!(text.contains("tls=None verified_client=None"));
+        }
+    }
+
+    #[test]
+    fn server_progress_preserves_tls_identity_verification() {
+        use ferrum_alloy::telemetry::peer::{PeerInfo, TlsPeer};
+
+        for verified in [false, true] {
+            let observer = Observer::default();
+            let mut request = http::Request::new(());
+            request.extensions_mut().insert(PeerInfo {
+                remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
+                tls: Some(TlsPeer {
+                    client_cert_verified: verified,
+                    ..TlsPeer::default()
+                }),
+            });
+            let observation = observer.server_request(&request).unwrap();
+            assert_eq!(observation.identity.tls, Some(true));
+            assert_eq!(observation.identity.verified_client, Some(verified));
+            let mut text = String::new();
+            observer
+                .capture()
+                .write_server_progress(&mut text, Instant::now());
+            let expected = format!("tls=Some(true) verified_client=Some({verified})");
+            assert!(text.contains(&expected));
+        }
+    }
+
+    #[test]
+    fn server_progress_keeps_missing_peer_unknown_with_connect_info_fallback() {
+        use axum::extract::ConnectInfo;
+        use ferrum_alloy::telemetry::peer::PeerInfo;
+
+        let socket = SocketAddr::from(([127, 0, 0, 1], 12345));
+        for with_peer in [false, true] {
+            let observer = Observer::default();
+            let mut request = http::Request::new(());
+            let observation = observer.server_request(&request).unwrap();
+            assert_eq!(observation.socket, None);
+            assert_eq!(observation.identity.tls, None);
+            assert_eq!(observation.identity.verified_client, None);
+            request.extensions_mut().insert(ConnectInfo(socket));
+            if with_peer {
+                request.extensions_mut().insert(PeerInfo::default());
+            }
+            let observation = observer.server_request(&request).unwrap();
+            assert_eq!(observation.socket, Some(socket));
+            assert_eq!(observation.identity.tls, None);
+            assert_eq!(observation.identity.verified_client, None);
+            let mut text = String::new();
+            observer
+                .capture()
+                .write_server_progress(&mut text, Instant::now());
+            assert_eq!(text.matches("tls=None verified_client=None").count(), 2);
+        }
     }
 
     #[tokio::test]
