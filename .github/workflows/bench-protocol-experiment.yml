@@ -31,7 +31,6 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
       DIAGNOSTIC_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-      ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ runner.temp }}/alloy-protocol-evidence
     defaults:
       run:
         shell: bash
@@ -141,6 +140,7 @@ jobs:
       - name: Record fork outcome
         if: always()
         env:
+          ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ runner.temp }}/alloy-protocol-evidence
           EXPERIMENT_STATUS: ${{ job.status }}
         run: |
           mkdir -p "$ALLOY_BENCH_DIAGNOSTIC_DIR"
@@ -152,6 +152,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: bench-protocol-fork-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ env.ALLOY_BENCH_DIAGNOSTIC_DIR }}/*
+          path: ${{ runner.temp }}/alloy-protocol-evidence/*
           if-no-files-found: warn
           retention-days: 7
