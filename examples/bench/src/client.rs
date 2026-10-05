@@ -2364,7 +2364,12 @@ pub(crate) mod tests {
 
     #[test]
     fn scoped_observer_sees_real_h2_child_wire_errors_without_peer_bytes() {
-        async fn wire_failure(diagnostics: Arc<HealthDiagnostics>, protocol: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn wire_failure(
+            diagnostics: Arc<HealthDiagnostics>,
+            protocol: bool,
+        ) -> (Instant, String) {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let target = Target {
                 addr: listener.local_addr().unwrap(),
@@ -2372,14 +2377,15 @@ pub(crate) mod tests {
                 workload: Workload::Cancel,
                 tls: None,
             };
+            let server_diagnostics = Arc::clone(&diagnostics);
             let server = tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
+                let (mut stream, _) = listener.accept().await.unwrap();
                 let mut preface = [0; 24];
                 wire_read(&stream, &mut preface).await;
                 assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
                 h2_write(&stream, 4, 0, 0, &[]).await;
                 h2_until(&stream, 1).await;
-                if protocol {
+                let (goaway, intact) = if protocol {
                     // DATA on stream zero is a real protocol error. No frame
                     // or peer bytes may be retained by the event collector.
                     h2_write(&stream, 0, 0, 0, b"peer-private-marker").await;
@@ -2388,13 +2394,41 @@ pub(crate) mod tests {
                     let last = u32::from_be_bytes(payload[..4].try_into().unwrap()) & 0x7fff_ffff;
                     let reason = u32::from_be_bytes(payload[4..8].try_into().unwrap());
                     assert_eq!(reason, 1); // PROTOCOL_ERROR, not a guessed delay cause.
-                    Some((last, reason))
+                    (Some((last, reason)), None)
                 } else {
+                    // A complete PING/ACK proves the real wire child has read
+                    // our SETTINGS and stays healthy at a frame boundary.
+                    // Consume its reply before injecting the incomplete frame.
+                    let ping = b"private!";
+                    h2_write(&stream, 6, 0, 0, ping).await;
+                    let (flags, id, payload) = h2_until(&stream, 6).await;
+                    assert_eq!(flags, 1); // ACK.
+                    assert_eq!(id, 0);
+                    assert_eq!(payload.as_slice(), ping);
+                    let wires = server_diagnostics.observer.wires();
+                    assert_eq!(wires.len(), 1);
+                    let intact = wires[0].snapshot().directions[1].clone();
+                    assert!(!intact.eof);
+                    assert_eq!(intact.invalid_lengths, 0);
+                    assert_eq!(intact.headers_seen, intact.frames_complete);
+                    server_diagnostics.worker(0, |state| {
+                        assert_eq!(state.wire_events, 0);
+                        assert_eq!(state.error_events, 0);
+                    });
                     // Truncated PING (9-byte header + 1 of 8 payload bytes)
                     // followed by EOF is a real framed-reader I/O error.
                     wire_write(&stream, &[0, 0, 8, 6, 0, 0, 0, 0, 0, 0]).await;
-                    None
-                }
+                    (None, Some(intact))
+                };
+                // Closing with unread client bytes can send RST instead of
+                // FIN (RFC 9293 section 3.6.1; XNU tcp_disconnect). Tokio's
+                // shutdown closes only the write side. Keep reading until
+                // the real H2 child closes its socket, then drop the peer.
+                // The existing overall 10-second timeout bounds this drain.
+                stream.shutdown().await.unwrap();
+                let mut drain = [0; 1024];
+                while stream.read(&mut drain).await.unwrap() != 0 {}
+                (goaway, intact)
             });
             let result = diagnostic_worker(Arc::clone(&diagnostics), 0, async {
                 let mut sender = dial(&target).await?;
@@ -2403,7 +2437,14 @@ pub(crate) mod tests {
             })
             .await;
             assert!(result.is_err());
-            let goaway = server.await.unwrap();
+            let (goaway, intact) = server.await.unwrap();
+            let children = diagnostics
+                .observer
+                .tasks("h2-wire-child-pinned-first-spawn");
+            assert_eq!(children.len(), 1);
+            let child = children[0].snapshot();
+            assert_eq!(child.ready, 1);
+            assert!(child.dropped);
             let wires = diagnostics.observer.wires();
             assert_eq!(wires.len(), 1);
             let frames = wires[0].snapshot();
@@ -2411,15 +2452,34 @@ pub(crate) mod tests {
                 assert!(frames.has_goaway(crate::health::Direction::Tx, last, reason));
                 assert_eq!(frames.directions[1].invalid_streams, 1);
             } else {
-                assert!(frames.directions[1].eof_partial());
-                assert_eq!(frames.directions[1].invalid_lengths, 0);
+                let intact = intact.unwrap();
+                let rx = &frames.directions[1];
+                assert!(rx.eof_partial());
+                assert_eq!(rx.invalid_lengths, 0);
+                assert_eq!(rx.invalid_streams, 0);
+                assert_eq!(rx.bytes, intact.bytes + 10);
+                assert_eq!(rx.headers_seen, intact.headers_seen + 1);
+                assert_eq!(rx.frames_complete, intact.frames_complete);
             }
+            let capture = diagnostics.observer.capture();
+            let sampled_at = Instant::now();
             let mut frame_text = String::new();
-            diagnostics
-                .observer
-                .write_wire(&mut frame_text, Instant::now());
+            capture.write_wire(&mut frame_text, sampled_at);
+            if !protocol {
+                let rx = frame_text
+                    .lines()
+                    .find(|line| line.starts_with("wire Rx bytes="))
+                    .unwrap();
+                let eof = "eof=true eof_partial=true header_bytes=9 remaining=Some(7)";
+                let partial = "partial(type,flags,length,stream)=(Some(6),Some(0),Some(8),Some(0))";
+                assert!(rx.contains(eof));
+                assert!(rx.contains(partial));
+                assert!(rx.ends_with("errors=0")); // EOF, not a raw socket read error.
+            }
             assert!(!frame_text.contains("peer-private-marker"));
+            assert!(!frame_text.contains("private!"));
             diagnostics.worker(0, |state| {
+                assert_eq!(state.connect_attempts, 1);
                 assert!(state.wire_events > 0);
                 assert!(state.wire_samples.len() <= ERROR_SAMPLES);
                 let sample = &state.wire_samples[0];
@@ -2441,8 +2501,11 @@ pub(crate) mod tests {
                 let error_text = format!("{:?}", state.error_samples);
                 assert!(!wire_text.contains("peer-private-marker"));
                 assert!(!error_text.contains("peer-private-marker"));
+                assert!(!wire_text.contains("private!"));
+                assert!(!error_text.contains("private!"));
                 assert!(state.error_events > 0);
             });
+            (sampled_at, frame_text)
         }
 
         let runtime = CancellationRuntime::new();
@@ -2455,12 +2518,12 @@ pub(crate) mod tests {
                 tokio::join!(
                     wire_failure(Arc::clone(&left), true),
                     wire_failure(Arc::clone(&right), false),
-                );
+                )
             })
             .await
         });
         runtime.shutdown();
-        result.unwrap();
+        let (left_frozen, right_frozen) = result.unwrap();
         let mut address = None;
         left.worker(0, |state| {
             address = state.connection.as_ref().unwrap().local_addr
@@ -2468,7 +2531,7 @@ pub(crate) mod tests {
         right.worker(0, |state| {
             assert_ne!(address, state.connection.as_ref().unwrap().local_addr);
         });
-        for diagnostics in [&left, &right] {
+        for (diagnostics, (sampled_at, frozen)) in [(&left, left_frozen), (&right, right_frozen)] {
             let wire = &diagnostics.observer.wires()[0];
             assert_eq!(wire.owner, 0);
             assert_eq!(wire.generation, 1);
@@ -2476,7 +2539,8 @@ pub(crate) mod tests {
                 assert_eq!(wire.socket, state.connection.as_ref().unwrap().local_addr);
             });
             let mut text = String::new();
-            diagnostics.observer.write_wire(&mut text, Instant::now());
+            diagnostics.observer.write_wire(&mut text, sampled_at);
+            assert_eq!(text, frozen);
             assert!(text.contains(&diagnostics.instance));
             let other = if Arc::ptr_eq(diagnostics, &left) {
                 &right
