@@ -1715,9 +1715,8 @@ impl<B: hyper::body::Body<Data = bytes::Bytes>> hyper::body::Body for ObservedBo
         }
         result.map(|frame| {
             frame.map(|frame| {
-                frame.map(|frame| {
-                    frame.map_data(|data| ObservedData::wrap(data, &this.observation))
-                })
+                frame
+                    .map(|frame| frame.map_data(|data| ObservedData::wrap(data, &this.observation)))
             })
         })
     }
@@ -1753,7 +1752,10 @@ impl ObservedData {
         }
         let bytes = inner.len() as u64;
         {
-            let mut state = observation.custody.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = observation
+                .custody
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.issued_buffers = state.issued_buffers.saturating_add(1);
             state.issued_bytes = state.issued_bytes.saturating_add(bytes);
             state.retained_buffers = state.retained_buffers.saturating_add(1);
