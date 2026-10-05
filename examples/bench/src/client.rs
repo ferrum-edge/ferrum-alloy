@@ -1016,7 +1016,10 @@ pub(crate) mod tests {
                 message,
                 "sample_start_us={} sample_end_us={} interval_us={} atomic=false \
                  ages_to=sample_end before_health_future_drop={}",
-                capture.sample_start.duration_since(self.started).as_micros(),
+                capture
+                    .sample_start
+                    .duration_since(self.started)
+                    .as_micros(),
                 now.duration_since(self.started).as_micros(),
                 now.duration_since(capture.sample_start).as_micros(),
                 capture.before_health_drop,
@@ -1325,7 +1328,20 @@ pub(crate) mod tests {
         assert!(rendered.len() <= DIAGNOSTIC_SNAPSHOT_BYTES);
         assert_eq!(rendered.matches("server socket_ref=").count(), 72);
         assert_eq!(rendered.matches("stage=response-headers").count(), 4);
-        assert_eq!(rendered.matches("drop=false").count(), 12);
+        // Required compact task records exclude metadata and optional task history.
+        let pending_tasks: Vec<_> = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("task=")
+                    && line.contains(" polls_hex(polls,inner,pending,ready,wakes)=")
+            })
+            .collect();
+        assert_eq!(pending_tasks.len(), 12);
+        for (id, task) in (148..160).zip(pending_tasks) {
+            assert!(task.starts_with(&format!("task={id} ")));
+            assert!(task.contains(" polls_hex(polls,inner,pending,ready,wakes)=1/1/1/0/0 "));
+            assert!(task.contains(" drop=false "));
+        }
         assert!(rendered.contains("required_detail=0 required_wire=0"));
         assert!(!rendered.contains("detail_bytes=0 "));
         assert!(rendered.contains("socket_ref=0 socket=Some([ffff:"));
@@ -1405,7 +1421,12 @@ pub(crate) mod tests {
         diagnostics.worker(0, |state| {
             assert_eq!(state.outcome, "future-dropped");
             assert_eq!(
-                state.connection.as_ref().unwrap().driver.load(Ordering::Relaxed),
+                state
+                    .connection
+                    .as_ref()
+                    .unwrap()
+                    .driver
+                    .load(Ordering::Relaxed),
                 4
             );
         });
@@ -1420,11 +1441,7 @@ pub(crate) mod tests {
         assert!(frozen.contains("atomic=false"));
         assert!(frozen.contains("before_health_future_drop=true"));
         assert!(!frozen.contains("future-dropped"));
-        let after = diagnostics.render(
-            cell,
-            "controlled-after-drop",
-            &diagnostics.capture(),
-        );
+        let after = diagnostics.render(cell, "controlled-after-drop", &diagnostics.capture());
         assert!(after.contains("future-dropped"));
         assert!(after.contains("drop=true"));
     }
@@ -2517,7 +2534,10 @@ pub(crate) mod tests {
         }
     }
 
-    fn capture_before_drop<F>(health: Pin<Box<F>>, diagnostics: &HealthDiagnostics) -> HealthCapture {
+    fn capture_before_drop<F>(
+        health: Pin<Box<F>>,
+        diagnostics: &HealthDiagnostics,
+    ) -> HealthCapture {
         let mut capture = diagnostics.capture();
         capture.before_health_drop = true;
         // Dropping the coordinator can abort JoinSet workers and release

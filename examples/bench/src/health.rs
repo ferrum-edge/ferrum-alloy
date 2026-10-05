@@ -692,7 +692,8 @@ impl WireCapture {
                 let _ = write!(
                     text,
                     "wire control_hex {:?} c={} mark=",
-                    event.direction, u8::from(event.complete),
+                    event.direction,
+                    u8::from(event.complete),
                 );
                 write_mark(text, Some(event.point.mark), now);
                 let _ = write!(
@@ -1219,15 +1220,17 @@ impl Observer {
             })
         });
         let requests = std::array::from_fn(|index| {
-            slots.requests[index].as_ref().map(|request| RequestCapture {
-                socket: request.socket,
-                ordinal: request.ordinal,
-                entered: request.entered,
-                response: *request.response.lock().unwrap_or_else(|e| e.into_inner()),
-                handler: request.handler.snapshot(),
-                body: request.body.snapshot(),
-                frames: request.frames.load(Ordering::Relaxed),
-            })
+            slots.requests[index]
+                .as_ref()
+                .map(|request| RequestCapture {
+                    socket: request.socket,
+                    ordinal: request.ordinal,
+                    entered: request.entered,
+                    response: *request.response.lock().unwrap_or_else(|e| e.into_inner()),
+                    handler: request.handler.snapshot(),
+                    body: request.body.snapshot(),
+                    frames: request.frames.load(Ordering::Relaxed),
+                })
         });
         let tasks_omitted = slots.tasks_omitted;
         let requests_omitted = slots.requests_omitted;
@@ -1376,7 +1379,8 @@ impl ObserverCapture {
                 .requests
                 .iter()
                 .position(|slot| {
-                    slot.as_ref().is_some_and(|other| other.socket == request.socket)
+                    slot.as_ref()
+                        .is_some_and(|other| other.socket == request.socket)
                 })
                 .unwrap_or(index);
             if reference == index {
@@ -1412,7 +1416,8 @@ impl ObserverCapture {
         // Pending and never-polled tasks precede completed/destroyed history.
         for (id, task) in self.tasks.iter().enumerate() {
             if let Some(task) = task
-                && task.state.ready == 0 && !task.state.dropped
+                && task.state.ready == 0
+                && !task.state.dropped
             {
                 task.write_required(text, id, now);
             }
@@ -1422,7 +1427,8 @@ impl ObserverCapture {
     pub(crate) fn write_history(&self, text: &mut impl Write, now: Instant) {
         for (id, task) in self.tasks.iter().enumerate() {
             if let Some(task) = task
-                && task.state.ready == 0 && !task.state.dropped
+                && task.state.ready == 0
+                && !task.state.dropped
             {
                 task.write(text, id, now);
             }
@@ -2277,7 +2283,9 @@ mod tests {
         assert!(!format!("{retained:?}").contains("private"));
         wire.feed(Direction::Rx, &replacement[15..]);
         assert_eq!(
-            wire.snapshot().directions[1].settings_complete[3].unwrap().value,
+            wire.snapshot().directions[1].settings_complete[3]
+                .unwrap()
+                .value,
             42
         );
     }
