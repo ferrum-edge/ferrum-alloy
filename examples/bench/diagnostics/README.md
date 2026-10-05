@@ -15,6 +15,10 @@ feature selection on all three OSes. It preserves 1/5/15 s clocks, concurrency 4
 quota 8, original sockets, drain/reset/flood protections and assertions. There is
 no repetition, reconnect workaround, relaxed gate or soft failure.
 
+On Windows the workflow converts `RUNNER_TEMP` to a Git Bash path for archive
+extraction, then passes native paths to Python and the diagnostic environment.
+Source identity, run/attempt and OS are recorded before export/preparation can fail.
+
 ## Provenance
 
 Upstream is published **h2 0.4.19**, MIT, from
@@ -41,6 +45,15 @@ validated. Snapshot `pf` records archive, both patches, graph SHA-256 and source
 head. Artifacts retain the graphs, instrumented manifest/lock, identity, outcome
 and bounded captures. `fork=true` / `qualification=false` excludes interpreting a
 fork pass as ordinary qualification.
+
+Before the exact byte comparison, artifacts retain the complete generated
+`instrumented.lock`, `expected-protocol.lock`, instrumented manifest and patch
+provenance. A mismatch prints and retains `lock-diff.txt`, then exits with failure;
+no serialization or pin normalization is applied. Run 37288726272 at `69485db`
+failed Windows export because `tar` received an unconverted native drive path.
+Linux/macOS stopped at the lock comparison (byte/char 19877, line 791) without
+retaining either lockfile. Their actual complete graph delta remains unknown;
+the next hosted artifacts are required before changing the expected graph.
 
 ## Boundaries and limits
 
