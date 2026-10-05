@@ -752,6 +752,8 @@ async fn handle(
     let local = stream.local_addr().ok();
     #[cfg(feature = "tls")]
     if let Some(tls) = &options.tls {
+        #[cfg(feature = "bench-diagnostics")]
+        let stream = crate::bench_diagnostics::SocketIo::new(stream);
         let accept = tokio::time::timeout(tls.handshake_timeout, tls.acceptor().accept(stream));
         // A handshake that finishes after shutdown began could never serve a
         // request, so stop waiting for it.
@@ -787,13 +789,18 @@ async fn handle(
             tls: crate::tls::peer_identity(stream.get_ref().1),
         };
         #[cfg(feature = "bench-diagnostics")]
-        let stream = crate::bench_diagnostics::PlaintextIo::optional(
-            stream,
-            options
-                .bench_io
-                .as_ref()
-                .and_then(|observer| observer.accepted(local, remote, true)),
-        );
+        let observation = options
+            .bench_io
+            .as_ref()
+            .and_then(|observer| observer.accepted(local, remote, true));
+        #[cfg(feature = "bench-diagnostics")]
+        let stream = {
+            let mut stream = stream;
+            stream.get_mut().0.observe(observation.clone());
+            crate::bench_diagnostics::TlsIo::optional(stream.into(), observation.clone())
+        };
+        #[cfg(feature = "bench-diagnostics")]
+        let stream = crate::bench_diagnostics::PlaintextIo::optional(stream, observation);
         serve_io(stream, peer, active, builder, app, options, lifecycle).await;
         return;
     }
@@ -802,13 +809,18 @@ async fn handle(
         tls: None,
     };
     #[cfg(feature = "bench-diagnostics")]
-    let stream = crate::bench_diagnostics::PlaintextIo::optional(
-        stream,
-        options
-            .bench_io
-            .as_ref()
-            .and_then(|observer| observer.accepted(local, remote, false)),
-    );
+    let observation = options
+        .bench_io
+        .as_ref()
+        .and_then(|observer| observer.accepted(local, remote, false));
+    #[cfg(feature = "bench-diagnostics")]
+    let stream = {
+        let mut stream = crate::bench_diagnostics::SocketIo::new(stream);
+        stream.observe(observation.clone());
+        stream
+    };
+    #[cfg(feature = "bench-diagnostics")]
+    let stream = crate::bench_diagnostics::PlaintextIo::optional(stream, observation);
     serve_io(stream, peer, active, builder, app, options, lifecycle).await;
 }
 

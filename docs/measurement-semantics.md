@@ -30,6 +30,29 @@ received with its declared length, and distinguish time spent with a blocked
 server write from time spent reading data the server has already written. These
 boundaries do not add a client-delivery timing to Alloy's measurements.
 
+## Internal benchmark transport marks
+
+The opt-in health snapshots in [Benchmarks](benchmarks.md) reuse endpoint-local
+sequence/age marks for plaintext frames, socket polls and TLS demand samples.
+They are internal test evidence, not diagnostic-report observation names or
+measurements interpreted by `catalog.rs` rules. Each age starts at the recorded
+`std::time::Instant` event and ends at the frozen snapshot's sample-end instant,
+in microseconds on that endpoint's monotonic clock. Missing marks are unknown;
+the rendered age is capped at `u64::MAX`, without changing stored timestamps.
+
+| Mark | Event boundary | Does not establish |
+|---|---|---|
+| Socket last poll | Entry immediately before the single inner read/write/flush delegation | Poll completion, time parked or kernel queue state |
+| Socket progress | Return with positive newly read/accepted bytes, or an Ok socket flush | Peer delivery, plaintext decoding or a byte count for flush |
+| Socket last wake | Invocation of the socket forwarding waker, before forwarding to the original target | Execution of the task, a unique readiness event or absence of lost wakes |
+| TLS demand sample | After an established TLS poll, or initial attachment, reading only rustls demand flags | Buffer lengths, tokio-rustls private flush state or simultaneous socket state |
+
+The age is event-to-snapshot elapsed time, never an I/O operation duration.
+Each endpoint copy is atomic only with respect to updates of its retained
+observer records. Actual socket delegation, TLS sampling and plaintext callbacks
+are sequential; endpoint copies are also sequential and non-atomic. Do not sum
+ages, subtract them across endpoints or interpret them as network latency.
+
 ## Availability states
 
 | State | Meaning |

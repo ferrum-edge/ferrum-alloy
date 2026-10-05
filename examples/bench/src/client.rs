@@ -176,6 +176,8 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
     let remote = stream.peer_addr().ok();
     stream.set_nodelay(true)?;
     let h2 = target.transport.http2();
+    #[cfg(test)]
+    let wire = tests::diagnostic_wire(h2, remote, target.tls.is_some());
     if target.workload == Workload::Cancel && !h2 {
         // An abandoned HTTP/1.1 connection is reset, as an aborting client's
         // would be, rather than left in TIME_WAIT to exhaust ephemeral ports.
@@ -187,7 +189,11 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             tests::diagnostic_worker_stage("http-handshake");
             #[cfg(test)]
             {
-                tests::diagnostic_handshake(stream, h2, remote, false).await
+                let mut stream = ferrum_alloy::bench_diagnostics::SocketIo::new(stream);
+                stream.observe(wire.clone().map(|wire| {
+                    wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                }));
+                tests::diagnostic_handshake(stream, h2, wire).await
             }
             #[cfg(not(test))]
             {
@@ -198,6 +204,8 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             let name = ServerName::try_from("localhost")?;
             #[cfg(test)]
             tests::diagnostic_worker_stage("tls-handshake");
+            #[cfg(test)]
+            let stream = ferrum_alloy::bench_diagnostics::SocketIo::new(stream);
             let stream = TlsConnector::from(Arc::clone(config))
                 .connect(name, stream)
                 .await?;
@@ -205,7 +213,16 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             tests::diagnostic_worker_stage("http-handshake");
             #[cfg(test)]
             {
-                tests::diagnostic_handshake(stream, h2, remote, true).await
+                let mut stream = stream;
+                let observer = wire.clone().map(|wire| {
+                    wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                });
+                stream.get_mut().0.observe(observer.clone());
+                let stream = ferrum_alloy::bench_diagnostics::TlsIo::optional(
+                    stream.into(),
+                    observer,
+                );
+                tests::diagnostic_handshake(stream, h2, wire).await
             }
             #[cfg(not(test))]
             {
@@ -1339,6 +1356,14 @@ pub(crate) mod tests {
             for _ in 0..64 {
                 wire.prefix(request, &ping);
             }
+            for operation in [Operation::Read, Operation::Write, Operation::Flush] {
+                wire.socket_start(operation, Some(usize::MAX));
+                wire.socket_outcome(operation, Outcome::Pending, 0, false);
+                wire.socket_wake(operation);
+                wire.socket_start(operation, Some(usize::MAX));
+                wire.socket_outcome(operation, Outcome::Ok, usize::MAX, false);
+            }
+            wire.tls_state([true, true, false]);
             let state = wire.snapshot();
             for direction in [crate::health::Direction::Tx, crate::health::Direction::Rx] {
                 assert_eq!(state.header_streams(direction).len(), 36);
@@ -1481,9 +1506,9 @@ pub(crate) mod tests {
             .observer
             .write_wire_core(&mut wire_core, capture.sample_end);
         assert_eq!(wire_core.2, 0);
-        assert_eq!(wire_core.0.matches("wire first s_hex=").count(), 72);
-        assert_eq!(wire_core.0.matches("wire control_hex ").count(), 128);
-        assert_eq!(wire_core.0.matches("settings_complete ").count(), 48);
+        assert_eq!(wire_core.0.matches("wf ").count(), 72);
+        assert_eq!(wire_core.0.matches("wc ").count(), 128);
+        assert_eq!(wire_core.0.matches("ws ").count(), 48);
         assert!(rendered.contains(&wire_core.0));
         assert!(!rendered.contains("detail_bytes=0 "));
         assert!(rendered.contains("socket_ref=0 socket=Some([ffff:"));
@@ -1513,6 +1538,8 @@ pub(crate) mod tests {
             .chain(diagnostics.observer.server_wires())
         {
             wire.outcome(Operation::Write, Outcome::Error, false);
+            wire.socket_drop();
+            wire.tls_state([false; 3]);
         }
         diagnostics.freeze_first_failure("later-saturation-capture-must-not-replace-first");
         let cached = diagnostics.failure_state().unwrap();
@@ -2132,36 +2159,41 @@ pub(crate) mod tests {
         });
     }
 
-    pub(super) async fn diagnostic_handshake<I>(
-        io: I,
+    pub(super) fn diagnostic_wire(
         h2: bool,
         remote: Option<SocketAddr>,
         tls: bool,
+    ) -> Option<Arc<crate::health::WireObservation>> {
+        h2.then(|| {
+            HEALTH_WORKER
+                .try_with(|(diagnostics, index)| {
+                    let mut connection = None;
+                    diagnostics.worker(*index, |state| connection = state.connection.clone());
+                    connection.and_then(|connection| {
+                        diagnostics.observer.wire_endpoint(
+                            &diagnostics.instance,
+                            connection.owner,
+                            connection.generation,
+                            connection.local_addr,
+                            remote,
+                            tls,
+                        )
+                    })
+                })
+                .ok()
+                .flatten()
+        })
+        .flatten()
+    }
+
+    pub(super) async fn diagnostic_handshake<I>(
+        io: I,
+        h2: bool,
+        wire: Option<Arc<crate::health::WireObservation>>,
     ) -> Result<Sender, Failure>
     where
         I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let wire = h2
-            .then(|| {
-                HEALTH_WORKER
-                    .try_with(|(diagnostics, index)| {
-                        let mut connection = None;
-                        diagnostics.worker(*index, |state| connection = state.connection.clone());
-                        connection.and_then(|connection| {
-                            diagnostics.observer.wire_endpoint(
-                                &diagnostics.instance,
-                                connection.owner,
-                                connection.generation,
-                                connection.local_addr,
-                                remote,
-                                tls,
-                            )
-                        })
-                    })
-                    .ok()
-                    .flatten()
-            })
-            .flatten();
         match wire {
             Some(wire) => handshake(TokioIo::new(crate::health::WireIo::new(io, wire)), h2).await,
             None => handshake(TokioIo::new(io), h2).await,

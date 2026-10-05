@@ -285,6 +285,14 @@ async fn serve_plain(
             match tls {
                 None => {
                     #[cfg(test)]
+                    let stream = {
+                        let mut stream = ferrum_alloy::bench_diagnostics::SocketIo::new(stream);
+                        stream.observe(observation.clone().map(|wire| {
+                            wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                        }));
+                        stream
+                    };
+                    #[cfg(test)]
                     let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(
                         stream,
                         observation.map(|wire| {
@@ -296,8 +304,19 @@ async fn serve_plain(
                         .await;
                 }
                 Some(acceptor) => {
+                    #[cfg(test)]
+                    let stream = ferrum_alloy::bench_diagnostics::SocketIo::new(stream);
                     let Ok(stream) = acceptor.accept(stream).await else {
                         return;
+                    };
+                    #[cfg(test)]
+                    let stream = {
+                        let mut stream = stream;
+                        let observer = observation.clone().map(|wire| {
+                            wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
+                        });
+                        stream.get_mut().0.observe(observer.clone());
+                        ferrum_alloy::bench_diagnostics::TlsIo::optional(stream.into(), observer)
                     };
                     #[cfg(test)]
                     let stream = ferrum_alloy::bench_diagnostics::PlaintextIo::optional(

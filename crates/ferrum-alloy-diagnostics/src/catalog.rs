@@ -3,6 +3,15 @@
 //! This catalog mirrors `docs/measurement-semantics.md`. Rules only interpret
 //! names listed here; an unknown name is preserved and reported but never used
 //! as evidence.
+//!
+//! Internal benchmark transport marks are not report observation names and are
+//! never interpreted by these rules. As defined in measurement-semantics.md,
+//! their age runs from an endpoint-local monotonic event (socket poll entry,
+//! positive read/write or Ok flush return, forwarding-waker invocation, or
+//! post-poll/attachment TLS demand sampling) to the frozen sample-end instant,
+//! in microseconds. Missing is unknown; rendering caps ages at u64::MAX. These
+//! event-to-snapshot ages are not operation durations or network latency, and
+//! sequential endpoint copies do not establish simultaneous live socket/TLS state.
 
 /// A catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

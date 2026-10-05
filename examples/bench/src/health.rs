@@ -151,6 +151,26 @@ struct Setting {
 }
 
 #[derive(Clone, Debug, Default)]
+pub(crate) struct SocketProgress {
+    pub(crate) outcomes: [u64; 3],
+    pub(crate) bytes: u64,
+    requested: Option<usize>,
+    in_poll: bool,
+    last: Option<u8>,
+    eof: bool,
+    pub(crate) wakes: u64,
+    last_poll: Option<WireMark>,
+    progress: Option<WireMark>,
+    last_wake: Option<WireMark>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TlsSample {
+    flags: [bool; 3],
+    mark: WireMark,
+}
+
+#[derive(Clone, Debug, Default)]
 pub(crate) struct WireDirection {
     pub(crate) bytes: u64,
     pub(crate) headers_seen: u64,
@@ -195,6 +215,9 @@ pub(crate) struct WireState {
     events_next: usize,
     pub(crate) events_overwritten: u64,
     pub(crate) streams_omitted: u64,
+    pub(crate) socket: Box<[SocketProgress; 3]>,
+    socket_dropped: bool,
+    tls_sample: Option<TlsSample>,
 }
 
 impl Clone for WireState {
@@ -208,6 +231,9 @@ impl Clone for WireState {
             events_next: self.events_next,
             events_overwritten: self.events_overwritten,
             streams_omitted: self.streams_omitted,
+            socket: boxed_slots(|index| self.socket[index].clone()),
+            socket_dropped: self.socket_dropped,
+            tls_sample: self.tls_sample,
         }
     }
 }
@@ -226,6 +252,9 @@ impl Default for WireState {
             events_next: 0,
             events_overwritten: 0,
             streams_omitted: 0,
+            socket: boxed_slots(|_| SocketProgress::default()),
+            socket_dropped: false,
+            tls_sample: None,
         }
     }
 }
@@ -625,6 +654,63 @@ impl IoObserver for WireObservation {
             parser.errors = parser.errors.saturating_add(1);
         }
     }
+
+    fn socket_start(&self, operation: Operation, requested: Option<usize>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mark = state.mark();
+        let progress = &mut state.socket[socket_index(operation)];
+        progress.in_poll = true;
+        progress.requested = requested;
+        progress.last_poll = Some(mark);
+    }
+
+    fn socket_outcome(&self, operation: Operation, outcome: Outcome, bytes: usize, eof: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let result = match outcome {
+            Outcome::Pending => 0,
+            Outcome::Ok => 1,
+            Outcome::Error => 2,
+        };
+        let made_progress = bytes > 0 || matches!(operation, Operation::Flush) && result == 1;
+        let mark = made_progress.then(|| state.mark());
+        let progress = &mut state.socket[socket_index(operation)];
+        progress.in_poll = false;
+        progress.last = Some(result as u8);
+        progress.outcomes[result] = progress.outcomes[result].saturating_add(1);
+        progress.bytes = progress.bytes.saturating_add(bytes as u64);
+        progress.eof |= eof;
+        if let Some(mark) = mark {
+            progress.progress = Some(mark);
+        }
+    }
+
+    fn socket_wake(&self, operation: Operation) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mark = state.mark();
+        let progress = &mut state.socket[socket_index(operation)];
+        progress.wakes = progress.wakes.saturating_add(1);
+        progress.last_wake = Some(mark);
+    }
+
+    fn socket_drop(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).socket_dropped = true;
+    }
+
+    fn tls_state(&self, flags: [bool; 3]) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.tls_sample = Some(TlsSample {
+            flags,
+            mark: state.mark(),
+        });
+    }
+}
+
+fn socket_index(operation: Operation) -> usize {
+    match operation {
+        Operation::Read => 0,
+        Operation::Write | Operation::WriteVectored => 1,
+        Operation::Flush | Operation::Shutdown => 2,
+    }
 }
 
 #[derive(Clone)]
@@ -657,6 +743,53 @@ impl WireCapture {
             self.remote,
             self.tls,
         );
+        let _ = writeln!(text, "socket dropped={}", u8::from(state.socket_dropped));
+        for (index, progress) in state.socket.iter().enumerate() {
+            let _ = write!(
+                text,
+                "socket {index} {:x}/{:x}/{:x} {:x} ",
+                progress.outcomes[0],
+                progress.outcomes[1],
+                progress.outcomes[2],
+                progress.bytes,
+            );
+            if let Some(requested) = progress.requested {
+                let _ = write!(text, "{requested:x}");
+            } else {
+                let _ = write!(text, "-");
+            }
+            let _ = write!(text, " {:x} {}/", progress.wakes, u8::from(progress.in_poll));
+            if let Some(last) = progress.last {
+                let _ = write!(text, "{last}");
+            } else {
+                let _ = write!(text, "-");
+            }
+            let _ = write!(text, "/{} ", u8::from(progress.eof));
+            for (offset, mark) in [progress.last_poll, progress.progress, progress.last_wake]
+                .into_iter()
+                .enumerate()
+            {
+                if offset > 0 {
+                    let _ = write!(text, "/");
+                }
+                write_mark(text, mark, now);
+            }
+            let _ = writeln!(text);
+        }
+        let _ = write!(text, "tls demand ");
+        if let Some(sample) = state.tls_sample {
+            let _ = write!(
+                text,
+                "{}/{}/{} ",
+                u8::from(sample.flags[0]),
+                u8::from(sample.flags[1]),
+                u8::from(sample.flags[2]),
+            );
+            write_mark(text, Some(sample.mark), now);
+        } else {
+            let _ = write!(text, "-");
+        }
+        let _ = writeln!(text);
         for direction in [Direction::Tx, Direction::Rx] {
             let parser = &state.directions[direction.index()];
             let _ = write!(
@@ -728,7 +861,7 @@ impl WireCapture {
                 if let Some(setting) = setting {
                     let _ = write!(
                         text,
-                        "wire settings_complete {direction:?} {:x} {:x} ",
+                        "ws {direction:?} {:x} {:x} ",
                         index + 1,
                         setting.value,
                     );
@@ -748,7 +881,7 @@ impl WireCapture {
             self.owner, self.generation, self.endpoint, self.remote, state.reset_direction,
         );
         for stream in state.streams.iter().flatten() {
-            let _ = write!(text, "wire first s_hex={:x}", stream.id);
+            let _ = write!(text, "wf {:x}", stream.id);
             for direction in [Direction::Tx, Direction::Rx] {
                 let progress = stream.directions[direction.index()];
                 let _ = write!(text, " ");
@@ -829,7 +962,7 @@ impl WireCapture {
                 let header = event.point.header;
                 let _ = write!(
                     text,
-                    "wire control_hex {:?} {} ",
+                    "wc {:?} {} ",
                     event.direction,
                     u8::from(event.complete),
                 );
@@ -1534,7 +1667,22 @@ impl ObserverCapture {
             let _ = writeln!(
                 text,
                 "wire first columns=Tx,Rx,cancel,rst Tx/Rx=first-HEADERS-seen/complete/END_HEADERS \
-                 cancel=first-complete-CANCEL rst=latest-complete-RST:reason_hex",
+                 cancel=first-complete-CANCEL rst=latest-complete-RST:reason_hex \
+                 rows(wf/wc/ws)=first-stream/control/completed-SETTINGS",
+            );
+            let _ = writeln!(
+                text,
+                "socket hex rows=0(read)/1(scalar+vector-write)/2(flush) \
+                 columns=pending/ok/error,bytes,last_requested,wakes,in_poll/last_outcome/eof,last_poll/progress/last_wake \
+                 outcome=0(Pending)/1(Ok)/2(error) marks=endpoint-seq:age_us '-'=unobserved \
+                 progress=positive-bytes-or-Ok-flush shutdown=unobserved",
+            );
+            let _ = writeln!(
+                text,
+                "tls demand=wants_read/wants_write/handshaking,mark \
+                 buffer_lengths/kernel_queues/need_flush=unknown \
+                 socket_bytes=encrypted-if-tls TLS_flags=after-poll-sequential \
+                 endpoint_copy=one-lock-records-only cross_endpoint=sequential-non-atomic",
             );
         }
         for observation in self
@@ -1971,6 +2119,346 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn socket_observer_counts_actual_prefixes_and_forwards_wakes_without_retaining_bytes() {
+        use ferrum_alloy::bench_diagnostics::SocketIo;
+
+        let observer = Observer::default();
+        let wire = observer.wire(INSTANCE, 0, 1, None).unwrap();
+        let wake = Arc::new(CountWake::default());
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut cx = Context::from_waker(&waker);
+        let inner = MockIo {
+            reads: [
+                ReadStep::Pending,
+                ReadStep::Bytes(b"private-ciphertext".to_vec()),
+                ReadStep::Error,
+                ReadStep::Eof,
+                ReadStep::Eof,
+            ]
+            .into(),
+            writes: [WriteStep::Pending, WriteStep::Accept(3), WriteStep::Error].into(),
+            vectored: true,
+            ..MockIo::default()
+        };
+        let mut io = SocketIo::new(inner);
+        io.observe(Some(wire.clone()));
+        let mut storage = [0; 64];
+        let mut buf = ReadBuf::new(&mut storage);
+        buf.put_slice(b"old");
+        let pointer = buf.filled().as_ptr() as usize;
+        assert!(Pin::new(&mut io).poll_read(&mut cx, &mut buf).is_pending());
+        assert!(matches!(
+            Pin::new(&mut io).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(&buf.filled()[3..], b"private-ciphertext");
+        assert!(matches!(
+            Pin::new(&mut io).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Err(_))
+        ));
+        let mut empty = [];
+        let mut zero = ReadBuf::new(&mut empty);
+        assert!(matches!(
+            Pin::new(&mut io).poll_read(&mut cx, &mut zero),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(!wire.snapshot().socket[0].eof);
+        assert!(matches!(
+            Pin::new(&mut io).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        let bytes = b"private-ciphertext";
+        assert!(Pin::new(&mut io).poll_write(&mut cx, bytes).is_pending());
+        let bufs = [IoSlice::new(&bytes[..2]), IoSlice::new(&bytes[2..])];
+        assert!(io.is_write_vectored());
+        assert!(matches!(
+            Pin::new(&mut io).poll_write_vectored(&mut cx, &bufs),
+            Poll::Ready(Ok(3))
+        ));
+        assert!(matches!(
+            Pin::new(&mut io).poll_write(&mut cx, bytes),
+            Poll::Ready(Err(_))
+        ));
+        assert!(Pin::new(&mut io).poll_flush(&mut cx).is_pending());
+        assert!(matches!(
+            Pin::new(&mut io).poll_flush(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+        assert!(matches!(
+            Pin::new(&mut io).poll_flush(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(io.inner_mut().read_calls[0], (pointer, 3, 61));
+        assert_eq!(io.inner_mut().read_calls.len(), 5);
+        assert_eq!(io.inner_mut().scalar_calls.len(), 2);
+        assert_eq!(io.inner_mut().vector_calls.len(), 1);
+        assert_eq!(io.inner_mut().scalar_calls[0].0, bytes.as_ptr() as usize);
+        assert_eq!(io.inner_mut().vector_calls[0][0].0, bytes.as_ptr() as usize);
+        assert_eq!(io.inner_mut().accepted, &bytes[..3]);
+        assert_eq!(io.inner_mut().flushes, 3);
+        assert_eq!(wake.0.load(Ordering::SeqCst), 3);
+        let state = wire.snapshot();
+        assert_eq!(state.socket[0].outcomes, [1, 3, 1]);
+        assert_eq!(state.socket[0].bytes, bytes.len() as u64);
+        assert!(state.socket[0].eof);
+        assert_eq!(state.socket[1].outcomes, [1, 1, 1]);
+        assert_eq!(state.socket[1].bytes, 3);
+        assert_eq!(state.socket[1].requested, Some(bytes.len()));
+        assert_eq!(state.socket[2].outcomes, [1, 1, 1]);
+        assert!(state.socket[2].progress.is_some());
+        assert!(state.socket.iter().all(|progress| progress.wakes == 1));
+        assert!(state.directions.iter().all(|direction| direction.bytes == 0));
+        let frozen = observer.capture();
+        let sampled_at = Instant::now();
+        let mut before = String::new();
+        frozen.write_wire_core(&mut before, sampled_at);
+        drop(io);
+        assert!(wire.snapshot().socket_dropped);
+        let mut after = String::new();
+        frozen.clone().write_wire_core(&mut after, sampled_at);
+        assert_eq!(before, after);
+        assert!(!before.contains("private-"));
+        assert!(before.contains("socket dropped=0"));
+        // Without an observer, even the original waker identity is unchanged.
+        let mut passive = SocketIo::new(MockIo {
+            writes: [WriteStep::Pending, WriteStep::Accept(0)].into(),
+            expected_waker: Some(waker.clone()),
+            ..MockIo::default()
+        });
+        assert!(!passive.is_write_vectored());
+        assert!(Pin::new(&mut passive).poll_write(&mut cx, bytes).is_pending());
+        assert!(matches!(
+            Pin::new(&mut passive).poll_write(&mut cx, bytes),
+            Poll::Ready(Ok(0))
+        ));
+        assert_eq!(passive.inner_mut().scalar_calls.len(), 2);
+        assert_eq!(wake.0.load(Ordering::SeqCst), 4);
+    }
+
+    // Only this deterministic control installs socket gates. Production SocketIo
+    // always delegates; the fixture's Pending is a labelled held inner boundary.
+    struct HeldSocket {
+        inner: tokio::net::TcpStream,
+        gates: [Option<Arc<Gate>>; 3],
+    }
+
+    impl AsyncRead for HeldSocket {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if let Some(gate) = &this.gates[0]
+                && gate.poll(cx).is_pending()
+            {
+                return Poll::Pending;
+            }
+            Pin::new(&mut this.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for HeldSocket {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if let Some(gate) = &this.gates[1]
+                && gate.poll(cx).is_pending()
+            {
+                return Poll::Pending;
+            }
+            Pin::new(&mut this.inner).poll_write(cx, bytes)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if let Some(gate) = &this.gates[2]
+                && gate.poll(cx).is_pending()
+            {
+                return Poll::Pending;
+            }
+            Pin::new(&mut this.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn established_mtls_original_socket_distinguishes_held_read_write_and_flush() {
+        use ferrum_alloy::bench_diagnostics::{SocketIo, TlsIo};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let pki = crate::pki::Pki::generate().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let observer = Observer::default();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let client = tokio::net::TcpStream::connect(address).await.unwrap();
+            let original = client.local_addr().unwrap();
+            let (server, peer) = listener.accept().await.unwrap();
+            assert_eq!(peer, original);
+            let acceptor = tokio_rustls::TlsAcceptor::from(pki.server(true).unwrap().rustls);
+            let connector = tokio_rustls::TlsConnector::from(
+                pki.client(crate::dims::Transport::H2Mtls).unwrap(),
+            );
+            let held = HeldSocket {
+                inner: server,
+                gates: std::array::from_fn(|_| None),
+            };
+            let (client, server) = tokio::join!(
+                connector.connect(
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    SocketIo::new(client),
+                ),
+                acceptor.accept(SocketIo::new(held)),
+            );
+            let mut client = client.unwrap();
+            let mut server = server.unwrap();
+            assert!(!client.get_ref().1.is_handshaking());
+            assert!(!server.get_ref().1.is_handshaking());
+            assert_eq!(client.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            assert!(server.get_ref().1.peer_certificates().is_some());
+            let client_wire = observer
+                .wire_endpoint(INSTANCE, 2, 1, Some(original), Some(address), true)
+                .unwrap();
+            let server_wire = observer
+                .server_wire(INSTANCE, Some(address), peer, true)
+                .unwrap();
+            client.get_mut().0.observe(Some(client_wire.clone()));
+            server.get_mut().0.observe(Some(server_wire.clone()));
+            let read = Arc::new(Gate::default());
+            let write = Arc::new(Gate::default());
+            let flush = Arc::new(Gate::default());
+            // Start with unheld established TLS traffic, including frame marks.
+            let mut client = WireIo::new(
+                TlsIo::optional(client.into(), Some(client_wire.clone())),
+                client_wire.clone(),
+            );
+            let mut server = WireIo::new(
+                TlsIo::optional(server.into(), Some(server_wire.clone())),
+                server_wire.clone(),
+            );
+            let mut request = H2_PREFACE.to_vec();
+            request.extend(frame(1, 5, 1, &[]));
+            client.write_all(&request).await.unwrap();
+            client.flush().await.unwrap();
+            let mut received = vec![0; request.len()];
+            server.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, request);
+            let response = frame(1, 4, 1, &[]);
+            server.write_all(&response).await.unwrap();
+            server.flush().await.unwrap();
+            let mut received = vec![0; response.len()];
+            client.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, response);
+            let baseline = server_wire.snapshot();
+            assert!(baseline.socket[0].bytes > 0 && baseline.socket[1].bytes > 0);
+            assert!(baseline.socket[2].outcomes[1] > 0);
+            // Arm beneath established TLS, without replacing the original socket.
+            server.inner_mut().inner_mut().get_mut().0.inner_mut().gates = [
+                Some(read.clone()),
+                Some(write.clone()),
+                Some(flush.clone()),
+            ];
+            let mut request = frame(3, 0, 1, &8_u32.to_be_bytes());
+            request.extend(frame(1, 5, 3, &[]));
+            client.write_all(&request).await.unwrap();
+            client.flush().await.unwrap();
+            let mut received = vec![0; request.len()];
+            let mut reading = Box::pin(server.read_exact(&mut received));
+            std::future::poll_fn(|cx| {
+                assert!(reading.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(read.reached.load(Ordering::SeqCst));
+            let held_read = server_wire.snapshot();
+            assert_eq!(held_read.socket[0].last, Some(0));
+            assert_eq!(held_read.socket[0].bytes, baseline.socket[0].bytes);
+            assert_eq!(held_read.header_streams(Direction::Rx), [1]);
+            let read_wakes = held_read.socket[0].wakes;
+            read.release();
+            reading.await.unwrap();
+            assert_eq!(received, request);
+            let released_read = server_wire.snapshot();
+            assert!(released_read.socket[0].bytes > baseline.socket[0].bytes);
+            assert!(released_read.socket[0].wakes > read_wakes);
+            assert_eq!(released_read.header_streams(Direction::Rx), [1, 3]);
+            assert!(released_read.streams[0].unwrap().first_cancel.is_some());
+            let response = frame(1, 4, 3, &[]);
+            server.write_all(&response).await.unwrap();
+            let mut flushing = Box::pin(server.flush());
+            std::future::poll_fn(|cx| {
+                assert!(flushing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(write.reached.load(Ordering::SeqCst));
+            let held_write = server_wire.snapshot();
+            assert_eq!(held_write.socket[1].last, Some(0));
+            assert_eq!(held_write.socket[1].bytes, baseline.socket[1].bytes);
+            assert!(held_write.tls_sample.unwrap().flags[1]);
+            assert_eq!(held_write.header_streams(Direction::Tx), [1, 3]);
+            assert_eq!(client_wire.snapshot().header_streams(Direction::Rx), [1]);
+            // Immutable capture at the held ciphertext-write boundary, before
+            // release/drop. Endpoint copies are sequential, not simultaneous.
+            let frozen = observer.capture();
+            let cloned = frozen.clone();
+            let sampled_at = Instant::now();
+            let mut before = String::new();
+            frozen.write_wire(&mut before, sampled_at);
+            let write_wakes = held_write.socket[1].wakes;
+            write.release();
+            std::future::poll_fn(|cx| {
+                assert!(flushing.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(flush.reached.load(Ordering::SeqCst));
+            let held_flush = server_wire.snapshot();
+            assert!(held_flush.socket[1].bytes > baseline.socket[1].bytes);
+            assert!(held_flush.socket[1].wakes > write_wakes);
+            assert_eq!(held_flush.socket[2].last, Some(0));
+            assert!(!held_flush.tls_sample.unwrap().flags[1]);
+            client
+                .read_exact(&mut received[..response.len()])
+                .await
+                .unwrap();
+            assert_eq!(&received[..response.len()], response);
+            assert_eq!(client_wire.snapshot().header_streams(Direction::Rx), [1, 3]);
+            let flush_wakes = held_flush.socket[2].wakes;
+            flush.release();
+            flushing.await.unwrap();
+            let released = server_wire.snapshot();
+            assert_eq!(released.socket[2].last, Some(1));
+            assert!(released.socket[2].wakes > flush_wakes);
+            let original_socket = &server.inner_mut().inner_mut().get_mut().0.inner_mut().inner;
+            assert_eq!(original_socket.local_addr().unwrap(), address);
+            assert_eq!(original_socket.peer_addr().unwrap(), original);
+            assert_eq!(client_wire.socket, Some(original));
+            assert_eq!(server_wire.remote, Some(original));
+            drop(server);
+            drop(client);
+            assert!(server_wire.snapshot().socket_dropped);
+            assert!(client_wire.snapshot().socket_dropped);
+            let mut after = String::new();
+            cloned.write_wire(&mut after, sampled_at);
+            assert_eq!(before, after);
+            assert!(!before.contains("socket dropped=1"));
+            assert!(before.len() < 48 * 1024);
+            assert_eq!(observer.wires().len(), 1);
+            assert_eq!(observer.server_wires().len(), 1);
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -2581,8 +3069,8 @@ mod tests {
         let capture = observer.capture();
         let mut text = String::new();
         capture.write_wire_core(&mut text, Instant::now());
-        assert!(text.contains("wire first s_hex=b"));
-        assert!(text.contains("settings_complete Rx 4 ffff "));
+        assert!(text.contains("wf b"));
+        assert!(text.contains("ws Rx 4 ffff "));
         assert!(!text.contains("private"));
         assert!(!format!("{retained:?}").contains("private"));
         wire.feed(Direction::Rx, &replacement[15..]);
@@ -2639,6 +3127,7 @@ mod tests {
         assert!(std::mem::size_of::<RequestCapture>() <= 512);
         assert!(std::mem::size_of::<Option<WireStream>>() <= 1024);
         assert!(std::mem::size_of::<Option<WireEvent>>() <= 128);
+        assert!(std::mem::size_of::<SocketProgress>() <= 256);
     }
 
     #[test]
@@ -2706,7 +3195,7 @@ mod tests {
             .find(|line| line.starts_with("wire Rx counts_hex="))
             .unwrap();
         assert!(rx.ends_with("remaining_hex=0 partial_hex=0/0/0/0"));
-        assert!(text.contains("wire first s_hex=d 1:0/2:0/3:0 4:0/5:0/6:0 7:0 8:0:8\n"));
+        assert!(text.contains("wf d 1:0/2:0/3:0 4:0/5:0/6:0 7:0 8:0:8\n"));
         assert!(text.contains("wire Rx last_header hex=9:0 0/0/0/0 0/1\n"));
         assert!(text.contains("wire Rx eof_mark_hex=a:0\n"));
     }
@@ -2765,6 +3254,24 @@ mod tests {
             state.sequence = u64::MAX;
             state.streams_omitted = u64::MAX;
             state.events_overwritten = u64::MAX;
+            for progress in state.socket.iter_mut() {
+                *progress = SocketProgress {
+                    outcomes: [u64::MAX; 3],
+                    bytes: u64::MAX,
+                    requested: Some(usize::MAX),
+                    in_poll: true,
+                    last: Some(2),
+                    eof: true,
+                    wakes: u64::MAX,
+                    last_poll: Some(mark),
+                    progress: Some(mark),
+                    last_wake: Some(mark),
+                };
+            }
+            state.tls_sample = Some(TlsSample {
+                flags: [true; 3],
+                mark,
+            });
             for direction in &mut state.directions {
                 direction.bytes = u64::MAX;
                 direction.headers_seen = u64::MAX;
@@ -2849,23 +3356,41 @@ mod tests {
         left.capture().write_wire_core(&mut compact, mark.at);
         // Reserve maximum-width ages for first HEADERS/CANCEL/latest reset,
         // completed SETTINGS and every unowned control, plus point/EOF ages.
-        // Static zero-age row bounds: first=72*187, control=128*82,
-        // SETTINGS=48*56, point=16*74, EOF=8*42. Other row bounds:
-        // directions=8*280, outcomes=1,640, identities=4*288,
-        // schemas/headers=1,320, first identities=2*192, control identities=2*144.
-        // Total <=35,192, with a strict hosted assertion below 35,200 bytes;
-        // unchanged age/identity allowances add 13,264: 48,464 < 49,152.
+        // Shorter wf/wc/ws prefixes retain every original field and save
+        // 3,760 bytes. Added socket rows <=12*174, drop rows <=4*17 and TLS
+        // rows <=4*36 at zero ages, plus schemas, stay below the unchanged
+        // 35,200-byte assertion. All 40 new marks reserve 15 extra age digits.
+        // Combined maximum age/identity allowance is 13,864 bytes:
+        // 35,200 + 13,864 = 49,064 < the unchanged 49,152-byte wire reserve.
         let widest_ages = WIRE_CONNECTIONS * ((WIRE_STREAMS * 8 + WIRE_EVENTS + 12) * 15 + 240);
         let widest_server_ages = SERVER_CONNECTIONS * (12 * 15 + 240);
         let widest_identity = (WIRE_CONNECTIONS + SERVER_CONNECTIONS) * 256;
-        assert!(compact.len() + widest_ages + widest_server_ages + widest_identity < 48 * 1024);
+        let socket_ages = (WIRE_CONNECTIONS + SERVER_CONNECTIONS) * (3 * 3 + 1) * 15;
+        assert!(
+            compact.len() + widest_ages + widest_server_ages + widest_identity + socket_ages
+                < 48 * 1024
+        );
         assert!(compact.len() < 35_200);
-        assert_eq!(compact.matches("wire first s_hex=").count(), 72);
-        assert_eq!(compact.matches("wire control_hex ").count(), 128);
-        assert_eq!(compact.matches("settings_complete ").count(), 48);
+        assert_eq!(compact.matches("wf ").count(), 72);
+        assert_eq!(compact.matches("wc ").count(), 128);
+        assert_eq!(compact.matches("ws ").count(), 48);
         // Every mandatory mark and numerical control/setting/point value
         // survives compaction; these counts include both server core records.
-        assert_eq!(compact.matches("ffffffffffffffff:0").count(), 776);
+        assert_eq!(compact.matches("ffffffffffffffff:0").count(), 776 + 40);
+        let original_marks: usize = compact
+            .lines()
+            .filter(|line| !line.starts_with("socket ") && !line.starts_with("tls demand "))
+            .map(|line| line.matches("ffffffffffffffff:0").count())
+            .sum();
+        assert_eq!(original_marks, 776);
+        assert_eq!(
+            compact.lines().filter(|line| line.starts_with("socket ")).count(),
+            17,
+        );
+        assert_eq!(
+            compact.matches("tls demand 1/1/1 ffffffffffffffff:0\n").count(),
+            4,
+        );
         assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);
         assert_eq!(
             compact.matches(" ffffffff ffffffffffffffff:0\n").count(),
