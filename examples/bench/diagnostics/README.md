@@ -85,6 +85,13 @@ not serialization. The affected published manifests allow the original locked ve
 These static constraints justify retaining the reviewed graph; hosted locked
 metadata still must validate the entire graph on all three OSes and both features.
 
+Run 37318325950 at `47ef332` passed exact preparation, both locked metadata graphs
+and formatting on all three OSes. Both feature sections then failed strict lint on
+the same manual no-op waker and nested teardown condition, before observer controls
+or real matrices ran. The overlay uses `Waker::noop()` and an equivalent let-chain,
+preserving the single retained-dispatcher poll after runtime destruction and guard
+cleanup. These lint repairs require fresh hosted gates and do not explain #142.
+
 ## Boundaries and limits
 
 The adapter scopes construction/polling on the actual selected socket. h2 captures
