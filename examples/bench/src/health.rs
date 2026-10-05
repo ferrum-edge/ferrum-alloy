@@ -693,7 +693,10 @@ impl IoObserver for WireObservation {
     }
 
     fn socket_drop(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).socket_dropped = true;
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .socket_dropped = true;
     }
 
     fn tls_state(&self, flags: [bool; 3]) {
@@ -748,17 +751,19 @@ impl WireCapture {
             let _ = write!(
                 text,
                 "socket {index} {:x}/{:x}/{:x} {:x} ",
-                progress.outcomes[0],
-                progress.outcomes[1],
-                progress.outcomes[2],
-                progress.bytes,
+                progress.outcomes[0], progress.outcomes[1], progress.outcomes[2], progress.bytes,
             );
             if let Some(requested) = progress.requested {
                 let _ = write!(text, "{requested:x}");
             } else {
                 let _ = write!(text, "-");
             }
-            let _ = write!(text, " {:x} {}/", progress.wakes, u8::from(progress.in_poll));
+            let _ = write!(
+                text,
+                " {:x} {}/",
+                progress.wakes,
+                u8::from(progress.in_poll)
+            );
             if let Some(last) = progress.last {
                 let _ = write!(text, "{last}");
             } else {
@@ -2210,7 +2215,12 @@ mod tests {
         assert_eq!(state.socket[2].outcomes, [1, 1, 1]);
         assert!(state.socket[2].progress.is_some());
         assert!(state.socket.iter().all(|progress| progress.wakes == 1));
-        assert!(state.directions.iter().all(|direction| direction.bytes == 0));
+        assert!(
+            state
+                .directions
+                .iter()
+                .all(|direction| direction.bytes == 0)
+        );
         let frozen = observer.capture();
         let sampled_at = Instant::now();
         let mut before = String::new();
@@ -2229,7 +2239,11 @@ mod tests {
             ..MockIo::default()
         });
         assert!(!passive.is_write_vectored());
-        assert!(Pin::new(&mut passive).poll_write(&mut cx, bytes).is_pending());
+        assert!(
+            Pin::new(&mut passive)
+                .poll_write(&mut cx, bytes)
+                .is_pending()
+        );
         assert!(matches!(
             Pin::new(&mut passive).poll_write(&mut cx, bytes),
             Poll::Ready(Ok(0))
@@ -2363,11 +2377,8 @@ mod tests {
             assert!(baseline.socket[0].bytes > 0 && baseline.socket[1].bytes > 0);
             assert!(baseline.socket[2].outcomes[1] > 0);
             // Arm beneath established TLS, without replacing the original socket.
-            server.inner_mut().inner_mut().get_mut().0.inner_mut().gates = [
-                Some(read.clone()),
-                Some(write.clone()),
-                Some(flush.clone()),
-            ];
+            server.inner_mut().inner_mut().get_mut().0.inner_mut().gates =
+                [Some(read.clone()), Some(write.clone()), Some(flush.clone())];
             let mut request = frame(3, 0, 1, &8_u32.to_be_bytes());
             request.extend(frame(1, 5, 3, &[]));
             client.write_all(&request).await.unwrap();
@@ -3384,11 +3395,16 @@ mod tests {
             .sum();
         assert_eq!(original_marks, 776);
         assert_eq!(
-            compact.lines().filter(|line| line.starts_with("socket ")).count(),
+            compact
+                .lines()
+                .filter(|line| line.starts_with("socket "))
+                .count(),
             17,
         );
         assert_eq!(
-            compact.matches("tls demand 1/1/1 ffffffffffffffff:0\n").count(),
+            compact
+                .matches("tls demand 1/1/1 ffffffffffffffff:0\n")
+                .count(),
             4,
         );
         assert_eq!(compact.matches(" goaway=ffffffff:ffffffff\n").count(), 128);

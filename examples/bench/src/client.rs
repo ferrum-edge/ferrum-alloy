@@ -190,9 +190,10 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             #[cfg(test)]
             {
                 let mut stream = ferrum_alloy::bench_diagnostics::SocketIo::new(stream);
-                stream.observe(wire.clone().map(|wire| {
-                    wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
-                }));
+                stream.observe(
+                    wire.clone()
+                        .map(|wire| wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>),
+                );
                 tests::diagnostic_handshake(stream, h2, wire).await
             }
             #[cfg(not(test))]
@@ -214,14 +215,12 @@ async fn dial(target: &Target) -> Result<Sender, Failure> {
             #[cfg(test)]
             {
                 let mut stream = stream;
-                let observer = wire.clone().map(|wire| {
-                    wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>
-                });
+                let observer = wire
+                    .clone()
+                    .map(|wire| wire as Arc<dyn ferrum_alloy::bench_diagnostics::IoObserver>);
                 stream.get_mut().0.observe(observer.clone());
-                let stream = ferrum_alloy::bench_diagnostics::TlsIo::optional(
-                    stream.into(),
-                    observer,
-                );
+                let stream =
+                    ferrum_alloy::bench_diagnostics::TlsIo::optional(stream.into(), observer);
                 tests::diagnostic_handshake(stream, h2, wire).await
             }
             #[cfg(not(test))]
