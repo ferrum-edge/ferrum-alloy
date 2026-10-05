@@ -1316,7 +1316,11 @@ pub(crate) mod tests {
     async fn saturated_history_keeps_server_rows_workers_and_pending_tasks() {
         use ferrum_alloy::bench_diagnostics::{IoObserver, Operation, Outcome};
 
-        fn fill_wire(wire: &crate::health::WireObservation, request: Operation, response: Operation) {
+        fn fill_wire(
+            wire: &crate::health::WireObservation,
+            request: Operation,
+            response: Operation,
+        ) {
             wire.prefix(request, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
             let mut settings = vec![0, 0, 36, 4, 0, 0, 0, 0, 0];
             for id in 1_u16..=6 {
@@ -1343,11 +1347,10 @@ pub(crate) mod tests {
 
         let diagnostics = HealthDiagnostics::new(load(4, 2));
         let other = HealthDiagnostics::new(load(4, 2));
-        let socket = Some(
-            "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
-                .parse()
-                .unwrap(),
-        );
+        let address: SocketAddr = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+            .parse()
+            .unwrap();
+        let socket = Some(address);
         for owner in [0, 2] {
             let client = diagnostics
                 .observer
@@ -1356,12 +1359,7 @@ pub(crate) mod tests {
             fill_wire(&client, Operation::Write, Operation::Read);
             let server = diagnostics
                 .observer
-                .server_wire(
-                    &diagnostics.instance,
-                    socket,
-                    socket.unwrap(),
-                    false,
-                )
+                .server_wire(&diagnostics.instance, socket, address, false)
                 .unwrap();
             fill_wire(&server, Operation::Read, Operation::Write);
         }
@@ -1657,13 +1655,12 @@ pub(crate) mod tests {
     }
 
     fn source_body<'a>(source: &'a str, signature: &str, closing: &str) -> &'a str {
-        source
-            .split_once(signature)
-            .unwrap()
-            .1
-            .split_once(closing)
-            .unwrap()
-            .0
+        assert!(closing.starts_with('\n'));
+        let remaining = source.split_once(signature).unwrap().1;
+        let (body, _) = remaining.split_once(closing).unwrap();
+        // Keep the boundary newline: the final nested branch needs it to
+        // match its own complete, indentation-anchored closing delimiter.
+        &remaining[..body.len() + 1]
     }
 
     fn assert_source_order(source: &str, steps: &[&str]) {
@@ -1714,11 +1711,7 @@ pub(crate) mod tests {
                 "capture",
             ],
         );
-        let cache = source_body(
-            helper,
-            "\n        if first.is_none() {",
-            "\n        }\n",
-        );
+        let cache = source_body(helper, "\n        if first.is_none() {", "\n        }\n");
         assert_eq!(cache.trim(), "*first = Some(capture.clone());");
         assert_source_order(
             helper,
@@ -1733,13 +1726,12 @@ pub(crate) mod tests {
             ],
         );
         assert_eq!(helper.matches("diagnostics.capture()").count(), 1);
-        assert_eq!(helper.split_once("drop(health);").unwrap().1.trim(), "capture");
-        assert!(!production.contains("fn capture_before_drop<"));
-        let freeze = source_body(
-            tests,
-            "\n        fn freeze_first_failure(",
-            "\n        }\n",
+        assert_eq!(
+            helper.split_once("drop(health);").unwrap().1.trim(),
+            "capture"
         );
+        assert!(!production.contains("fn capture_before_drop<"));
+        let freeze = source_body(tests, "\n        fn freeze_first_failure(", "\n        }\n");
         let first = source_body(
             freeze,
             "\n            if first.is_none() {",

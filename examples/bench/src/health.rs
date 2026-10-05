@@ -24,7 +24,10 @@ const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 // Build one record at a time in heap storage. Converting the boxed slice
 // preserves its allocation; no full fixed-capacity array is returned by value.
-#[allow(clippy::unwrap_used, reason = "fixed-capacity test observation conversion")]
+#[allow(
+    clippy::unwrap_used,
+    reason = "fixed-capacity test observation conversion"
+)]
 pub(crate) fn boxed_slots<T, const N: usize>(capture: impl FnMut(usize) -> T) -> Box<[T; N]> {
     (0..N)
         .map(capture)
