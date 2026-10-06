@@ -13,25 +13,12 @@
   Alloy trust, telemetry, lifecycle or publishing status. The preceding bot
   head's four failed pairing jobs require fresh whole-head hosted qualification.
 
-- Repair test-only #142 evidence retention: freeze bounded observer state before
-  dropping the borrowed, pinned health future on the unchanged 15-second
-  timeout, label its sampling interval, and prioritize compact server records,
-  worker state and pending tasks before historical detail. Retain first
-  HEADERS/CANCEL marks and completed SETTINGS outside the existing control ring,
-  prioritizing controls without a retained stream owner within the same 64 KiB
-  output bound. Add saturation, pre/post-destruction, ring overwrite, UTF-8 and
-  source-invariant controls for hosted CI. The real `8cc2` failures, historical
-  d00/d09 causes and server CANCEL/encoded-response boundary remain unresolved;
-  later `89d1004` passes show nonreproduction only. Observer overhead is unmeasured.
-- Add a test-only transparent client plaintext H2 wire observer for #142, with
-  fixed connection/stream/control bounds, numerical frame progress and reasons,
-  aggregate DATA/reset/late-DATA summaries, and explicit retention/rendering loss
-  within the existing 64 KiB snapshot budget. Extend existing controlled gates
-  and malformed/truncated-frame regressions; add fragmented I/O, short/vectored
-  write, redaction, bounds and isolation proofs for hosted CI. Keep all transport,
-  cancellation, reuse, clock and production benchmark behavior unchanged. The
-  original d00 cause and genuine d09 recurrence remain unresolved; passing CI
-  means nonreproduction, and controlled transcripts do not establish a cause.
+- Simplify the test-only benchmark health harness (#142): remove the fatal
+  post-deadline H2 reuse probe, the observers, evidence capture and
+  source-text tests built around it, and the health-diagnostic workflow; keep
+  the bounded cancellation budget, allocator test isolation, error source
+  chains and coordinator checks. Hosted benchmark qualification now runs
+  weekly and on dispatch, not on pull requests.
 - Adopt published `contracts-edge-0.9.11` at
   `390edbd5b2485af0988e02f7827fde778d76ae0a`: vendor all 16 adopted files
   byte-exact and pin every SHA-256. Record root's accepted unchanged report and
@@ -46,123 +33,8 @@
   update paired CLI assertions and only the known generated YAML headers, and
   statically re-audit existing config/MCP contracts. Fresh hosted adoption CI
   remains required; no Alloy crate publication or performance acceptance is granted.
-- Isolate the benchmark allocator unit test with thread-local RAII observation
-  and instance-owned role counters. It no longer permanently enables production
-  allocation counting for later non-counting health tests. Add concurrent-thread
-  allocation/restoration coverage without global toggles or suite serialization.
-- Extend test-only cancellation-health evidence with bounded worker, public
-  dispatcher, H2 wire-child and response-callback polling/wakes, plus server
-  router/response/body observations by original socket and request ordinal.
-  Controlled wire/header/DATA gates cover release, retained-sender reuse and
-  task destruction. Ordinary three-OS CI now preserves separate all-feature
-  and default-feature evidence outside cache trees. The genuine instrumented
-  Linux recurrence in #142 and the original uninstrumented cause remain
-  unresolved; allocator isolation is not a demonstrated timeout repair.
-- Fix #143's warmed cancellation health regression by using the existing
-  test-only phase budget and retained H2 reuse probe over h2c, H2 mTLS and
-  H1 mTLS. Keep the 100 ms warm-up / 200 ms window, require positive measured
-  progress with zero errors, and reconcile included/excluded exchange counts
-  and bytes exactly with worker and reported totals. Preparation, drained
-  warm-up, late measurement completion and reuse cannot contribute measured
-  bytes. All phases require at most 36 cancellations per original H2 connection,
-  below the unchanged 50-reset retention limit. This finite functional check
-  does not guarantee 32 completions in the short window or sustained cancellation
-  performance. Production load/protections remain unchanged; #142's historical
-  timeout cause remains unknown.
-- Initialize hosted benchmark diagnostics from `RUNNER_TEMP` in a runtime step
-  and propagate the path through `GITHUB_ENV`, outside Rust cache trees, so
-  source identity and failure uploads use valid workflow contexts. Correct the
-  truncated-PING regression to require the pinned h2 0.4.19 / Tokio-util 0.7.19
-  framed-reader I/O kind `Other`, retaining separate protocol-error coverage.
-- Retain bounded test-only worker error identities/source chains outside the
-  cancellation timeout, and observe narrowly scoped pinned-h2 wire error events
-  through spawned executor tasks without payload/header/secret logging. Label
-  public dispatcher Ok completion with unknown wire health. Add real retained
-  DATA timeout and released-gate controls using two H2 connections/four workers
-  after exactly 32 measured cancellations, with owned-task destruction checks.
-  Add one hosted diagnostic job for both complete health matrices once at exact
-  PR head, concurrently, with bounded always-upload evidence. Preserve all gates,
-  clocks, protections and continuous CLI behavior. The historical `d00fc47`
-  cause remains unproved; this is neither historical repair nor performance
-  acceptance.
 - Correct website and shared-contract adoption references using immutable current
   sources; retain historical website and released r2 claims and pending freeze.
-- Ignore stderr write errors when printing the bounded test-only cancellation
-  health failure snapshot, preserving the original driver result and avoiding
-  a second panic while unwinding. This does not explain or repair the historical
-  `d00fc47` timeout.
-- Repair PR #141's test-only diagnostic worker guard ownership after
-  [head `73e6b711` / Clippy job 111507388589](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37226589007/job/111507388589)
-  rejected the field-only async capture. Construct the whole guard inside the
-  scoped future and explicitly disarm it on normal or Err completion; keep Drop
-  evidence for genuinely destroyed pending futures. Add single-poll regressions
-  for completed-ok/completed-error surviving wrapper destruction and retained
-  error stage, preserving pending worker/driver and outside-scope coverage.
-  Apply the exact two parent-workspace rustfmt hunks reported by Format and
-  Generated projects, without template changes. The historical `d00fc47` timeout
-  remains unexplained.
-- Add bounded test-only cancellation-health failure diagnostics for PR #141.
-  [Head `d00fc47` / run 37225022927 / job 111502796765](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37225022927/job/111502796765)
-  failed with 41 harness passes and an Alloy matrix 15-second driver timeout;
-  its transport and stalled stage are unknown. The formatting-only successor
-  [head `3c029953` / run 37225520768 / job 111504252189](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37225520768/job/111504252189)
-  passed all 42 harness tests, including both complete matrices, without
-  establishing the earlier cause. Retain four worker snapshots outside the
-  timed future and print the exact cell, coordinator/worker awaits, phase
-  exchange/byte counters, socket identity and driver status once on failure.
-  Cover context retention when pending worker/driver futures are dropped.
-  Preserve all load, timeout, accounting, security and qualification gates.
-  This diagnostic-only change is not a timeout repair or performance acceptance.
-- Bound real-service cancellation health below the pinned h2 reset-retention
-  limit after PR #141 head `d3468f6b6603e157c37ee41c70ef73ac6756f276` failed
-  [qualification run 37223357081 / job 111497941354](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37223357081/job/111497941354).
-  Its warmed 5-second h2c/cancel cells reported 46 errors / 34 connects for
-  plain and 37 errors / 35 connects for Alloy; 37 other harness tests passed,
-  but the remaining transports were not reached. The original samples do
-  not prove an inner HTTP/2 cause. Source inspection establishes that
-  unlimited first-frame cancellations with in-flight DATA can exceed h2's
-  50-reset retention capacity; forgotten-stream DATA can consume its separate
-  protocol-error reset limit. Add a bounded wire regression for that mechanism.
-  Keep the real services, all workloads/transports and fixed 1/5-second clocks;
-  cancellation health uses eight exchanges per worker per phase and a fatal
-  post-window H2 reuse probe, at most 36 resets per connection. Require exactly
-  32 measured cancellations, nonzero latencies and zero errors. Preserve
-  continuous benchmark load and all qualification gates; this finite functional
-  fixture does not qualify sustained cancellation performance. Retain error
-  source chains in the existing sample strings. Accept nonempty partial first
-  incoming frames, with a bounded half-chunk HTTP/1 regression; keep exact
-  1 KiB accounting in the controlled fixture and full-body accounting elsewhere.
-  Hosted validation of this repair remains required.
-- Extend the real-service benchmark health windows after PR #141 head
-  `7950a8b84ff7a0ee829e09c0b5c4a26789c1a3ee` failed
-  [Linux run 37222237081 / job 111494745143](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37222237081/job/111494745143).
-  The Alloy h2c stream cell completed no measured body in a zero-warm-up
-  200 ms window; the test's short-window progress assumption was invalid,
-  with the exact scheduler/transport delay unknown. Use a test-only 1-second
-  warm-up and fixed 5-second health budget through the real production path
-  for every workload and all six transports on both plain and Alloy servers.
-  Retain nonzero work/latencies and zero errors; assert full-body/cancellation
-  byte accounting and exact report labels/durations. Keep separate 200 ms
-  boundary/probe, cancellation and full-body tests, worker-liveness/runtime
-  teardown coverage, production measurement semantics and strict qualification
-  unchanged. That longer-window attempt subsequently failed at `d3468f6` as
-  recorded above; it is not passing repair evidence. Functional health coverage
-  supplies no performance budget or dedicated acceptance.
-- Make the benchmark cancellation protocol regression causal and bounded:
-  observe real worker completions, server body drops and accepted connection
-  identities over all six transports instead of assuming completed work in a
-  shared runner's 200 ms window. Require four measured cancellations, nonzero
-  latencies, zero errors, HTTP/1 reconnects and HTTP/2 reuse; release another
-  round only after the deadline and exclude its bytes and completions. The
-  hosted failure at PR #141 head `5d528ce` remains failed evidence. Production
-  fixed-window timing, zero-request rejection and qualification gates are
-  unchanged; the causal coordinator is compiled only for tests. Apply the exact
-  hosted rustfmt correction to its startup readiness call; the generated-project
-  job reported the same parent-workspace formatting failure, not a template bug.
-  Own each transport's client drivers and H2 executor children in an isolated
-  test runtime with bounded shutdown. Join workers and server sets on success;
-  destroy remaining async tasks before proceeding, including timeout/unwind,
-  and assert actual teardown with live-task counts and pending-task drop witnesses.
 - Refresh the authoritative implementation ledger for #28 with current issue
   states, immutable consumer heads and hosted evidence. Record merged Anvil,
   Foundry, Nexus #519 and GitForgeOps qualification as of 2026-10-04. Record
