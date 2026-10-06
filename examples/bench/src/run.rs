@@ -530,16 +530,9 @@ mod tests {
                 let environment = probe::environment(options.label.as_deref());
                 let cancel = *workload == Workload::Cancel;
                 let budget = cancel.then_some(HEALTH_EXCHANGES_PER_PHASE);
-                let result = measure_with_budget(
-                    cell,
-                    &options,
-                    None,
-                    &metrics,
-                    None,
-                    environment,
-                    budget,
-                )
-                .unwrap();
+                let result =
+                    measure_with_budget(cell, &options, None, &metrics, None, environment, budget)
+                        .unwrap();
                 assert_work_completed(&result);
                 assert_eq!(result["seconds"], 5.0, "{result}");
                 assert_eq!(result["warmup_seconds"], 1.0, "{result}");
