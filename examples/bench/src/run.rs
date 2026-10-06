@@ -675,7 +675,7 @@ mod tests {
             assert_eq!(result["protocol"], transport.protocol(), "{result}");
             assert_eq!(result["tls"], transport.tls(), "{result}");
             assert_eq!(result["mtls"], transport.mtls(), "{result}");
-            // No worker starts more than its measurement budget.
+            // Total completed requests across workers stay within the aggregate budget.
             let budget = (4 * HEALTH_EXCHANGES_PER_PHASE) as u64;
             assert!(result["requests"].as_u64().unwrap() <= budget, "{result}");
         }
