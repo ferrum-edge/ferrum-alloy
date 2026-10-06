@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Adopt canonical `contracts-edge-0.9.13` (gateway vocabularies re-pinned to Edge v0.9.13 provenance; content otherwise unchanged).
+
 - Document scraping the management `/metrics` endpoint with Prometheus and a
   bearer `credentials_file`, and fix Edge-version wording left stale after the
   v0.9.12 pin: the canonical vocabulary source is `contracts-edge-0.9.12`, and

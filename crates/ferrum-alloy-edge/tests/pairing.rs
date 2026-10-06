@@ -196,7 +196,7 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.12`, unchanged from `contracts-edge-0.9.8`. They are
+/// `contracts-edge-0.9.13`, unchanged from `contracts-edge-0.9.8`. They are
 /// recorded here only to detect drift and are never rendered: rule
 /// `alloy.r007` renders the version-neutral explanations in
 /// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
@@ -286,8 +286,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.12");
-    assert_eq!(pin["commit"], "31f0a21d707795be293d15837c2f77c3d84219d8");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.13");
+    assert_eq!(pin["commit"], "9626821eb089c71f5d4d71268c7b8276a8a5ab50");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
