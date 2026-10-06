@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Adopt canonical `contracts-edge-0.9.13` (gateway vocabularies re-pinned to Edge v0.9.13 provenance; content otherwise unchanged).
 - Fix diagnostics retention review findings (#153, item 2). Admission could
   freeze once every retained tenant held one record: records now expire after
   `diagnostics.max_age_ms` (default 15 minutes, `0` disables, otherwise 1 s to

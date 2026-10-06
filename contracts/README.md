@@ -2,9 +2,9 @@
 
 | Path | Contract | Status |
 |---|---|---|
-| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.12` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
-| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.12`; Alloy validates and binds authenticated lookup records per ADR 0009 |
-| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten released lookup record fixtures | Byte-exact from `contracts-edge-0.9.12`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
+| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.13` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
+| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.13`; Alloy validates and binds authenticated lookup records per ADR 0009 |
+| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten released lookup record fixtures | Byte-exact from `contracts-edge-0.9.13`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
 | `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007 (including an observed Ferrum Edge diagnostic reference), a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests; `fixtures/reports/gateway-diagnostic-ref.json` is a candidate for upstreaming to ferrum-contracts |
 | `fixtures/reports/*.expected.txt` | Deterministic rendering snapshots | Regenerate with `UPDATE_SNAPSHOTS=1` and review the diff |
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
@@ -30,8 +30,8 @@ the earlier qualified consumer slices are not relabeled as new-tag qualification
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
 diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures from the tag recorded
-in `ferrum-contracts/PIN`: `contracts-edge-0.9.12` at
-`31f0a21d707795be293d15837c2f77c3d84219d8`. Both shared v1 contracts are now
+in `ferrum-contracts/PIN`: `contracts-edge-0.9.13` at
+`9626821eb089c71f5d4d71268c7b8276a8a5ab50`. Both shared v1 contracts are now
 EXISTING/implemented; Alloy owner availability remains unreleased. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in
@@ -70,10 +70,9 @@ state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-
 published at 22:41:21 UTC on 2026-10-04. Never rewrite canonical-owned bytes or
 weaken full schema parity to change those descriptions. This adoption updates the
 pin and local metadata together. The current
-[contracts-edge-0.9.12 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12)
-was published at 13:58:38 UTC on 2026-10-05 after the sole main PUSH
-[Validate contracts run 37320780987](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/37320780987)
-succeeded. There is no canonical release workflow; fresh Alloy hosted CI remains required.
+[contracts-edge-0.9.13 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.13)
+was published at 17:58:52 UTC on 2026-10-06; its two gateway vocabularies differ
+from contracts-edge-0.9.12 only in their Edge v0.9.13 provenance pins and descriptions.
 
 ## Service manifest schema
 
@@ -81,7 +80,7 @@ ferrum-contracts publishes `schemas/service-manifest/v1.schema.json` (EXISTING/i
 transcribed from `manifest.rs`, with `additionalProperties: false` at the top
 level. The shared schema includes the optional `[agents]` section (`enabled`,
 `endpoint_path`, `namespace`) as of ferrum-contracts #8, released in
-`contracts-edge-0.9.9-r2`, retained unchanged in `contracts-edge-0.9.12`. Alloy does
+`contracts-edge-0.9.9-r2`, retained unchanged in `contracts-edge-0.9.13`. Alloy does
 not vendor the service-manifest schema; Alloy's own parser accepts manifests with
 or without `[agents]`. The canonical schema is a transcription, not an owner-exported
 schema: post-default validation, derived resource ID lengths and endpoint relationships

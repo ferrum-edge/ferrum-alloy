@@ -105,7 +105,7 @@ The management listener binds to loopback by default, but loopback does not auth
 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
 This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures.
-The adopted tag is [`contracts-edge-0.9.12`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.12) at `31f0a21d707795be293d15837c2f77c3d84219d8`.
+The adopted tag is [`contracts-edge-0.9.13`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.13) at `9626821eb089c71f5d4d71268c7b8276a8a5ab50`.
 Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented with root's accepted unchanged wire freeze at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`. Alloy remains unreleased (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
