@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- Fix diagnostics retention review findings (#153, item 2). Admission could
+  freeze once every retained tenant held one record: records now expire after
+  `diagnostics.max_age_ms` (default 15 minutes, `0` disables, otherwise 1 s to
+  1 day; `FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS`), measured on the monotonic
+  clock and removed oldest first before each admission, lookup and metrics
+  scrape as `evicted_total{reason="age"}`, and an expired id gets the same
+  `404` as an evicted one. With every tenant at one record, a new tenant takes
+  the record of the least recently active tenant, so admission never freezes
+  even with expiry disabled. Reports note when a lookup resolved through a
+  correlation alias, including an evicted local id that now names another
+  request, and how many earlier attempts are no longer retained. Every index
+  shares one tenant allocation, matching the byte accounting. A poisoned
+  store starts again empty (`ferrum_alloy_diagnostics_resets_total`), and
+  admission gives up instead of looping if its indexes ever disagree. ADR 0008
+  no longer implies a time window that did not exist.
+
 - Document scraping the management `/metrics` endpoint with Prometheus and a
   bearer `credentials_file`, and fix Edge-version wording left stale after the
   v0.9.12 pin: the canonical vocabulary source is `contracts-edge-0.9.12`, and

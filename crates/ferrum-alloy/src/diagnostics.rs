@@ -14,8 +14,8 @@
 //!   that tenant's evidence for the id as a `ferrum.diagnostic_report` v1
 //!   document marked `Cache-Control: no-store`.
 //!
-//! A denied caller, a malformed, unknown, or evicted id, and another
-//! tenant's id all get byte-identical `404` responses, and so does an
+//! A denied caller, a malformed, unknown, evicted, or expired id, and
+//! another tenant's id all get byte-identical `404` responses, and so does an
 //! authorizer that panics or times out. A request id is a lookup key, never
 //! a credential. The management token is neither required nor sufficient:
 //! the authorizer decides.
@@ -64,8 +64,8 @@ use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use axum::extract::rejection::PathRejection;
 use axum::extract::{ConnectInfo, Path, Request};
@@ -268,6 +268,9 @@ struct Stored {
     peer_trust: &'static str,
     /// Estimated retained bytes.
     bytes: usize,
+    /// When the record was admitted, on the monotonic clock. It never
+    /// decreases with the sequence number.
+    inserted: Instant,
 }
 
 impl Stored {
@@ -298,6 +301,9 @@ const LOOKUP_ORDER: [RequestIdOrigin; 3] = [
 struct Filed {
     /// Attempts of one local request, oldest first.
     seqs: Vec<u64>,
+    /// Earlier attempts evicted or expired while later ones are retained.
+    /// Eviction always takes a request's oldest attempt first.
+    dropped: usize,
 }
 
 #[derive(Debug, Default)]
@@ -405,11 +411,16 @@ impl Ring {
         self.by_bytes.insert((bytes, Arc::clone(tenant)));
     }
 
-    /// Files `record` under its local owner as the newest record.
-    fn push(&mut self, key: Key, record: Stored) {
+    /// Files `record` under its local owner as the newest record. Every
+    /// index shares one tenant allocation, the one already retained.
+    fn push(&mut self, mut key: Key, mut record: Stored) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
+        if let Some((interned, _)) = self.tenants.get_key_value(&record.tenant) {
+            record.tenant = Arc::clone(interned);
+        }
         let tenant = Arc::clone(&record.tenant);
+        key.0 = Arc::clone(&tenant);
         self.unrank(&tenant);
         let holding = self.tenants.entry(Arc::clone(&tenant)).or_default();
         holding.seqs.insert(seq);
@@ -442,6 +453,8 @@ impl Ring {
             filed.seqs.retain(|s| *s != seq);
             if filed.seqs.is_empty() {
                 self.index.remove(&key);
+            } else {
+                filed.dropped = filed.dropped.saturating_add(1);
             }
         }
         let alias = (tenant, record.origin, record.request_id);
@@ -452,6 +465,23 @@ impl Ring {
             }
         }
         true
+    }
+
+    /// Removes the records retained for `max_age` or longer at `now`, oldest
+    /// first, and returns how many. Admission times never decrease with the
+    /// sequence number, so expired records are always the oldest.
+    fn expire(&mut self, now: Instant, max_age: Option<Duration>) -> u64 {
+        let Some(max_age) = max_age else {
+            return 0;
+        };
+        let mut expired = 0;
+        while let Some((&seq, oldest)) = self.records.first_key_value()
+            && now.saturating_duration_since(oldest.inserted) >= max_age
+        {
+            self.remove(seq);
+            expired += 1;
+        }
+        expired
     }
 
     /// Checks a local attempt's consistency, without modifying retention.
@@ -472,17 +502,18 @@ impl Ring {
     }
 
     fn owned(&self, key: &Key) -> Found {
-        let records = self
-            .index
-            .get(key)
-            .into_iter()
-            .flat_map(|filed| &filed.seqs);
+        let Some(filed) = self.index.get(key) else {
+            return Found::default();
+        };
         Found {
-            records: records
+            records: filed
+                .seqs
+                .iter()
                 .filter_map(|seq| self.records.get(seq))
                 .cloned()
                 .collect(),
-            shadowed: 0,
+            dropped: filed.dropped,
+            ..Found::default()
         }
     }
 
@@ -510,6 +541,7 @@ impl Ring {
             }
             if let Some(owner) = aliased.owners.keys().next() {
                 found = self.owned(&(Arc::clone(tenant), owner.clone()));
+                found.alias = Some(origin);
             }
         }
         found
@@ -604,9 +636,11 @@ impl<'a> Reservation<'a> {
             .copied()
     }
 
-    fn reserve(&mut self, seq: u64, reason: Evicted, advance: bool) {
+    /// Reserves the eviction of `seq`. Returns `false`, reserving nothing,
+    /// when no such record exists.
+    fn reserve(&mut self, seq: u64, reason: Evicted, advance: bool) -> bool {
         let Some(record) = self.ring.records.get(&seq) else {
-            return;
+            return false;
         };
         let tenant = &record.tenant;
         let (count, bytes) = self.usage(tenant);
@@ -620,12 +654,14 @@ impl<'a> Reservation<'a> {
         self.evictions.insert(seq, reason);
         self.count = self.count.saturating_sub(1);
         self.bytes = self.bytes.saturating_sub(record.bytes);
+        true
     }
 
     /// Reclaim the heaviest tenant's oldest record only if its remaining
     /// holding is at least the candidate tenant's projected holding in the
-    /// pressured dimension. Otherwise reserve our own oldest. If neither is
-    /// possible, refuse admission; there is no global-oldest fallback.
+    /// pressured dimension. Otherwise reserve our own oldest, or take over
+    /// a sole record (see `takeover`). If none is possible, refuse
+    /// admission.
     fn victim(&mut self, record: &Stored, reason: Evicted) -> Option<u64> {
         let (count, bytes) = self.usage(&record.tenant);
         let (will_hold, other) = match reason {
@@ -651,7 +687,28 @@ impl<'a> Reservation<'a> {
                 return Some(seq);
             }
         }
-        self.oldest(&record.tenant)
+        self.oldest(&record.tenant).or_else(|| self.takeover(&record.tenant))
+    }
+
+    /// A tenant that holds nothing takes the oldest record of the least
+    /// recently active tenant, but only while every tenant holds at most one
+    /// record (counting reservations), when no tenant can donate. Without
+    /// it, a store full of sole records would refuse every new tenant until
+    /// they expire. With one record each, the owner of the oldest record is
+    /// the tenant whose newest record is oldest.
+    fn takeover(&mut self, tenant: &str) -> Option<u64> {
+        if self.ring.tenants.contains_key(tenant) {
+            return None;
+        }
+        let heaviest = self.by_count.heaviest(&self.changed)?;
+        if self.usage(&heaviest).0 > 1 {
+            return None;
+        }
+        self.ring
+            .records
+            .keys()
+            .find(|seq| !self.evictions.contains_key(*seq))
+            .copied()
     }
 
     fn plan(
@@ -661,8 +718,10 @@ impl<'a> Reservation<'a> {
         max_records: usize,
         max_bytes: usize,
     ) -> Option<BTreeMap<u64, Evicted>> {
-        if let Some(seq) = replacement {
-            self.reserve(seq, Evicted::RequestIdLimit, false);
+        if let Some(seq) = replacement
+            && !self.reserve(seq, Evicted::RequestIdLimit, false)
+        {
+            return None;
         }
         loop {
             let reason = if self.count >= max_records {
@@ -673,7 +732,11 @@ impl<'a> Reservation<'a> {
                 return Some(self.evictions);
             };
             let victim = self.victim(record, reason)?;
-            self.reserve(victim, reason, true);
+            // A victim always exists; if the indexes ever disagreed, give
+            // up rather than loop under the lock.
+            if !self.reserve(victim, reason, true) {
+                return None;
+            }
         }
     }
 }
@@ -686,6 +749,11 @@ struct Found {
     /// Records from less preferred correlation origins under this alias, which
     /// the lookup does not answer with.
     shadowed: usize,
+    /// The correlation origin the lookup resolved through, when the id was
+    /// not a retained local id.
+    alias: Option<RequestIdOrigin>,
+    /// Earlier attempts of the request that are no longer retained.
+    dropped: usize,
 }
 
 /// Why an eviction happened.
@@ -694,6 +762,7 @@ enum Evicted {
     Count,
     Bytes,
     RequestIdLimit,
+    Age,
 }
 
 /// Why a finalized request was not retained.
@@ -731,9 +800,12 @@ enum Answer {
 pub(crate) struct EvidenceStore {
     max_records: usize,
     max_bytes: usize,
+    max_age: Option<Duration>,
     ring: Mutex<Ring>,
     stored: AtomicU64,
-    evicted: [AtomicU64; 3],
+    /// Times the store was emptied after a panic while it was locked.
+    resets: AtomicU64,
+    evicted: [AtomicU64; 4],
     skipped: [AtomicU64; 4],
     retrievals: [AtomicU64; 2],
     authorizer_failures: [AtomicU64; 2],
@@ -741,11 +813,14 @@ pub(crate) struct EvidenceStore {
 
 impl EvidenceStore {
     pub(crate) fn new(settings: &DiagnosticsSettings) -> Self {
+        let max_age = Duration::from_millis(settings.max_age_ms);
         Self {
             max_records: settings.max_records.max(1),
             max_bytes: settings.max_bytes,
+            max_age: (!max_age.is_zero()).then_some(max_age),
             ring: Mutex::new(Ring::default()),
             stored: AtomicU64::new(0),
+            resets: AtomicU64::new(0),
             evicted: Default::default(),
             skipped: Default::default(),
             retrievals: Default::default(),
@@ -753,8 +828,31 @@ impl EvidenceStore {
         }
     }
 
+    /// Locks the store. A panic while it was locked may have left its
+    /// indexes half-updated, so a poisoned store starts again empty.
     fn ring(&self) -> MutexGuard<'_, Ring> {
-        self.ring.lock().unwrap_or_else(PoisonError::into_inner)
+        self.ring.lock().unwrap_or_else(|poisoned| {
+            let mut ring = poisoned.into_inner();
+            *ring = Ring::default();
+            self.ring.clear_poison();
+            self.resets.fetch_add(1, Ordering::Relaxed);
+            ring
+        })
+    }
+
+    /// Locks the store after removing the records that are too old at
+    /// `now`.
+    fn fresh(&self, now: Instant) -> MutexGuard<'_, Ring> {
+        let mut ring = self.ring();
+        let expired = ring.expire(now, self.max_age);
+        self.count_evicted(Evicted::Age, expired);
+        ring
+    }
+
+    fn count_evicted(&self, reason: Evicted, count: u64) {
+        if count > 0 {
+            self.evicted[reason as usize].fetch_add(count, Ordering::Relaxed);
+        }
     }
 
     fn count_skipped(&self, reason: Skipped) {
@@ -772,13 +870,20 @@ impl EvidenceStore {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn insert(&self, record: Stored) {
+    fn insert(&self, mut record: Stored) {
         if record.bytes > self.max_bytes {
             self.count_skipped(Skipped::TooLarge);
             return;
         }
         let key = (Arc::clone(&record.tenant), record.diagnostic_id.clone());
         let mut ring = self.ring();
+        // Another thread may have read the clock later but locked first.
+        // Keeping admission times in sequence order keeps expiry a prefix.
+        if let Some((_, newest)) = ring.records.last_key_value() {
+            record.inserted = record.inserted.max(newest.inserted);
+        }
+        let expired = ring.expire(record.inserted, self.max_age);
+        self.count_evicted(Evicted::Age, expired);
         let replacement = match ring.admit(&key, &record) {
             Ok(replacement) => replacement,
             Err(()) => {
@@ -794,7 +899,7 @@ impl EvidenceStore {
             self.count_skipped(Skipped::FairShare);
             return;
         };
-        let mut evicted = [0u64; 3];
+        let mut evicted = [0u64; 4];
         for (seq, reason) in plan {
             if ring.remove(seq) {
                 evicted[reason as usize] += 1;
@@ -810,14 +915,16 @@ impl EvidenceStore {
         }
     }
 
-    /// What `tenant` has under `request_id`.
+    /// What `tenant` has under `request_id`. An expired record is removed
+    /// first, so it is missing exactly like an evicted one.
     fn find(&self, tenant: &str, request_id: RequestId) -> Found {
-        self.ring().find(&Arc::from(tenant), &request_id)
+        let tenant: Arc<str> = Arc::from(tenant);
+        self.fresh(Instant::now()).find(&tenant, &request_id)
     }
 
     /// Records and estimated bytes currently retained.
     pub(crate) fn retained(&self) -> (usize, usize) {
-        let ring = self.ring();
+        let ring = self.fresh(Instant::now());
         (ring.live(), ring.bytes)
     }
 
@@ -844,6 +951,12 @@ impl EvidenceStore {
                 "Request evidence records retained.",
                 self.stored.load(Ordering::Relaxed),
             ),
+            (
+                "ferrum_alloy_diagnostics_resets_total",
+                "counter",
+                "Times the evidence store was emptied after a panic while it was locked.",
+                self.resets.load(Ordering::Relaxed),
+            ),
         ] {
             out.push_str(&format!(
                 "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
@@ -858,6 +971,7 @@ impl EvidenceStore {
                     ("count", &self.evicted[0]),
                     ("bytes", &self.evicted[1]),
                     ("request_id_limit", &self.evicted[2]),
+                    ("age", &self.evicted[3]),
                 ][..],
             ),
             (
@@ -948,6 +1062,7 @@ impl EvidenceSink for EvidenceStore {
             trace_decision: evidence.trace_decision,
             peer_trust: evidence.peer_trust,
             bytes,
+            inserted: Instant::now(),
         });
     }
 }
@@ -1074,10 +1189,22 @@ fn report(service: &str, found: &Found) -> DiagnosticReport {
             first.diagnostic_id
         ));
     }
+    if let Some(origin) = found.alias {
+        let origin = origin.as_str();
+        notes.push(format!(
+            "resolved as a correlation alias (request_id_origin {origin}); no retained request has the requested id as its local diagnostic id, and a request that had it may have been evicted or expired"
+        ));
+    }
     let shadowed = found.shadowed;
     if shadowed > 0 {
         notes.push(format!(
             "{shadowed} record(s) from less preferred correlation origins under this alias are not included"
+        ));
+    }
+    let dropped = found.dropped;
+    if dropped > 0 {
+        notes.push(format!(
+            "{dropped} earlier attempt(s) of this request are no longer retained"
         ));
     }
     let mut report = DiagnosticReport::new(Collection {
@@ -1230,6 +1357,15 @@ mod tests {
         DiagnosticsSettings {
             max_records,
             max_bytes,
+            ..DiagnosticsSettings::default()
+        }
+    }
+
+    /// Moves every retained record's admission `age` into the past.
+    fn backdate(store: &EvidenceStore, age: Duration) {
+        let mut ring = store.ring();
+        for record in ring.records.values_mut() {
+            record.inserted = record.inserted.checked_sub(age).unwrap();
         }
     }
 
@@ -1312,7 +1448,25 @@ mod tests {
         assert_eq!(holdings, ring.live());
         assert_eq!(ring.by_count.len(), ring.tenants.len());
         assert_eq!(ring.by_bytes.len(), ring.tenants.len());
+        // Every index shares the tenant's one retained allocation.
+        let interned = |tenant: &Arc<str>| {
+            let (key, _) = ring.tenants.get_key_value(tenant).unwrap();
+            assert!(Arc::ptr_eq(key, tenant), "{tenant} is not interned");
+        };
+        for key in ring.index.keys() {
+            interned(&key.0);
+        }
+        for alias in ring.aliases.keys() {
+            interned(&alias.0);
+        }
+        for (_, tenant) in ring.by_count.iter().chain(&ring.by_bytes) {
+            interned(tenant);
+        }
+        let mut inserted = None;
         for (seq, record) in &ring.records {
+            interned(&record.tenant);
+            assert!(inserted <= Some(record.inserted), "admission times are ordered");
+            inserted = Some(record.inserted);
             assert!(ring.tenants[&record.tenant].seqs.contains(seq));
             let key = (Arc::clone(&record.tenant), record.diagnostic_id.clone());
             let filed = &ring.index[&key];
@@ -1415,7 +1569,9 @@ mod tests {
             retry.status = Some(500 + n);
             store.record(retry);
         }
-        let records = store.find("acme", owner.clone()).records;
+        let found_now = store.find("acme", owner.clone());
+        assert_eq!(found_now.dropped, 24);
+        let records = found_now.records;
         assert_eq!(records.len(), MAX_RECORDS_PER_REQUEST_ID);
         assert_eq!(records[0].status, Some(524));
         assert_eq!(records.last().unwrap().status, Some(539));
@@ -1877,16 +2033,191 @@ mod tests {
     }
 
     #[test]
-    fn a_new_tenant_cannot_displace_another_tenants_sole_record() {
+    fn a_new_tenant_takes_the_sole_record_of_the_least_recently_active_tenant() {
         let store = EvidenceStore::new(&settings(2, 1024 * 1024));
         store.record(evidence(Some("a"), "a-1"));
         store.record(evidence(Some("b"), "b-1"));
         store.record(evidence(Some("c"), "c-1"));
-        assert_eq!(found(&store, "a", "a-1"), 1);
+        // Every tenant held one record, and "a" was inactive longest.
+        assert_eq!(found(&store, "a", "a-1"), 0);
         assert_eq!(found(&store, "b", "b-1"), 1);
+        assert_eq!(found(&store, "c", "c-1"), 1);
+
+        // A present tenant at its share still replaces only its own record.
+        store.record(evidence(Some("b"), "b-2"));
+        assert_eq!(found(&store, "b", "b-1"), 0);
+        assert_eq!(found(&store, "b", "b-2"), 1);
+        assert_eq!(found(&store, "c", "c-1"), 1);
+
+        // Now "c" is the least recently active tenant.
+        store.record(evidence(Some("d"), "d-1"));
         assert_eq!(found(&store, "c", "c-1"), 0);
+        assert_eq!(found(&store, "b", "b-2"), 1);
+        assert_eq!(found(&store, "d", "d-1"), 1);
+        let evicted = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, evicted), 3);
         let skipped = r#"ferrum_alloy_diagnostics_skipped_total{reason="fair_share"}"#;
-        assert_eq!(metric(&store, skipped), 1);
+        assert_eq!(metric(&store, skipped), 0);
+        check(&store);
+    }
+
+    #[test]
+    fn admission_never_freezes_with_more_tenants_than_room() {
+        // About 800 default-sized records fill the default byte budget. Small
+        // budgets reach the same state, every retained tenant holding one
+        // record, by count and by bytes, with expiry disabled.
+        let each = sized("t000", &id("req"), None);
+        for (max_records, max_bytes) in [(16, 1024 * 1024), (1_000, 16 * each)] {
+            let mut config = settings(max_records, max_bytes);
+            config.max_age_ms = 0;
+            let store = EvidenceStore::new(&config);
+            for n in 0..800 {
+                let tenant = format!("t{n:03}");
+                store.record(evidence(Some(&tenant), "req"));
+                assert_eq!(found(&store, &tenant, "req"), 1, "{tenant}");
+            }
+            assert_eq!(store.retained().0, 16);
+            for n in 784..800 {
+                assert_eq!(found(&store, &format!("t{n:03}"), "req"), 1, "{n}");
+            }
+            // A tenant whose record was taken over comes back.
+            store.record(evidence(Some("t000"), "back"));
+            assert_eq!(found(&store, "t000", "back"), 1);
+            assert_eq!(found(&store, "t784", "req"), 0);
+            let skipped = r#"ferrum_alloy_diagnostics_skipped_total{reason="fair_share"}"#;
+            assert_eq!(metric(&store, skipped), 0);
+            check(&store);
+        }
+    }
+
+    #[test]
+    fn records_expire_by_age_before_admission_and_lookup() {
+        let mut config = settings(10, 1024 * 1024);
+        config.max_age_ms = 1_000;
+        let store = EvidenceStore::new(&config);
+        store.record(evidence(Some("acme"), "old-0"));
+        store.record(evidence(Some("other"), "old-1"));
+        backdate(&store, Duration::from_millis(1_500));
+        store.record(evidence(Some("acme"), "young"));
+        let aged = r#"ferrum_alloy_diagnostics_evicted_total{reason="age"}"#;
+        assert_eq!(metric(&store, aged), 2, "expired before admission");
+        assert_eq!(found(&store, "acme", "old-0"), 0);
+        assert_eq!(found(&store, "other", "old-1"), 0);
+        assert_eq!(found(&store, "acme", "young"), 1);
+        assert!(!store.ring().tenants.contains_key("other"));
+        check(&store);
+
+        // A lookup expires a record that no admission has removed yet.
+        backdate(&store, Duration::from_millis(500));
+        assert_eq!(found(&store, "acme", "young"), 1);
+        backdate(&store, Duration::from_millis(600));
+        assert_eq!(found(&store, "acme", "young"), 0);
+        assert_eq!(metric(&store, aged), 3);
+        assert_eq!(store.retained(), (0, 0));
+        let count = r#"ferrum_alloy_diagnostics_evicted_total{reason="count"}"#;
+        assert_eq!(metric(&store, count), 0);
+        check(&store);
+    }
+
+    #[tokio::test]
+    async fn an_expired_id_gets_the_same_404_as_an_unknown_id() {
+        let mut config = settings(10, 1024 * 1024);
+        config.max_age_ms = 1_000;
+        let store = Arc::new(EvidenceStore::new(&config));
+        let authorizer = |_: DiagnosticsRequest| async { DiagnosticsAccess::tenant("acme") };
+        let retrieval = Retrieval {
+            authorizer: Arc::new(authorizer),
+            store: Arc::clone(&store),
+            service: "test".to_owned(),
+        };
+        let answer = |request_id: &str| {
+            let path = Ok(Path(request_id.to_owned()));
+            let request = Request::new(axum::body::Body::empty());
+            let retrieval = retrieval.clone();
+            async move {
+                let response = retrieval.retrieve(path, request).await;
+                let (parts, body) = response.into_parts();
+                let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                (parts.status, parts.headers, body)
+            }
+        };
+        store.record(evidence(Some("acme"), "expiring"));
+        assert_eq!(answer("expiring").await.0, StatusCode::OK);
+        backdate(&store, Duration::from_millis(1_000));
+        let expired = answer("expiring").await;
+        assert_eq!(expired.0, StatusCode::NOT_FOUND);
+        assert_eq!(expired, answer("unknown").await);
+        let aged = r#"ferrum_alloy_diagnostics_evicted_total{reason="age"}"#;
+        assert_eq!(metric(&store, aged), 1);
+    }
+
+    #[test]
+    fn reports_disclose_alias_resolution_and_dropped_attempts() {
+        let store = EvidenceStore::new(&settings(3, 1024 * 1024));
+        let first = attempt("acme", "edge-1", TraceId::random());
+        let owner = first.diagnostic_id().clone();
+        for _ in 0..(MAX_RECORDS_PER_REQUEST_ID + 2) {
+            let mut next = first.clone();
+            next.span_id = SpanId::random();
+            store.record(next);
+        }
+        let by_owner = store.find("acme", owner.clone());
+        assert_eq!(by_owner.records.len(), 3);
+        assert_eq!(by_owner.alias, None);
+        let notes = report("test", &by_owner).collection.notes;
+        let dropped = format!(
+            "{} earlier attempt(s) of this request are no longer retained",
+            MAX_RECORDS_PER_REQUEST_ID - 1
+        );
+        assert!(notes.contains(&dropped), "{notes:?}");
+        let resolved = "resolved as a correlation alias";
+        assert!(!notes.iter().any(|note| note.starts_with(resolved)));
+
+        let by_alias = store.find("acme", id("edge-1"));
+        assert_eq!(by_alias.alias, Some(RequestIdOrigin::TrustedPeer));
+        let notes = report("test", &by_alias).collection.notes;
+        let resolved = "resolved as a correlation alias (request_id_origin trusted_peer)";
+        let noted = notes.iter().any(|note| note.starts_with(resolved));
+        assert!(noted, "{notes:?}");
+
+        // Once the local owner is evicted, its id can resolve as another
+        // request's alias. The report says so.
+        let mut reuse = attempt("acme", owner.as_str(), TraceId::random());
+        reuse.request_id_origin = RequestIdOrigin::UntrustedCaller;
+        let reuse_owner = reuse.diagnostic_id().clone();
+        store.record(reuse);
+        for n in 0..2 {
+            store.record(evidence(Some("acme"), &format!("later-{n}")));
+        }
+        let found_now = store.find("acme", owner);
+        assert_eq!(found_now.records.len(), 1);
+        assert_eq!(found_now.records[0].diagnostic_id, reuse_owner);
+        assert_eq!(found_now.alias, Some(RequestIdOrigin::UntrustedCaller));
+        let notes = report("test", &found_now).collection.notes;
+        let resolved = "resolved as a correlation alias (request_id_origin untrusted_caller)";
+        let noted = notes.iter().any(|note| note.starts_with(resolved));
+        assert!(noted, "{notes:?}");
+        check(&store);
+    }
+
+    #[test]
+    fn a_poisoned_store_starts_again_empty() {
+        let store = EvidenceStore::new(&settings(10, 1024 * 1024));
+        store.record(evidence(Some("acme"), "before"));
+        let poisoned = catch_unwind::<_, ()>(AssertUnwindSafe(|| {
+            let _ring = store.ring.lock().unwrap();
+            panic!("poison the store");
+        }));
+        assert!(poisoned.is_err());
+        assert!(store.ring.is_poisoned());
+        assert_eq!(store.retained(), (0, 0));
+        assert!(!store.ring.is_poisoned());
+        let resets = "ferrum_alloy_diagnostics_resets_total";
+        assert_eq!(metric(&store, resets), 1);
+        store.record(evidence(Some("acme"), "after"));
+        assert_eq!(found(&store, "acme", "after"), 1);
+        assert_eq!(found(&store, "acme", "before"), 0);
+        assert_eq!(metric(&store, resets), 1);
         check(&store);
     }
 
@@ -2166,7 +2497,10 @@ mod tests {
         // Ownership is described without adding fields to the wire schema.
         let report = super::report("orders", &found_now);
         let notes = &report.collection.notes;
-        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert_eq!(notes.len(), 4, "{notes:?}");
+        let resolved = "resolved as a correlation alias (request_id_origin trusted_peer)";
+        let noted = notes.iter().any(|note| note.starts_with(resolved));
+        assert!(noted, "{notes:?}");
     }
 
     #[test]

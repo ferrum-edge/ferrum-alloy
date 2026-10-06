@@ -952,14 +952,19 @@ fn diagnostics_retention_bounds_are_validated() {
     let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
     assert_eq!(config.diagnostics.max_records, 1_024);
     assert_eq!(config.diagnostics.max_bytes, 1024 * 1024);
+    assert_eq!(config.diagnostics.max_age_ms, 15 * 60 * 1000);
 
-    let vars = [
-        ("FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS", "65536"),
-        ("FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES", "4096"),
-    ];
-    let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
-    assert_eq!(config.diagnostics.max_records, 65_536);
-    config.validate(NO_FEATURES).unwrap();
+    for max_age in ["0", "1000", "86400000"] {
+        let vars = [
+            ("FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS", "65536"),
+            ("FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES", "4096"),
+            ("FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS", max_age),
+        ];
+        let (config, _) = load_from(None, env(&vars), &Overrides::default()).unwrap();
+        assert_eq!(config.diagnostics.max_records, 65_536);
+        assert_eq!(config.diagnostics.max_age_ms.to_string(), max_age);
+        config.validate(NO_FEATURES).unwrap();
+    }
 
     for (name, value, expected) in [
         (
@@ -981,6 +986,16 @@ fn diagnostics_retention_bounds_are_validated() {
             "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES",
             "67108865",
             "diagnostics.max_bytes must be within 4096..=67108864",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS",
+            "999",
+            "diagnostics.max_age_ms must be 0 (disabled) or between 1000 and 86400000",
+        ),
+        (
+            "FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS",
+            "86400001",
+            "diagnostics.max_age_ms must be 0 (disabled) or between 1000 and 86400000",
         ),
     ] {
         let (config, _) = load_from(None, env(&[(name, value)]), &Overrides::default()).unwrap();
