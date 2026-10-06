@@ -17,8 +17,11 @@
   post-deadline H2 reuse probe, the observers, evidence capture and
   source-text tests built around it, and the health-diagnostic workflow; keep
   the bounded cancellation budget, allocator test isolation, error source
-  chains and coordinator checks. Hosted benchmark qualification now runs
-  weekly and on dispatch, not on pull requests.
+  chains and coordinator checks. The warmed cancellation regression now uses
+  the matrices' 5-second window and requires all 32 measured cancellations;
+  its 200 ms window could close before a slow runner completed any. Hosted
+  benchmark qualification now runs weekly and on dispatch, not on pull
+  requests.
 - Adopt published `contracts-edge-0.9.11` at
   `390edbd5b2485af0988e02f7827fde778d76ae0a`: vendor all 16 adopted files
   byte-exact and pin every SHA-256. Record root's accepted unchanged report and

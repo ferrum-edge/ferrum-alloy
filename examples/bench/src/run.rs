@@ -449,6 +449,12 @@ mod tests {
     /// expire.
     const HEALTH_EXCHANGES_PER_PHASE: usize = 8;
 
+    /// The real-service health window. A 200 ms window was too short for a
+    /// shared debug-build runner, also running the other health tests, to
+    /// complete work reliably. Budgeted cells bound their work by exchanges,
+    /// not by this window.
+    const HEALTH_SECONDS: f64 = 5.0;
+
     /// How long a budgeted run's client driver may take.
     const HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -491,11 +497,6 @@ mod tests {
         measure(cell, &options(0.2), None, &metrics, None, environment).unwrap()
     }
 
-    fn assert_healthy(result: &Value) {
-        assert_work_completed(result);
-        assert_eq!(result["seconds"], 0.2, "{result}");
-    }
-
     fn assert_work_completed(result: &Value) {
         assert_eq!(result["schema"], SCHEMA, "{result}");
         assert!(result["requests"].as_u64().unwrap() > 0, "{result}");
@@ -517,7 +518,7 @@ mod tests {
         // Cancellation alone uses finite per-worker phase budgets below h2's
         // reset-retention limit, through the same exchanges and coordinator.
         // Dedicated boundary and body tests keep their 200 ms windows.
-        let mut options = options(5.0);
+        let mut options = options(HEALTH_SECONDS);
         options.load.warmup = Duration::from_secs(1);
         for transport in Transport::ALL {
             for workload in Workload::ALL {
@@ -534,7 +535,7 @@ mod tests {
                     measure_with_budget(cell, &options, None, &metrics, None, environment, budget)
                         .unwrap();
                 assert_work_completed(&result);
-                assert_eq!(result["seconds"], 5.0, "{result}");
+                assert_eq!(result["seconds"], HEALTH_SECONDS, "{result}");
                 assert_eq!(result["warmup_seconds"], 1.0, "{result}");
                 assert_eq!(result["scenario"], scenario.name(), "{result}");
                 assert_eq!(result["transport"], transport.name(), "{result}");
@@ -647,7 +648,11 @@ mod tests {
                 workload: Workload::Cancel,
                 transport,
             };
-            let mut options = options(0.2);
+            // A 100 ms warm-up can end with workers mid-exchange, so the
+            // window opens only after the drain. Its clock is the matrices':
+            // a 200 ms window measured no exchange at all when a slow runner
+            // spent it on h2-mtls cancellations. The budget bounds the work.
+            let mut options = options(HEALTH_SECONDS);
             options.load.warmup = Duration::from_millis(100);
             let metrics = Metrics::default();
             let environment = probe::environment(None);
@@ -663,8 +668,9 @@ mod tests {
                 Some(HEALTH_EXCHANGES_PER_PHASE),
             )
             .unwrap();
-            assert_healthy(&result);
+            assert_work_completed(&result);
             assert_cancellation(&result, transport);
+            assert_eq!(result["seconds"], HEALTH_SECONDS, "{result}");
             assert_eq!(result["warmup_seconds"], 0.1, "{result}");
             assert_eq!(result["concurrency"], 4, "{result}");
             let connections = if transport.http2() { 2 } else { 4 };
@@ -675,9 +681,9 @@ mod tests {
             assert_eq!(result["protocol"], transport.protocol(), "{result}");
             assert_eq!(result["tls"], transport.tls(), "{result}");
             assert_eq!(result["mtls"], transport.mtls(), "{result}");
-            // Total completed requests across workers stay within the aggregate budget.
-            let budget = (4 * HEALTH_EXCHANGES_PER_PHASE) as u64;
-            assert!(result["requests"].as_u64().unwrap() <= budget, "{result}");
+            // Every budgeted measured cancellation completes inside the window.
+            let requests = options.load.concurrency * HEALTH_EXCHANGES_PER_PHASE;
+            assert_eq!(result["requests"], requests, "{result}");
         }
     }
 
