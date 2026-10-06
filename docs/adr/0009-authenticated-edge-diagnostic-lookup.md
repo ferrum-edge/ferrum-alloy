@@ -83,3 +83,9 @@ not change the Edge support policy or MSRV. The 2026-10-04 adoption candidate no
 pins the identical schema/fixture bytes from `contracts-edge-0.9.11` at
 `390edbd5b2485af0988e02f7827fde778d76ae0a`; the latest-plus-previous Edge window
 rolls to v0.9.11/v0.9.10 and requires fresh hosted pairing and HTTP fixture checks.
+
+The 2026-10-05 adoption pins `contracts-edge-0.9.12` at
+`31f0a21d707795be293d15837c2f77c3d84219d8`. The lookup schema refreshes only
+Edge source provenance; its constraints and ten fixture payloads are unchanged.
+The current window is v0.9.12/v0.9.11, pending fresh hosted qualification.
+Edge's new admin deployment profile is outside this explicit G01 lookup.

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Complete the Edge v0.9.12 pin with published `contracts-edge-0.9.12` at
+  `31f0a21d707795be293d15837c2f77c3d84219d8`, preserving the same 16-file scope
+  and verifying its bytes against the canonical Git tree. Refresh gateway
+  provenance, admin-only ETag/If-Match descriptions and diagnostic-ref provenance;
+  keep gateway meanings, report schema, all diagnostic fixture payloads and the
+  original v0.9.11 shared-freeze metadata unchanged. Preserve strict pairing,
+  schema and fixture assertions. Re-audit published Edge `0d917701` and refresh
+  the v0.9.12/v0.9.11 documentation without adopting deployment APIs or changing
+  Alloy trust, telemetry, lifecycle or publishing status. The preceding bot
+  head's four failed pairing jobs require fresh whole-head hosted qualification.
+
 - Repair test-only #142 evidence retention: freeze bounded observer state before
   dropping the borrowed, pinned health future on the unchanged 15-second
   timeout, label its sampling interval, and prioritize compact server records,

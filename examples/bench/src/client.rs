@@ -1106,6 +1106,7 @@ pub(crate) mod tests {
             }
             capture.observer.write_required(&mut message, now);
             message.checkpoint();
+            capture.observer.write_server_progress(&mut message, now);
             for (index, worker) in capture.workers.iter().enumerate() {
                 let state = &worker.state;
                 let _ = writeln!(

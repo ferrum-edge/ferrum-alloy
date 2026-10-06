@@ -299,11 +299,7 @@ fn observe_router(
         return router;
     };
     router.layer(middleware::from_fn(move |request: Request, next: Next| {
-        let socket = request
-            .extensions()
-            .get::<axum::extract::ConnectInfo<SocketAddr>>()
-            .map(|info| info.0);
-        let observation = health.observer.request(socket);
+        let observation = health.observer.server_request(&request);
         crate::health::response(next.run(request), observation)
     }))
 }
