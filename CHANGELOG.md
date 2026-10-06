@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Document scraping the management `/metrics` endpoint with Prometheus and a
+  bearer `credentials_file`, and fix Edge-version wording left stale after the
+  v0.9.12 pin: the canonical vocabulary source is `contracts-edge-0.9.12`, and
+  ADR 0007 marks its v0.9.9/v0.9.10 support statements as historical (#153).
+
 - Complete the Edge v0.9.12 pin with published `contracts-edge-0.9.12` at
   `31f0a21d707795be293d15837c2f77c3d84219d8`, preserving the same 16-file scope
   and verifying its bytes against the canonical Git tree. Refresh gateway
