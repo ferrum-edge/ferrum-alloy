@@ -58,59 +58,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - name: Initialize cache-safe health evidence
-        shell: bash
-        env:
-          HEALTH_JOB_NAME: Test (${{ matrix.os }})
-        run: |
-          set -euo pipefail
-          diagnostic_root="$RUNNER_TEMP/bench-health-ci"
-          printf 'ALLOY_BENCH_DIAGNOSTIC_ROOT=%s\n' "$diagnostic_root" >> "$GITHUB_ENV"
-          mkdir -p "$diagnostic_root/all-features" "$diagnostic_root/default-features"
-          printf 'head=%s\nevent_sha=%s\nrun=%s\nattempt=%s\njob=%s\njob_name=%s\nos=%s\nrunner=%s\n' \
-            "$(git rev-parse HEAD)" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            "$GITHUB_JOB" "$HEALTH_JOB_NAME" "$RUNNER_OS" "$RUNNER_NAME" \
-            > "$diagnostic_root/source.txt"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Tests (all features)
-        id: all_features
-        env:
-          ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ env.ALLOY_BENCH_DIAGNOSTIC_ROOT }}/all-features
-          ALLOY_BENCH_DIAGNOSTIC_FEATURE: all-features
         run: cargo test --workspace --all-features --locked
       - name: Tests (default features)
-        id: default_features
         if: ${{ !cancelled() }}
-        env:
-          ALLOY_BENCH_DIAGNOSTIC_DIR: ${{ env.ALLOY_BENCH_DIAGNOSTIC_ROOT }}/default-features
-          ALLOY_BENCH_DIAGNOSTIC_FEATURE: default-features
         run: cargo test --workspace --locked
       - name: Doc tests
         run: cargo test --workspace --all-features --doc --locked
-      - name: Record health section outcomes
-        if: always()
-        continue-on-error: true
-        shell: bash
-        env:
-          ALL_FEATURES_OUTCOME: ${{ steps.all_features.outcome }}
-          DEFAULT_FEATURES_OUTCOME: ${{ steps.default_features.outcome }}
-        run: |
-          printf 'all_features=%s\ndefault_features=%s\n' \
-            "$ALL_FEATURES_OUTCOME" "$DEFAULT_FEATURES_OUTCOME" \
-            > "$ALLOY_BENCH_DIAGNOSTIC_ROOT/outcome.txt"
-      - name: Upload bounded health evidence, including on failure
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: bench-health-ci-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          # Only bounded cfg(test) snapshots and small source/outcome files.
-          path: ${{ env.ALLOY_BENCH_DIAGNOSTIC_ROOT }}/**/*.txt
-          if-no-files-found: warn
-          retention-days: 7
 
   features:
     name: Feature combinations

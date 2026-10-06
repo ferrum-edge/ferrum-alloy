@@ -1,30 +1,23 @@
 name: Hosted benchmark qualification
 
 on:
-  pull_request:
-    paths:
-      - 'examples/bench/**'
-      - 'crates/ferrum-alloy/**'
-      - 'crates/ferrum-alloy-telemetry/**'
-      - 'crates/ferrum-alloy-diagnostics/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'docs/benchmarks.md'
-      - '.github/workflows/newbenchmark-only.yml'
-  # Full matrix only after this workflow lands on main. No ref/URL inputs.
+  # The bounded preparation run, weekly on main (Mondays 04:17 UTC). It is
+  # experimental evidence, not a pull request gate.
+  schedule:
+    - cron: '17 4 * * 1'
+  # The full matrix, on main only. No ref/URL inputs.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: hosted-benchmark-${{ github.event.pull_request.number || github.ref }}
+  group: hosted-benchmark-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   qualification:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     name: Shared Linux experimental evidence (not dedicated acceptance)
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 210 || 60 }}
@@ -34,7 +27,7 @@ jobs:
       # One optimized binary with symbols for both profiles and comparisons.
       CARGO_PROFILE_RELEASE_DEBUG: '1'
       RUST_BACKTRACE: '1'
-      QUALIFICATION_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      QUALIFICATION_SHA: ${{ github.sha }}
       QUALIFICATION_FULL: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
     steps:
       - name: Initialize qualification output directory

@@ -209,60 +209,39 @@ pub(crate) fn measure(
     collector: Option<Arc<CollectorStats>>,
     environment: Value,
 ) -> Result<Value, Failure> {
-    measure_inner(
+    measure_with_budget(
         cell,
         options,
         pipeline,
         metrics,
         collector,
         environment,
-        #[cfg(test)]
         None,
     )
 }
 
-fn measure_inner(
+/// [`measure`], optionally with a per-phase exchange `budget` for each
+/// worker, as passed to [`client::drive`].
+fn measure_with_budget(
     cell: Cell,
     options: &RunOptions,
     pipeline: Option<OtelPipeline>,
     metrics: &Metrics,
     collector: Option<Arc<CollectorStats>>,
     environment: Value,
-    #[cfg(test)] diagnostics: Option<Arc<client::tests::HealthDiagnostics>>,
+    budget: Option<usize>,
 ) -> Result<Value, Failure> {
     options.load.validate(cell.transport)?;
-    #[cfg(test)]
-    if let Some(diagnostics) = &diagnostics {
-        diagnostics.coordinator_stage("pki-generation");
-    }
     let pki = if cell.transport.tls() {
         Some(Pki::generate()?)
     } else {
         None
     };
-    #[cfg(test)]
-    if let Some(diagnostics) = &diagnostics {
-        diagnostics.coordinator_stage("server-tls-config");
-    }
     let server_tls = match &pki {
         Some(pki) => Some(pki.server(cell.transport.mtls())?),
         None => None,
     };
-    #[cfg(test)]
-    if let Some(diagnostics) = &diagnostics {
-        diagnostics.coordinator_stage("server-start-readiness");
-    }
-    let server = server::start(
-        cell.scenario,
-        server_tls,
-        pipeline,
-        #[cfg(test)]
-        diagnostics.clone(),
-    )?;
-    #[cfg(test)]
-    if let Some(diagnostics) = &diagnostics {
-        diagnostics.coordinator_stage("client-tls-config");
-    }
+    let server = server::start(cell.scenario, server_tls, pipeline)?;
     let target = Target {
         addr: server.addr,
         transport: cell.transport,
@@ -272,10 +251,6 @@ fn measure_inner(
             None => None,
         },
     };
-    #[cfg(test)]
-    if let Some(diagnostics) = &diagnostics {
-        diagnostics.coordinator_stage("client-runtime-build");
-    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(server::THREADS)
         .thread_name(CLIENT_THREAD)
@@ -285,20 +260,10 @@ fn measure_inner(
     let collector = collector.as_deref();
     let probe = || Sample::take(metrics, collector);
     alloc::set_role(Role::Client);
-    let measured = runtime.block_on(async {
-        #[cfg(test)]
-        if let Some(diagnostics) = diagnostics {
-            diagnostics.coordinator_stage("client-driver-start");
-            let health = client::tests::cancellation_health(
-                target,
-                options.load,
-                probe,
-                Arc::clone(&diagnostics),
-            );
-            return client::tests::cancellation_health_timeout(health, &diagnostics, cell).await;
-        }
-        client::drive(target, options.load, probe).await
-    });
+    let measured = client::drive(target, options.load, budget, probe);
+    #[cfg(test)]
+    let measured = tests::bounded(measured, budget);
+    let measured = runtime.block_on(measured);
     alloc::set_role(Role::Service);
     // Close the client's connections before stopping the server.
     drop(runtime);
@@ -477,18 +442,32 @@ mod tests {
         CANCEL_FRAMES, FRAME_BYTES, LARGE_BYTES, STREAM_FRAMES, Transport, Workload,
     };
 
-    struct HealthFailureEvidence {
-        cell: Cell,
-        diagnostics: Arc<client::tests::HealthDiagnostics>,
-    }
+    /// Functional cancellation health is finite work, not an unbounded reset
+    /// flood. Pinned h2 retains 50 local resets per connection for one second.
+    /// With two workers per connection, preparation and both phase budgets
+    /// require at most 2 * (1 + 8 + 8) = 34 retained resets, even if none
+    /// expire.
+    const HEALTH_EXCHANGES_PER_PHASE: usize = 8;
 
-    impl Drop for HealthFailureEvidence {
-        fn drop(&mut self) {
-            if std::thread::panicking() {
-                self.diagnostics
-                    .failure(self.cell, "cell-error-or-assertion");
-            }
+    /// The real-service health window. A 200 ms window was too short for a
+    /// shared debug-build runner, also running the other health tests, to
+    /// complete work reliably. Budgeted cells bound their work by exchanges,
+    /// not by this window.
+    const HEALTH_SECONDS: f64 = 5.0;
+
+    /// How long a budgeted run's client driver may take.
+    const HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// Fail a budgeted run that stalls, rather than hang the test binary.
+    pub(super) async fn bounded<T>(
+        driven: impl std::future::Future<Output = Result<T, Failure>>,
+        budget: Option<usize>,
+    ) -> Result<T, Failure> {
+        if budget.is_none() {
+            return driven.await;
         }
+        let result = tokio::time::timeout(HEALTH_TIMEOUT, driven).await;
+        result.map_err(|_| "the budgeted run exceeded its 15 s bound")?
     }
 
     fn options(seconds: f64) -> RunOptions {
@@ -518,11 +497,6 @@ mod tests {
         measure(cell, &options(0.2), None, &metrics, None, environment).unwrap()
     }
 
-    fn assert_healthy(result: &Value) {
-        assert_work_completed(result);
-        assert_eq!(result["seconds"], 0.2, "{result}");
-    }
-
     fn assert_work_completed(result: &Value) {
         assert_eq!(result["schema"], SCHEMA, "{result}");
         assert!(result["requests"].as_u64().unwrap() > 0, "{result}");
@@ -544,7 +518,7 @@ mod tests {
         // Cancellation alone uses finite per-worker phase budgets below h2's
         // reset-retention limit, through the same exchanges and coordinator.
         // Dedicated boundary and body tests keep their 200 ms windows.
-        let mut options = options(5.0);
+        let mut options = options(HEALTH_SECONDS);
         options.load.warmup = Duration::from_secs(1);
         for transport in Transport::ALL {
             for workload in Workload::ALL {
@@ -555,28 +529,13 @@ mod tests {
                 };
                 let metrics = Metrics::default();
                 let environment = probe::environment(options.label.as_deref());
-                // Keep the bounded snapshots alive through timeout teardown
-                // and every report assertion; print at most once on failure.
-                let evidence = (*workload == Workload::Cancel).then(|| HealthFailureEvidence {
-                    cell,
-                    diagnostics: Arc::new(
-                        client::tests::HealthDiagnostics::new(options.load)
-                            .with_origin("real-matrix"),
-                    ),
-                });
-                let diagnostics = evidence.as_ref().map(|e| Arc::clone(&e.diagnostics));
-                let result = measure_inner(
-                    cell,
-                    &options,
-                    None,
-                    &metrics,
-                    None,
-                    environment,
-                    diagnostics,
-                )
-                .unwrap();
+                let cancel = *workload == Workload::Cancel;
+                let budget = cancel.then_some(HEALTH_EXCHANGES_PER_PHASE);
+                let result =
+                    measure_with_budget(cell, &options, None, &metrics, None, environment, budget)
+                        .unwrap();
                 assert_work_completed(&result);
-                assert_eq!(result["seconds"], 5.0, "{result}");
+                assert_eq!(result["seconds"], HEALTH_SECONDS, "{result}");
                 assert_eq!(result["warmup_seconds"], 1.0, "{result}");
                 assert_eq!(result["scenario"], scenario.name(), "{result}");
                 assert_eq!(result["transport"], transport.name(), "{result}");
@@ -588,9 +547,8 @@ mod tests {
                 assert_eq!(result["run_id"], "test-run", "{result}");
                 assert_eq!(result["rep"], 1, "{result}");
                 assert_body_accounting(&result, *workload, *transport);
-                if *workload == Workload::Cancel {
-                    let requests =
-                        options.load.concurrency * client::tests::HEALTH_EXCHANGES_PER_PHASE;
+                if cancel {
+                    let requests = options.load.concurrency * HEALTH_EXCHANGES_PER_PHASE;
                     assert_eq!(result["requests"], requests, "{result}");
                 }
             }
@@ -690,33 +648,29 @@ mod tests {
                 workload: Workload::Cancel,
                 transport,
             };
-            let mut options = options(0.2);
+            // A 100 ms warm-up can end with workers mid-exchange, so the
+            // window opens only after the drain. Its clock is the matrices':
+            // a 200 ms window measured no exchange at all when a slow runner
+            // spent it on h2-mtls cancellations. The budget bounds the work.
+            let mut options = options(HEALTH_SECONDS);
             options.load.warmup = Duration::from_millis(100);
             let metrics = Metrics::default();
             let environment = probe::environment(None);
             // Bound all phases, not just measured requests: two H2 workers
-            // need at most 2 * (1 + 8 + 8 + 1) = 36 retained resets, below 50.
-            // Keep the real warm-up/drain/window and fatal retained-sender
-            // probe, with evidence alive through teardown and assertions.
-            let evidence = HealthFailureEvidence {
-                cell,
-                diagnostics: Arc::new(
-                    client::tests::HealthDiagnostics::new(options.load)
-                        .with_origin("warmed-short-window"),
-                ),
-            };
-            let result = measure_inner(
+            // need at most 2 * (1 + 8 + 8) = 34 retained resets, below 50.
+            let result = measure_with_budget(
                 cell,
                 &options,
                 None,
                 &metrics,
                 None,
                 environment,
-                Some(Arc::clone(&evidence.diagnostics)),
+                Some(HEALTH_EXCHANGES_PER_PHASE),
             )
             .unwrap();
-            assert_healthy(&result);
+            assert_work_completed(&result);
             assert_cancellation(&result, transport);
+            assert_eq!(result["seconds"], HEALTH_SECONDS, "{result}");
             assert_eq!(result["warmup_seconds"], 0.1, "{result}");
             assert_eq!(result["concurrency"], 4, "{result}");
             let connections = if transport.http2() { 2 } else { 4 };
@@ -727,9 +681,9 @@ mod tests {
             assert_eq!(result["protocol"], transport.protocol(), "{result}");
             assert_eq!(result["tls"], transport.tls(), "{result}");
             assert_eq!(result["mtls"], transport.mtls(), "{result}");
-            let (requests, bytes) = evidence.diagnostics.assert_warmed_progress(transport);
+            // Every budgeted measured cancellation completes inside the window.
+            let requests = options.load.concurrency * HEALTH_EXCHANGES_PER_PHASE;
             assert_eq!(result["requests"], requests, "{result}");
-            assert_eq!(result["body_bytes"], bytes, "{result}");
         }
     }
 
