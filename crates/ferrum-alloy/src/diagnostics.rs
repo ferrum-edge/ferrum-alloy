@@ -104,6 +104,11 @@ pub const MAX_RECORDS_PER_REQUEST_ID: usize = 16;
 /// Longest route template kept. A longer one is dropped from the record.
 pub const MAX_ROUTE_BYTES: usize = 512;
 
+/// How long a record is retained before a tenant holding nothing may take
+/// it over while every tenant holds at most one record. A stream of new
+/// tenants cannot displace a sole record sooner.
+pub const TAKEOVER_AGE: Duration = Duration::from_secs(1);
+
 /// Bytes of an `Arc<str>` allocation besides its text: its two reference
 /// counts.
 const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
@@ -600,10 +605,13 @@ struct Reservation<'a> {
     evictions: BTreeMap<u64, Evicted>,
     count: usize,
     bytes: usize,
+    /// The latest admission time of a sole record that may be taken over,
+    /// if any is old enough.
+    settled: Option<Instant>,
 }
 
 impl<'a> Reservation<'a> {
-    fn new(ring: &'a Ring) -> Self {
+    fn new(ring: &'a Ring, settled: Option<Instant>) -> Self {
         Self {
             ring,
             by_count: Ranking::new(&ring.by_count),
@@ -613,6 +621,7 @@ impl<'a> Reservation<'a> {
             evictions: BTreeMap::new(),
             count: ring.live(),
             bytes: ring.bytes,
+            settled,
         }
     }
 
@@ -659,9 +668,9 @@ impl<'a> Reservation<'a> {
 
     /// Reclaim the heaviest tenant's oldest record only if its remaining
     /// holding is at least the candidate tenant's projected holding in the
-    /// pressured dimension. Otherwise reserve our own oldest, or take over
-    /// a sole record (see `takeover`). If none is possible, refuse
-    /// admission.
+    /// pressured dimension. Otherwise reserve our own oldest, or, once we
+    /// hold nothing, take over a record (see `takeover`). If none is
+    /// possible, refuse admission.
     fn victim(&mut self, record: &Stored, reason: Evicted) -> Option<u64> {
         let (count, bytes) = self.usage(&record.tenant);
         let (will_hold, other) = match reason {
@@ -691,25 +700,33 @@ impl<'a> Reservation<'a> {
             .or_else(|| self.takeover(&record.tenant))
     }
 
-    /// A tenant that holds nothing takes the oldest record of the least
-    /// recently active tenant, but only while every tenant holds at most one
-    /// record (counting reservations), when no tenant can donate. Without
-    /// it, a store full of sole records would refuse every new tenant until
-    /// they expire. With one record each, the owner of the oldest record is
-    /// the tenant whose newest record is oldest.
+    /// A tenant that holds nothing, counting reservations, takes a record
+    /// when no donor can keep its share in the pressured dimension. While
+    /// another tenant holds two or more records, it takes the oldest record
+    /// of the tenant holding the most, which keeps at least the one record
+    /// the candidate will hold. Once every tenant holds at most one record,
+    /// it takes the oldest record, whose owner is the tenant whose newest
+    /// record is oldest, but only once that record is `TAKEOVER_AGE` old.
+    /// Without this, a store full of sole records, or of sole records and a
+    /// tenant holding a few small ones, would refuse every newcomer until
+    /// records expire. One admission takes over sole records only until the
+    /// new record fits: at most its estimate divided by the smallest taken
+    /// record's, rounded up.
     fn takeover(&mut self, tenant: &str) -> Option<u64> {
-        if self.ring.tenants.contains_key(tenant) {
+        if self.usage(tenant).0 != 0 {
             return None;
         }
         let heaviest = self.by_count.heaviest(&self.changed)?;
         if self.usage(&heaviest).0 > 1 {
-            return None;
+            return self.oldest(&heaviest);
         }
-        self.ring
+        let (&seq, oldest) = self
+            .ring
             .records
-            .keys()
-            .find(|seq| !self.evictions.contains_key(*seq))
-            .copied()
+            .iter()
+            .find(|(seq, _)| !self.evictions.contains_key(*seq))?;
+        let settled = self.settled.is_some_and(|at| oldest.inserted <= at);
+        settled.then_some(seq)
     }
 
     fn plan(
@@ -893,8 +910,9 @@ impl EvidenceStore {
                 return;
             }
         };
-        let plan =
-            Reservation::new(&ring).plan(&record, replacement, self.max_records, self.max_bytes);
+        let settled = record.inserted.checked_sub(TAKEOVER_AGE);
+        let reservation = Reservation::new(&ring, settled);
+        let plan = reservation.plan(&record, replacement, self.max_records, self.max_bytes);
         let Some(plan) = plan else {
             drop(ring);
             self.count_skipped(Skipped::FairShare);
@@ -2041,6 +2059,7 @@ mod tests {
         let store = EvidenceStore::new(&settings(2, 1024 * 1024));
         store.record(evidence(Some("a"), "a-1"));
         store.record(evidence(Some("b"), "b-1"));
+        backdate(&store, TAKEOVER_AGE);
         store.record(evidence(Some("c"), "c-1"));
         // Every tenant held one record, and "a" was inactive longest.
         assert_eq!(found(&store, "a", "a-1"), 0);
@@ -2054,6 +2073,7 @@ mod tests {
         assert_eq!(found(&store, "c", "c-1"), 1);
 
         // Now "c" is the least recently active tenant.
+        backdate(&store, TAKEOVER_AGE);
         store.record(evidence(Some("d"), "d-1"));
         assert_eq!(found(&store, "c", "c-1"), 0);
         assert_eq!(found(&store, "b", "b-2"), 1);
@@ -2077,6 +2097,7 @@ mod tests {
             let store = EvidenceStore::new(&config);
             for n in 0..800 {
                 let tenant = format!("t{n:03}");
+                backdate(&store, TAKEOVER_AGE);
                 store.record(evidence(Some(&tenant), "req"));
                 assert_eq!(found(&store, &tenant, "req"), 1, "{tenant}");
             }
@@ -2085,6 +2106,7 @@ mod tests {
                 assert_eq!(found(&store, &format!("t{n:03}"), "req"), 1, "{n}");
             }
             // A tenant whose record was taken over comes back.
+            backdate(&store, TAKEOVER_AGE);
             store.record(evidence(Some("t000"), "back"));
             assert_eq!(found(&store, "t000", "back"), 1);
             assert_eq!(found(&store, "t784", "req"), 0);
@@ -2092,6 +2114,122 @@ mod tests {
             assert_eq!(metric(&store, skipped), 0);
             check(&store);
         }
+    }
+
+    #[test]
+    fn admission_never_freezes_under_byte_pressure_with_mixed_record_sizes() {
+        // A quiet tenant holds two small records and every other tenant one
+        // large record, with expiry disabled. No tenant can give up bytes
+        // and keep a newcomer's holding, which once refused every newcomer
+        // for as long as the quiet tenant stayed idle.
+        let small = sized("x", &id("r0"), None);
+        let long = "l".repeat(256);
+        let route = "/".repeat(MAX_ROUTE_BYTES);
+        let large = sized("t0", &id(&long), Some(&route));
+        let typical = "/".repeat(100);
+        let each = sized("n0", &id("req"), Some(&typical));
+        assert!(small < each && each < large, "{small} {each} {large}");
+        let mut config = settings(1_000, small + 4 * large + each);
+        config.max_age_ms = 0;
+        let store = EvidenceStore::new(&config);
+        for n in 0..2 {
+            store.record(evidence(Some("x"), &format!("r{n}")));
+        }
+        for n in 0..4 {
+            let mut record = evidence(Some(&format!("t{n}")), &long);
+            record.route = Some(Arc::from(route.as_str()));
+            store.record(record);
+        }
+        let newcomer = |n: usize| {
+            let mut record = evidence(Some(&format!("n{n}")), "req");
+            record.route = Some(Arc::from(typical.as_str()));
+            record
+        };
+
+        // The quiet tenant gives up one of its two records at once.
+        store.record(newcomer(0));
+        assert_eq!(found(&store, "n0", "req"), 1);
+        assert_eq!(found(&store, "x", "r0"), 0);
+        assert_eq!(found(&store, "x", "r1"), 1);
+        check(&store);
+
+        // Then every tenant holds one record, and each newcomer takes over
+        // the least recently active tenants' records once they are old
+        // enough.
+        for n in 1..4 {
+            backdate(&store, TAKEOVER_AGE);
+            store.record(newcomer(n));
+            assert_eq!(found(&store, &format!("n{n}"), "req"), 1, "{n}");
+            check(&store);
+        }
+        assert_eq!(found(&store, "x", "r1"), 0);
+        assert_eq!(found(&store, "n0", "req"), 1);
+        let skipped = r#"ferrum_alloy_diagnostics_skipped_total{reason="fair_share"}"#;
+        assert_eq!(metric(&store, skipped), 0);
+    }
+
+    #[test]
+    fn a_present_tenant_with_a_larger_record_is_admitted_like_a_new_tenant() {
+        let each = sized("t0", &id("short"), None);
+        let mut config = settings(32, 6 * each);
+        config.max_age_ms = 0;
+        let store = EvidenceStore::new(&config);
+        for n in 0..6 {
+            store.record(evidence(Some(&format!("t{n}")), "short"));
+        }
+        let mut larger = evidence(Some("t5"), "longer-id");
+        larger.route = Some(Arc::from("/longer/route"));
+
+        // Room needs another tenant's sole record, younger than the
+        // takeover age: nothing is lost.
+        store.record(larger.clone());
+        assert_eq!(found(&store, "t5", "longer-id"), 0);
+        assert_eq!(store.retained(), (6, 6 * each));
+        let skipped = r#"ferrum_alloy_diagnostics_skipped_total{reason="fair_share"}"#;
+        assert_eq!(metric(&store, skipped), 1);
+        check(&store);
+
+        // Once it is old enough, the tenant gives up its own record and
+        // takes over the least recently active tenant's.
+        backdate(&store, TAKEOVER_AGE);
+        store.record(larger);
+        assert_eq!(found(&store, "t5", "longer-id"), 1);
+        assert_eq!(found(&store, "t5", "short"), 0);
+        assert_eq!(found(&store, "t0", "short"), 0);
+        for n in 1..5 {
+            assert_eq!(found(&store, &format!("t{n}"), "short"), 1, "{n}");
+        }
+        assert_eq!(metric(&store, skipped), 1);
+        check(&store);
+    }
+
+    #[test]
+    fn one_admission_takes_over_at_most_three_sole_records() {
+        // The smallest record a tenant can hold, and the largest.
+        let small = sized("a", &id("r"), None);
+        let tenant = "n".repeat(128);
+        let mut large = evidence(Some(&tenant), &"l".repeat(256));
+        large.route = Some(Arc::from("/".repeat(MAX_ROUTE_BYTES)));
+        let large_bytes = sized(&tenant, &large.request_id, large.route.as_deref());
+        let taken = large_bytes.div_ceil(small);
+        assert!((2..=3).contains(&taken), "{large_bytes} / {small}");
+        let owners = ["a", "b", "c", "d", "e", "f"];
+        let mut config = settings(1_000, owners.len() * small);
+        config.max_age_ms = 0;
+        let store = EvidenceStore::new(&config);
+        for owner in owners {
+            store.record(evidence(Some(owner), "r"));
+        }
+        backdate(&store, TAKEOVER_AGE);
+        store.record(large);
+        assert_eq!(held(&store, &tenant), 1);
+        // The least recently active tenants lost theirs, and no more.
+        for (n, owner) in owners.into_iter().enumerate() {
+            assert_eq!(held(&store, owner), usize::from(n >= taken), "{owner}");
+        }
+        let bytes = r#"ferrum_alloy_diagnostics_evicted_total{reason="bytes"}"#;
+        assert_eq!(metric(&store, bytes), u64::try_from(taken).unwrap());
+        check(&store);
     }
 
     #[test]
@@ -2250,6 +2388,8 @@ mod tests {
             let larger_bytes = sized("t0", &larger.request_id, larger.route.as_deref());
             assert!(each < larger_bytes && larger_bytes < 2 * each);
             let owner = larger.diagnostic_id().clone();
+            // Room needs another tenant's sole record, which is younger than
+            // the takeover age.
             store.record(larger);
             assert!(store.find("t0", owner).records.is_empty());
             assert_eq!(store.retained(), (6, 6 * each));
@@ -2268,11 +2408,14 @@ mod tests {
 
     #[test]
     fn a_rejected_reservation_also_preserves_planned_donor_evictions() {
-        let each = sized("old", &id("small"), None);
-        let store = EvidenceStore::new(&settings(10, 3 * each));
-        for _ in 0..3 {
-            store.record(evidence(Some("old"), "small"));
-        }
+        let small = evidence(Some("old"), "small");
+        let mut big = evidence(Some("old"), &"b".repeat(200));
+        big.route = Some(Arc::from("/".repeat(400)));
+        let small_bytes = sized("old", &small.request_id, None);
+        let big_bytes = sized("old", &big.request_id, big.route.as_deref());
+        let store = EvidenceStore::new(&settings(10, small_bytes + big_bytes));
+        store.record(small);
+        store.record(big);
         let before = store.retained();
         let owners: Vec<_> = store
             .ring()
@@ -2282,8 +2425,11 @@ mod tests {
             .collect();
         let mut candidate = evidence(Some("new"), "large");
         candidate.route = Some(Arc::from("/".repeat(100)));
-        // Reserving one donor record leaves a real overshare, but a second
-        // would cross the candidate's holding. The first reservation rolls back.
+        let bytes = sized("new", &candidate.request_id, candidate.route.as_deref());
+        assert!(small_bytes < bytes && bytes <= big_bytes);
+        // The donor can give up its small record and keep more than the
+        // candidate requests, but more room needs its remaining sole record,
+        // younger than the takeover age. The donor reservation rolls back.
         store.record(candidate);
         assert_eq!(store.retained(), before);
         for owner in owners {
@@ -2297,13 +2443,15 @@ mod tests {
     }
 
     #[test]
-    fn a_large_oldest_donor_record_cannot_cross_the_reserved_share() {
+    fn a_tenant_holding_nothing_takes_a_large_record_from_a_tenant_holding_two() {
         let mut big = evidence(Some("donor"), &"b".repeat(200));
         big.route = Some(Arc::from("/".repeat(400)));
         let small = evidence(Some("donor"), "small");
         let large_bytes = sized("donor", &big.request_id, big.route.as_deref());
         let small_bytes = sized("donor", &small.request_id, None);
-        let store = EvidenceStore::new(&settings(10, large_bytes + small_bytes));
+        let mut config = settings(10, large_bytes + small_bytes);
+        config.max_age_ms = 0;
+        let store = EvidenceStore::new(&config);
         store.record(big);
         store.record(small);
         let mut candidate = evidence(Some("other"), &"c".repeat(100));
@@ -2311,11 +2459,15 @@ mod tests {
         let bytes = sized("other", &candidate.request_id, candidate.route.as_deref());
         assert!(small_bytes < bytes && bytes < large_bytes);
         store.record(candidate);
-        // The heaviest tenant has two records, but removing its oldest
-        // would leave less than the new tenant requests. Reject conservatively.
-        assert_eq!(store.retained(), (2, large_bytes + small_bytes));
-        assert_eq!(held(&store, "donor"), 2);
-        assert_eq!(held(&store, "other"), 0);
+        // Removing the donor's large oldest record would leave it fewer
+        // bytes than the new tenant requests, but it still keeps as many
+        // records as the new tenant then holds: one each.
+        assert_eq!(store.retained(), (2, small_bytes + bytes));
+        assert_eq!(held(&store, "donor"), 1);
+        assert_eq!(found(&store, "donor", "small"), 1);
+        assert_eq!(held(&store, "other"), 1);
+        let evicted = r#"ferrum_alloy_diagnostics_evicted_total{reason="bytes"}"#;
+        assert_eq!(metric(&store, evicted), 1);
         check(&store);
     }
 
@@ -2395,6 +2547,8 @@ mod tests {
         for n in 0..6 {
             store.record(evidence(Some(&format!("t{n}")), "short"));
         }
+        // Each larger record needs another tenant's sole record, which is
+        // younger than the takeover age.
         std::thread::scope(|scope| {
             for n in 0..6 {
                 let store = Arc::clone(&store);

@@ -834,9 +834,10 @@ pub const DIAGNOSTICS_MAX_AGE_MS: std::ops::RangeInclusive<u64> = 1_000..=24 * 6
 /// evidence lives in memory in this process. Records older than `max_age_ms`
 /// expire. When either bound would be exceeded, a tenant evicts another
 /// tenant's oldest record only while that tenant holds more than it, and
-/// otherwise its own oldest record. A tenant that holds nothing, when every
-/// tenant holds at most one record, takes the record of the tenant that has
-/// been inactive longest.
+/// otherwise its own oldest record. A tenant that holds nothing takes the
+/// oldest record of the tenant holding the most records while one holds two
+/// or more, and otherwise, once it is a second old, the record of the tenant
+/// that has been inactive longest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -1705,7 +1706,7 @@ impl AlloyConfig {
         let max_age = diagnostics.max_age_ms;
         if max_age != 0 && !DIAGNOSTICS_MAX_AGE_MS.contains(&max_age) {
             error(format!(
-                "diagnostics.max_age_ms must be 0 (disabled) or between {} and {}",
+                "diagnostics.max_age_ms must be 0 (disabled) or within {}..={}",
                 DIAGNOSTICS_MAX_AGE_MS.start(),
                 DIAGNOSTICS_MAX_AGE_MS.end()
             ));

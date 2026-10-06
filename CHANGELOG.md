@@ -8,15 +8,20 @@
   1 day; `FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS`), measured on the monotonic
   clock and removed oldest first before each admission, lookup and metrics
   scrape as `evicted_total{reason="age"}`, and an expired id gets the same
-  `404` as an evicted one. With every tenant at one record, a new tenant takes
-  the record of the least recently active tenant, so admission never freezes
-  even with expiry disabled. Reports note when a lookup resolved through a
-  correlation alias, including an evicted local id that now names another
-  request, and how many earlier attempts are no longer retained. Every index
-  shares one tenant allocation, matching the byte accounting. A poisoned
-  store starts again empty (`ferrum_alloy_diagnostics_resets_total`), and
-  admission gives up instead of looping if its indexes ever disagree. ADR 0008
-  no longer implies a time window that did not exist.
+  `404` as an evicted one. A tenant holding nothing takes the oldest record of
+  the tenant holding the most records while one holds two or more, by count
+  even under byte pressure, and otherwise the record of the least recently
+  active tenant once it is 1 second old (`diagnostics::TAKEOVER_AGE`), so
+  admission never freezes, by count or by bytes, even with expiry disabled.
+  One admission takes over at most two or three sole records. Reports note
+  when a lookup resolved through a correlation alias, including an evicted
+  local id that now names another request, and how many earlier attempts are
+  no longer retained while a later one is. The `diagnostics.max_age_ms`
+  validation message uses the same `within a..=b` wording as its neighbours.
+  Every index shares one tenant allocation, matching the byte accounting. A
+  poisoned store starts again empty (`ferrum_alloy_diagnostics_resets_total`),
+  and admission gives up instead of looping if its indexes ever disagree. ADR
+  0008 no longer implies a time window that did not exist.
 
 - Document scraping the management `/metrics` endpoint with Prometheus and a
   bearer `credentials_file`, and fix Edge-version wording left stale after the

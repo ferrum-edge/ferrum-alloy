@@ -990,12 +990,12 @@ fn diagnostics_retention_bounds_are_validated() {
         (
             "FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS",
             "999",
-            "diagnostics.max_age_ms must be 0 (disabled) or between 1000 and 86400000",
+            "diagnostics.max_age_ms must be 0 (disabled) or within 1000..=86400000",
         ),
         (
             "FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS",
             "86400001",
-            "diagnostics.max_age_ms must be 0 (disabled) or between 1000 and 86400000",
+            "diagnostics.max_age_ms must be 0 (disabled) or within 1000..=86400000",
         ),
     ] {
         let (config, _) = load_from(None, env(&[(name, value)]), &Overrides::default()).unwrap();
