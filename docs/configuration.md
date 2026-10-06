@@ -217,6 +217,24 @@ Each client table holds at most `max_clients` clients. A client gets an entry on
 
 Every rate and burst must be greater than zero when `enabled` is `true`. Rejections are counted in `ferrum_alloy_management_rate_limited_total{budget,scope}` on `/metrics`, where `scope` names the empty bucket: `client` (the client's own), `shared` (the one for requests without a transport address and, for endpoints, for clients beyond `max_clients`), or `global` (the listener's, endpoints only). `ferrum_alloy_management_rate_limit_clients{budget}` is the number of clients currently tracked, and `ferrum_alloy_management_rate_limit_untracked_probes_total` counts probes served untracked because the probe table was full. Exempt requests are not counted. The application listener, including its own `/livez` and `/readyz`, is not affected.
 
+#### Scraping `/metrics` with Prometheus
+
+`/metrics` is served on the management listener and, like every detailed management route, always requires `Authorization: Bearer <management.token>`. Without a configured token it returns `401`, even on loopback, because loopback is not an authentication boundary. Give Prometheus the token through a credentials file so the secret never appears in `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: ferrum-alloy
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/alloy-management-token
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+```
+
+The credentials file holds the token and nothing else; point it at the same file the service reads through `FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE` (Alloy ignores a trailing CR/LF) and keep it readable only by the Prometheus service account. The management listener has no TLS, so scrape it over loopback or a trusted network; a non-loopback `management.bind` already requires the token. A scrape with no token, or a wrong one, gets `401` and counts against the endpoint rate-limit budget before any metrics handler runs.
+
 ### `[health]`
 
 | Key | Default | Meaning |

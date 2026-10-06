@@ -123,8 +123,8 @@ source evidence; the new Alloy pairing still requires hosted CI on its exact com
    schema URL is introduced. New admin snapshot/verification/egress surfaces are
    outside Alloy's explicit G01 lookup and grant no new confirmation authority.
 
-Canonical gateway vocabularies are copied from `contracts-edge-0.9.11`, never
-edited locally. Its report `x-contract` records EXISTING/implemented at owner
+Canonical gateway vocabularies are copied from `contracts-edge-0.9.12`, never
+edited locally. The report's `x-contract` records EXISTING/implemented at owner
 81cbb with unreleased availability; every historical PROPOSED description outside
 `$id`/`x-contract` remains exactly paired. Tagged pending-publication text is the
 source's pre-publication record, superseded by the actual GitHub release.
