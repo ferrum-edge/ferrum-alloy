@@ -687,7 +687,8 @@ impl<'a> Reservation<'a> {
                 return Some(seq);
             }
         }
-        self.oldest(&record.tenant).or_else(|| self.takeover(&record.tenant))
+        self.oldest(&record.tenant)
+            .or_else(|| self.takeover(&record.tenant))
     }
 
     /// A tenant that holds nothing takes the oldest record of the least
@@ -1465,7 +1466,10 @@ mod tests {
         let mut inserted = None;
         for (seq, record) in &ring.records {
             interned(&record.tenant);
-            assert!(inserted <= Some(record.inserted), "admission times are ordered");
+            assert!(
+                inserted <= Some(record.inserted),
+                "admission times are ordered"
+            );
             inserted = Some(record.inserted);
             assert!(ring.tenants[&record.tenant].seqs.contains(seq));
             let key = (Arc::clone(&record.tenant), record.diagnostic_id.clone());
