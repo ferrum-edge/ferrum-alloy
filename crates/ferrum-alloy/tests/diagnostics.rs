@@ -994,6 +994,8 @@ async fn real_http_variable_byte_admission_is_non_destructive() {
         ("x-request-id", longer_id.as_str()),
         ("authorization", "Bearer app-user"),
     ];
+    // Room for the larger record needs another tenant's sole record, which
+    // is younger than `diagnostics::TAKEOVER_AGE`, so nothing is lost.
     let path = LONG_BYTE_ROUTE.replace("{tenant}", "t0");
     let reply = fetch_with(&server.url(&path), &headers).await;
     assert_eq!(reply.status, StatusCode::OK);

@@ -251,7 +251,7 @@ ferrum-alloy diagnose --url https://ops.example/orders --request-id <id> --token
 
 Use `RequestContext::diagnostic_id()` or the `alloy.diagnostic_id` server-span field for an independent local lookup. An accepted gateway id remains a convenience alias only while it names one retained local request; reuse makes that alias ambiguous, even for matching remote traces. Separate gateway retries have separate reports linked by their actual trace ids. Reports keep the actual correlation id in `subject.request_id` and the local lookup id in collection notes; Alloy adds no diagnostic-id response header.
 
-Every refusal is the same `404`: a denied caller, another tenant's request, an ambiguous alias, and an unknown or evicted id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
+Every refusal is the same `404`: a denied caller, another tenant's request, an ambiguous alias, and an unknown, evicted or expired id look alike. The management listener must bind to loopback while retrieval is installed; reach it from other hosts through a TLS-terminating proxy on the same host. Retention is bounded by `[diagnostics]` (see [configuration](configuration.md#diagnostics-feature-diagnostics)), and a live report is never treated as verified.
 
 ### From an authenticated Edge diagnostic reference
 

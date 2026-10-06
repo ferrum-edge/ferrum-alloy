@@ -823,14 +823,21 @@ pub const MAX_DIAGNOSTICS_RECORDS: usize = 65_536;
 /// Bounds of `diagnostics.max_bytes`: 4 KiB to 64 MiB.
 pub const DIAGNOSTICS_BYTES: std::ops::RangeInclusive<usize> = 4_096..=64 * 1024 * 1024;
 
+/// Accepted nonzero `diagnostics.max_age_ms` values: one second to one day.
+pub const DIAGNOSTICS_MAX_AGE_MS: std::ops::RangeInclusive<u64> = 1_000..=24 * 60 * 60 * 1000;
+
 /// Retention of request evidence for authorized diagnostic retrieval
 /// (feature `diagnostics`).
 ///
 /// It applies only when the application installs a
 /// `diagnostics::DiagnosticsAuthorizer`; otherwise nothing is retained. The
-/// evidence lives in memory in this process. When either bound would be
-/// exceeded, a tenant evicts another tenant's oldest record only while that
-/// tenant holds more than it, and otherwise its own oldest record.
+/// evidence lives in memory in this process. Records older than `max_age_ms`
+/// expire. When either bound would be exceeded, a tenant evicts another
+/// tenant's oldest record only while that tenant holds more than it, and
+/// otherwise its own oldest record. A tenant that holds nothing takes the
+/// oldest record of the tenant holding the most records while one holds two
+/// or more, and otherwise, once it is a second old, the record of the tenant
+/// that has been inactive longest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -839,6 +846,9 @@ pub struct DiagnosticsSettings {
     pub max_records: usize,
     /// Most estimated bytes retained.
     pub max_bytes: usize,
+    /// Longest a record is retained, in milliseconds, measured on the
+    /// monotonic clock from its admission. `0` disables expiry.
+    pub max_age_ms: u64,
 }
 
 impl Default for DiagnosticsSettings {
@@ -846,6 +856,7 @@ impl Default for DiagnosticsSettings {
         Self {
             max_records: 1_024,
             max_bytes: 1024 * 1024,
+            max_age_ms: 15 * 60 * 1000,
         }
     }
 }
@@ -946,6 +957,7 @@ env_vars! {
     "FERRUM_ALLOY_CORS_ALLOWED_ORIGINS" => ["cors", "allowed_origins"]: List,
     "FERRUM_ALLOY_DIAGNOSTICS_MAX_RECORDS" => ["diagnostics", "max_records"]: Uint,
     "FERRUM_ALLOY_DIAGNOSTICS_MAX_BYTES" => ["diagnostics", "max_bytes"]: Uint,
+    "FERRUM_ALLOY_DIAGNOSTICS_MAX_AGE_MS" => ["diagnostics", "max_age_ms"]: Uint,
 }
 
 /// Configuration errors.
@@ -1689,6 +1701,14 @@ impl AlloyConfig {
                 "diagnostics.max_bytes must be within {}..={}",
                 DIAGNOSTICS_BYTES.start(),
                 DIAGNOSTICS_BYTES.end()
+            ));
+        }
+        let max_age = diagnostics.max_age_ms;
+        if max_age != 0 && !DIAGNOSTICS_MAX_AGE_MS.contains(&max_age) {
+            error(format!(
+                "diagnostics.max_age_ms must be 0 (disabled) or within {}..={}",
+                DIAGNOSTICS_MAX_AGE_MS.start(),
+                DIAGNOSTICS_MAX_AGE_MS.end()
             ));
         }
 
