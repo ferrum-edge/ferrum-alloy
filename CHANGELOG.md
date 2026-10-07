@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice) and `LICENSE-COMMERCIAL.md`.
 - Adopt canonical `contracts-edge-0.9.13` (gateway vocabularies re-pinned to Edge v0.9.13 provenance; content otherwise unchanged).
 - Fix diagnostics retention review findings (#153, item 2). Admission could
   freeze once every retained tenant held one record: records now expire after
