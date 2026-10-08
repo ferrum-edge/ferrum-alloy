@@ -174,7 +174,7 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    service base remain unchanged. With stripping disabled, operation paths are preserved.
 
    To let AI agents call selected operations through Edge's OpenAPI to MCP bridge (Edge
-   v0.9.12 and v0.9.11), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
+   v0.9.14 and v0.9.13), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
    manifest. The export then writes the `x-ferrum-mcp` extension and refuses metadata Edge
    would reject. Read [AI-agent tools](agent-tools.md) for what is safe to expose first.
 
@@ -197,7 +197,7 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
 
    Build with `features = ["tls", "edge"]`, and add `"otel"` for trace export. Handlers can take `Option<ferrum_alloy::edge::GatewayContext>` for Edge's authenticated consumer.
 
-3. `examples/edge-observability` runs Edge v0.9.12 (the contract baseline), Alloy, and an OpenTelemetry Collector together:
+3. `examples/edge-observability` runs Edge v0.9.14 (the contract baseline), Alloy, and an OpenTelemetry Collector together:
 
    ```bash
    docker compose -f examples/edge-observability/compose.yaml up -d --build

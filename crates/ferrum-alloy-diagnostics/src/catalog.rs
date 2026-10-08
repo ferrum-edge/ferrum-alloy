@@ -256,6 +256,7 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "circuit_breaker_open",
     "max_forwards",
     "grpc_deadline_preflight",
+    "route_request_timeout_early_upload",
     "backend_max_connections",
     "websocket_connection_limit",
     "adaptive_concurrency",

@@ -10,8 +10,8 @@
     "owner": "ferrum-edge/ferrum-alloy",
     "shared_status": "EXISTING shared v1; root accepted the unchanged wire freeze, published in contracts-edge-0.9.11. Historical PROPOSED descriptions are retained for full canonical pairing.",
     "availability": "unreleased",
-    "contracts_tag": "contracts-edge-0.9.13",
-    "contracts_commit": "9626821eb089c71f5d4d71268c7b8276a8a5ab50",
+    "contracts_tag": "contracts-edge-0.9.14",
+    "contracts_commit": "ddbdd845733b7046c4393ac951011dafb774db33",
     "qualified_owner_commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e"
   },
   "type": "object",

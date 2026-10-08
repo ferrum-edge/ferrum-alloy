@@ -1,6 +1,6 @@
 # ADR 0007: Prove Edge integration with a pinned real gateway
 
-**Status:** Accepted (2026-09-26). The single pinned release below is superseded by the two-release matrix in `docs/compatibility.json` (`edge_support.tested`). Amended 2026-09-27 with the attempt and connection cases, 2026-10-01 for Edge v0.9.9's per-attempt CLIENT spans and diagnostic references, and 2026-10-01 for Edge v0.9.10. The 2026-10-04 adoption candidate rolls the existing latest-plus-previous window to v0.9.11/v0.9.10, with static source re-audit and fresh hosted validation pending. The 2026-10-05 candidate advances to v0.9.12/v0.9.11 with unchanged data-plane contracts and fresh hosted qualification pending. Older release examples below are historical; the strict attempt/reference assertions remain unchanged and run for both current matrix entries.
+**Status:** Accepted (2026-09-26). The single pinned release below is superseded by the two-release matrix in `docs/compatibility.json` (`edge_support.tested`). Amended 2026-09-27 with the attempt and connection cases, 2026-10-01 for Edge v0.9.9's per-attempt CLIENT spans and diagnostic references, and 2026-10-01 for Edge v0.9.10. The 2026-10-04 and 2026-10-05 adoption candidates advanced the window through v0.9.12/v0.9.11. The 2026-10-08 candidate advances it to v0.9.14/v0.9.13, with static source re-audit complete and fresh hosted qualification pending. Older release examples below are historical; the strict attempt/reference assertions remain unchanged and run for both current matrix entries.
 
 ## Context
 
