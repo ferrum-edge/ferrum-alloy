@@ -195,11 +195,7 @@ fn early_upload_route_timeout_is_a_pre_upstream_rejection() {
         serde_json::from_slice(&fixture("edge-rejected-before-upstream.json")).unwrap();
     report["observations"][0]["attributes"]["phase"] =
         serde_json::json!("route_request_timeout_early_upload");
-    let parsed = parse_offline(
-        &serde_json::to_vec(&report).unwrap(),
-        &Limits::default(),
-    )
-    .unwrap();
+    let parsed = parse_offline(&serde_json::to_vec(&report).unwrap(), &Limits::default()).unwrap();
 
     let findings = analyze(&parsed.report, &Thresholds::default());
     let finding = by_code(&findings, "alloy.edge.rejected_before_upstream");
