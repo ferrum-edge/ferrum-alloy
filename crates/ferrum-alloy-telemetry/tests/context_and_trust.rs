@@ -540,6 +540,7 @@ fn reserved_request_id_headers_are_rejected() {
         "cookie",
         "traceparent",
         "x-consumer-username",
+        "x-authenticated-identity",
         "bad header",
     ] {
         let mut config = TelemetryConfig::default();

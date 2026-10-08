@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Adopt `contracts-edge-0.9.15` at `6fb64c5dc2e014204c17609fc717d976f3b4589e` and pin Ferrum Edge v0.9.15 at `25b37395ff61bfea0f3ffd189d9011c4984fa755`. Track its `route_protocol_admission` rejection phase and reserve `X-Authenticated-Identity` from request-ID configuration.
 - Adopt `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` and pin Ferrum Edge v0.9.14 at `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice) and `LICENSE-COMMERCIAL.md`.
 - Adopt canonical `contracts-edge-0.9.13` (gateway vocabularies re-pinned to Edge v0.9.13 provenance; content otherwise unchanged).

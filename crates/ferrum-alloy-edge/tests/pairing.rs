@@ -196,7 +196,7 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.14`, unchanged from `contracts-edge-0.9.8`. They are
+/// `contracts-edge-0.9.15`, unchanged from `contracts-edge-0.9.8`. They are
 /// recorded here only to detect drift and are never rendered: rule
 /// `alloy.r007` renders the version-neutral explanations in
 /// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
@@ -286,8 +286,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.14");
-    assert_eq!(pin["commit"], "ddbdd845733b7046c4393ac951011dafb774db33");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.15");
+    assert_eq!(pin["commit"], "6fb64c5dc2e014204c17609fc717d976f3b4589e");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
@@ -420,6 +420,23 @@ fn released_gateway_diagnostic_headers_match_the_pinned_vocabulary() {
     assert!(
         extra.is_empty(),
         "local gateway diagnostic headers not released in the pin: {extra:?}"
+    );
+}
+
+#[test]
+fn external_authenticated_identity_is_not_a_consumer_identity_header() {
+    let headers = pinned_json("vocabularies/gateway-headers.json");
+    let external_identity = headers["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "X-Authenticated-Identity")
+        .expect("Edge v0.9.15 publishes X-Authenticated-Identity");
+    assert_eq!(external_identity["role"], "gateway_assertion");
+    assert_eq!(external_identity["availability"], "v0.9.15");
+    assert!(
+        !ferrum_alloy_edge::contract::IDENTITY_HEADERS.contains(&"x-authenticated-identity"),
+        "external authentication identity is not a mapped Consumer assertion"
     );
 }
 

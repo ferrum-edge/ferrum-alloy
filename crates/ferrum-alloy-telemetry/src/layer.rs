@@ -178,6 +178,7 @@ const RESERVED_ID_HEADERS: &[&str] = &[
     "forwarded",
     "x-consumer-username",
     "x-consumer-custom-id",
+    "x-authenticated-identity",
 ];
 
 #[derive(Debug, Clone)]
