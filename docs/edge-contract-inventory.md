@@ -8,14 +8,16 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 |---|---|
 | **EXISTING** | Present in the Edge release below and verified in its source. For Alloy-owned items, implemented in this repository. |
 | **PROPOSED** | Not implemented by its would-be producer or consumer. Historical PROPOSED descriptions/fixture comments are retained for exact pairing; current shared v1 status is EXISTING/implemented in canonical `x-contract`. |
-| **UNAVAILABLE** | Not produced by supported Edge v0.9.12 (the contract baseline) or v0.9.11. Alloy must not assume it and reports it as missing evidence. Historical release-specific absences are marked separately. |
+| **UNAVAILABLE** | Not produced by supported Edge v0.9.14 (the contract baseline) or v0.9.13. Alloy must not assume it and reports it as missing evidence. Historical release-specific absences are marked separately. |
 
 ## Revisions inspected
 
 | Repository | Revision | Role |
 |---|---|---|
-| ferrum-edge/ferrum-edge | `v0.9.12` = `0d917701b63ef38210c49df830f48cf0457cbc7d` (2026-10-05) | **Contract baseline.** Verified published release/default multi-arch index (`ferrumedge/ferrum-edge@sha256:80526b59…1684ee4`); static re-audit below, fresh Alloy adoption CI pending. |
-| ferrum-edge/ferrum-edge | `v0.9.11` = `c764084b3b51c3f7ffde268c039688d35e49c553` (2026-10-04) | Previous release under the existing latest-plus-previous policy (`ferrumedge/ferrum-edge@sha256:2476b502…0d36e`); its historical re-audit is retained below. |
+| ferrum-edge/ferrum-edge | `v0.9.14` = `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d` (2026-10-07) | **Contract baseline.** Published default multi-arch index (`ferrumedge/ferrum-edge@sha256:15442f1b…0da5e3f8`); static re-audit below, fresh Alloy adoption CI pending. |
+| ferrum-edge/ferrum-edge | `v0.9.13` = `9b83115de7ec23ab51ec4feae6bed65e596db425` (2026-10-06) | Previous release under the latest-plus-previous policy (`ferrumedge/ferrum-edge@sha256:6caa0987…05862e50`); static re-audit below, fresh Alloy adoption CI pending. |
+| ferrum-edge/ferrum-edge | `v0.9.12` = `0d917701b63ef38210c49df830f48cf0457cbc7d` (2026-10-05) | Older, unsupported release (`ferrumedge/ferrum-edge@sha256:80526b59…1684ee4`); its historical re-audit is retained below. |
+| ferrum-edge/ferrum-edge | `v0.9.11` = `c764084b3b51c3f7ffde268c039688d35e49c553` (2026-10-04) | Older, unsupported release under the previous support window (`ferrumedge/ferrum-edge@sha256:2476b502…0d36e`); its historical re-audit is retained below. |
 | ferrum-edge/ferrum-edge | `v0.9.10` = `ee040d5e3281fde424aa65f5b18004852c5b53b0` (2026-10-01) | Older, unsupported release (`ferrumedge/ferrum-edge@sha256:430d6a7d…c7dd4cc`). Historical unmarked Edge file:line references below remain from v0.9.10 unless another revision is named. |
 | ferrum-edge/ferrum-edge | `v0.9.9` = `234717ce41965cd1e2b5c6c761a25475c5d7628c` (2026-10-01) | Older, unsupported release retained for historical source/qualification references. Line references marked "v0.9.9" are from this revision. |
 | ferrum-edge/ferrum-edge | `v0.9.8` = `e27f2109216352c3fe9e67a7014611f3f66daa91` (2026-09-27) | Older, unsupported release retained as historical comparison for telemetry and security behavior. |
@@ -31,6 +33,86 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 | ferrum-edge/ferrumedge | `51f3709f1d3f754519dcc0ce5e018716f44dc272` | Current Alloy page: [immutable source](https://github.com/ferrum-edge/ferrumedge/blob/51f3709f1d3f754519dcc0ce5e018716f44dc272/alloy.html); it labels Alloy pre-release and unpublished, with source tested against Edge v0.9.10/v0.9.9. |
 
 The historical consumer revisions above support the inventory's source references. Consumer qualification as of 2026-10-04 is recorded at immutable Anvil #312, Foundry #540, Nexus #519 and GitForgeOps #461 heads in the [ledger](implementation-status.md#cross-repository-dependencies). Root accepted the unchanged shared v1 freeze at qualified owner 81cbb; canonical publication is complete. The [owner/adoption record](shared-contract-qualification.md) preserves those qualified slices and the remaining fresh adoption gates without relabeling historical r2 evidence.
+
+**v0.9.14 static re-audit (2026-10-08).** Compared the published tags
+`v0.9.13..v0.9.14` after checking the intervening `v0.9.12..v0.9.13` step
+below. Edge references are from the named tag. This is source evidence, not
+execution of Alloy's new head.
+
+1. **Changed files.** The checklist's five core files change only in
+   `src/plugins/otel_tracing.rs` (+5), `src/plugins/correlation_id.rs` (+4),
+   and `src/retry.rs` (+64/-4). The broader plugin changes in `src/plugins/mod.rs`
+   are reviewed under items 7 and 8. `src/config/types.rs`,
+   `src/proxy/headers.rs`, and `docs/plugin_execution_order.md` are byte-identical.
+2. **`src/retry.rs`: no vocabulary change.** Edge #6028/#6042 classify typed
+   backend HTTP/2 resets and buffered read errors more accurately, including
+   `ProtocolError` for backend resets with a reason other than `NO_ERROR`.
+   `HTTP_OBSERVABILITY_ERROR_CLASSES` remains the same eight tokens; the
+   `contracts-edge-0.9.14` gateway-errors vocabulary confirms no `ErrorClass`
+   value or token was added. `contract::GATEWAY_ERROR_TOKENS`,
+   `catalog::EDGE_GATEWAY_ERROR_TOKENS`, and rule `alloy.r007` remain paired;
+   no new `does_not_prove` claim is required. Existing explanations remain
+   version-neutral. The PIN and all 16 adopted files were already updated in
+   this PR and match the canonical `contracts-edge-0.9.14` tag.
+3. **`src/proxy/headers.rs`: unchanged.** Backend-response stripping and
+   Edge-owned request-header overwrites are unchanged.
+4. **`src/plugins/otel_tracing.rs`: declarations only.** The change declares
+   `traceparent` and `tracestate` among request headers the plugin may modify;
+   span kinds, attributes, meanings, trace-context parsing, and timing
+   boundaries are unchanged. No timing field was added.
+5. **`src/plugins/correlation_id.rs`: declarations only.** The change reports
+   the configured request-id header as mutable. Its accepted grammar and
+   exported configuration are unchanged.
+6. **`src/config/types.rs` and allowed keys: unchanged.** Edge export's fields,
+   bounds, and `otel_tracing` allowed configuration keys did not change.
+7. **Plugin ordering and rejection phases.** `docs/plugin_execution_order.md`
+   is unchanged. No `rejection_phase` value was added in v0.9.14, and no new
+   phase belongs in `catalog::EDGE_PRE_UPSTREAM_PHASES`.
+8. **Reserved `x-consumer-*` names.** The namespace stripping behavior is
+   unchanged. The `src/plugins/mod.rs` changes make built-in plugin trust depend
+   on concrete registered types, but do not change which consumer assertion
+   headers Edge strips.
+9. **Previously unavailable entries.** No new Alloy-consumed header,
+   diagnostic endpoint, span attribute, timing field, or evidence authority
+   appeared. The HTTP/2 classification changes do not add an exported contract.
+
+**v0.9.13 static re-audit (2026-10-08).** Compared the published tags
+`v0.9.12..v0.9.13`; this records the intervening step omitted from the v0.9.13
+adoption. Edge references are from the named tag. This is source evidence, not
+execution of Alloy's new head.
+
+1. **Changed files.** Among the checklist surfaces, `src/plugins/mod.rs`
+   (+60/-3), `src/plugins/mesh_route_dispatch.rs` (+166/-2),
+   `src/plugins/otel_tracing.rs` (+5), and `src/plugins/correlation_id.rs`
+   (+4) change. `src/retry.rs`, `src/config/types.rs`,
+   `src/proxy/headers.rs`, and `docs/plugin_execution_order.md` are unchanged.
+2. **`src/retry.rs`: unchanged vocabulary.** The eight `X-Gateway-Error`
+   tokens and class mapping are unchanged. No token was added, so the Alloy
+   constants, `alloy.r007` explanations and `does_not_prove` limits remain
+   paired with the pinned vocabulary.
+3. **`src/proxy/headers.rs`: unchanged.** Backend-response stripping and
+   gateway-owned request-header overwrites are unchanged.
+4. **`src/plugins/otel_tracing.rs`: declarations only.** `traceparent` and
+   `tracestate` are declared as mutable request headers; span kinds, attributes,
+   trace-context parsing, and timing boundaries are unchanged.
+5. **`src/plugins/correlation_id.rs`: declarations only.** The configured
+   request-id header is declared mutable; its accepted grammar and exported
+   configuration are unchanged.
+6. **`src/config/types.rs` and allowed keys: unchanged.** No generated Edge
+   configuration field or `otel_tracing` allowed key changed.
+7. **Plugin ordering and rejection phases.** Plugin execution order is
+   unchanged. Edge #6024 introduces `route_request_timeout_early_upload`, a
+   request deadline rejection before an upstream attempt. Alloy's R001 rule
+   already treats catalogued pre-upstream phases as gateway admission evidence;
+   `catalog::EDGE_PRE_UPSTREAM_PHASES` now includes this value, with a regression
+   check that it produces the pre-upstream finding.
+8. **Reserved `x-consumer-*` names.** The gateway-owned namespace behavior is
+   unchanged. The new early route-total preview operates on request inputs and
+   does not alter reserved-header stripping.
+9. **Previously unavailable entries.** The early upload deadline adds the
+   rejection phase above, but no new header, telemetry attribute, diagnostic
+   endpoint, or authority. Other Alloy-consumed unavailable entries remain
+   unavailable.
 
 **v0.9.12 static re-audit (2026-10-05).** Compared the actual published
 `v0.9.11..v0.9.12` source archives and the [immutable release diff](https://github.com/ferrum-edge/ferrum-edge/compare/c764084b3b51c3f7ffde268c039688d35e49c553...0d917701b63ef38210c49df830f48cf0457cbc7d).
@@ -205,8 +287,8 @@ The remaining EXISTING entries in `src/proxy/mod.rs`, `src/plugins/mod.rs`, `src
 
 | Item | Status | Source | Semantics | Trust | Alloy use |
 |---|---|---|---|---|---|
-| `X-Gateway-Error` | EXISTING | `src/retry.rs:212-244` (tokens), `:310-318` (class mapping), unchanged through v0.9.12 from v0.9.9 and v0.9.8; backend copies stripped by v0.9.9 `src/proxy/headers.rs:809`, `:852-870` (v0.9.8 `:754-757`, `:777-816`) | Closed vocabulary, on gateway-authored 5xx only: `connection_failure`, `backend_timeout`, `backend_error`, `circuit_breaker_open`, `overload`, `config_stale`, `concurrency_limit`, and `request_timeout` (a route's total request deadline expired before any backend held the request). In both supported releases `backend_timeout` means a backend held the request; releases before v0.9.8 also used it for route deadlines that expired before dispatch. | Both supported releases strip backend-supplied copies at every backend response boundary; releases before v0.9.8 do not on every path (Anvil `catalog/ferrum/ferrum-edge-0.9.7/outcomes.json`). The header is unauthenticated and names no Edge version, so it stays unverified evidence. | Diagnosis rule `alloy.r007` caps confidence at `likely`, keeps the broader pre-v0.9.8 meaning of `backend_timeout` because a header names no release, and lists what each token does not prove. For example, `connection_failure` does not prove a DNS failure. An unknown token yields `unknown`. `edge-e2e` checks `connection_failure` for a refused backend connection on both supported releases. |
-| `X-Ferrum-Diagnostic-Ref` | EXISTING since v0.9.9, retained in v0.9.12/v0.9.11 (off by default); UNAVAILABLE in legacy v0.9.8 | v0.9.9 `src/diagnostic_ref.rs:82` (`DIAGNOSTIC_REF_HEADER`), `:96-122` (`fd1_`/`fd2_` forms), stamped as the last step before the client response head (`stamp_response_headers`, `:1672`); backend and plugin copies stripped (`src/proxy/headers.rs:838-870`); enabled by `FERRUM_DIAGNOSTIC_REFS` (`src/config/env_config.rs:4574`, default `off`). `docs/error_classification.md` "Gateway diagnostic references", `docs/admin_api.md` "Diagnostic References". Pinned grammar: `contracts-edge-0.9.9` `vocabularies/gateway-headers.json` (`values.pattern`) | An opaque reference, `fd1_<32 lowercase hex>`, or `fd2_<8 lowercase hex replica id>_<32 lowercase hex>` with `FERRUM_DIAGNOSTIC_REF_REPLICA_TAG=true`. It embeds nothing. `errors` mode stamps every HTTP/1.1, HTTP/2, and HTTP/3 response that carries the gateway's own `X-Gateway-Error` token; `all` mode also stamps plugin rejections, gateway policy refusals, and routing `404`s. A backend's own response, relayed or replayed by a plugin, never carries one. | Gateway-owned whatever the setting, but unauthenticated: the header names no Edge version, and any server can send one. It is a pointer to authenticated evidence, never evidence itself. | Recorded from a response a client observed as a `client.response_header` event (`measurement-semantics.md`, `catalog::EDGE_DIAGNOSTIC_REF_HEADER`); Edge puts it on no span (§4). Rule `alloy.r007` reports a well-formed reference as `alloy.edge.diagnostic_ref` (`likely`, naming the lookup in `confirm_with`) and anything else as `alloy.edge.diagnostic_ref_malformed` (`unknown`, never offered for lookup); neither changes another finding. `catalog::is_edge_diagnostic_ref` implements the pinned grammar, which the pairing test compares. `edge-e2e` turns references on (`FERRUM_DIAGNOSTIC_REFS=errors`) and checks on both supported releases that the refused connection's `502` carries a well-formed reference that diagnosis records. |
+| `X-Gateway-Error` | EXISTING | `src/retry.rs:212-244` (tokens), `:310-318` (class mapping), unchanged through v0.9.14 from v0.9.9 and v0.9.8; backend copies stripped by v0.9.9 `src/proxy/headers.rs:809`, `:852-870` (v0.9.8 `:754-757`, `:777-816`) | Closed vocabulary, on gateway-authored 5xx only: `connection_failure`, `backend_timeout`, `backend_error`, `circuit_breaker_open`, `overload`, `config_stale`, `concurrency_limit`, and `request_timeout` (a route's total request deadline expired before any backend held the request). `backend_timeout` denotes a gateway backend or route timeout; releases before v0.9.8 also used it for route deadlines that expired before dispatch. The header alone does not prove whether the service received the request. | Both supported releases strip backend-supplied copies at every backend response boundary; releases before v0.9.8 do not on every path (Anvil `catalog/ferrum/ferrum-edge-0.9.7/outcomes.json`). The header is unauthenticated and names no Edge version, so it stays unverified evidence. | Diagnosis rule `alloy.r007` caps confidence at `likely`, keeps the broader pre-v0.9.8 meaning of `backend_timeout` because a header names no release, and lists what each token does not prove. For example, `connection_failure` does not prove a DNS failure. An unknown token yields `unknown`. `edge-e2e` checks `connection_failure` for a refused backend connection on both supported releases. |
+| `X-Ferrum-Diagnostic-Ref` | EXISTING since v0.9.9, retained in v0.9.14/v0.9.13 (off by default); UNAVAILABLE in legacy v0.9.8 | v0.9.9 `src/diagnostic_ref.rs:82` (`DIAGNOSTIC_REF_HEADER`), `:96-122` (`fd1_`/`fd2_` forms), stamped as the last step before the client response head (`stamp_response_headers`, `:1672`); backend and plugin copies stripped (`src/proxy/headers.rs:838-870`); enabled by `FERRUM_DIAGNOSTIC_REFS` (`src/config/env_config.rs:4574`, default `off`). `docs/error_classification.md` "Gateway diagnostic references", `docs/admin_api.md` "Diagnostic References". Pinned grammar: `contracts-edge-0.9.9` `vocabularies/gateway-headers.json` (`values.pattern`) | An opaque reference, `fd1_<32 lowercase hex>`, or `fd2_<8 lowercase hex replica id>_<32 lowercase hex>` with `FERRUM_DIAGNOSTIC_REF_REPLICA_TAG=true`. It embeds nothing. `errors` mode stamps every HTTP/1.1, HTTP/2, and HTTP/3 response that carries the gateway's own `X-Gateway-Error` token; `all` mode also stamps plugin rejections, gateway policy refusals, and routing `404`s. A backend's own response, relayed or replayed by a plugin, never carries one. | Gateway-owned whatever the setting, but unauthenticated: the header names no Edge version, and any server can send one. It is a pointer to authenticated evidence, never evidence itself. | Recorded from a response a client observed as a `client.response_header` event (`measurement-semantics.md`, `catalog::EDGE_DIAGNOSTIC_REF_HEADER`); Edge puts it on no span (§4). Rule `alloy.r007` reports a well-formed reference as `alloy.edge.diagnostic_ref` (`likely`, naming the lookup in `confirm_with`) and anything else as `alloy.edge.diagnostic_ref_malformed` (`unknown`, never offered for lookup); neither changes another finding. `catalog::is_edge_diagnostic_ref` implements the pinned grammar, which the pairing test compares. `edge-e2e` turns references on (`FERRUM_DIAGNOSTIC_REFS=errors`) and checks on both supported releases that the refused connection's `502` carries a well-formed reference that diagnosis records. |
 | `X-Ferrum-Diagnostic-Owner-Replica` | EXISTING in v0.9.9 (admin lookup only) | v0.9.9 `src/diagnostic_ref.rs:127` | On a lookup `404` for an `fd2_` reference another replica minted, names the owner replica, only for a caller whose token passed the scope and namespace checks. | Admin response header. | Not followed: the explicit ADR 0009 lookup never uses an owner hint for automatic routing or retry. |
 | `X-Gateway-Upstream-Status: degraded` | EXISTING | v0.9.9 `src/proxy/mod.rs:42523`, `:42625`; v0.9.8 `:41018`, `:41120` | The all-unhealthy fallback target was used. | Stripped from backend responses in both supported releases (same list as `X-Gateway-Error`) | Not interpreted yet |
 | Gateway error bodies `{"error":"…"}` | EXISTING | `src/proxy/mod.rs:25817`, `:48013-48040` | Plain JSON, not Problem Details. | — | Not parsed. Body text is weak evidence (Anvil convention). |
@@ -259,27 +341,27 @@ These fields exist in Edge access logs (`TransactionSummary`, `src/plugins/mod.r
 |---|---|---|
 | Edge active health check `GET {http_path}` (default `/health`, healthy `[200, 302]`) | EXISTING | `src/config/types.rs:1463-1526`, `src/health_check.rs:85-92`, `:3242-3277`. Alloy's export sets `http_path` to the manifest's `health.path` (typically `/readyz`) and `healthy_status_codes: [200]`. |
 | Edge admin `POST/PUT/GET/DELETE /api-specs` | EXISTING | `src/admin/mod.rs:3673-3716`, `docs/api_specs.md`. Not available in file mode. **Alloy never calls it.** `ferrum-alloy openapi export` produces the artifact that operators or Nexus publish. CI's `edge-config` job submits the exported agent-tool fixture to it (database mode, SQLite) to prove Edge accepts what the export writes (§7). |
-| `x-ferrum-mcp` on `POST /api-specs`: OpenAPI operations as MCP tools through a generated `mcp_gateway` | EXISTING since v0.9.9, retained in v0.9.12/v0.9.11 (Edge #5930); ignored by legacy v0.9.8 | v0.9.9 `docs/api_specs.md` ("`x-ferrum-mcp` (optional)"), `docs/plugins.md` ("OpenAPI bridge"); `src/admin/api_specs/extractor.rs` (`X_FERRUM_MCP_KEYS`, `X_FERRUM_MCP_OPERATION_KEYS`, `mcp_operation_selected`, `extract_mcp_bridge_operations`, `auto_inject_mcp_gateway`), `src/plugins/mcp_openapi_bridge.rs` (`ANNOTATION_KEYS`, `default_annotations`, `MAX_BRIDGE_OPERATIONS` = 256). Alloy writes it (`ferrum-alloy openapi export`) and checks it against these rules (`ferrum_alloy_edge::agents`); see [agent-tools.md](agent-tools.md). |
+| `x-ferrum-mcp` on `POST /api-specs`: OpenAPI operations as MCP tools through a generated `mcp_gateway` | EXISTING since v0.9.9, retained in v0.9.14/v0.9.13 (Edge #5930); ignored by legacy v0.9.8 | v0.9.9 `docs/api_specs.md` ("`x-ferrum-mcp` (optional)"), `docs/plugins.md` ("OpenAPI bridge"); `src/admin/api_specs/extractor.rs` (`X_FERRUM_MCP_KEYS`, `X_FERRUM_MCP_OPERATION_KEYS`, `mcp_operation_selected`, `extract_mcp_bridge_operations`, `auto_inject_mcp_gateway`), `src/plugins/mcp_openapi_bridge.rs` (`ANNOTATION_KEYS`, `default_annotations`, `MAX_BRIDGE_OPERATIONS` = 256). Alloy writes it (`ferrum-alloy openapi export`) and checks it against these rules (`ferrum_alloy_edge::agents`); see [agent-tools.md](agent-tools.md). |
 | G01 authenticated diagnostic lookup: `GET /diagnostics/v1/refs/{ref}` on the admin listener, `diagnostics:read` scope plus an `ns` claim | EXISTING in v0.9.9 (Edge #5767, #5845, #5846, #5868); UNAVAILABLE in v0.9.8 | Released v0.9.9 `src/admin/mod.rs:2796`, `docs/admin_api.md` “Diagnostic References”, `openapi.yaml` `DiagnosticRefLookup`, and `src/diagnostic_ref.rs`. Schema and ten fixtures vendored byte-exact from `contracts-edge-0.9.14`; schema provenance is refreshed, with wire constraints and fixture payloads unchanged from r2. Alloy calls it only with explicit `--edge-admin-url`, environment credential, and a separate trusted `--edge-observation`; binding and the limited confirmation path are defined in ADR 0009. `200` may have null detail; `401`/`403` refuse credentials/scope/namespace; `404` collapses malformed/unknown/expired/evicted/wrong-namespace/wrong-replica/disabled references (an owner hint is not an automatic routing instruction); `429` rate limits. No redirects or automatic retries, verified HTTPS or direct literal-loopback HTTP, no environment proxies, 2s connect/5s whole-request and 64 KiB body bounds. Only a bound authenticated record with known vocabulary can confirm its own recorded facts; service reports and timing findings remain unverified. |
 | Alloy `/livez`, `/readyz` (application and management listeners) | EXISTING (Alloy) | Status only, `no-store` |
 | Alloy management `/health`, `/metrics`, `/openapi.json` | EXISTING (Alloy) | Configured bearer token always required; tokenless detailed routes deny; loopback bind by default |
 
 ## 7. Configuration schema Alloy generates
 
-The unchanged resource shape of `ferrum-alloy edge export`, statically rechecked against v0.9.12/v0.9.11 above, originated with fields that exist in the `deny_unknown_fields` resources of both Edge v0.9.9 (`src/config/types.rs`: `Proxy` 2776, `Upstream` 1910, `PluginConfig` 3247, `GatewayConfig` 3398) and v0.9.8 (`Proxy` 2646, `Upstream` 1843, `PluginConfig` 3101, `GatewayConfig` 3252), and GitForgeOps's `kind`/`spec` wrapper (`src/config/strict.rs:321-332`). v0.9.9 adds two `Proxy` fields that export deliberately leaves at their defaults (re-audit item 6): `allow_path_parameters` (`false`) and `websocket_permessage_deflate` (`strip`). Manifest paths cannot contain `;`, `%`, `\`, or `.`/`..` segments, so no generated `listen_path` needs the opt-in.
+The unchanged resource shape of `ferrum-alloy edge export`, statically rechecked against v0.9.14/v0.9.13 above, originated with fields that exist in the `deny_unknown_fields` resources of both Edge v0.9.9 (`src/config/types.rs`: `Proxy` 2776, `Upstream` 1910, `PluginConfig` 3247, `GatewayConfig` 3398) and v0.9.8 (`Proxy` 2646, `Upstream` 1843, `PluginConfig` 3101, `GatewayConfig` 3252), and GitForgeOps's `kind`/`spec` wrapper (`src/config/strict.rs:321-332`). v0.9.9 adds two `Proxy` fields that export deliberately leaves at their defaults (re-audit item 6): `allow_path_parameters` (`false`) and `websocket_permessage_deflate` (`strip`). Manifest paths cannot contain `;`, `%`, `\`, or `.`/`..` segments, so no generated `listen_path` needs the opt-in.
 
-Edge v0.9.12 and v0.9.11 validate resource IDs in `src/config/types.rs`: IDs are 1–254 bytes, start with an ASCII alphanumeric, and then contain only ASCII alphanumerics, `.`, `_`, or `-`. Manifest validation applies that limit to each generated ID selected by the manifest: `-upstream` for health checks, `-correlation-id` for the correlation plugin, and `-otel-tracing` for OTLP tracing.
+Edge v0.9.14 and v0.9.13 validate resource IDs in `src/config/types.rs`: IDs are 1–254 bytes, start with an ASCII alphanumeric, and then contain only ASCII alphanumerics, `.`, `_`, or `-`. Manifest validation applies that limit to each generated ID selected by the manifest: `-upstream` for health checks, `-correlation-id` for the correlation plugin, and `-otel-tracing` for OTLP tracing.
 
 | Generated item | Status | Validation |
 |---|---|---|
-| Proxy: `listen_path`, `backend_scheme` (never `backend_protocol`), `strip_listen_path`, `backend_path`, `backend_*_timeout_ms`, `upstream_id`, `plugins`, `labels`, `backend_tls_*` | EXISTING | CI: `ferrum-edge validate -m file` is required on v0.9.12 and v0.9.11 (new adoption pairing pending; historical v0.9.10/v0.9.9 passed) for `contracts/fixtures/manifests/plain-http.edge.yaml` and for the e2e TLS config. The e2e stack serves traffic with it. |
+| Proxy: `listen_path`, `backend_scheme` (never `backend_protocol`), `strip_listen_path`, `backend_path`, `backend_*_timeout_ms`, `upstream_id`, `plugins`, `labels`, `backend_tls_*` | EXISTING | CI: `ferrum-edge validate -m file` is required on v0.9.14 and v0.9.13 (new adoption pairing pending; historical v0.9.10/v0.9.9 passed) for `contracts/fixtures/manifests/plain-http.edge.yaml` and for the e2e TLS config. The e2e stack serves traffic with it. |
 | Upstream with `health_checks.active` and backend TLS on the upstream | EXISTING | same |
 | `correlation_id` plugin config (`header_name`, `echo_downstream`) | EXISTING | same |
 | `otel_tracing` plugin config (`endpoint`, `service_name`, `trace_context_trust: untrusted`, `include_url_path: false`, optional `root_sampling`/`root_sampling_ratio`) | EXISTING | same; keys checked against `ALLOWED_CONFIG_KEYS` (`otel_tracing.rs:63-81`) |
-| End-to-end stack only (`gen-e2e-edge-config`, not `edge export`): proxy `backend_host`, `backend_port`, and `retry` (`max_retries`, `retryable_status_codes`, `retryable_methods`, `retry_on_connect_failure`); Edge environment `FERRUM_POOL_WARMUP_ENABLED`, `FERRUM_POOL_HTTP2_CONNECTIONS_PER_HOST`, and `FERRUM_DIAGNOSTIC_REFS=errors` (supported by v0.9.12 and v0.9.11) | EXISTING | `ferrum-edge validate` and real traffic in the `edge-e2e` job on v0.9.12 and v0.9.11; fresh adoption qualification pending |
+| End-to-end stack only (`gen-e2e-edge-config`, not `edge export`): proxy `backend_host`, `backend_port`, and `retry` (`max_retries`, `retryable_status_codes`, `retryable_methods`, `retry_on_connect_failure`); Edge environment `FERRUM_POOL_WARMUP_ENABLED`, `FERRUM_POOL_HTTP2_CONNECTIONS_PER_HOST`, and `FERRUM_DIAGNOSTIC_REFS=errors` (supported by v0.9.14 and v0.9.13) | EXISTING | `ferrum-edge validate` and real traffic in the `edge-e2e` job on v0.9.14 and v0.9.13; fresh adoption qualification pending |
 | Service manifest `ferrum.service_manifest` v1 | **EXISTING**/implemented shared v1 | Alloy-defined; Foundry #540 and Nexus #519 have merged, qualified authenticated previews as of 2026-10-04. GitForgeOps qualifies Alloy-generated resource trees, not a manifest JSON preview. Root accepted the unchanged freeze at qualified owner 81cbb, published in `contracts-edge-0.9.11`; the [adoption candidate](shared-contract-qualification.md) requires fresh hosted checks; see the [consumer evidence ledger](implementation-status.md#cross-repository-dependencies). |
 | Service manifest `[agents]` (`enabled`, `endpoint_path`, `namespace`), read by `openapi export` | Included in shared schema as of ferrum-contracts #8 (`contracts-edge-0.9.9-r2`) | Alloy's own parser accepts manifests with or without it. Alloy does not vendor the service-manifest schema (§9). |
-| OpenAPI document-level `x-ferrum-mcp` (`enabled`, `endpoint.path`, `namespace`, `include.operations`) and per-operation `x-ferrum-mcp` (`expose`, `name`, `title`, `description`, `annotations` with `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) | EXISTING since v0.9.9, retained in v0.9.12/v0.9.11 | CI: `edge-config` submits `contracts/fixtures/openapi/orders-api.openapi.json` to the real `POST /api-specs` on both supported releases. Each generates an `mcp_gateway` with exactly the declared tools, endpoint, and namespace. Legacy v0.9.8 accepted the document and ignored the extension. |
+| OpenAPI document-level `x-ferrum-mcp` (`enabled`, `endpoint.path`, `namespace`, `include.operations`) and per-operation `x-ferrum-mcp` (`expose`, `name`, `title`, `description`, `annotations` with `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) | EXISTING since v0.9.9, retained in v0.9.14/v0.9.13 | CI: `edge-config` submits `contracts/fixtures/openapi/orders-api.openapi.json` to the real `POST /api-specs` on both supported releases. Each generates an `mcp_gateway` with exactly the declared tools, endpoint, and namespace. Legacy v0.9.8 accepted the document and ignored the extension. |
 
 ## 8. Alloy-owned telemetry (produced by this repository)
 
