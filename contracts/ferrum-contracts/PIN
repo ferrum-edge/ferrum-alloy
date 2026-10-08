@@ -1,6 +1,6 @@
 {
-  "tag": "contracts-edge-0.9.14",
-  "commit": "ddbdd845733b7046c4393ac951011dafb774db33",
+  "tag": "contracts-edge-0.9.15",
+  "commit": "6fb64c5dc2e014204c17609fc717d976f3b4589e",
   "files": {
     "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json": "a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410",
     "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-connection-failure.json": "05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310",
@@ -16,7 +16,7 @@
     "contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/tls-retry.json": "65f56506897b83a08a4aef6fc490096813bac4a5faba1f91768c6bdc8c92f7a8",
     "contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json": "04c0e0deb43eb3e6e4998e37a0a6db450692aa7da058e04e00ba70294bfd9e9d",
     "contracts/ferrum-contracts/schemas/diagnostic-report/v1.schema.json": "f4562508329516dc18b7df481ffb6586ef48d19ab90da1ba7514e2d97ba8b177",
-    "contracts/ferrum-contracts/vocabularies/gateway-errors.json": "5adcd8f9913e1efb99f111d7f5208016d4bd76206a8ce0555531af36094cc081",
-    "contracts/ferrum-contracts/vocabularies/gateway-headers.json": "ada929455ce8b98d6382040471dd2cc4c2aeec186d2d7b134a1e0e147339e8a1"
+    "contracts/ferrum-contracts/vocabularies/gateway-errors.json": "2ef83a7d427b1f4f5486b3f1092814b6cc5428324a52db97ea96777e7d63ca96",
+    "contracts/ferrum-contracts/vocabularies/gateway-headers.json": "67d8ae06feacf6398f5025518d7e64c56c52efd45db4741778ecc4957e855276"
   }
 }

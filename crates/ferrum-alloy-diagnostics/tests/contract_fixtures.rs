@@ -203,6 +203,20 @@ fn early_upload_route_timeout_is_a_pre_upstream_rejection() {
     assert_eq!(finding.scope, SourceScope::GatewayAdmission);
 }
 
+#[test]
+fn route_protocol_admission_is_a_pre_upstream_rejection() {
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("edge-rejected-before-upstream.json")).unwrap();
+    report["observations"][0]["attributes"]["phase"] =
+        serde_json::json!("route_protocol_admission");
+    let parsed = parse_offline(&serde_json::to_vec(&report).unwrap(), &Limits::default()).unwrap();
+
+    let findings = analyze(&parsed.report, &Thresholds::default());
+    let finding = by_code(&findings, "alloy.edge.rejected_before_upstream");
+    assert_eq!(finding.confidence, Confidence::Likely);
+    assert_eq!(finding.scope, SourceScope::GatewayAdmission);
+}
+
 fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
     let mut report = DiagnosticReport::new(Collection {
         collector: Producer {

@@ -53,7 +53,7 @@ The recommended first deployment is Edge presenting an X.509-SVID through `backe
 
 If a sidecar terminates TLS instead, Alloy sees a plaintext loopback connection and must rely on `trust.networks`. The deployment must then guarantee that only the sidecar can reach the service port. Alloy cannot verify that.
 
-Supported Edge releases v0.9.14 and v0.9.13 treat the whole `x-consumer-*` namespace as gateway-owned and drop every client copy. Older, unsupported Edge v0.9.8 reserves only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path, so other `x-consumer-*` names sent by clients can pass through it. Alloy trusts only those two names, and only from a verified identity.
+Supported Edge releases v0.9.15 and v0.9.14 treat the whole `x-consumer-*` namespace as gateway-owned and drop every client copy. Edge v0.9.15 also uses `X-Authenticated-Identity` for external auth when it has no mapped Consumer; Alloy does not treat that header as a Consumer assertion. Older, unsupported Edge v0.9.8 reserves only `x-consumer-username` and `x-consumer-custom-id` on the plain HTTP path, so other `x-consumer-*` names sent by clients can pass through it. Alloy trusts only those two names, and only from a verified identity.
 
 ## Trace context and sampling
 

@@ -7,23 +7,23 @@
     "published": false
   },
   "edge": {
-    "release": "v0.9.14",
-    "source_commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
-    "image": "ferrumedge/ferrum-edge@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8",
+    "release": "v0.9.15",
+    "source_commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+    "image": "ferrumedge/ferrum-edge@sha256:29b468dfeea13b1ecaac8dfbc7e019f310e71e647611d43800a1dc64436eaca3",
     "mode": "file"
   },
   "edge_support": {
     "policy": "The latest Ferrum Edge release and the release before it. Older releases are unsupported.",
     "tested": [
       {
+        "release": "v0.9.15",
+        "source_commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+        "image": "ferrumedge/ferrum-edge@sha256:29b468dfeea13b1ecaac8dfbc7e019f310e71e647611d43800a1dc64436eaca3"
+      },
+      {
         "release": "v0.9.14",
         "source_commit": "9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d",
         "image": "ferrumedge/ferrum-edge@sha256:15442f1b1d1758023fe871fe57be50f19caf34bbe6c499a6812f4ffd0da5e3f8"
-      },
-      {
-        "release": "v0.9.13",
-        "source_commit": "9b83115de7ec23ab51ec4feae6bed65e596db425",
-        "image": "ferrumedge/ferrum-edge@sha256:6caa0987adb4c0a3a368fcd800bb0459cff3d3e219522e2e9c56280205862e50"
       }
     ]
   },
