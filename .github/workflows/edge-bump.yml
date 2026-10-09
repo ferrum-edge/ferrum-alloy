@@ -24,7 +24,7 @@ jobs:
   bump:
     name: Propose the latest Ferrum Edge release
     if: github.repository == 'ferrum-edge/ferrum-alloy'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: write # push the bump branch
