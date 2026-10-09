@@ -49,7 +49,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
+    # Preserve the required status context configured in the main ruleset.
+    # This display name is historical; runs-on below pins Ubuntu 26.04.
+    name: Test (${{ matrix.os == 'ubuntu-26.04' && 'ubuntu-latest' || matrix.os }})
     strategy:
       fail-fast: false
       matrix:
