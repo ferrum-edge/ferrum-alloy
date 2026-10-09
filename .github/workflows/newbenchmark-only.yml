@@ -1,6 +1,11 @@
 name: Hosted benchmark qualification
 
 on:
+  # Qualify runner/workflow changes with the bounded preparation run before
+  # landing them. The full manual matrix remains restricted to main.
+  pull_request:
+    paths:
+      - '.github/workflows/newbenchmark-only.yml'
   # The bounded preparation run, weekly on main (Mondays 04:17 UTC). It is
   # experimental evidence, not a pull request gate.
   schedule:
@@ -17,9 +22,9 @@ concurrency:
 
 jobs:
   qualification:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     name: Shared Linux experimental evidence (not dedicated acceptance)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 210 || 60 }}
     env:
       CARGO_TERM_COLOR: always
