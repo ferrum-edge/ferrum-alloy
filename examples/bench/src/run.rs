@@ -455,19 +455,25 @@ mod tests {
     /// not by this window.
     const HEALTH_SECONDS: f64 = 5.0;
 
-    /// How long a budgeted run's client driver may take.
-    const HEALTH_TIMEOUT: Duration = Duration::from_secs(15);
+    /// Time allowed per exchange for the test-only watchdog around budgeted runs.
+    const HEALTH_TIMEOUT_PER_EXCHANGE: Duration = Duration::from_secs(5);
 
     /// Fail a budgeted run that stalls, rather than hang the test binary.
     pub(super) async fn bounded<T>(
         driven: impl std::future::Future<Output = Result<T, Failure>>,
         budget: Option<usize>,
     ) -> Result<T, Failure> {
-        if budget.is_none() {
+        let Some(budget) = budget else {
             return driven.await;
-        }
-        let result = tokio::time::timeout(HEALTH_TIMEOUT, driven).await;
-        result.map_err(|_| "the budgeted run exceeded its 15 s bound")?
+        };
+        // The driver runs one preparation exchange and two budgeted phases.
+        // Scale the watchdog with that finite work so slow shared runners do
+        // not fail on an arbitrary wall-clock limit.
+        let exchanges = budget.saturating_mul(2).saturating_add(1);
+        let exchanges = u32::try_from(exchanges).unwrap_or(u32::MAX);
+        let timeout = HEALTH_TIMEOUT_PER_EXCHANGE.saturating_mul(exchanges);
+        let result = tokio::time::timeout(timeout, driven).await;
+        result.map_err(|_| "the budgeted run exceeded its exchange-scaled bound")?
     }
 
     fn options(seconds: f64) -> RunOptions {
