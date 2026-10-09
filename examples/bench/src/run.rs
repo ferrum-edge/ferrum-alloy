@@ -463,14 +463,15 @@ mod tests {
         driven: impl std::future::Future<Output = Result<T, Failure>>,
         budget: Option<usize>,
     ) -> Result<T, Failure> {
-        if budget.is_none() {
+        let Some(budget) = budget else {
             return driven.await;
-        }
+        };
         // The driver runs one preparation exchange and two budgeted phases.
         // Scale the watchdog with that finite work so slow shared runners do
         // not fail on an arbitrary wall-clock limit.
         let exchanges = budget.saturating_mul(2).saturating_add(1);
-        let timeout = HEALTH_TIMEOUT_PER_EXCHANGE.saturating_mul(exchanges as u32);
+        let exchanges = u32::try_from(exchanges).unwrap_or(u32::MAX);
+        let timeout = HEALTH_TIMEOUT_PER_EXCHANGE.saturating_mul(exchanges);
         let result = tokio::time::timeout(timeout, driven).await;
         result.map_err(|_| "the budgeted run exceeded its exchange-scaled bound")?
     }
