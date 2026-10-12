@@ -67,11 +67,13 @@ mod tests {
     fn report_values_cannot_add_lines_to_printed_diagnoses() {
         let render = |value: &str| {
             let mut report = DiagnosticReport::new(Collection {
+                unrecognized: std::collections::BTreeMap::new(),
                 collector: Producer {
                     kind: ProducerKind::Collector,
                     name: value.into(),
                     version: None,
                     instance: None,
+                    unrecognized: std::collections::BTreeMap::new(),
                 },
                 method: CollectionMethod::Fixture,
                 verification: Verification::Unverified,

@@ -419,6 +419,50 @@ async fn management_requires_the_token_for_detail_and_metrics() {
 }
 
 #[tokio::test]
+async fn panicking_readiness_checks_fail_sanitized_not_unwind() {
+    // Both panic sites: constructing the check future and polling it. The
+    // panic payload must never reach the client, and liveness keeps working.
+    let app = AlloyApp::new("core-test")
+        .router(router())
+        .readiness_check(
+            "sync-panic",
+            || -> std::future::Ready<Result<(), CheckError>> {
+                panic!("sync secret panic payload")
+            },
+        )
+        .readiness_check("async-panic", || async {
+            let result: Result<(), CheckError> = panic!("async secret panic payload");
+            result
+        });
+    let server = start(app, config()).await;
+
+    let ready = fetch(&server.url("/readyz")).await;
+    assert_eq!(ready.status, 503);
+    assert_eq!(ready.json(), serde_json::json!({ "status": "not_ready" }));
+
+    let bearer = format!("Bearer {TOKEN}");
+    let health = fetch_with(
+        &server.management_url("/health"),
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(health.status, 503);
+    let text = health.text();
+    assert!(text.contains("readiness check panicked"), "{text}");
+    assert!(
+        !text.contains("secret panic payload"),
+        "panic payload leaked: {text}"
+    );
+
+    let live = fetch(&server.management_url("/livez")).await;
+    assert_eq!(
+        live.status, 200,
+        "liveness still answers after readiness panics"
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn readiness_checks_are_cached_and_single_flight() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);

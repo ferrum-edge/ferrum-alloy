@@ -332,10 +332,7 @@ impl JwtVerifier {
             .ok_or_else(|| AlloyError::Integration("auth.jwt.jwks_url is required".into()))?;
         let jwks_url = url::Url::parse(url_text)
             .map_err(|e| AlloyError::Integration(format!("auth.jwt.jwks_url: {e}")))?;
-        let loopback = jwks_url
-            .host_str()
-            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "[::1]");
-        if jwks_url.scheme() != "https" && !(jwks_url.scheme() == "http" && loopback) {
+        if !crate::config::jwks_url_allowed(url_text) {
             return Err(AlloyError::Integration(
                 "auth.jwt.jwks_url must use https (http is allowed only for loopback)".into(),
             ));

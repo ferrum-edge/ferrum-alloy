@@ -767,6 +767,58 @@ impl JwtSettings {
     }
 }
 
+/// The one JWKS URL policy shared by configuration validation and
+/// `JwtVerifier::new`: an `https` URL with a host, or `http` only with an
+/// exact loopback host (`localhost`, `127.0.0.1`, or `[::1]` — a host that
+/// merely starts with one of those spellings does not qualify). Parsed by
+/// hand because this module compiles without the `jwt` feature (and its
+/// `url` dependency); anything malformed is rejected, matching the
+/// verifier's fail-closed construction.
+pub(crate) fn jwks_url_allowed(url_text: &str) -> bool {
+    if url_text
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return false;
+    }
+    let Some((scheme, rest)) = url_text.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let (host, port) = if let Some(v6) = host_port.strip_prefix('[') {
+        let Some((host, after)) = v6.split_once(']') else {
+            return false;
+        };
+        let port = if after.is_empty() {
+            None
+        } else if let Some(p) = after.strip_prefix(':') {
+            Some(p)
+        } else {
+            return false;
+        };
+        (host, port)
+    } else {
+        match host_port.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (host_port, None),
+        }
+    };
+    if host.is_empty() {
+        return false;
+    }
+    if let Some(p) = port
+        && (p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
+    if scheme.eq_ignore_ascii_case("https") {
+        return true;
+    }
+    scheme.eq_ignore_ascii_case("http")
+        && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1")
+}
+
 fn default_algorithms() -> Vec<String> {
     vec!["RS256".to_owned()]
 }
@@ -1457,6 +1509,21 @@ impl AlloyConfig {
         if server.max_header_bytes > u32::MAX as usize {
             error("server.max_header_bytes is too large".into());
         }
+        // Both counts become Tokio semaphore permits; `Semaphore::new`
+        // panics above `MAX_PERMITS`, so reject them here instead of
+        // panicking during limiter/listener construction.
+        if server.max_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            error(format!(
+                "server.max_connections must not exceed {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            ));
+        }
+        if server.max_in_flight_requests > tokio::sync::Semaphore::MAX_PERMITS {
+            error(format!(
+                "server.max_in_flight_requests must not exceed {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            ));
+        }
         for (name, path) in [
             ("health.liveness_path", &self.health.liveness_path),
             ("health.readiness_path", &self.health.readiness_path),
@@ -1677,10 +1744,10 @@ impl AlloyConfig {
             match &jwt.jwks_url {
                 None => error("auth.jwt.jwks_url is required".into()),
                 Some(url) => {
-                    let loopback_http = url.starts_with("http://127.0.0.1")
-                        || url.starts_with("http://localhost")
-                        || url.starts_with("http://[::1]");
-                    if !url.starts_with("https://") && !loopback_http {
+                    // The same parsed policy `JwtVerifier::new` applies, so a
+                    // configuration this check accepts cannot fail later at
+                    // verifier construction (and vice versa).
+                    if !jwks_url_allowed(url) {
                         error(
                             "auth.jwt.jwks_url must use https (http is allowed only for loopback)"
                                 .into(),

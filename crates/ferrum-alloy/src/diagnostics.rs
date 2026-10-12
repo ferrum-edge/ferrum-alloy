@@ -1227,11 +1227,13 @@ fn report(service: &str, found: &Found) -> DiagnosticReport {
         ));
     }
     let mut report = DiagnosticReport::new(Collection {
+        unrecognized: std::collections::BTreeMap::new(),
         collector: Producer {
             kind: ProducerKind::Alloy,
             name: "ferrum-alloy".to_owned(),
             version: None,
             instance: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         method: CollectionMethod::LiveExport,
         verification: Verification::Unverified,
@@ -1262,6 +1264,7 @@ fn base(
     Observation {
         id: format!("alloy:{span_id}:{suffix}"),
         producer: Producer {
+            unrecognized: std::collections::BTreeMap::new(),
             kind: ProducerKind::Alloy,
             name: "ferrum-alloy-telemetry".to_owned(),
             version: None,

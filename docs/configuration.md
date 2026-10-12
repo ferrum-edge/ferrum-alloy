@@ -300,7 +300,7 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 |---|---|---|
 | `enabled` | `false` | Export traces over OTLP/HTTP protobuf. |
 | `endpoint` | see `OTEL_*` | Full traces URL. Must be `http(s)` with no credentials in the URL. |
-| `timeout_ms` | `10000` | Per-export timeout including retries. |
+| `timeout_ms` | `10000` | Per-request export timeout. Retries only start (and back off) within this budget, but an in-flight retry is not cancelled when the budget ends, so one export can take up to roughly twice as long; it is not a hard whole-export maximum. |
 | `max_export_retries` | `2` | Retries for retryable failures (exponential backoff). |
 | `sampling_ratio` | `1.0` | Root trace sampling. Accepted remote parents keep their own decision. |
 | `max_queue_spans` | `2048` | Queue bound. Excess spans are dropped and counted (`queue_full`). |

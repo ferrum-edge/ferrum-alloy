@@ -119,6 +119,43 @@ fn exposed_operations_get_default_annotations_and_keep_their_own() {
 }
 
 #[test]
+fn referenced_path_items_get_default_annotations_too() {
+    // Inline and locally referenced Path Items are filled consistently;
+    // a target shared by two paths keeps its explicit hints.
+    let mut document = json!({
+        "paths": {
+            "/inline": { "get": { X_FERRUM_MCP: true } },
+            "/shared-a": { "$ref": "#/components/pathItems/Shared" },
+            "/shared-b": { "$ref": "#/components/pathItems/Shared" }
+        },
+        "components": {
+            "pathItems": {
+                "Shared": {
+                    "get": { X_FERRUM_MCP: true },
+                    "delete": {
+                        X_FERRUM_MCP: { "expose": true, "annotations": { "readOnlyHint": false } }
+                    }
+                }
+            }
+        }
+    });
+    fill_default_annotations(&mut document);
+    assert_eq!(
+        document["paths"]["/inline"]["get"][X_FERRUM_MCP],
+        json!({ "expose": true, "annotations": { "readOnlyHint": true } })
+    );
+    let shared = &document["components"]["pathItems"]["Shared"];
+    assert_eq!(
+        shared["get"][X_FERRUM_MCP],
+        json!({ "expose": true, "annotations": { "readOnlyHint": true } })
+    );
+    assert_eq!(
+        shared["delete"][X_FERRUM_MCP]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true })
+    );
+}
+
+#[test]
 fn the_manifest_selects_only_declared_operations() {
     let enabled = manifest_with("[agents]\nenabled = true\n");
     let mut document = orders();

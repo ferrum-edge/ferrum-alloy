@@ -29,6 +29,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
+use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::config::Secret;
 use crate::health::{self, Readiness};
@@ -212,10 +213,14 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
         router = router.route(crate::diagnostics::ROUTE, get(handler));
     }
     let limiter = state.rate_limiter.clone();
+    // Same sanitized panic boundary as the application router: a panicking
+    // handler (for example a readiness callback) becomes a generic 500,
+    // never an unwind carrying the panic message to the client.
     let router = router
         .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
         .fallback(|| async { Problem::new(ProblemKind::RouteNotFound).into_response() })
-        .with_state(state);
+        .with_state(state)
+        .layer(CatchPanicLayer::custom(crate::normalize::panic_response));
     let Some(limiter) = limiter else {
         return router;
     };

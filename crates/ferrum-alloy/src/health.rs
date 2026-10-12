@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt as _;
 use http::StatusCode;
 use http::header::{CACHE_CONTROL, HeaderValue};
 use serde::Serialize;
@@ -161,16 +162,24 @@ impl Readiness {
         };
         let results = futures_util::future::join_all(self.checks.iter().map(|(name, check)| {
             let name = name.clone();
-            let future = check.check();
             let timeout = self.timeout;
             async move {
                 let started = Instant::now();
-                let outcome = tokio::time::timeout(timeout, future).await;
+                // A callback may panic while constructing its future or
+                // while that future is polled. Contain both: the check
+                // fails with a sanitized message (never the panic payload)
+                // instead of unwinding the readiness request.
+                let outcome = std::panic::AssertUnwindSafe(async {
+                    tokio::time::timeout(timeout, check.check()).await
+                })
+                .catch_unwind()
+                .await;
                 let latency_ms = started.elapsed().as_secs_f64() * 1_000.0;
                 let error = match outcome {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) => Some(error.0),
-                    Err(_) => Some(format!("timed out after {} ms", timeout.as_millis())),
+                    Ok(Ok(Ok(()))) => None,
+                    Ok(Ok(Err(error))) => Some(error.0),
+                    Ok(Err(_)) => Some(format!("timed out after {} ms", timeout.as_millis())),
+                    Err(_) => Some("readiness check panicked".to_string()),
                 };
                 CheckResult {
                     name,

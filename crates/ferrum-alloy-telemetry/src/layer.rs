@@ -434,6 +434,12 @@ where
         }
         request.extensions_mut().insert(route_slot.clone());
 
+        // The bridge timestamps the span at creation, but every duration
+        // below is measured from `start` (middleware entry, before the
+        // classifier/header/trace preparation above). Export that offset
+        // so importers can anchor the monotonic measurements to the same
+        // instant the span claims to start.
+        let preparation_ms = millis(start.elapsed());
         let span = tracing::info_span!(
             target: "ferrum_alloy::http",
             parent: None,
@@ -456,6 +462,7 @@ where
             alloy.diagnostic_id = %diagnostic_id,
             alloy.trace.parent = trace.decision.as_str(),
             alloy.peer.trust = peer_trust.label(),
+            alloy.server.preparation_ms = preparation_ms,
             alloy.server.time_to_headers_ms = Empty,
             alloy.server.body_duration_ms = Empty,
             alloy.server.duration_ms = Empty,
