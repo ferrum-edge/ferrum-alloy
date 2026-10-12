@@ -196,7 +196,7 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.15`, unchanged from `contracts-edge-0.9.8`. They are
+/// `contracts-edge-0.9.17`. They are
 /// recorded here only to detect drift and are never rendered: rule
 /// `alloy.r007` renders the version-neutral explanations in
 /// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
@@ -210,7 +210,7 @@ const PINNED_GATEWAY_ERROR_MEANINGS: &[(&str, &str)] = &[
     ),
     (
         "backend_timeout",
-        "A backend held the request (it accepted the connection and was sent the request) but did not answer in time. Never used for a timeout no backend held.",
+        "Backend dispatch did not answer before its deadline (504). A route-total deadline is a backend timeout once send() begins, including TCP/TLS connection establishment; remote acceptance or receipt of request bytes is not implied. This clarifies existing behavior.",
     ),
     (
         "backend_error",
@@ -231,7 +231,11 @@ const PINNED_GATEWAY_ERROR_MEANINGS: &[(&str, &str)] = &[
     ),
     (
         "request_timeout",
-        "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before any backend held the request: during the client upload, a gateway-local phase, admission, or retry backoff. New in v0.9.8 (#5762).",
+        "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before backend dispatch began: client upload, a gateway-local phase, admission, or retry backoff (504). The route timeout phase is before_dispatch or retry_backoff. Introduced in v0.9.8; v0.9.17 clarifies existing behavior.",
+    ),
+    (
+        "loop_detected",
+        "The received X-Ferrum-Hops count reached FERRUM_MAX_PROXY_HOPS; the gateway refuses before routing and contacts no backend. Only the refusing hop writes this token; an outer gateway relaying 508 uses backend_error. HTTP 508 is never retried, regardless of retryable_status_codes. Native gRPC returns trailers-only FAILED_PRECONDITION with no HTTP 5xx token; malformed hop fields return 400 or native gRPC INVALID_ARGUMENT with no token. The metrics label is reserved: this fence currently emits no transaction summary/error-class metric row.",
     ),
 ];
 
@@ -286,8 +290,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.15");
-    assert_eq!(pin["commit"], "6fb64c5dc2e014204c17609fc717d976f3b4589e");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.17");
+    assert_eq!(pin["commit"], "f7ba1a9b9885900d1e110f76d38e37a02eda13c8");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
@@ -324,6 +328,23 @@ fn ferrum_contracts_pin_matches_the_vendored_files() {
         extra.is_empty(),
         "vendored files absent from PIN: {extra:?}"
     );
+}
+
+#[test]
+fn rejection_phases_match_the_pinned_schema() {
+    let schema = pinned_json("schemas/diagnostic-ref/v1.schema.json");
+    let canonical: BTreeSet<String> =
+        schema["$defs"]["Detail"]["properties"]["rejection_phase"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+    let local: BTreeSet<String> = ferrum_alloy_diagnostics::edge_record::REJECTION_PHASES
+        .iter()
+        .map(|phase| (*phase).to_owned())
+        .collect();
+    assert_eq!(canonical, local, "REJECTION_PHASES drifted from the pin");
 }
 
 #[test]

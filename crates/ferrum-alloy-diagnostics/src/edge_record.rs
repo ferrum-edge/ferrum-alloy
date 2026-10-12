@@ -81,6 +81,7 @@ pub const REJECTION_PHASES: &[&str] = &[
     "concurrency_limit",
     "overload",
     "config_stale",
+    "loop_detected",
 ];
 /// Schema vocabulary for route deadlines.
 pub const ROUTE_TIMEOUT_PHASES: &[&str] = &["before_dispatch", "dispatch", "retry_backoff"];

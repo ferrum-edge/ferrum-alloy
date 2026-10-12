@@ -307,4 +307,8 @@ pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
         "request_timeout",
         "A gateway route's total request deadline expired before any backend held the request.",
     ),
+    (
+        "loop_detected",
+        "The gateway refused the request before routing because it had already traversed the maximum number of gateway hops; no backend was contacted.",
+    ),
 ];

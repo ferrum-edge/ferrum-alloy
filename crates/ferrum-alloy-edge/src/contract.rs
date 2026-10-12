@@ -44,6 +44,7 @@ pub const GATEWAY_ERROR_TOKENS: &[&str] = &[
     "config_stale",
     "concurrency_limit",
     "request_timeout",
+    "loop_detected",
 ];
 
 /// Edge `otel_tracing` span attributes Alloy's diagnostics interpret.
