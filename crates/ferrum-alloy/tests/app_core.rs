@@ -431,8 +431,7 @@ async fn panicking_readiness_checks_fail_sanitized_not_unwind() {
             },
         )
         .readiness_check("async-panic", || async {
-            let result: Result<(), CheckError> = panic!("async secret panic payload");
-            result
+            panic!("async secret panic payload")
         });
     let server = start(app, config()).await;
 

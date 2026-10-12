@@ -955,6 +955,7 @@ const REQUEST_TIMINGS: &[&str] = &[
     "gateway.latency.processing_ms",
     "gateway.overhead_ms",
     "gateway.plugin_execution_ms",
+    "alloy.server.preparation_ms",
     "alloy.server.time_to_headers_ms",
     "alloy.server.body_duration_ms",
     "alloy.server.duration_ms",
