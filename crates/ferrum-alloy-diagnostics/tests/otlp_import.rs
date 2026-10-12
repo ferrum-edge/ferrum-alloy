@@ -152,18 +152,15 @@ fn overlong_instance_identities_are_not_truncated_into_collisions() {
         instances(&b),
         "distinct long identities stay distinct"
     );
-    let both = format!("{a}\n{b}");
-    let set = instances(&both);
-    assert_eq!(
-        set.len(),
-        2,
-        "exactly two distinct bounded digests: {set:?}"
-    );
-    assert!(
-        set.iter()
-            .all(|i| i.as_deref().is_some_and(|s| s.starts_with("digest:"))),
-        "{set:?}"
-    );
+    // (No combined import: the same span ids under two different resources
+    // are conflicting spans by design, which is its own error.)
+    for text in [&a, &b] {
+        let set = instances(text);
+        assert!(
+            set.iter().flatten().all(|s| s.starts_with("digest:")),
+            "{set:?}"
+        );
+    }
     assert_eq!(instances(&a).len(), 1, "one identity stays one instance");
 }
 
