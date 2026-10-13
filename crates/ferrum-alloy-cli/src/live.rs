@@ -63,16 +63,18 @@ pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliErro
     Ok(Some(token.to_owned()))
 }
 
-/// Whether `url` names this host by a loopback address or `localhost`.
+/// Whether `url` names this host by a literal loopback address. DNS names,
+/// `localhost` included, do not qualify: the resolver decides where they
+/// connect, and a credential sent over plain http must not leave this host.
 fn is_loopback(url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    let ip = host.trim_start_matches('[').trim_end_matches(']');
-    ip.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    // The parser canonicalizes IP hosts (dotted-quad IPv4, bracketed IPv6);
+    // a domain never parses as an address.
+    url.host_str().is_some_and(|host| {
+        host.trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    })
 }
 
 /// The report URL of `request_id` under the management listener at `base`.
@@ -206,8 +208,18 @@ mod tests {
         let proxied = url("https://ops.example/svc/", true).unwrap();
         let expected = "https://ops.example/svc/diagnostics/v1/requests/req-1";
         assert_eq!(proxied, expected);
-        assert!(url("http://localhost:9090", true).is_ok());
         assert!(url("http://[::1]:9090", true).is_ok());
+        assert!(url("http://127.0.0.2:9090", true).is_ok());
+        assert!(url("https://localhost:9090", true).is_ok());
+        // A DNS name never receives the credential over plain http (#181).
+        for host in ["localhost", "LocalHost", "localhost.", "api.localhost"] {
+            let error = url(&format!("http://{host}:9090"), true).unwrap_err();
+            assert!(error.contains("loopback"), "{host}: {error}");
+            assert!(
+                url(&format!("http://{host}:9090"), false).is_ok(),
+                "{host}: no credential"
+            );
+        }
     }
 
     #[test]

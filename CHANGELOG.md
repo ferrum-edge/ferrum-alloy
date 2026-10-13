@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
+  loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
+  `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
+  connects (#181). Use `http://127.0.0.1:<port>`. An `http` JWKS is fetched
+  directly, never through an environment proxy (`HTTP_PROXY`). `ferrum-alloy diagnose --url`
+  likewise sends its credential over plain `http` only to a literal loopback
+  address, no longer to `localhost`.
+- **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
+  when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
+  not local (a Unix socket or a literal loopback address; `localhost` and
+  other DNS names are not), so a remote
+  database never silently falls back to plaintext (#182). An explicit
+  `sslmode=disable` or `allow` to a remote host is kept and logs a warning.
 - `ferrum-alloy openapi export` without `--input` reads at most 16 MiB of the
   project binary's standard output, the `--input` limit. When a binary prints
   more, the export closes the pipe, kills the process it spawned (on Windows

@@ -781,19 +781,20 @@ impl JwtSettings {
 }
 
 /// The JWKS URL transport policy, applied to the parsed URL that the
-/// verifier also fetches: `https` with a host, or `http` only to an exact
-/// loopback host (`localhost`, `127.0.0.1`, or `[::1]`). A host that merely
-/// starts with one of those spellings does not qualify.
+/// verifier also fetches: `https` with a host, or `http` only to the exact
+/// literal loopback addresses `127.0.0.1` and `[::1]`. DNS names never
+/// qualify for `http`, `localhost` included: where they connect depends on
+/// the resolver, and keys fetched in cleartext from an off-host answer would
+/// let whoever controls it forge tokens (#181). A host that merely starts
+/// with a loopback spelling does not qualify either.
 #[cfg(feature = "http-client")]
 pub(crate) fn jwks_url_policy(url: &url::Url) -> bool {
     match url.scheme() {
         "https" => url.host().is_some(),
         "http" => match url.host() {
-            // The URL parser lowercases domains.
-            Some(url::Host::Domain(host)) => host == "localhost",
             Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
             Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
-            None => false,
+            Some(url::Host::Domain(_)) | None => false,
         },
         _ => false,
     }
@@ -908,7 +909,8 @@ fn jwks_url_allowed_without_parser(url_text: &str) -> bool {
                 Err(_) => return false,
             }
         } else {
-            host.eq_ignore_ascii_case("localhost")
+            // A DNS name, `localhost` included, never qualifies for `http`.
+            false
         }
     };
     https || loopback
@@ -1847,7 +1849,7 @@ impl AlloyConfig {
                     // versa).
                     if !jwks_url_allowed(url) {
                         error(
-                            "auth.jwt.jwks_url must use https (http is allowed only for loopback)"
+                            "auth.jwt.jwks_url must use https (http is allowed only for the literal loopback addresses 127.0.0.1 and [::1], not localhost)"
                                 .into(),
                         );
                     }
@@ -2045,15 +2047,20 @@ mod jwks_url_tests {
         "https://user@idp.example.com/jwks",
         "HTTPS://IDP.EXAMPLE.COM/jwks",
         "http://127.0.0.1:8080/jwks",
-        "http://localhost/jwks",
-        "http://LocalHost:80/jwks",
-        "http://user@localhost/jwks",
+        "http://user@127.0.0.1/jwks",
         "http://[::1]:8080/jwks",
         "http://[0:0:0:0:0:0:0:1]/jwks",
+        "https://localhost/jwks",
     ];
 
     const REJECTED: &[&str] = &[
         "http://idp.example.com/jwks",
+        // DNS names never qualify for plaintext, `localhost` included (#181).
+        "http://localhost/jwks",
+        "http://LocalHost:80/jwks",
+        "http://user@localhost/jwks",
+        "http://localhost./jwks",
+        "http://api.localhost/jwks",
         "http://localhost.evil.example/jwks",
         "http://127.0.0.1.evil.example/jwks",
         "http://user@localhost.evil.example/jwks",

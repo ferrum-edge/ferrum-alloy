@@ -60,6 +60,72 @@ async fn invalid_urls_fail_without_revealing_the_secret() {
     assert!(postgres::connect(&settings("postgres://u:hunter2@[::1:bad/x"), "test").is_err());
 }
 
+#[tokio::test]
+async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
+    use sqlx::postgres::PgSslMode;
+    // `PgSslMode` has no `PartialEq`; compare its `Debug` names.
+    let mode = |url: &str| {
+        let mode = postgres::connect(&settings(url), "test")
+            .unwrap()
+            .connect_options()
+            .get_ssl_mode();
+        format!("{mode:?}")
+    };
+    let name = |mode: PgSslMode| format!("{mode:?}");
+    // `prefer` would fall back to plaintext: raised to `require` (#182).
+    for remote in [
+        "postgres://u:p@db.example/x?sslmode=prefer",
+        "postgres://u:p@10.0.0.5:5432/x?sslmode=prefer",
+        "postgres://u:p@127.0.0.1.example/x?sslmode=prefer",
+        // A DNS name is not a destination check, `localhost` included.
+        "postgres://u:p@localhost/x?sslmode=prefer",
+        "postgres://u:p@LOCALHOST/x?sslmode=prefer",
+    ] {
+        assert_eq!(mode(remote), name(PgSslMode::Require), "{remote}");
+    }
+    // Without `sslmode` in the URL, SQLx takes `PGSSLMODE`, which is kept as
+    // set; only its absence (`prefer`) is raised.
+    if std::env::var_os("PGSSLMODE").is_none() {
+        for remote in ["postgres://u:p@db.example/x", "postgres://u:p@localhost/x"] {
+            assert_eq!(mode(remote), name(PgSslMode::Require), "{remote}");
+        }
+    }
+    // Stronger and explicit plaintext modes are kept as written.
+    for (url, expected) in [
+        (
+            "postgres://u:p@db.example/x?sslmode=verify-full",
+            PgSslMode::VerifyFull,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=verify-ca",
+            PgSslMode::VerifyCa,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=require",
+            PgSslMode::Require,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=disable",
+            PgSslMode::Disable,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=allow",
+            PgSslMode::Allow,
+        ),
+    ] {
+        assert_eq!(mode(url), name(expected), "{url}");
+    }
+    // Local development is unaffected.
+    for local in [
+        "postgres://u:p@127.0.0.1:5432/x?sslmode=prefer",
+        "postgres://u:p@127.0.0.2/x?sslmode=prefer",
+        "postgres://u:p@[::1]:5432/x?sslmode=prefer",
+        "postgres:///x?host=/var/run/postgresql&sslmode=prefer",
+    ] {
+        assert_eq!(mode(local), name(PgSslMode::Prefer), "{local}");
+    }
+}
+
 #[test]
 fn connect_outside_a_runtime_is_an_error_not_a_panic() {
     let error = postgres::connect(

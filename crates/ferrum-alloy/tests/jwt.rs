@@ -1050,13 +1050,16 @@ fn jwks_url_check_and_verifier_agree() {
         "https://idp.example.com/jwks",
         "https://user@idp.example.com:8443/jwks",
         "http://127.0.0.1:8080/jwks",
-        "http://localhost/jwks",
-        "http://LOCALHOST/jwks",
-        "http://user@localhost/jwks",
+        "http://user@127.0.0.1/jwks",
         "http://[::1]:8080/jwks",
+        "https://localhost/jwks",
     ];
     let rejected = [
         "http://idp.example.com/jwks",
+        // DNS names never qualify for plaintext, `localhost` included (#181).
+        "http://localhost/jwks",
+        "http://LOCALHOST/jwks",
+        "http://user@localhost/jwks",
         "http://localhost.evil.example/jwks",
         "http://127.0.0.1.evil.example/jwks",
         "http://localhost@idp.example/jwks",
@@ -1089,6 +1092,60 @@ fn jwks_url_check_and_verifier_agree() {
     for url in rejected {
         assert_eq!(check(url), (false, false), "{url}");
     }
+}
+
+/// An `http` JWKS (literal loopback only) is fetched directly, never through
+/// an environment proxy that could serve its own keys (#181). Proxy variables
+/// are process-wide, so the fetch runs in a child test process with them set
+/// to a proxy that accepts connections but never answers.
+#[test]
+fn an_http_jwks_is_never_fetched_through_an_environment_proxy() {
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "jwks_fetch_with_proxy_variables_child",
+            "--include-ignored",
+            "--test-threads=1",
+        ])
+        .env("ALLOY_JWKS_PROXY_TEST_CHILD", "1")
+        .env("HTTP_PROXY", &proxy_url)
+        .env("http_proxy", &proxy_url)
+        .env("ALL_PROXY", &proxy_url)
+        .env("all_proxy", &proxy_url)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env_remove("REQUEST_METHOD")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child test failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        matches!(proxy.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the JWKS fetch went through the proxy"
+    );
+}
+
+/// Run only by [`an_http_jwks_is_never_fetched_through_an_environment_proxy`].
+#[tokio::test]
+#[ignore = "run in a child process by an_http_jwks_is_never_fetched_through_an_environment_proxy"]
+async fn jwks_fetch_with_proxy_variables_child() {
+    if std::env::var_os("ALLOY_JWKS_PROXY_TEST_CHILD").is_none() {
+        return;
+    }
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let router = protected(&verifier);
+    let (status, body, _) = call(&router, Some(&key.sign(&claims(), Some("k1")))).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(jwks.fetches(), 1, "fetched from the JWKS server directly");
 }
 
 #[test]
