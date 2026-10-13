@@ -63,44 +63,49 @@ async fn invalid_urls_fail_without_revealing_the_secret() {
 #[tokio::test]
 async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
     use sqlx::postgres::PgSslMode;
+    // `PgSslMode` has no `PartialEq`; compare its `Debug` names.
     let mode = |url: &str| {
-        postgres::connect(&settings(url), "test")
+        let mode = postgres::connect(&settings(url), "test")
             .unwrap()
             .connect_options()
-            .get_ssl_mode()
+            .get_ssl_mode();
+        format!("{mode:?}")
     };
+    let name = |mode: PgSslMode| format!("{mode:?}");
     // Unset or `prefer` would fall back to plaintext: raised to `require` (#182).
-    assert_eq!(mode("postgres://u:p@db.example/x"), PgSslMode::Require);
-    assert_eq!(
-        mode("postgres://u:p@db.example/x?sslmode=prefer"),
-        PgSslMode::Require
-    );
-    assert_eq!(mode("postgres://u:p@10.0.0.5:5432/x"), PgSslMode::Require);
-    assert_eq!(
-        mode("postgres://u:p@127.0.0.1.example/x"),
-        PgSslMode::Require
-    );
+    for remote in [
+        "postgres://u:p@db.example/x",
+        "postgres://u:p@db.example/x?sslmode=prefer",
+        "postgres://u:p@10.0.0.5:5432/x",
+        "postgres://u:p@127.0.0.1.example/x",
+    ] {
+        assert_eq!(mode(remote), name(PgSslMode::Require), "{remote}");
+    }
     // Stronger and explicit plaintext modes are kept as written.
-    assert_eq!(
-        mode("postgres://u:p@db.example/x?sslmode=verify-full"),
-        PgSslMode::VerifyFull
-    );
-    assert_eq!(
-        mode("postgres://u:p@db.example/x?sslmode=verify-ca"),
-        PgSslMode::VerifyCa
-    );
-    assert_eq!(
-        mode("postgres://u:p@db.example/x?sslmode=require"),
-        PgSslMode::Require
-    );
-    assert_eq!(
-        mode("postgres://u:p@db.example/x?sslmode=disable"),
-        PgSslMode::Disable
-    );
-    assert_eq!(
-        mode("postgres://u:p@db.example/x?sslmode=allow"),
-        PgSslMode::Allow
-    );
+    for (url, expected) in [
+        (
+            "postgres://u:p@db.example/x?sslmode=verify-full",
+            PgSslMode::VerifyFull,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=verify-ca",
+            PgSslMode::VerifyCa,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=require",
+            PgSslMode::Require,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=disable",
+            PgSslMode::Disable,
+        ),
+        (
+            "postgres://u:p@db.example/x?sslmode=allow",
+            PgSslMode::Allow,
+        ),
+    ] {
+        assert_eq!(mode(url), name(expected), "{url}");
+    }
     // Local development is unaffected.
     for local in [
         "postgres://u:p@127.0.0.1:5432/x?sslmode=prefer",
@@ -110,7 +115,7 @@ async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
         "postgres://u:p@LOCALHOST/x?sslmode=prefer",
         "postgres:///x?host=/var/run/postgresql&sslmode=prefer",
     ] {
-        assert_eq!(mode(local), PgSslMode::Prefer, "{local}");
+        assert_eq!(mode(local), name(PgSslMode::Prefer), "{local}");
     }
 }
 
