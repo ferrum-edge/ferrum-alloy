@@ -225,6 +225,7 @@ pub fn import(
     let (spans, duplicates) = drop_exact_duplicates(spans)?;
 
     let mut report = DiagnosticReport::new(Collection {
+        unrecognized: std::collections::BTreeMap::new(),
         collector,
         method: CollectionMethod::OtlpFileImport,
         verification: Verification::Unverified,
@@ -517,6 +518,7 @@ fn producer_for(
         name,
         version,
         instance,
+        unrecognized: std::collections::BTreeMap::new(),
     }
 }
 
@@ -531,7 +533,15 @@ fn attributes(value: Option<&Value>) -> BTreeMap<String, AttrValue> {
             continue;
         };
         let parsed = if let Some(s) = value.get("stringValue").and_then(Value::as_str) {
-            Some(AttrValue::Str(truncate(s)))
+            // Instance identity is compared for equality (same-clock
+            // decisions), so it must never be silently truncated into a
+            // value a different instance can also produce: overlong
+            // identities become a bounded deterministic digest instead.
+            if (key == "service.instance.id" || key == "host.name") && s.len() > MAX_ATTR_BYTES {
+                Some(AttrValue::Str(bounded_identity(s)))
+            } else {
+                Some(AttrValue::Str(truncate(s)))
+            }
         } else if let Some(v) = value.get("intValue") {
             match v {
                 Value::Number(n) => n.as_i64().map(AttrValue::Int),
@@ -555,6 +565,32 @@ fn attributes(value: Option<&Value>) -> BTreeMap<String, AttrValue> {
         }
     }
     out
+}
+
+/// A bounded, deterministic stand-in for an overlong instance identity:
+/// two FNV-1a/splitmix 64-bit halves over the full value, so equal
+/// identities stay equal and identities that merely share a long prefix
+/// stay distinct (up to a 128-bit collision, versus certain collision
+/// under truncation).
+fn bounded_identity(value: &str) -> String {
+    fn fnv1a(bytes: &[u8], offset: u64) -> u64 {
+        let mut hash = offset;
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash
+    }
+    fn splitmix(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    }
+    let bytes = value.as_bytes();
+    let lo = fnv1a(bytes, 0xcbf2_9ce4_8422_2325);
+    let hi = splitmix(lo ^ fnv1a(bytes, 0x8422_2325_cbf2_9ce4) ^ bytes.len() as u64);
+    format!("digest:{hi:016x}{lo:016x}")
 }
 
 fn truncate(value: &str) -> String {
@@ -602,25 +638,40 @@ fn interval(span: &RawSpan) -> Option<Interval> {
 /// Clock-reading slack allowed when fitting the header phase inside its span.
 const HEADER_PHASE_SLACK_NANOS: u64 = 1_000_000;
 
-/// The header phase of an Alloy SERVER span: from the span start (middleware
-/// entry) until the span start plus the measured time to headers.
+/// The header phase of an Alloy SERVER span: from middleware entry until
+/// entry plus the measured time to headers.
 ///
 /// The span stays open through the response body, so its end is never used
 /// as the headers boundary. Both inputs come from the same span of the same
 /// process. When the duration is missing, or does not fit inside the span,
 /// the interval stays unknown.
+///
+/// Durations are measured from middleware entry, but the tracing bridge
+/// timestamps the span at creation — after the layer's classifier/header/
+/// trace preparation. The producer exports that offset as
+/// `alloy.server.preparation_ms`; without it (older producers) the span
+/// start is taken as the anchor, as before.
 fn header_interval(span: &RawSpan, time_to_headers_ms: Option<f64>) -> Option<Interval> {
     let whole = interval(span)?;
     let nanos = time_to_headers_ms? * 1_000_000.0;
     if !nanos.is_finite() || nanos < 0.0 {
         return None;
     }
-    let end = whole.start_unix_nano.checked_add(nanos.round() as u64)?;
+    let preparation_nanos = match span
+        .attributes
+        .get("alloy.server.preparation_ms")
+        .and_then(AttrValue::as_f64)
+    {
+        Some(ms) if ms.is_finite() && ms > 0.0 => (ms * 1_000_000.0).round() as u64,
+        _ => 0,
+    };
+    let anchor = whole.start_unix_nano.saturating_sub(preparation_nanos);
+    let end = anchor.checked_add(nanos.round() as u64)?;
     if end > whole.end_unix_nano.saturating_add(HEADER_PHASE_SLACK_NANOS) {
         return None;
     }
     Some(Interval {
-        start_unix_nano: whole.start_unix_nano,
+        start_unix_nano: anchor,
         end_unix_nano: end,
     })
 }
@@ -957,10 +1008,16 @@ fn alloy_observations(span: &RawSpan, report: &mut DiagnosticReport) {
         name,
         leg,
     };
+    // A finalized Alloy SERVER span always carries the total duration, but
+    // one that ended before response headers (cancellation, service error)
+    // has no time-to-headers measurement. Gate on either attribute so the
+    // total duration and outcome survive import; the header/body phase
+    // observations stay absent (never zero) when unmeasured.
     if span.kind == SPAN_KIND_SERVER
-        && span
+        && (span
             .attributes
             .contains_key("alloy.server.time_to_headers_ms")
+            || span.attributes.contains_key("alloy.server.duration_ms"))
     {
         if let Some(mut o) = duration(
             d(
@@ -1005,6 +1062,10 @@ fn alloy_observations(span: &RawSpan, report: &mut DiagnosticReport) {
             ("http.route", "route"),
             ("alloy.trace.parent", "trace_parent"),
             ("alloy.peer.trust", "peer_trust"),
+            // The finalized body outcome (for example
+            // `cancelled_before_headers`) is service evidence even when no
+            // body duration was measured.
+            ("alloy.response.body.outcome", "body.outcome"),
         ] {
             if let Some(value) = span.attributes.get(from) {
                 response.attributes.insert(to.to_owned(), value.as_string());

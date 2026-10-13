@@ -95,10 +95,14 @@ pub struct Collection {
     /// Free-form, bounded notes from the collector.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// The component that produced an observation or assembled a report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Producer {
     /// Producer family.
     pub kind: ProducerKind,
@@ -111,10 +115,14 @@ pub struct Producer {
     /// intervals share a clock. Absent means "unknown instance".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance: Option<String>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// What the report is about.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Subject {
     /// W3C trace id (32 lowercase hex characters) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -128,6 +136,10 @@ pub struct Subject {
     /// Route template (never a raw path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// One collected fact: a measurement or an event.

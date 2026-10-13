@@ -594,6 +594,55 @@ fn a_flush_and_a_shutdown_queued_behind_a_blocked_export_both_complete() {
     assert!(matches!(after, Err(OTelSdkError::AlreadyShutdown)));
 }
 
+#[test]
+fn a_timed_out_shutdown_does_not_count_spans_the_worker_still_owns() {
+    let exporter = GatedExporter::default();
+    let shared = exporter.clone();
+    let mut config = config();
+    config.max_queue_spans = 8;
+    config.max_export_batch = 1;
+    let metrics = Arc::new(Metrics::default());
+    let factory = move || Ok(shared);
+    let processor = BoundedSpanProcessor::spawn(factory, &config, Arc::clone(&metrics)).unwrap();
+
+    processor.on_end(new_test_export_span_data());
+    exporter.wait_until_exporting();
+    // The export stays blocked past the shutdown timeout: the caller is
+    // released with a timeout, and the span is pending, not yet lost.
+    let result = processor.shutdown_with_timeout(Duration::from_millis(50));
+    assert!(
+        matches!(result, Err(OTelSdkError::Timeout(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        metrics.telemetry_spans_lost.get("shutdown"),
+        0,
+        "a live export is not a shutdown loss"
+    );
+    // Once released, the worker exports it and counts it exactly once.
+    exporter.open();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while metrics
+        .telemetry_spans_exported
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the released export never completed"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        metrics
+            .telemetry_spans_exported
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 0);
+    assert_eq!(metrics.telemetry_spans_lost.get("export_failed"), 0);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn the_byte_budget_bounds_queued_memory() {
     let mut config = config();

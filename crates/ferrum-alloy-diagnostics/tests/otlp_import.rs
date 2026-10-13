@@ -39,6 +39,7 @@ fn collector() -> Producer {
         name: "ferrum-alloy-cli".into(),
         version: None,
         instance: None,
+        unrecognized: std::collections::BTreeMap::new(),
     }
 }
 
@@ -113,6 +114,159 @@ fn imported_evidence_is_unverified_and_linked_by_parent_ids() {
             finding.code
         );
     }
+}
+
+#[test]
+fn overlong_instance_identities_are_not_truncated_into_collisions() {
+    // Two resources whose instance ids share their first 600 bytes must
+    // stay distinct producers (truncation at 512 bytes would merge them
+    // into one fake same-clock instance); the same long id twice stays equal.
+    let prefix = "i".repeat(600);
+    let with_instance = |instance: &str| -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for line in input().lines() {
+            let mut doc: Value = serde_json::from_str(line).unwrap();
+            for rs in doc["resourceSpans"].as_array_mut().unwrap() {
+                let attrs = rs["resource"]["attributes"].as_array_mut().unwrap();
+                attrs.retain(|a| a["key"] != "service.instance.id");
+                attrs.push(
+                    json!({"key": "service.instance.id", "value": {"stringValue": instance}}),
+                );
+            }
+            lines.push(doc.to_string());
+        }
+        lines.join("\n")
+    };
+    let instances = |text: &str| -> BTreeSet<Option<String>> {
+        let report = import(text, Some(OK_TRACE), collector(), &ImportLimits::default()).unwrap();
+        report
+            .observations
+            .iter()
+            .map(|o| o.producer.instance.clone())
+            .collect()
+    };
+    let a = with_instance(&format!("{prefix}-aaaa"));
+    let b = with_instance(&format!("{prefix}-bbbb"));
+    assert_ne!(
+        instances(&a),
+        instances(&b),
+        "distinct long identities stay distinct"
+    );
+    // (No combined import: the same span ids under two different resources
+    // are conflicting spans by design, which is its own error.)
+    for text in [&a, &b] {
+        let set = instances(text);
+        assert!(
+            set.iter().flatten().all(|s| s.starts_with("digest:")),
+            "{set:?}"
+        );
+    }
+    assert_eq!(instances(&a).len(), 1, "one identity stays one instance");
+}
+
+#[test]
+fn finalized_server_span_without_headers_keeps_its_total_duration() {
+    // Remove the header-phase measurements from the Alloy SERVER span and
+    // finalize it as cancelled before headers: the total duration and the
+    // outcome are still service evidence; the missing phases stay absent.
+    let mut lines: Vec<String> = Vec::new();
+    for line in input().lines() {
+        let mut doc: Value = serde_json::from_str(line).unwrap();
+        for rs in doc["resourceSpans"].as_array_mut().unwrap() {
+            for ss in rs["scopeSpans"].as_array_mut().unwrap() {
+                for span in ss["spans"].as_array_mut().unwrap() {
+                    if span["spanId"] == "b7ad6b7169203331" {
+                        let attrs = span["attributes"].as_array_mut().unwrap();
+                        attrs.retain(|a| {
+                            ![
+                                "alloy.server.time_to_headers_ms",
+                                "alloy.server.body_duration_ms",
+                                "http.response.status_code",
+                            ]
+                            .contains(&a["key"].as_str().unwrap_or(""))
+                        });
+                        for a in attrs.iter_mut() {
+                            if a["key"] == "alloy.response.body.outcome" {
+                                a["value"] = json!({"stringValue": "cancelled_before_headers"});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        lines.push(doc.to_string());
+    }
+    let report = import(
+        &lines.join("\n"),
+        Some(OK_TRACE),
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        report
+            .observation("alloy:b7ad6b7169203331:time_to_headers")
+            .is_none(),
+        "unmeasured header phase stays absent"
+    );
+    assert!(
+        report.observation("alloy:b7ad6b7169203331:body").is_none(),
+        "unmeasured body phase stays absent"
+    );
+    let total = report
+        .observation("alloy:b7ad6b7169203331:duration")
+        .expect("total duration survives");
+    assert!(total.duration_ms().is_some_and(|v| v > 0.0), "{total:?}");
+    let response = report
+        .observation("alloy:b7ad6b7169203331:response")
+        .expect("response event survives");
+    assert_eq!(
+        response.attr("body.outcome"),
+        Some("cancelled_before_headers")
+    );
+}
+
+#[test]
+fn header_interval_anchors_at_middleware_entry_not_span_creation() {
+    // Durations are measured from middleware entry; the span is timestamped
+    // at creation, after preparation. With 100 ms of exported preparation,
+    // the header phase must start (and end) 100 ms earlier than the
+    // unadjusted span-start derivation.
+    let mut lines: Vec<String> = Vec::new();
+    for line in input().lines() {
+        let mut doc: Value = serde_json::from_str(line).unwrap();
+        for rs in doc["resourceSpans"].as_array_mut().unwrap() {
+            for ss in rs["scopeSpans"].as_array_mut().unwrap() {
+                for span in ss["spans"].as_array_mut().unwrap() {
+                    if span["spanId"] == "b7ad6b7169203331" {
+                        span["attributes"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"key": "alloy.server.preparation_ms", "value": {"doubleValue": 100.0}}));
+                    }
+                }
+            }
+        }
+        lines.push(doc.to_string());
+    }
+    let report = import(
+        &lines.join("\n"),
+        Some(OK_TRACE),
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let server = report
+        .observation("alloy:b7ad6b7169203331:time_to_headers")
+        .unwrap();
+    assert_eq!(
+        server.interval,
+        Some(Interval {
+            start_unix_nano: 1_790_000_000_600_000_000,
+            end_unix_nano: 1_790_000_000_730_000_000,
+        }),
+        "span start (700 ms) minus preparation (100 ms), plus time to headers (130 ms)"
+    );
 }
 
 #[test]

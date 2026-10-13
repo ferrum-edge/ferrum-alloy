@@ -202,40 +202,84 @@ pub fn stamp(document: &mut Value, manifest: &ServiceManifest) -> Result<(), Age
 /// `{"expose": true, "annotations": {...}}`. Malformed values are left for
 /// [`lint`] to report.
 pub fn fill_default_annotations(document: &mut Value) {
-    let Some(paths) = document.get_mut("paths").and_then(Value::as_object_mut) else {
-        return;
-    };
-    for item in paths.values_mut() {
-        let Some(item) = item.as_object_mut() else {
+    // Locally referenced Path Items hold their operations outside `paths`;
+    // collect their locations first (immutable borrow), then fill inline
+    // items and every referenced target. A shared target is filled once;
+    // filling is idempotent and never replaces an explicit hint. Unresolvable
+    // references are left for [`lint`] to report.
+    let mut targets: Vec<String> = Vec::new();
+    if let Some(paths) = document.get("paths").and_then(Value::as_object) {
+        for item in paths.values() {
+            if let Some(pointer) = ref_target_pointer(document, item)
+                && !targets.contains(&pointer)
+            {
+                targets.push(pointer);
+            }
+        }
+    }
+    if let Some(paths) = document.get_mut("paths").and_then(Value::as_object_mut) {
+        for item in paths.values_mut() {
+            if let Some(item) = item.as_object_mut() {
+                fill_item_annotations(item);
+            }
+        }
+    }
+    for pointer in targets {
+        if let Some(item) = document
+            .pointer_mut(&pointer)
+            .and_then(Value::as_object_mut)
+        {
+            fill_item_annotations(item);
+        }
+    }
+}
+
+/// The JSON Pointer of the object a Path Item's local `$ref` chain ends at,
+/// or `None` for inline items and references [`resolve`] cannot follow.
+fn ref_target_pointer(document: &Value, item: &Value) -> Option<String> {
+    let mut current = item;
+    let mut target = None;
+    for _ in 0..MAX_REF_HOPS {
+        let Some(pointer) = current
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix('#'))
+        else {
+            break;
+        };
+        current = document.pointer(pointer)?;
+        target = Some(pointer.to_owned());
+    }
+    target
+}
+
+fn fill_item_annotations(item: &mut Map<String, Value>) {
+    for (method, operation) in item.iter_mut() {
+        let Some(defaults) = default_annotations(method) else {
             continue;
         };
-        for (method, operation) in item.iter_mut() {
-            let Some(defaults) = default_annotations(method) else {
-                continue;
-            };
-            let Some(extension) = operation
-                .as_object_mut()
-                .and_then(|operation| operation.get_mut(X_FERRUM_MCP))
-            else {
-                continue;
-            };
-            if *extension == Value::Bool(true) {
-                *extension = json!({ "expose": true, "annotations": defaults });
-                continue;
-            }
-            let Value::Object(object) = extension else {
-                continue;
-            };
-            if object.get("expose") != Some(&Value::Bool(true)) {
-                continue;
-            }
-            let annotations = object
-                .entry("annotations")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Value::Object(annotations) = annotations {
-                for (hint, value) in defaults {
-                    annotations.entry(hint).or_insert(value);
-                }
+        let Some(extension) = operation
+            .as_object_mut()
+            .and_then(|operation| operation.get_mut(X_FERRUM_MCP))
+        else {
+            continue;
+        };
+        if *extension == Value::Bool(true) {
+            *extension = json!({ "expose": true, "annotations": defaults });
+            continue;
+        }
+        let Value::Object(object) = extension else {
+            continue;
+        };
+        if object.get("expose") != Some(&Value::Bool(true)) {
+            continue;
+        }
+        let annotations = object
+            .entry("annotations")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(annotations) = annotations {
+            for (hint, value) in defaults {
+                annotations.entry(hint).or_insert(value);
             }
         }
     }

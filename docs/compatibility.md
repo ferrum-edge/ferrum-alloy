@@ -1,6 +1,6 @@
 # Compatibility
 
-This page records the supported pairing and its qualification limits. The v0.9.15/v0.9.14 adoption candidate requires fresh hosted CI on its exact commit; the earlier v0.9.13/v0.9.12 window and its CI history are historical. Coverage listed below describes the existing gates, not a green result for this new commit. Edge's broader protocol support, such as HTTP/3, gRPC, and mesh modes, does **not** imply Alloy support.
+This page records the supported pairing and its qualification limits. The v0.9.15/v0.9.14 pairing is adopted on `main` at `4bdd07744ebf27b583c33c463c2586f70ade46b2`; its exact-pin [main PUSH CI 37961771953](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37961771953) completed all 18 jobs successfully, including both supported pairings. The earlier v0.9.13/v0.9.12 window and its CI history are historical. Coverage listed below describes the existing gates. Edge's broader protocol support, such as HTTP/3, gRPC, and mesh modes, does **not** imply Alloy support.
 
 The same pairing in machine-readable form is in [compatibility.json](compatibility.json).
 

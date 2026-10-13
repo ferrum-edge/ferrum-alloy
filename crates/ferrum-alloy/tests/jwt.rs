@@ -12,7 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use ferrum_alloy::config::JwtSettings;
+use ferrum_alloy::config::{AlloyConfig, JwtSettings};
 use ferrum_alloy::jwt::{JwtVerifier, Principal};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -1039,6 +1039,55 @@ async fn the_authorizer_decides_after_authentication() {
         call(&router, Some(&key.sign(&write, Some("k1")))).await.0,
         200
     );
+}
+
+/// Configuration validation and verifier construction apply one policy to
+/// the parsed URL that is fetched, so they agree on every JWKS URL (#166,
+/// #178).
+#[test]
+fn jwks_url_check_and_verifier_agree() {
+    let accepted = [
+        "https://idp.example.com/jwks",
+        "https://user@idp.example.com:8443/jwks",
+        "http://127.0.0.1:8080/jwks",
+        "http://localhost/jwks",
+        "http://LOCALHOST/jwks",
+        "http://user@localhost/jwks",
+        "http://[::1]:8080/jwks",
+    ];
+    let rejected = [
+        "http://idp.example.com/jwks",
+        "http://localhost.evil.example/jwks",
+        "http://127.0.0.1.evil.example/jwks",
+        "http://localhost@idp.example/jwks",
+        // Parsed as host `idp.example` (the backslash ends the authority):
+        // plaintext to a remote host must be refused by both paths.
+        "http://idp.example\\@localhost/jwks",
+        "https://idp.example:99999/jwks",
+        "https://[not-ipv6]/jwks",
+        "https://",
+        "ftp://localhost/jwks",
+        "not a url",
+    ];
+    let check = |url: &str| {
+        let mut jwt = settings("127.0.0.1:1".parse().unwrap(), 1_000);
+        jwt.jwks_url = Some(url.into());
+        let mut config = AlloyConfig::default();
+        config.auth.jwt = Some(jwt.clone());
+        // Only the URL decision is compared: an https verifier may still
+        // fail later on a runner without a platform trust store.
+        let verifier_accepts_url = match JwtVerifier::new(&jwt) {
+            Ok(_) => true,
+            Err(error) => !error.to_string().contains("jwks_url"),
+        };
+        (config.validate(&["jwt"]).is_ok(), verifier_accepts_url)
+    };
+    for url in accepted {
+        assert_eq!(check(url), (true, true), "{url}");
+    }
+    for url in rejected {
+        assert_eq!(check(url), (false, false), "{url}");
+    }
 }
 
 #[test]

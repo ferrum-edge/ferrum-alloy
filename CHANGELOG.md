@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- Fix the 2026-10 audit batch (#164–#175, #178). `server.max_connections` and
+  `server.max_in_flight_requests` above Tokio's `Semaphore::MAX_PERMITS` fail
+  validation instead of panicking. The `auth.jwt.jwks_url` HTTPS/exact-loopback
+  policy is applied to the parsed URL the verifier fetches, by both `check` and
+  `JwtVerifier::new`, so lookalike loopback hosts, malformed URLs, and
+  backslash-ambiguous forms such as `http://idp.example\@localhost/` are
+  refused consistently. Panicking readiness callbacks fail their check with a
+  sanitized message, and the management router has the same panic boundary as
+  the application router. OTLP queue admission charges span status
+  descriptions; a timed-out shutdown no longer counts spans the worker still
+  owns as shutdown losses. `timeout_ms` is documented as a per-request timeout.
+  Alloy SERVER spans export `alloy.server.preparation_ms`, which the OTLP
+  importer uses to anchor the header phase at middleware entry. Diagnostic
+  reports preserve and warn about unknown fields in `collection`, producers
+  and `subject`; overlong OTLP instance identities become a bounded digest
+  instead of colliding truncations; Alloy SERVER spans without response
+  headers keep their total duration and outcome on import.
+  `fill_default_annotations` fills locally referenced Path Items. Benchmark,
+  qualification and compatibility docs describe the current state.
+
 - Adopt `contracts-edge-0.9.15` at `6fb64c5dc2e014204c17609fc717d976f3b4589e` and pin Ferrum Edge v0.9.15 at `25b37395ff61bfea0f3ffd189d9011c4984fa755`. Track its `route_protocol_admission` rejection phase and reserve `X-Authenticated-Identity` from request-ID configuration.
 - Adopt `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` and pin Ferrum Edge v0.9.14 at `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice) and `LICENSE-COMMERCIAL.md`.

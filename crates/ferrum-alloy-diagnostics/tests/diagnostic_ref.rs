@@ -179,6 +179,7 @@ fn client() -> Producer {
         name: "test".into(),
         version: None,
         instance: None,
+        unrecognized: std::collections::BTreeMap::new(),
     }
 }
 
@@ -186,6 +187,7 @@ fn client() -> Producer {
 /// and verified producers, bypassing the offline parser's downgrade.
 fn verified_report(value: &str) -> DiagnosticReport {
     let mut report = DiagnosticReport::new(Collection {
+        unrecognized: std::collections::BTreeMap::new(),
         collector: client(),
         method: CollectionMethod::LiveExport,
         verification: Verification::Verified,

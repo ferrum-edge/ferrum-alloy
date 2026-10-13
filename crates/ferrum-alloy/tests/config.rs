@@ -718,6 +718,73 @@ fn unsafe_combinations_fail_validation() {
 }
 
 #[test]
+fn semaphore_capacities_are_bounded_before_construction() {
+    // Both counts become Tokio semaphore permits; above MAX_PERMITS the
+    // semaphore constructor would panic, so validation must reject them.
+    let max = tokio::sync::Semaphore::MAX_PERMITS;
+    for field in ["max_connections", "max_in_flight_requests"] {
+        let mut config = AlloyConfig::default();
+        match field {
+            "max_connections" => config.server.max_connections = max + 1,
+            _ => config.server.max_in_flight_requests = max + 1,
+        }
+        let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+        assert!(error.contains(field), "{field}: {error}");
+
+        let mut config = AlloyConfig::default();
+        match field {
+            "max_connections" => config.server.max_connections = max,
+            _ => config.server.max_in_flight_requests = max,
+        }
+        config.validate(NO_FEATURES).unwrap();
+    }
+    // Admission disabled (0 = unlimited) stays accepted.
+    let mut config = AlloyConfig::default();
+    config.server.max_in_flight_requests = 0;
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn jwks_url_check_and_verifier_share_one_parsed_policy() {
+    let accepted = [
+        "https://idp.example.com/jwks",
+        "http://127.0.0.1:8080/jwks",
+        "http://localhost/jwks",
+        "http://[::1]:8080/jwks",
+    ];
+    let rejected = [
+        "http://idp.example.com/jwks",
+        "http://localhost.evil.example/jwks",
+        "http://127.0.0.1.evil.example/jwks",
+        "http://user@localhost.evil.example/jwks",
+        "http://localhost@idp.example/jwks",
+        "http://idp.example\\@localhost/jwks",
+        "https://idp.example:99999/jwks",
+        "https://[not-ipv6]/jwks",
+        "https://",
+        "not a url",
+    ];
+    let features = &["jwt"];
+    for url in accepted {
+        let mut config = AlloyConfig::default();
+        let mut jwt = JwtSettings::new("https://issuer.test", vec!["api".into()]);
+        jwt.jwks_url = Some(url.into());
+        config.auth.jwt = Some(jwt);
+        config
+            .validate(features)
+            .unwrap_or_else(|e| panic!("{url} should validate: {e}"));
+    }
+    for url in rejected {
+        let mut config = AlloyConfig::default();
+        let mut jwt = JwtSettings::new("https://issuer.test", vec!["api".into()]);
+        jwt.jwks_url = Some(url.into());
+        config.auth.jwt = Some(jwt);
+        let error = config.validate(features).unwrap_err().to_string();
+        assert!(error.contains("jwks_url"), "{url}: {error}");
+    }
+}
+
+#[test]
 fn openapi_ui_needs_its_feature_and_a_path_of_its_own() {
     let features = &["openapi", "openapi-ui"];
     let mut config = AlloyConfig::default();

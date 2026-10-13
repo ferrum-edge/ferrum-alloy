@@ -52,7 +52,10 @@ pub struct OtlpConfig {
     /// `OTEL_EXPORTER_OTLP_ENDPOINT` (+ `/v1/traces`), then the OTLP default
     /// `http://localhost:4318/v1/traces` apply.
     pub endpoint: Option<String>,
-    /// Per-export timeout including retries, in milliseconds.
+    /// Per-request export timeout in milliseconds. It also bounds when a
+    /// retry may start and how long its backoff may be, but an in-flight
+    /// retry is not cancelled when that budget ends, so one export call can
+    /// take up to roughly twice this long in the worst case.
     pub timeout_ms: u64,
     /// Retries after the first attempt for retryable failures.
     pub max_export_retries: usize,
@@ -419,6 +422,13 @@ impl fmt::Debug for BoundedSpanProcessor {
 
 /// Rough encoded size of a span, used for the byte budget.
 fn estimate_bytes(span: &SpanData) -> usize {
+    // The status description is dynamically owned queued payload (the
+    // tracing bridge puts `otel.status_description` there, outside the
+    // attributes), so it must be charged like every other payload.
+    let status = match &span.status {
+        opentelemetry::trace::Status::Error { description } => description.len(),
+        _ => 0,
+    };
     let attributes = estimate_attributes_bytes(&span.attributes);
     let events: usize = span
         .events
@@ -430,7 +440,7 @@ fn estimate_bytes(span: &SpanData) -> usize {
         .iter()
         .map(|link| estimate_attributes_bytes(&link.attributes) + 64)
         .sum();
-    96 + span.name.len() + attributes + events + links
+    96 + span.name.len() + attributes + events + links + status
 }
 
 fn estimate_attributes_bytes(attributes: &[KeyValue]) -> usize {
@@ -597,17 +607,28 @@ impl SpanProcessor for BoundedSpanProcessor {
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         let result = self.control(Message::Shutdown, timeout);
-        if result.is_ok()
+        // The worker is finished once it acknowledged the shutdown, or gone
+        // when the queue or the acknowledgement disconnected (for example
+        // after an exporter panic). Only then has it given up ownership of
+        // its spans, so whatever is still counted as queued is genuinely
+        // lost. On a timeout the worker still owns the in-flight and queued
+        // spans and will count each one exported or export-failed when it
+        // resumes, so counting them as shutdown losses here would count
+        // every such span twice.
+        let worker_done = matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown));
+        if worker_done
             && let Ok(mut worker) = self.worker.lock()
             && let Some(handle) = worker.take()
         {
             let _ = handle.join();
         }
-        let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
-        if stranded > 0 {
-            self.metrics
-                .telemetry_spans_lost
-                .add("shutdown", stranded as u64);
+        if worker_done {
+            let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
+            if stranded > 0 {
+                self.metrics
+                    .telemetry_spans_lost
+                    .add("shutdown", stranded as u64);
+            }
         }
         result
     }
@@ -739,7 +760,8 @@ impl Worker {
             // callers then get `AlreadyShutdown`, later spans are counted as
             // `shutdown` losses, and `exporter.shutdown()` is not called.
             let result = block_on(exporter.export(chunk));
-            // Saturating: a timed-out shutdown may already have counted these.
+            // Saturating for safety; shutdown-timeout accounting stays with
+            // this worker, so each span is still counted exactly once.
             let _ = self
                 .queued_spans
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
@@ -844,6 +866,19 @@ mod tests {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         sender.send(make(ack_tx)).unwrap();
         ack_rx
+    }
+
+    #[test]
+    fn estimate_bytes_charges_the_status_description() {
+        let mut span = new_test_export_span_data();
+        let plain = estimate_bytes(&span);
+        span.status = opentelemetry::trace::Status::Error {
+            description: "x".repeat(10_000).into(),
+        };
+        assert!(
+            estimate_bytes(&span) >= plain + 10_000,
+            "a large error description is queued payload and must be charged"
+        );
     }
 
     #[test]
