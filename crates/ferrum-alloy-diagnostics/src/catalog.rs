@@ -309,6 +309,6 @@ pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     ),
     (
         "loop_detected",
-        "The gateway refused the request before routing because it had already traversed the maximum number of gateway hops; no backend was contacted.",
+        "The gateway refused the request before routing because the X-Ferrum-Hops count it received had reached its hop limit; no backend was contacted.",
     ),
 ];

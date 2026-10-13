@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Adopt `contracts-edge-0.9.17` at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` and pin Ferrum Edge v0.9.17 at `669c574c1d1e88e84dccb26a8159939e6694644d`, with v0.9.15 as the previous supported release. Recognize the `loop_detected` `X-Gateway-Error` token and diagnostic-ref rejection phase; its diagnosis describes the received `X-Ferrum-Hops` count reaching the limit and does not claim a traversal or routing loop.
+
 - Adopt `contracts-edge-0.9.15` at `6fb64c5dc2e014204c17609fc717d976f3b4589e` and pin Ferrum Edge v0.9.15 at `25b37395ff61bfea0f3ffd189d9011c4984fa755`. Track its `route_protocol_admission` rejection phase and reserve `X-Authenticated-Identity` from request-ID configuration.
 - Adopt `contracts-edge-0.9.14` at `ddbdd845733b7046c4393ac951011dafb774db33` and pin Ferrum Edge v0.9.14 at `9bd4d5f9caa4ebe8f0ea13e76d8a6e2172eaca7d`.
 - Name Ferrum Edge LLC as the copyright holder and commercial licensor in `LICENSE` (Required Notice) and `LICENSE-COMMERCIAL.md`.
