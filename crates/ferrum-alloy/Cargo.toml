@@ -19,7 +19,7 @@ include = ["/src/**", "/assets/**", "/README.md", "/LICENSE", "/LICENSE-COMMERCI
 default = []
 otel = ["ferrum-alloy-telemetry/otel"]
 edge = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/axum"]
-tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:x509-parser", "dep:zeroize", "ferrum-alloy-telemetry/x509"]
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:x509-parser", "ferrum-alloy-telemetry/x509"]
 postgres = ["dep:sqlx"]
 openapi = ["dep:utoipa", "dep:utoipa-axum"]
 # The OpenAPI documentation UI: Swagger UI from embedded assets (Apache-2.0,
@@ -58,6 +58,8 @@ tower-layer = { workspace = true }
 tower-service = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 ipnet = { workspace = true, features = ["serde"] }
+# `config::Secret` zeroizes its value on drop.
+zeroize = { workspace = true }
 
 ferrum-alloy-edge = { workspace = true, optional = true }
 ferrum-alloy-diagnostics = { workspace = true, optional = true }
@@ -65,7 +67,6 @@ rustls = { workspace = true, optional = true, features = ["ring", "std", "tls12"
 tokio-rustls = { workspace = true, optional = true, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = { workspace = true, optional = true, features = ["std"] }
 x509-parser = { workspace = true, optional = true }
-zeroize = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki", "migrate", "macros"] }
 utoipa = { workspace = true, optional = true, features = ["macros"] }
 utoipa-axum = { workspace = true, optional = true }

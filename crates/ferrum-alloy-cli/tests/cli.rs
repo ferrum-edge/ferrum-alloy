@@ -1646,6 +1646,61 @@ fn openapi_check_refuses_special_outputs_with_exit_4() {
     }
 }
 
+/// A stand-in for `cargo` that ignores its arguments and runs `body`.
+#[cfg(unix)]
+fn fake_cargo(dir: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-cargo");
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The document printed by the project binary is bounded like `--input`
+/// (#183): a binary that prints without end is stopped with exit 3 instead
+/// of exhausting memory.
+#[cfg(unix)]
+#[test]
+fn openapi_export_bounds_the_binary_output() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
+    let out = dir.path().join("openapi.json");
+    let export = |cargo: &Path| {
+        bin()
+            .env("CARGO", cargo)
+            .args(["openapi", "export", "--project"])
+            .arg(dir.path())
+            .arg("--output")
+            .arg(&out)
+            .output()
+            .unwrap()
+    };
+
+    let endless = fake_cargo(dir.path(), "exec yes '{}'");
+    let started = std::time::Instant::now();
+    let output = export(&endless);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("printed more than 16777216 bytes"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!out.exists());
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+
+    let document = r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#;
+    let small = fake_cargo(dir.path(), &format!("printf '%s' '{document}'"));
+    let output = export(&small);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(written["openapi"], "3.1.0");
+
+    let failing = fake_cargo(dir.path(), "exit 7");
+    let output = export(&failing);
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(stderr(&output).contains("failed"), "{}", stderr(&output));
+}
+
 #[test]
 fn new_rejects_unsafe_names_and_targets() {
     for name in [
