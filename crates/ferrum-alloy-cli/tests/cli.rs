@@ -1692,16 +1692,6 @@ fn openapi_export_bounds_the_binary_output() {
         }
     };
 
-    let endless = fake_cargo(dir.path(), "endless", "exec yes '{}'");
-    let output = export(&endless);
-    assert_eq!(code(&output), 3, "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("printed more than 16777216 bytes"),
-        "{}",
-        stderr(&output)
-    );
-    assert!(!out.exists());
-
     // A valid, finite document just over the limit is refused too.
     let large = fake_cargo(
         dir.path(),
@@ -1713,6 +1703,18 @@ fn openapi_export_bounds_the_binary_output() {
     let output = export(&large);
     assert_eq!(code(&output), 3, "{}", stderr(&output));
     assert!(stderr(&output).contains("printed more than 16777216 bytes"));
+    assert!(!out.exists());
+
+    // A producer far past the limit (64 MiB, finite, so a regression fails
+    // the assertions instead of exhausting the runner) is cut off too.
+    let flood = fake_cargo(dir.path(), "flood", "yes '{}' | head -c 67108864");
+    let output = export(&flood);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("printed more than 16777216 bytes"),
+        "{}",
+        stderr(&output)
+    );
     assert!(!out.exists());
 
     let document = r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#;

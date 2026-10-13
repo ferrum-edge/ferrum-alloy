@@ -3,9 +3,10 @@
 ## [Unreleased]
 
 - `ferrum-alloy openapi export` without `--input` reads at most 16 MiB of the
-  project binary's standard output, the `--input` limit. A binary that prints
-  more is stopped and the export fails with exit 3 instead of buffering
-  without bound (#183).
+  project binary's standard output, the `--input` limit. When a binary prints
+  more, the export closes the pipe, kills the process it spawned (on Windows
+  Cargo, not necessarily its child), and fails with exit 3 instead of
+  buffering without bound (#183).
 - `config::Secret` holds its value in `Zeroizing<String>`: the value is
   zeroized when a `Secret` or any clone of it is dropped, and `Secret`
   implements `ZeroizeOnDrop`. `FERRUM_ALLOY_*_FILE` secret files and the TLS
