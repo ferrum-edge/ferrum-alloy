@@ -102,7 +102,7 @@ pub struct Collection {
 }
 
 /// The component that produced an observation or assembled a report.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Producer {
     /// Producer family.
     pub kind: ProducerKind,
@@ -122,7 +122,7 @@ pub struct Producer {
 }
 
 /// What the report is about.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subject {
     /// W3C trace id (32 lowercase hex characters) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,7 +224,7 @@ impl Observation {
 }
 
 /// Measurement boundaries, named from the catalog (e.g. `alloy.middleware_entry`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Boundaries {
     /// Where the measurement starts.
     pub start: String,
@@ -237,7 +237,7 @@ pub struct Boundaries {
 }
 
 /// Wall-clock interval in Unix nanoseconds.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interval {
     /// Start, Unix epoch nanoseconds.
     pub start_unix_nano: u64,
@@ -260,7 +260,7 @@ impl Interval {
 }
 
 /// Position on the request path.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
     /// Connection leg.
     pub leg: Leg,
@@ -281,7 +281,7 @@ pub struct Scope {
 }
 
 /// Trace linkage.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpanRef {
     /// 32 lowercase hex characters.
     pub trace_id: String,
