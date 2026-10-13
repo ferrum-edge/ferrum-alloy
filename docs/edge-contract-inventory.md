@@ -427,7 +427,7 @@ Edge v0.9.15 and v0.9.14 validate resource IDs in `src/config/types.rs`: IDs are
 | `alloy.trace.parent` | EXISTING | `accepted_remote`, `root`, `rerooted_untrusted`, `rerooted_invalid`, or `ignored_by_policy` |
 | `alloy.peer.trust` | EXISTING | `verified_identity`, `network_boundary`, or `untrusted` |
 | `alloy.request_id` | EXISTING | Validated request id |
-| `alloy.server.time_to_headers_ms`, `alloy.server.body_duration_ms`, `alloy.server.duration_ms` | EXISTING | See [measurement-semantics.md](measurement-semantics.md) |
+| `alloy.server.preparation_ms`, `alloy.server.time_to_headers_ms`, `alloy.server.body_duration_ms`, `alloy.server.duration_ms` | EXISTING | See [measurement-semantics.md](measurement-semantics.md) |
 | `alloy.response.body.outcome`, `alloy.response.body.bytes`, `alloy.response.upgraded` | EXISTING | Body finalization |
 | `alloy.admission.wait_ms` | EXISTING | Admission wait when enabled |
 | Operation spans with `alloy.operation.duration_ms`, `alloy.operation.kind`, `alloy.db.pool_wait_ms` | EXISTING | Explicitly instrumented operations |

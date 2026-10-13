@@ -757,8 +757,11 @@ fn jwks_url_check_and_verifier_share_one_parsed_policy() {
         "http://localhost.evil.example/jwks",
         "http://127.0.0.1.evil.example/jwks",
         "http://user@localhost.evil.example/jwks",
+        "http://localhost@idp.example/jwks",
+        "http://idp.example\\@localhost/jwks",
+        "https://idp.example:99999/jwks",
+        "https://[not-ipv6]/jwks",
         "https://",
-        "https:missing-slashes",
         "not a url",
     ];
     let features = &["jwt"];

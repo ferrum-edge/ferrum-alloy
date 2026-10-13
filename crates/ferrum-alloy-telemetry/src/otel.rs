@@ -607,20 +607,22 @@ impl SpanProcessor for BoundedSpanProcessor {
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         let result = self.control(Message::Shutdown, timeout);
-        let mut joined = false;
-        if result.is_ok()
+        // The worker is finished once it acknowledged the shutdown, or gone
+        // when the queue or the acknowledgement disconnected (for example
+        // after an exporter panic). Only then has it given up ownership of
+        // its spans, so whatever is still counted as queued is genuinely
+        // lost. On a timeout the worker still owns the in-flight and queued
+        // spans and will count each one exported or export-failed when it
+        // resumes, so counting them as shutdown losses here would count
+        // every such span twice.
+        let worker_done = matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown));
+        if worker_done
             && let Ok(mut worker) = self.worker.lock()
             && let Some(handle) = worker.take()
         {
             let _ = handle.join();
-            joined = true;
         }
-        // Only a joined worker has given up ownership of its spans: whatever
-        // it left queued is genuinely lost. On a timeout the worker still
-        // owns the in-flight and queued spans and will count each one
-        // exported or export-failed when it resumes, so counting them as
-        // shutdown losses here would count every such span twice.
-        if joined {
+        if worker_done {
             let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
             if stranded > 0 {
                 self.metrics

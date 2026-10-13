@@ -767,23 +767,66 @@ impl JwtSettings {
     }
 }
 
-/// The one JWKS URL policy shared by configuration validation and
-/// `JwtVerifier::new`: an `https` URL with a host, or `http` only with an
-/// exact loopback host (`localhost`, `127.0.0.1`, or `[::1]` — a host that
-/// merely starts with one of those spellings does not qualify). Parsed by
-/// hand because this module compiles without the `jwt` feature (and its
-/// `url` dependency); anything malformed is rejected, matching the
-/// verifier's fail-closed construction.
+/// The JWKS URL transport policy, applied to the parsed URL that the
+/// verifier also fetches: `https` with a host, or `http` only to an exact
+/// loopback host (`localhost`, `127.0.0.1`, or `[::1]`). A host that merely
+/// starts with one of those spellings does not qualify.
+#[cfg(feature = "http-client")]
+pub(crate) fn jwks_url_policy(url: &url::Url) -> bool {
+    match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => match url.host() {
+            // The URL parser lowercases domains.
+            Some(url::Host::Domain(host)) => host == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip == std::net::Ipv4Addr::LOCALHOST,
+            Some(url::Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// The check shared by configuration validation and `JwtVerifier::new`:
+/// parse `url_text` exactly as the verifier does and apply
+/// [`jwks_url_policy`] to the parsed URL, so validation accepts precisely
+/// the URLs the verifier accepts, and the policy judges the same host the
+/// verifier would fetch from.
+#[cfg(feature = "http-client")]
 pub(crate) fn jwks_url_allowed(url_text: &str) -> bool {
+    url::Url::parse(url_text).is_ok_and(|url| jwks_url_policy(&url))
+}
+
+/// Without the `http-client` feature there is no verifier and no URL
+/// parser (for example `ferrum-alloy check` in the CLI), so validation uses
+/// [`jwks_url_allowed_without_parser`], which accepts only a subset of what
+/// the parsed policy accepts.
+#[cfg(not(feature = "http-client"))]
+pub(crate) fn jwks_url_allowed(url_text: &str) -> bool {
+    jwks_url_allowed_without_parser(url_text)
+}
+
+/// A conservative, parser-free form of [`jwks_url_allowed`]: it accepts
+/// only plainly written URLs whose host is unambiguous, and rejects anything
+/// a WHATWG URL parser could read differently (backslashes, percent-encoded
+/// or unusual host characters, numeric hosts that are not dotted-quad IPv4,
+/// out-of-range ports). Everything it accepts is also accepted by the parsed
+/// policy with the same host; it may reject some URLs the parsed policy
+/// would accept.
+#[cfg_attr(feature = "http-client", allow(dead_code))]
+fn jwks_url_allowed_without_parser(url_text: &str) -> bool {
     if url_text
         .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || b == b'\\')
     {
         return false;
     }
     let Some((scheme, rest)) = url_text.split_once("://") else {
         return false;
     };
+    let https = scheme.eq_ignore_ascii_case("https");
+    if !https && !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host_port = authority.rsplit('@').next().unwrap_or("");
     let (host, port) = if let Some(v6) = host_port.strip_prefix('[') {
@@ -792,31 +835,59 @@ pub(crate) fn jwks_url_allowed(url_text: &str) -> bool {
         };
         let port = if after.is_empty() {
             None
-        } else if let Some(p) = after.strip_prefix(':') {
-            Some(p)
+        } else if let Some(port) = after.strip_prefix(':') {
+            Some(port)
         } else {
             return false;
         };
         (host, port)
     } else {
         match host_port.split_once(':') {
-            Some((h, p)) => (h, Some(p)),
+            Some((host, port)) => (host, Some(port)),
             None => (host_port, None),
         }
     };
-    if host.is_empty() {
-        return false;
-    }
-    if let Some(p) = port
-        && (p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    if let Some(port) = port
+        && (port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || port.parse::<u16>().is_err())
     {
         return false;
     }
-    if scheme.eq_ignore_ascii_case("https") {
-        return true;
-    }
-    scheme.eq_ignore_ascii_case("http")
-        && (host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1")
+    let loopback = if host_port.starts_with('[') {
+        match host.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) => ip == std::net::Ipv6Addr::LOCALHOST,
+            Err(_) => return false,
+        }
+    } else {
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_')
+        {
+            return false;
+        }
+        // A WHATWG parser reads a host whose last label is numeric as IPv4
+        // (including shorthand, octal and hex forms); accept only plain
+        // dotted-quad IPv4 there.
+        let last = host
+            .rsplit('.')
+            .find(|label| !label.is_empty())
+            .unwrap_or("");
+        let numeric = !last.is_empty()
+            && (last.bytes().all(|b| b.is_ascii_digit())
+                || last.starts_with("0x")
+                || last.starts_with("0X"));
+        if numeric {
+            match host.parse::<std::net::Ipv4Addr>() {
+                Ok(ip) => ip == std::net::Ipv4Addr::LOCALHOST,
+                Err(_) => return false,
+            }
+        } else {
+            host.eq_ignore_ascii_case("localhost")
+        }
+    };
+    https || loopback
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -1744,9 +1815,10 @@ impl AlloyConfig {
             match &jwt.jwks_url {
                 None => error("auth.jwt.jwks_url is required".into()),
                 Some(url) => {
-                    // The same parsed policy `JwtVerifier::new` applies, so a
-                    // configuration this check accepts cannot fail later at
-                    // verifier construction (and vice versa).
+                    // The same parsed policy `JwtVerifier::new` applies to the
+                    // URL it fetches, so a configuration this check accepts
+                    // cannot fail later at verifier construction (and vice
+                    // versa).
                     if !jwks_url_allowed(url) {
                         error(
                             "auth.jwt.jwks_url must use https (http is allowed only for loopback)"
@@ -1911,4 +1983,75 @@ fn is_ui_path(path: &str) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
         })
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod jwks_url_tests {
+    use super::jwks_url_allowed_without_parser;
+
+    const ACCEPTED: &[&str] = &[
+        "https://idp.example.com/jwks",
+        "https://idp.example.com:8443/jwks?x=1#y",
+        "https://user@idp.example.com/jwks",
+        "HTTPS://IDP.EXAMPLE.COM/jwks",
+        "http://127.0.0.1:8080/jwks",
+        "http://localhost/jwks",
+        "http://LocalHost:80/jwks",
+        "http://user@localhost/jwks",
+        "http://[::1]:8080/jwks",
+        "http://[0:0:0:0:0:0:0:1]/jwks",
+    ];
+
+    const REJECTED: &[&str] = &[
+        "http://idp.example.com/jwks",
+        "http://localhost.evil.example/jwks",
+        "http://127.0.0.1.evil.example/jwks",
+        "http://user@localhost.evil.example/jwks",
+        "http://localhost@idp.example/jwks",
+        // A WHATWG parser ends an http authority at the backslash, so the
+        // request would go to idp.example over plaintext (#178).
+        "http://idp.example\\@localhost/jwks",
+        "https://idp.example:99999/jwks",
+        "https://[not-ipv6]/jwks",
+        "http://[::2]/jwks",
+        "http://127.0.0.2/jwks",
+        "https://999.1.1.1/jwks",
+        "https://",
+        "http:///idp.example/jwks",
+        "ftp://localhost/jwks",
+        "not a url",
+    ];
+
+    #[test]
+    fn the_parser_free_policy_accepts_plain_https_and_exact_loopback_only() {
+        for url in ACCEPTED {
+            assert!(jwks_url_allowed_without_parser(url), "{url} should pass");
+        }
+        for url in REJECTED.iter().chain(NARROWER) {
+            assert!(!jwks_url_allowed_without_parser(url), "{url} should fail");
+        }
+    }
+
+    /// Forms a WHATWG parser accepts (as `https://missing-slashes/` and
+    /// `http://127.0.0.1/`) but the parser-free policy conservatively
+    /// refuses.
+    const NARROWER: &[&str] = &["https:missing-slashes", "http://127.1/jwks"];
+
+    /// The parser-free policy never accepts a URL the parsed policy (and so
+    /// the verifier) rejects.
+    #[cfg(feature = "http-client")]
+    #[test]
+    fn the_parser_free_policy_is_no_wider_than_the_parsed_policy() {
+        for url in ACCEPTED.iter().chain(REJECTED) {
+            assert_eq!(
+                jwks_url_allowed_without_parser(url),
+                super::jwks_url_allowed(url),
+                "{url}"
+            );
+        }
+        for url in NARROWER {
+            assert!(super::jwks_url_allowed(url), "{url}");
+        }
+    }
 }
