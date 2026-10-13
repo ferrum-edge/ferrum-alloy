@@ -6,7 +6,9 @@
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
   connects (#181). Use `http://127.0.0.1:<port>`. An `http` JWKS is fetched
-  directly, never through an environment proxy (`HTTP_PROXY`).
+  directly, never through an environment proxy (`HTTP_PROXY`). `ferrum-alloy diagnose --url`
+  likewise sends its credential over plain `http` only to a literal loopback
+  address, no longer to `localhost`.
 - **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
   when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
   not local (a Unix socket or a literal loopback address; `localhost` and
