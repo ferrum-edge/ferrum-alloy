@@ -14,6 +14,7 @@ fn collector() -> Producer {
         name: "ferrum-alloy-fuzz".into(),
         version: None,
         instance: None,
+        unrecognized: std::collections::BTreeMap::new(),
     }
 }
 
@@ -39,7 +40,12 @@ fuzz_target!(|data: &[u8]| {
         let findings = analyze(report, &thresholds);
         for finding in &findings {
             // An imported file is unverified, like any offline input.
-            assert_ne!(finding.confidence, Confidence::Confirmed, "{}", finding.code);
+            assert_ne!(
+                finding.confidence,
+                Confidence::Confirmed,
+                "{}",
+                finding.code
+            );
             assert!(!finding.does_not_prove.is_empty(), "{}", finding.code);
         }
         assert_eq!(analyze(report, &thresholds), findings);

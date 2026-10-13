@@ -447,6 +447,26 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
             ),
         });
     }
+    // Unknown members of nested objects are preserved on round-trip (see
+    // the flatten fields in the model); say so, as for the top level.
+    for (path, unrecognized) in [
+        ("/collection", &report.collection.unrecognized),
+        (
+            "/collection/collector",
+            &report.collection.collector.unrecognized,
+        ),
+        ("/subject", &report.subject.unrecognized),
+    ] {
+        if !unrecognized.is_empty() {
+            warnings.push(Issue {
+                path: path.into(),
+                message: format!(
+                    "unrecognized fields preserved but not interpreted: {}",
+                    unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+    }
 
     let mut seen = BTreeSet::new();
     let mut earliest = u64::MAX;
@@ -567,6 +587,21 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 message: format!(
                     "unrecognized fields preserved but not interpreted: {}",
                     observation
+                        .unrecognized
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        if !observation.producer.unrecognized.is_empty() {
+            warnings.push(Issue {
+                path: format!("{path}/producer"),
+                message: format!(
+                    "unrecognized fields preserved but not interpreted: {}",
+                    observation
+                        .producer
                         .unrecognized
                         .keys()
                         .cloned()

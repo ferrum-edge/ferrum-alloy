@@ -153,6 +153,7 @@ fn run_redacted(args: DiagnoseArgs, redactor: &CredentialRedactor) -> Result<Exi
             return Ok(ExitCode::SUCCESS);
         }
         let collector = Producer {
+            unrecognized: std::collections::BTreeMap::new(),
             kind: ProducerKind::Collector,
             name: "ferrum-alloy-cli".into(),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -179,11 +180,13 @@ fn run_redacted(args: DiagnoseArgs, redactor: &CredentialRedactor) -> Result<Exi
         )
     } else if observation.is_some() {
         let report = DiagnosticReport::new(Collection {
+            unrecognized: std::collections::BTreeMap::new(),
             collector: Producer {
                 kind: ProducerKind::Collector,
                 name: "ferrum-alloy-cli".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
                 instance: None,
+                unrecognized: std::collections::BTreeMap::new(),
             },
             method: CollectionMethod::OfflineImport,
             verification: Verification::Unverified,
@@ -256,11 +259,13 @@ mod tests {
     #[test]
     fn written_reports_fall_back_to_compact_json_to_fit_the_limit() {
         let report = DiagnosticReport::new(Collection {
+            unrecognized: std::collections::BTreeMap::new(),
             collector: Producer {
                 kind: ProducerKind::Collector,
                 name: "ferrum-alloy-cli".into(),
                 version: None,
                 instance: None,
+                unrecognized: std::collections::BTreeMap::new(),
             },
             method: CollectionMethod::OtlpFileImport,
             verification: Verification::Unverified,

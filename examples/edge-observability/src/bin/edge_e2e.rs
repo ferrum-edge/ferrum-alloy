@@ -710,6 +710,7 @@ async fn main() -> Result<(), Failure> {
         name: "edge-e2e".into(),
         version: None,
         instance: None,
+        unrecognized: std::collections::BTreeMap::new(),
     };
     let mut diagnosis: DiagnosticReport = otlp::import(
         &text,
@@ -767,6 +768,7 @@ fn collector() -> Producer {
         name: "edge-e2e".into(),
         version: None,
         instance: None,
+        unrecognized: std::collections::BTreeMap::new(),
     }
 }
 
@@ -823,6 +825,7 @@ fn client_header(name: &str, value: &str) -> Observation {
             name: "edge-e2e".into(),
             version: None,
             instance: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         kind: ObservationKind::Event,
         name: catalog::CLIENT_RESPONSE_HEADER.into(),
@@ -952,6 +955,7 @@ const REQUEST_TIMINGS: &[&str] = &[
     "gateway.latency.processing_ms",
     "gateway.overhead_ms",
     "gateway.plugin_execution_ms",
+    "alloy.server.preparation_ms",
     "alloy.server.time_to_headers_ms",
     "alloy.server.body_duration_ms",
     "alloy.server.duration_ms",

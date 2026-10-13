@@ -219,11 +219,13 @@ fn route_protocol_admission_is_a_pre_upstream_rejection() {
 
 fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
     let mut report = DiagnosticReport::new(Collection {
+        unrecognized: std::collections::BTreeMap::new(),
         collector: Producer {
             kind: ProducerKind::Collector,
             name: "in-process".into(),
             version: None,
             instance: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         method: CollectionMethod::LiveExport,
         verification: Verification::Verified,
@@ -233,6 +235,7 @@ fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
     report.observations.push(Observation {
         id: "edge-rejected".into(),
         producer: Producer {
+            unrecognized: std::collections::BTreeMap::new(),
             kind: ProducerKind::Edge,
             name: "ferrum-edge".into(),
             version: Some("0.9.7".into()),
@@ -266,6 +269,7 @@ fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
         let mut service = report.observations[0].clone();
         service.id = "alloy-response".into();
         service.producer = Producer {
+            unrecognized: std::collections::BTreeMap::new(),
             kind: ProducerKind::Alloy,
             name: "ferrum-alloy-telemetry".into(),
             version: None,
@@ -980,6 +984,48 @@ fn unsupported_major_version_is_rejected() {
         ReportError::UnsupportedVersion {
             found: "2.0".into()
         }
+    );
+}
+
+#[test]
+fn unknown_fields_inside_nested_objects_survive_a_round_trip() {
+    // Collection, its collector, Subject, and each observation's producer
+    // keep additive members from a newer minor version instead of dropping
+    // them silently on deserialize.
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fixture("gateway-error-token.json")).unwrap();
+    report["collection"]["x-future-collection"] = serde_json::json!({"v": 1});
+    report["collection"]["collector"]["x-future-collector"] = serde_json::json!("kept");
+    report["subject"]["x-future-subject"] = serde_json::json!(7);
+    report["observations"][0]["producer"]["x-future-producer"] = serde_json::json!(true);
+    let bytes = serde_json::to_vec(&report).unwrap();
+    let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
+
+    let paths: Vec<&str> = parsed.warnings.iter().map(|w| w.path.as_str()).collect();
+    for want in [
+        "/collection",
+        "/collection/collector",
+        "/subject",
+        "/observations/0/producer",
+    ] {
+        assert!(
+            paths.contains(&want),
+            "missing warning for {want}: {paths:?}"
+        );
+    }
+    let round_tripped: serde_json::Value = serde_json::to_value(&parsed.report).unwrap();
+    assert_eq!(
+        round_tripped["collection"]["x-future-collection"],
+        serde_json::json!({"v": 1})
+    );
+    assert_eq!(
+        round_tripped["collection"]["collector"]["x-future-collector"],
+        "kept"
+    );
+    assert_eq!(round_tripped["subject"]["x-future-subject"], 7);
+    assert_eq!(
+        round_tripped["observations"][0]["producer"]["x-future-producer"],
+        true
     );
 }
 

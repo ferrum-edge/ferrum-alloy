@@ -135,7 +135,7 @@ Until then, no number is quoted without its artifact, source commit, environment
 
 ## Hosted qualification preparation
 
-[Hosted benchmark qualification](../.github/workflows/newbenchmark-only.yml) runs the bounded preparation workload weekly on `main`, and the full matrix on manual dispatch. It is not a pull request check. It checks out the exact `main` commit and builds one optimized binary with debug symbols using the pinned toolchain and `Cargo.lock`. That binary supplies every profile and comparison in the artifact. Existing workspace CI still checks formatting, linting, and tests; qualification additionally runs the harness tests and the compiled `json_log` schema/snapshot tests without updating snapshots.
+[Hosted benchmark qualification](../.github/workflows/newbenchmark-only.yml) runs the bounded preparation workload weekly on `main` and on pull requests that change that workflow file, and the full matrix on manual dispatch (main only). Except for those workflow-file pull requests it is not a pull request check, and nothing here establishes it as a required branch-protection gate. It checks out the exact immutable `github.sha` for the run and builds one optimized binary with debug symbols using the pinned toolchain and `Cargo.lock`. That binary supplies every profile and comparison in the artifact. Existing workspace CI still checks formatting, linting, and tests; qualification additionally runs the harness tests and the compiled `json_log` schema/snapshot tests without updating snapshots.
 
 The fixed weekly workload is bounded by a 60-minute job timeout and a 15-minute collection step:
 
