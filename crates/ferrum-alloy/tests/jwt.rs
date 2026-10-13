@@ -1050,13 +1050,16 @@ fn jwks_url_check_and_verifier_agree() {
         "https://idp.example.com/jwks",
         "https://user@idp.example.com:8443/jwks",
         "http://127.0.0.1:8080/jwks",
-        "http://localhost/jwks",
-        "http://LOCALHOST/jwks",
-        "http://user@localhost/jwks",
+        "http://user@127.0.0.1/jwks",
         "http://[::1]:8080/jwks",
+        "https://localhost/jwks",
     ];
     let rejected = [
         "http://idp.example.com/jwks",
+        // DNS names never qualify for plaintext, `localhost` included (#181).
+        "http://localhost/jwks",
+        "http://LOCALHOST/jwks",
+        "http://user@localhost/jwks",
         "http://localhost.evil.example/jwks",
         "http://127.0.0.1.evil.example/jwks",
         "http://localhost@idp.example/jwks",
