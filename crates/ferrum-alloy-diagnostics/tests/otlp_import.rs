@@ -89,6 +89,7 @@ fn imported_evidence_is_unverified_and_linked_by_parent_ids() {
         Some(Interval {
             start_unix_nano: 1_790_000_000_700_000_000,
             end_unix_nano: 1_790_000_000_830_000_000,
+            unrecognized: std::collections::BTreeMap::new(),
         }),
         "the header phase ends at span start plus time to headers, not at the span end"
     );
@@ -162,6 +163,56 @@ fn overlong_instance_identities_are_not_truncated_into_collisions() {
         );
     }
     assert_eq!(instances(&a).len(), 1, "one identity stays one instance");
+}
+
+#[test]
+fn a_literal_identity_never_equals_another_identity_digest() {
+    // For each identity key: a long identity becomes a digest; a resource
+    // whose literal identity is that digest text must not become the same
+    // producer instance (it would fake a shared clock).
+    for key in ["service.instance.id", "host.name"] {
+        let with_identity = |identity: &str| -> String {
+            let mut lines: Vec<String> = Vec::new();
+            for line in input().lines() {
+                let mut doc: Value = serde_json::from_str(line).unwrap();
+                for rs in doc["resourceSpans"].as_array_mut().unwrap() {
+                    let attrs = rs["resource"]["attributes"].as_array_mut().unwrap();
+                    attrs.retain(|a| a["key"] != "service.instance.id" && a["key"] != "host.name");
+                    attrs.push(json!({"key": key, "value": {"stringValue": identity}}));
+                }
+                lines.push(doc.to_string());
+            }
+            lines.join("\n")
+        };
+        let instances = |text: &str| -> BTreeSet<String> {
+            let report =
+                import(text, Some(OK_TRACE), collector(), &ImportLimits::default()).unwrap();
+            report
+                .observations
+                .iter()
+                .filter_map(|o| o.producer.instance.clone())
+                .collect()
+        };
+        let long = instances(&with_identity(&"l".repeat(600)));
+        assert_eq!(long.len(), 1, "{key}: {long:?}");
+        let digest = long.iter().next().unwrap().clone();
+        assert!(digest.starts_with("digest:"), "{key}: {digest}");
+
+        let literal = instances(&with_identity(&digest));
+        assert_eq!(literal.len(), 1, "{key}: {literal:?}");
+        assert_ne!(
+            literal.iter().next().unwrap(),
+            &digest,
+            "{key}: a literal copy of a digest must not collide with it"
+        );
+        // Equal literal identities stay equal, and ordinary ones are kept.
+        assert_eq!(literal, instances(&with_identity(&digest)), "{key}");
+        assert_eq!(
+            instances(&with_identity("orders-1")),
+            BTreeSet::from(["orders-1".to_owned()]),
+            "{key}"
+        );
+    }
 }
 
 #[test]
@@ -264,6 +315,7 @@ fn header_interval_anchors_at_middleware_entry_not_span_creation() {
         Some(Interval {
             start_unix_nano: 1_790_000_000_600_000_000,
             end_unix_nano: 1_790_000_000_730_000_000,
+            unrecognized: std::collections::BTreeMap::new(),
         }),
         "span start (700 ms) minus preparation (100 ms), plus time to headers (130 ms)"
     );
@@ -493,6 +545,7 @@ fn header_interval_ends_at_time_to_headers_not_at_span_end() {
         Some(Interval {
             start_unix_nano: T0,
             end_unix_nano: T0 + 100 * MS,
+            unrecognized: std::collections::BTreeMap::new(),
         })
     );
 }
@@ -537,6 +590,7 @@ fn body_phase_fixture_does_not_blame_the_database_on_time_to_headers() {
         Some(Interval {
             start_unix_nano: T0,
             end_unix_nano: T0 + 100 * MS,
+            unrecognized: std::collections::BTreeMap::new(),
         })
     );
     let findings = analyze(&report, &Thresholds::default());

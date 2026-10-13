@@ -19,6 +19,9 @@ pub struct CatalogEntry {
 
 /// Alloy: middleware entry until the service produced response headers.
 pub const ALLOY_TIME_TO_HEADERS: &str = "alloy.server.time_to_headers";
+/// Alloy: middleware entry until the request span was created (exported as
+/// the `alloy.server.preparation_ms` span attribute; anchors the header phase).
+pub const ALLOY_SERVER_PREPARATION: &str = "alloy.server.preparation";
 /// Alloy: response headers produced until the body ended, failed, or was dropped.
 pub const ALLOY_BODY_DURATION: &str = "alloy.server.body_duration";
 /// Alloy: middleware entry until body finalization.
@@ -112,7 +115,13 @@ pub const ENTRIES: &[CatalogEntry] = &[
         name: ALLOY_TIME_TO_HEADERS,
         start: "alloy.middleware_entry",
         end: "alloy.response_headers_produced",
-        meaning: "Alloy telemetry middleware entry until the inner service returned response headers to Hyper. Excludes accept, TLS handshake, and request-head parsing before the service was called. Its interval ends at the server span start plus this duration, never at the span end, which is body finalization.",
+        meaning: "Alloy telemetry middleware entry until the inner service returned response headers to Hyper. Excludes accept, TLS handshake, and request-head parsing before the service was called. Its interval starts at middleware entry (the server span start minus alloy.server.preparation_ms, or the span start when that attribute is absent) and ends at that anchor plus this duration, never at the span end, which is body finalization.",
+    },
+    CatalogEntry {
+        name: ALLOY_SERVER_PREPARATION,
+        start: "alloy.middleware_entry",
+        end: "alloy.request_span_created",
+        meaning: "Alloy telemetry middleware entry until the request span was created, after request classification, header and trace-context preparation. Exported only as the span attribute alloy.server.preparation_ms, which moves the header-phase anchor from the span start back to middleware entry. Local monotonic time; not a network or service-handler measurement.",
     },
     CatalogEntry {
         name: ALLOY_BODY_DURATION,

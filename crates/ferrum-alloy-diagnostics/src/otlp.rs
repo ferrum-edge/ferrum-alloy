@@ -533,12 +533,8 @@ fn attributes(value: Option<&Value>) -> BTreeMap<String, AttrValue> {
             continue;
         };
         let parsed = if let Some(s) = value.get("stringValue").and_then(Value::as_str) {
-            // Instance identity is compared for equality (same-clock
-            // decisions), so it must never be silently truncated into a
-            // value a different instance can also produce: overlong
-            // identities become a bounded deterministic digest instead.
-            if (key == "service.instance.id" || key == "host.name") && s.len() > MAX_ATTR_BYTES {
-                Some(AttrValue::Str(bounded_identity(s)))
+            if key == "service.instance.id" || key == "host.name" {
+                Some(AttrValue::Str(identity(s)))
             } else {
                 Some(AttrValue::Str(truncate(s)))
             }
@@ -567,6 +563,23 @@ fn attributes(value: Option<&Value>) -> BTreeMap<String, AttrValue> {
     out
 }
 
+/// Prefix of a digested instance identity.
+const IDENTITY_DIGEST_PREFIX: &str = "digest:";
+
+/// Instance identity is compared for equality (same-clock decisions), so it
+/// must never be silently truncated into a value a different instance can
+/// also produce. Overlong identities become a bounded deterministic digest,
+/// and so does any literal identity that already starts with the digest
+/// prefix: literal and digested identities then live in disjoint domains,
+/// and a literal copy of another identity's digest cannot equal it.
+fn identity(value: &str) -> String {
+    if value.len() > MAX_ATTR_BYTES || value.starts_with(IDENTITY_DIGEST_PREFIX) {
+        bounded_identity(value)
+    } else {
+        value.to_owned()
+    }
+}
+
 /// A bounded, deterministic stand-in for an overlong instance identity:
 /// two FNV-1a/splitmix 64-bit halves over the full value, so equal
 /// identities stay equal and identities that merely share a long prefix
@@ -590,7 +603,7 @@ fn bounded_identity(value: &str) -> String {
     let bytes = value.as_bytes();
     let lo = fnv1a(bytes, 0xcbf2_9ce4_8422_2325);
     let hi = splitmix(lo ^ fnv1a(bytes, 0x8422_2325_cbf2_9ce4) ^ bytes.len() as u64);
-    format!("digest:{hi:016x}{lo:016x}")
+    format!("{IDENTITY_DIGEST_PREFIX}{hi:016x}{lo:016x}")
 }
 
 fn truncate(value: &str) -> String {
@@ -625,6 +638,7 @@ fn span_ref(span: &RawSpan) -> SpanRef {
         trace_id: span.trace_id.clone(),
         span_id: span.span_id.clone(),
         parent_span_id: span.parent_span_id.clone(),
+        unrecognized: std::collections::BTreeMap::new(),
     }
 }
 
@@ -632,6 +646,7 @@ fn interval(span: &RawSpan) -> Option<Interval> {
     (span.start > 0 && span.end >= span.start).then_some(Interval {
         start_unix_nano: span.start,
         end_unix_nano: span.end,
+        unrecognized: std::collections::BTreeMap::new(),
     })
 }
 
@@ -673,6 +688,7 @@ fn header_interval(span: &RawSpan, time_to_headers_ms: Option<f64>) -> Option<In
     Some(Interval {
         start_unix_nano: anchor,
         end_unix_nano: end,
+        unrecognized: std::collections::BTreeMap::new(),
     })
 }
 
@@ -710,6 +726,7 @@ fn base(draft: Draft<'_>, kind: ObservationKind) -> Observation {
         boundaries: entry.map(|e| Boundaries {
             start: e.start.to_owned(),
             end: e.end.to_owned(),
+            unrecognized: std::collections::BTreeMap::new(),
         }),
         clock: None,
         interval: None,
@@ -718,6 +735,7 @@ fn base(draft: Draft<'_>, kind: ObservationKind) -> Observation {
             service,
             gateway,
             attempt: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         span: Some(span_ref(span)),
         attributes: BTreeMap::new(),

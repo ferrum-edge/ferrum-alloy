@@ -102,7 +102,7 @@ pub struct Collection {
 }
 
 /// The component that produced an observation or assembled a report.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Producer {
     /// Producer family.
     pub kind: ProducerKind,
@@ -122,7 +122,7 @@ pub struct Producer {
 }
 
 /// What the report is about.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subject {
     /// W3C trace id (32 lowercase hex characters) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,15 +230,23 @@ pub struct Boundaries {
     pub start: String,
     /// Where the measurement ends.
     pub end: String,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// Wall-clock interval in Unix nanoseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interval {
     /// Start, Unix epoch nanoseconds.
     pub start_unix_nano: u64,
     /// End, Unix epoch nanoseconds.
     pub end_unix_nano: u64,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 impl Interval {
@@ -266,6 +274,10 @@ pub struct Scope {
     /// Absent means the attempt is unknown, not "first attempt".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// Trace linkage.
@@ -278,6 +290,10 @@ pub struct SpanRef {
     /// Parent span id, when the span has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// A derived conclusion (Anvil `DiagnosticFinding` superset).

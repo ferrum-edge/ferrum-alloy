@@ -17,7 +17,7 @@
 //! and SDK are documented upstream as beta; see `docs/compatibility.md`.
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Wake, Waker};
@@ -405,6 +405,8 @@ pub struct BoundedSpanProcessor {
     sender: SyncSender<Message>,
     queued_bytes: Arc<AtomicUsize>,
     queued_spans: Arc<AtomicUsize>,
+    /// Set once the worker has ended; later spans are `shutdown` losses.
+    closed: Arc<AtomicBool>,
     max_queue_bytes: usize,
     metrics: Arc<Metrics>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
@@ -481,10 +483,12 @@ impl BoundedSpanProcessor {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let queued_spans = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
         let worker_state = Worker {
             receiver,
             queued_bytes: Arc::clone(&queued_bytes),
             queued_spans: Arc::clone(&queued_spans),
+            closed: Arc::clone(&closed),
             metrics: Arc::clone(&metrics),
             max_batch: config.max_export_batch,
             delay: Duration::from_millis(config.scheduled_delay_ms),
@@ -524,6 +528,7 @@ impl BoundedSpanProcessor {
             sender,
             queued_bytes,
             queued_spans,
+            closed,
             max_queue_bytes: config.max_queue_bytes,
             metrics,
             worker: Mutex::new(Some(handle)),
@@ -571,11 +576,27 @@ impl BoundedSpanProcessor {
     }
 }
 
+/// Releases one span reservation taken in `on_end` that did not reach the
+/// worker. Returns `false` when the exiting worker already counted it (it
+/// counts every reservation outstanding when it ends), in which case the
+/// caller must not count it again. Never wraps the counter.
+fn release_span_reservation(queued_spans: &AtomicUsize) -> bool {
+    queued_spans
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+        .is_ok()
+}
+
 impl SpanProcessor for BoundedSpanProcessor {
     fn on_start(&self, _span: &mut Span, _cx: &Context) {}
 
     fn on_end(&self, span: SpanData) {
         if !span.span_context.is_sampled() {
+            return;
+        }
+        // The worker has ended: the span cannot be queued, and the byte
+        // charges it left behind must not turn this into a budget loss.
+        if self.closed.load(Ordering::Acquire) {
+            self.metrics.telemetry_spans_lost.inc("shutdown");
             return;
         }
         let size = estimate_bytes(&span);
@@ -590,13 +611,15 @@ impl SpanProcessor for BoundedSpanProcessor {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.queued_bytes.fetch_sub(size, Ordering::Relaxed);
-                self.queued_spans.fetch_sub(1, Ordering::Relaxed);
-                self.metrics.telemetry_spans_lost.inc("queue_full");
+                if release_span_reservation(&self.queued_spans) {
+                    self.metrics.telemetry_spans_lost.inc("queue_full");
+                }
             }
             Err(TrySendError::Disconnected(_)) => {
                 self.queued_bytes.fetch_sub(size, Ordering::Relaxed);
-                self.queued_spans.fetch_sub(1, Ordering::Relaxed);
-                self.metrics.telemetry_spans_lost.inc("shutdown");
+                if release_span_reservation(&self.queued_spans) {
+                    self.metrics.telemetry_spans_lost.inc("shutdown");
+                }
             }
         }
     }
@@ -607,28 +630,19 @@ impl SpanProcessor for BoundedSpanProcessor {
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         let result = self.control(Message::Shutdown, timeout);
-        // The worker is finished once it acknowledged the shutdown, or gone
-        // when the queue or the acknowledgement disconnected (for example
-        // after an exporter panic). Only then has it given up ownership of
-        // its spans, so whatever is still counted as queued is genuinely
-        // lost. On a timeout the worker still owns the in-flight and queued
-        // spans and will count each one exported or export-failed when it
-        // resumes, so counting them as shutdown losses here would count
-        // every such span twice.
-        let worker_done = matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown));
-        if worker_done
+        // The worker owns terminal accounting for every span it accepted:
+        // each is counted exported or export-failed, and whatever is left
+        // when the worker ends (normally or by unwinding from an exporter
+        // panic) is counted as a shutdown loss by `Worker`'s `Drop`. Here we
+        // only wait for a worker that is finished (it acknowledged the
+        // shutdown) or gone (the queue or acknowledgement disconnected), so
+        // its accounting is complete when this returns. On a timeout the
+        // worker still owns its spans and counts them when it resumes.
+        if matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown))
             && let Ok(mut worker) = self.worker.lock()
             && let Some(handle) = worker.take()
         {
             let _ = handle.join();
-        }
-        if worker_done {
-            let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
-            if stranded > 0 {
-                self.metrics
-                    .telemetry_spans_lost
-                    .add("shutdown", stranded as u64);
-            }
         }
         result
     }
@@ -644,12 +658,37 @@ struct Worker {
     receiver: Receiver<Message>,
     queued_bytes: Arc<AtomicUsize>,
     queued_spans: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     max_batch: usize,
     delay: Duration,
     /// Queue capacity: the most messages queued behind a shutdown that are
     /// still handled, so producers that keep sending cannot hold it open.
     capacity: usize,
+}
+
+impl Drop for Worker {
+    /// Runs on every worker exit, including unwinding from an exporter
+    /// panic. Disconnects the queue first, so a producer can no longer hand
+    /// this worker a span (later `on_end` calls count their own `shutdown`
+    /// loss), then counts every span reservation still outstanding
+    /// (discarded queue messages, an unexported batch, an export that
+    /// unwound, or a producer about to roll back) as a shutdown loss. A
+    /// producer that then rolls back finds its reservation already taken
+    /// (`release_span_reservation`) and does not count it again, so every
+    /// span is counted exactly once. The byte budget is left alone: producers
+    /// roll back only the bytes they added.
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
+        let (_, disconnected) = mpsc::sync_channel(0);
+        drop(std::mem::replace(&mut self.receiver, disconnected));
+        let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
+        if stranded > 0 {
+            self.metrics
+                .telemetry_spans_lost
+                .add("shutdown", stranded as u64);
+        }
+    }
 }
 
 /// Spans accumulated for the next export request.
@@ -757,11 +796,13 @@ impl Worker {
             let chunk: Vec<SpanData> = batch.spans.drain(..take).collect();
             let count = chunk.len();
             // An exporter panic unwinds and ends this thread: waiting
-            // callers then get `AlreadyShutdown`, later spans are counted as
-            // `shutdown` losses, and `exporter.shutdown()` is not called.
+            // callers then get `AlreadyShutdown`, `Worker`'s `Drop` counts
+            // this chunk and everything still queued as `shutdown` losses,
+            // later spans count their own, and `exporter.shutdown()` is not
+            // called.
             let result = block_on(exporter.export(chunk));
-            // Saturating for safety; shutdown-timeout accounting stays with
-            // this worker, so each span is still counted exactly once.
+            // Saturating for safety; terminal accounting stays with this
+            // worker, so each span is still counted exactly once.
             let _ = self
                 .queued_spans
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
@@ -889,6 +930,7 @@ mod tests {
             receiver,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             queued_spans: Arc::new(AtomicUsize::new(3)),
+            closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::clone(&metrics),
             max_batch: 16,
             delay: Duration::from_secs(60),
@@ -938,12 +980,48 @@ mod tests {
     }
 
     #[test]
+    fn a_rollback_after_the_worker_ended_is_not_counted_twice() {
+        // Two producers hold reservations (one about to see `Full`, one
+        // `Disconnected`) when the worker unwinds. The worker counts both;
+        // their rollbacks then find nothing to release, never wrap the
+        // counter, and add no second loss.
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let metrics = Arc::new(Metrics::default());
+        let queued_spans = Arc::new(AtomicUsize::new(2));
+        let queued_bytes = Arc::new(AtomicUsize::new(200));
+        let worker = Worker {
+            receiver,
+            queued_bytes: Arc::clone(&queued_bytes),
+            queued_spans: Arc::clone(&queued_spans),
+            closed: Arc::new(AtomicBool::new(false)),
+            metrics: Arc::clone(&metrics),
+            max_batch: 1,
+            delay: Duration::from_secs(60),
+            capacity: 1,
+        };
+        drop(worker);
+        assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 2);
+        assert!(!release_span_reservation(&queued_spans));
+        assert!(!release_span_reservation(&queued_spans));
+        assert_eq!(queued_spans.load(Ordering::Relaxed), 0);
+        // The byte budget is untouched, so each producer's own byte
+        // rollback cannot wrap it.
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 200);
+
+        // A reservation taken after the worker ended is released normally.
+        queued_spans.fetch_add(1, Ordering::Relaxed);
+        assert!(release_span_reservation(&queued_spans));
+        assert_eq!(queued_spans.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn a_shutdown_handles_at_most_one_queue_of_later_messages() {
         let (sender, receiver) = mpsc::sync_channel(8);
         let worker = Worker {
             receiver,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             queued_spans: Arc::new(AtomicUsize::new(0)),
+            closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(Metrics::default()),
             max_batch: 8,
             delay: Duration::from_secs(60),

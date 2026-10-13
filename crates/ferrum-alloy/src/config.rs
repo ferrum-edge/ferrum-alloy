@@ -808,8 +808,8 @@ pub(crate) fn jwks_url_allowed(url_text: &str) -> bool {
 /// A conservative, parser-free form of [`jwks_url_allowed`]: it accepts
 /// only plainly written URLs whose host is unambiguous, and rejects anything
 /// a WHATWG URL parser could read differently (backslashes, percent-encoded
-/// or unusual host characters, numeric hosts that are not dotted-quad IPv4,
-/// out-of-range ports). Everything it accepts is also accepted by the parsed
+/// or unusual host characters, Punycode (`xn--`) or empty labels, numeric hosts that
+/// are not dotted-quad IPv4, out-of-range ports). Everything it accepts is also accepted by the parsed
 /// policy with the same host; it may reject some URLs the parsed policy
 /// would accept.
 #[cfg_attr(feature = "http-client", allow(dead_code))]
@@ -865,6 +865,17 @@ fn jwks_url_allowed_without_parser(url_text: &str) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_')
         {
+            return false;
+        }
+        // A WHATWG parser decodes `xn--` labels as Punycode and rejects
+        // invalid ones (`https://xn--/`); without a parser, refuse them all,
+        // and empty labels too.
+        if host.split('.').any(|label| {
+            label.is_empty()
+                || label
+                    .get(..4)
+                    .is_some_and(|p| p.eq_ignore_ascii_case("xn--"))
+        }) {
             return false;
         }
         // A WHATWG parser reads a host whose last label is numeric as IPv4
@@ -2017,6 +2028,8 @@ mod jwks_url_tests {
         "http://[::2]/jwks",
         "http://127.0.0.2/jwks",
         "https://999.1.1.1/jwks",
+        // Invalid Punycode: the URL parser rejects it.
+        "https://xn--/jwks",
         "https://",
         "http:///idp.example/jwks",
         "ftp://localhost/jwks",
@@ -2036,7 +2049,12 @@ mod jwks_url_tests {
     /// Forms a WHATWG parser accepts (as `https://missing-slashes/` and
     /// `http://127.0.0.1/`) but the parser-free policy conservatively
     /// refuses.
-    const NARROWER: &[&str] = &["https:missing-slashes", "http://127.1/jwks"];
+    const NARROWER: &[&str] = &[
+        "https:missing-slashes",
+        "http://127.1/jwks",
+        // Valid Punycode (bücher.example).
+        "https://xn--bcher-kva.example/jwks",
+    ];
 
     /// The parser-free policy never accepts a URL the parsed policy (and so
     /// the verifier) rejects.

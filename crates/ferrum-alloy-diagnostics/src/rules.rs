@@ -905,13 +905,13 @@ enum Placement {
 /// (`alloy.server.time_to_headers`). Intervals from different or unnamed
 /// producer instances are never compared.
 fn placement(operation: &Observation, server: &Observation, slack_nanos: u64) -> Placement {
-    let (Some(inner), Some(outer)) = (operation.interval, server.interval) else {
+    let (Some(inner), Some(outer)) = (&operation.interval, &server.interval) else {
         return Placement::Unknown;
     };
     if !same_instance(operation, server) || inner.start_unix_nano > inner.end_unix_nano {
         return Placement::Unknown;
     }
-    if inner.within(&outer, slack_nanos) {
+    if inner.within(outer, slack_nanos) {
         Placement::Inside
     } else if inner.start_unix_nano.saturating_add(slack_nanos) >= outer.end_unix_nano {
         Placement::AfterHeaders
