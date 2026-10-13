@@ -17,7 +17,7 @@
 //! and SDK are documented upstream as beta; see `docs/compatibility.md`.
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Wake, Waker};
@@ -405,6 +405,8 @@ pub struct BoundedSpanProcessor {
     sender: SyncSender<Message>,
     queued_bytes: Arc<AtomicUsize>,
     queued_spans: Arc<AtomicUsize>,
+    /// Set once the worker has ended; later spans are `shutdown` losses.
+    closed: Arc<AtomicBool>,
     max_queue_bytes: usize,
     metrics: Arc<Metrics>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
@@ -481,10 +483,12 @@ impl BoundedSpanProcessor {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let queued_spans = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
         let worker_state = Worker {
             receiver,
             queued_bytes: Arc::clone(&queued_bytes),
             queued_spans: Arc::clone(&queued_spans),
+            closed: Arc::clone(&closed),
             metrics: Arc::clone(&metrics),
             max_batch: config.max_export_batch,
             delay: Duration::from_millis(config.scheduled_delay_ms),
@@ -524,6 +528,7 @@ impl BoundedSpanProcessor {
             sender,
             queued_bytes,
             queued_spans,
+            closed,
             max_queue_bytes: config.max_queue_bytes,
             metrics,
             worker: Mutex::new(Some(handle)),
@@ -588,6 +593,12 @@ impl SpanProcessor for BoundedSpanProcessor {
         if !span.span_context.is_sampled() {
             return;
         }
+        // The worker has ended: the span cannot be queued, and the byte
+        // charges it left behind must not turn this into a budget loss.
+        if self.closed.load(Ordering::Acquire) {
+            self.metrics.telemetry_spans_lost.inc("shutdown");
+            return;
+        }
         let size = estimate_bytes(&span);
         let previous = self.queued_bytes.fetch_add(size, Ordering::Relaxed);
         if previous + size > self.max_queue_bytes {
@@ -647,6 +658,7 @@ struct Worker {
     receiver: Receiver<Message>,
     queued_bytes: Arc<AtomicUsize>,
     queued_spans: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     max_batch: usize,
     delay: Duration,
@@ -667,6 +679,7 @@ impl Drop for Worker {
     /// span is counted exactly once. The byte budget is left alone: producers
     /// roll back only the bytes they added.
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
         let (_, disconnected) = mpsc::sync_channel(0);
         drop(std::mem::replace(&mut self.receiver, disconnected));
         let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
@@ -917,6 +930,7 @@ mod tests {
             receiver,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             queued_spans: Arc::new(AtomicUsize::new(3)),
+            closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::clone(&metrics),
             max_batch: 16,
             delay: Duration::from_secs(60),
@@ -979,6 +993,7 @@ mod tests {
             receiver,
             queued_bytes: Arc::clone(&queued_bytes),
             queued_spans: Arc::clone(&queued_spans),
+            closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::clone(&metrics),
             max_batch: 1,
             delay: Duration::from_secs(60),
@@ -1006,6 +1021,7 @@ mod tests {
             receiver,
             queued_bytes: Arc::new(AtomicUsize::new(0)),
             queued_spans: Arc::new(AtomicUsize::new(0)),
+            closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(Metrics::default()),
             max_batch: 8,
             delay: Duration::from_secs(60),

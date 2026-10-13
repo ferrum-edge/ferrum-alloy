@@ -657,14 +657,23 @@ fn an_exporter_panic_after_a_timed_out_shutdown_still_accounts_for_every_span() 
     let mut config = config();
     config.max_queue_spans = 8;
     config.max_export_batch = 1;
+    // Three 10 KB spans nearly fill the byte budget, so a fourth would be a
+    // `byte_budget` loss while their charges were still held.
+    config.max_queue_bytes = 32_000;
     let metrics = Arc::new(Metrics::default());
     let factory = move || Ok(shared);
     let processor = BoundedSpanProcessor::spawn(factory, &config, Arc::clone(&metrics)).unwrap();
+    let large = || {
+        let mut span = new_test_export_span_data();
+        span.name = "x".repeat(10_000).into();
+        span
+    };
 
     // One span in flight, two queued behind it.
     for _ in 0..3 {
-        processor.on_end(new_test_export_span_data());
+        processor.on_end(large());
     }
+    assert_eq!(metrics.telemetry_spans_lost.get("byte_budget"), 0);
     exporter.wait_until_exporting();
     let result = processor.shutdown_with_timeout(Duration::from_millis(50));
     assert!(
@@ -693,9 +702,11 @@ fn an_exporter_panic_after_a_timed_out_shutdown_still_accounts_for_every_span() 
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(accounted(), 3, "each span is counted exactly once");
     assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 3);
-    // A span offered after the worker is gone counts its own loss.
-    processor.on_end(new_test_export_span_data());
+    // A span offered after the worker is gone counts its own loss as
+    // `shutdown`, not as byte-budget pressure from freed payloads.
+    processor.on_end(large());
     assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 4);
+    assert_eq!(metrics.telemetry_spans_lost.get("byte_budget"), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
