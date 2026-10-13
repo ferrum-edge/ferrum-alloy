@@ -496,7 +496,8 @@ pub(crate) struct Sources<'a> {
 impl<'a> Sources<'a> {
     pub(crate) fn read(settings: &'a TlsSettings) -> Result<Self, TlsError> {
         let cert = read_file(CHAIN, &settings.cert_path, MAX_PEM_FILE_BYTES)?;
-        let key = Zeroizing::new(read_file(KEY, &settings.key_path, MAX_PEM_FILE_BYTES)?);
+        let key = crate::files::read_sensitive_file_bounded(&settings.key_path, MAX_PEM_FILE_BYTES)
+            .map_err(|e| pem_error(KEY, &settings.key_path, e))?;
         let client_auth = settings.client_auth != ClientAuth::None;
         let client_ca = match &settings.client_ca_path {
             Some(path) if client_auth => Some(read_file(CLIENT_CA, path, MAX_PEM_FILE_BYTES)?),

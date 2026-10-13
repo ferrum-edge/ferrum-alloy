@@ -1646,6 +1646,90 @@ fn openapi_check_refuses_special_outputs_with_exit_4() {
     }
 }
 
+/// A stand-in for `cargo` that ignores its arguments and runs `body`.
+#[cfg(unix)]
+fn fake_cargo(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// The document printed by the project binary is bounded like `--input`
+/// (#183): a binary that prints without end, or a finite document over
+/// 16 MiB, is refused with exit 3 instead of being buffered.
+#[cfg(unix)]
+#[test]
+fn openapi_export_bounds_the_binary_output() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
+    let out = dir.path().join("openapi.json");
+    // Each export must finish within the deadline; a regression is killed
+    // and fails the test instead of exhausting the runner.
+    let export = |cargo: &Path| {
+        let child = bin()
+            .env("CARGO", cargo)
+            .args(["openapi", "export", "--project"])
+            .arg(dir.path())
+            .arg("--output")
+            .arg(&out)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(output) => output.unwrap(),
+            Err(_) => {
+                let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+                panic!("openapi export did not finish within 60 s");
+            }
+        }
+    };
+
+    // A valid, finite document just over the limit is refused too.
+    let large = fake_cargo(
+        dir.path(),
+        "large",
+        "printf '%s' '{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"paths\":{},\"x-pad\":\"'\n\
+         head -c 16777216 /dev/zero | tr '\\0' a\n\
+         printf '\"}'",
+    );
+    let output = export(&large);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(stderr(&output).contains("printed more than 16777216 bytes"));
+    assert!(!out.exists());
+
+    // A producer far past the limit (64 MiB, finite, so a regression fails
+    // the assertions instead of exhausting the runner) is cut off too.
+    let flood = fake_cargo(dir.path(), "flood", "yes '{}' | head -c 67108864");
+    let output = export(&flood);
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("printed more than 16777216 bytes"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!out.exists());
+
+    let document = r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#;
+    let small = fake_cargo(dir.path(), "small", &format!("printf '%s' '{document}'"));
+    let output = export(&small);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(written["openapi"], "3.1.0");
+
+    let failing = fake_cargo(dir.path(), "failing", "exit 7");
+    let output = export(&failing);
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(stderr(&output).contains("failed"), "{}", stderr(&output));
+}
+
 #[test]
 fn new_rejects_unsafe_names_and_targets() {
     for name in [

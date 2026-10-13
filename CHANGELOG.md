@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- `ferrum-alloy openapi export` without `--input` reads at most 16 MiB of the
+  project binary's standard output, the `--input` limit. When a binary prints
+  more, the export closes the pipe, kills the process it spawned (on Windows
+  Cargo, not necessarily its child), and fails with exit 3 instead of
+  buffering without bound (#183).
+- `config::Secret` holds its value in `Zeroizing<String>`: the value is
+  zeroized when a `Secret` or any clone of it is dropped, and `Secret`
+  implements `ZeroizeOnDrop`. `FERRUM_ALLOY_*_FILE` secret files and the TLS
+  private key are read with the new `files::read_sensitive_file_bounded`,
+  whose buffer is zeroizing and fully reserved before the read, so no
+  reallocation or refused read leaves a plaintext copy. `zeroize` is now a non-optional
+  dependency of `ferrum-alloy` (#184).
+
 - Complete the 2026-10 audit fixes after independent review of #177 (#166,
   #167, #171, #172). The parser-free JWKS URL check (CLI `check`) also refuses
   Punycode (`xn--`) and empty host labels, so it never accepts a URL the
