@@ -72,17 +72,23 @@ async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
         format!("{mode:?}")
     };
     let name = |mode: PgSslMode| format!("{mode:?}");
-    // Unset or `prefer` would fall back to plaintext: raised to `require` (#182).
+    // `prefer` would fall back to plaintext: raised to `require` (#182).
     for remote in [
-        "postgres://u:p@db.example/x",
         "postgres://u:p@db.example/x?sslmode=prefer",
-        "postgres://u:p@10.0.0.5:5432/x",
-        "postgres://u:p@127.0.0.1.example/x",
+        "postgres://u:p@10.0.0.5:5432/x?sslmode=prefer",
+        "postgres://u:p@127.0.0.1.example/x?sslmode=prefer",
         // A DNS name is not a destination check, `localhost` included.
         "postgres://u:p@localhost/x?sslmode=prefer",
-        "postgres://u:p@LOCALHOST/x",
+        "postgres://u:p@LOCALHOST/x?sslmode=prefer",
     ] {
         assert_eq!(mode(remote), name(PgSslMode::Require), "{remote}");
+    }
+    // Without `sslmode` in the URL, SQLx takes `PGSSLMODE`, which is kept as
+    // set; only its absence (`prefer`) is raised.
+    if std::env::var_os("PGSSLMODE").is_none() {
+        for remote in ["postgres://u:p@db.example/x", "postgres://u:p@localhost/x"] {
+            assert_eq!(mode(remote), name(PgSslMode::Require), "{remote}");
+        }
     }
     // Stronger and explicit plaintext modes are kept as written.
     for (url, expected) in [
