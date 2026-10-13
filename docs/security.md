@@ -109,7 +109,7 @@ The `openapi-ui` feature and `openapi.ui = true` serve Swagger UI at `openapi.ui
 
 ## Configuration and secrets
 
-`management.token` and `database.url` are `Secret`s and are never printed by `Debug`, `Display`, serialization, `ferrum-alloy check --show-effective`, or error messages. For example, an invalid database URL error does not echo the URL. `_FILE` variants read secrets from files. Unknown `FERRUM_ALLOY_*` variables and unknown keys are errors.
+`management.token` and `database.url` are `Secret`s and are never printed by `Debug`, `Display`, serialization, `ferrum-alloy check --show-effective`, or error messages. For example, an invalid database URL error does not echo the URL. A `Secret` zeroizes its value when it is dropped, and so does each clone of it; secret files and the TLS private key are read into a buffer that is reserved at its full bounded size before the read (so it is never reallocated) and zeroized when dropped, including when the read fails or the file is too large. This is best effort: copies made while a configuration file or the environment is parsed, and strings that callers build from `Secret::expose`, are not covered. `_FILE` variants read secrets from files. Unknown `FERRUM_ALLOY_*` variables and unknown keys are errors.
 
 Parsing fails before values reach `Secret`, so syntax and schema (type) errors never quote configuration content:
 
@@ -120,7 +120,7 @@ Parsing fails before values reach `Secret`, so syntax and schema (type) errors n
 
 ### Bounded file reads
 
-Files named by configuration are read with one bounded reader (`ferrum_alloy::files::read_regular_file_bounded`), which the `ferrum-alloy` command shares:
+Files named by configuration are read with one bounded reader (`ferrum_alloy::files::read_regular_file_bounded`), which the `ferrum-alloy` command shares. `FERRUM_ALLOY_*_FILE` secrets and the TLS private key use its variant `read_sensitive_file_bounded`, which applies the same checks and limits but reads into a zeroizing buffer reserved at the full limit:
 
 | File | Limit |
 |---|---|
@@ -217,7 +217,7 @@ Reports and OTLP files are untrusted input. They are bounded (size, nesting dept
 
 The human-readable rendering is line oriented, so every value it takes from a report, a finding, or a warning stays on one line: control characters other than tab, plus Unicode line and paragraph separators, are written as escape sequences (`\n`, `\u{1b}`, `\u{2028}`, ...). This applies to library callers that print `render_text` directly as well as to the CLI. Only the renderer's own structure ends a line, so a report cannot forge warning, finding, or header lines. Parser error locations also escape control characters and Unicode line separators in JSON keys, keeping hostile keys from adding lines to stderr. Use JSON output for machine processing.
 
-The CLI reads the files named by `diagnose --input`, `--otlp`, and `--token-file`, by `openapi export --input`, by the `--manifest` of `edge export` and `openapi export`, and the existing `--output` that `openapi export --check` compares against (at most 16 MiB, or the size of the newly rendered document when that is larger; any refusal is drift, exit 4), only from regular files (symbolic links followed), with the reader of [bounded file reads](#bounded-file-reads). It refuses devices, FIFOs, sockets, and directories before opening them (on Unix the open does not wait for a writer, so a path swapped for a FIFO in between never blocks it), checks the type again on the opened file, and stops reading one byte past the size limit, so a file that reports a length of `0` (such as those in `/proc`) or grows after the check is still bounded.
+The CLI reads the files named by `diagnose --input`, `--otlp`, and `--token-file`, by `openapi export --input`, by the `--manifest` of `edge export` and `openapi export`, and the existing `--output` that `openapi export --check` compares against (at most 16 MiB, or the size of the newly rendered document when that is larger; any refusal is drift, exit 4), only from regular files (symbolic links followed), with the reader of [bounded file reads](#bounded-file-reads). It refuses devices, FIFOs, sockets, and directories before opening them (on Unix the open does not wait for a writer, so a path swapped for a FIFO in between never blocks it), checks the type again on the opened file, and stops reading one byte past the size limit, so a file that reports a length of `0` (such as those in `/proc`) or grows after the check is still bounded. Without `--input`, `openapi export` runs `cargo run --bin <bin>` and reads at most 16 MiB of its standard output: when a binary prints more, the export closes the pipe, kills the process it spawned, and fails with exit 3 before the extra output is buffered. Termination of descendants is not guaranteed: on Windows `cargo run` starts the binary as its own child, and a binary that ignores the closed pipe can keep running after the export exits.
 
 A `verified` claim in a file is downgraded to `unverified` and reported, so file input can never produce `confirmed` findings.
 

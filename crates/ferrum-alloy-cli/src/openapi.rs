@@ -14,8 +14,9 @@
 //! could not use fails the export and `--check` with exit 3. A hand-written
 //! selection that publishes every `GET` operation is a warning.
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, Subcommand};
 use serde_json::Value;
@@ -82,23 +83,51 @@ fn load(args: &ExportArgs) -> Result<Vec<u8>, CliError> {
         manifest_path.display(),
         args.bin
     ));
-    let output = Command::new(cargo)
+    let mut child = Command::new(cargo)
         .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
         .arg(&manifest_path)
         .arg("--bin")
         .arg(&args.bin)
-        .stderr(std::process::Stdio::inherit())
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
         .map_err(|e| CliError::Io(format!("cannot run cargo: {e}")))?;
-    if !output.status.success() {
+    // The document is held to the same limit as `--input`: read at most one
+    // byte past it, so a binary that prints without end cannot exhaust memory.
+    let mut stdout = Vec::new();
+    let read = match child.stdout.take() {
+        Some(pipe) => pipe.take(MAX_DOCUMENT_BYTES + 1).read_to_end(&mut stdout),
+        None => Ok(0),
+    };
+    // The pipe is closed here: a child still writing gets EPIPE.
+    if read.is_err() || u64::try_from(stdout.len()).unwrap_or(u64::MAX) > MAX_DOCUMENT_BYTES {
+        // Best effort: the child may already have exited.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(match read {
+            Err(e) => CliError::Io(format!(
+                "cannot read `cargo run --bin {}` output: {e}",
+                args.bin
+            )),
+            Ok(_) => CliError::Invalid(format!(
+                "`cargo run --bin {}` printed more than {MAX_DOCUMENT_BYTES} bytes",
+                args.bin
+            )),
+        });
+    }
+    let status = child
+        .wait()
+        .map_err(|e| CliError::Io(format!("cannot run cargo: {e}")))?;
+    if !status.success() {
         return Err(CliError::Io(format!(
-            "`cargo run --bin {}` failed ({})",
-            args.bin, output.status
+            "`cargo run --bin {}` failed ({status})",
+            args.bin
         )));
     }
-    Ok(output.stdout)
+    Ok(stdout)
 }
 
 fn validate(document: &Value) -> Result<(), CliError> {

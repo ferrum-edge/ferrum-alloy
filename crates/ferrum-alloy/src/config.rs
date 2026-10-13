@@ -32,6 +32,7 @@ use ferrum_alloy_telemetry::init::LoggingConfig;
 use ferrum_alloy_telemetry::{TelemetryConfig, TrustedPeersConfig};
 use ipnet::IpNet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use zeroize::Zeroizing;
 
 use crate::files::read_regular_file_bounded;
 
@@ -64,20 +65,32 @@ pub const EDGE_DIAGNOSTICS_TOKEN_ENV: &str = "FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKE
 pub const CLI_ENV_VARS: &[&str] = &[DIAGNOSTICS_TOKEN_ENV, EDGE_DIAGNOSTICS_TOKEN_ENV];
 
 /// A secret value. `Debug`, `Display`, and `Serialize` never reveal it.
+///
+/// The value is zeroized when the `Secret` is dropped, and so is every clone:
+/// `Clone` stays because configuration structs are cloned into application
+/// state, but no copy outlives its owner in readable form. Zeroization is
+/// best effort. It covers the `Secret` itself, not the strings a caller
+/// derives from [`Secret::expose`] or buffers that held the text before it
+/// was wrapped (for example while a configuration file is parsed).
 #[derive(Clone, PartialEq, Eq)]
-pub struct Secret(String);
+pub struct Secret(Zeroizing<String>);
 
 impl Secret {
-    /// Wraps a secret.
+    /// Wraps a secret, taking ownership of the value (no copy is made of a
+    /// `String`).
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(Zeroizing::new(value.into()))
     }
 
-    /// The secret value. Callers must not log it.
+    /// The secret value. Callers must not log it, and should not keep owned
+    /// copies of it.
     pub fn expose(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
+
+// The only field is `Zeroizing`, which zeroizes the value on drop.
+impl zeroize::ZeroizeOnDrop for Secret {}
 
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -99,7 +112,7 @@ impl Serialize for Secret {
 
 impl<'de> Deserialize<'de> for Secret {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Secret)
+        String::deserialize(deserializer).map(Secret::new)
     }
 }
 
@@ -1419,9 +1432,11 @@ where
             .into_string()
             .map_err(|_| env_error("value is not valid UTF-8".into()))?;
         let value = if from_file {
-            let bytes = read_regular_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
-                .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
-            let text = String::from_utf8(bytes)
+            // The file's bytes are zeroized once the trimmed value is copied.
+            let bytes =
+                crate::files::read_sensitive_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
+                    .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
+            let text = std::str::from_utf8(&bytes)
                 .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
             text.trim_end_matches(['\n', '\r']).to_owned()
         } else {
@@ -1996,6 +2011,29 @@ fn is_ui_path(path: &str) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
         })
     })
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::Secret;
+
+    fn zeroized_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    #[test]
+    fn secrets_and_their_clones_are_zeroized_on_drop_and_never_shown() {
+        zeroized_on_drop::<Secret>();
+        let secret = Secret::new("hunter2");
+        let copy = secret.clone();
+        assert_eq!(copy.expose(), "hunter2");
+        assert_eq!(copy, secret);
+        assert_eq!(
+            format!("{secret:?} {secret}"),
+            "Secret(<redacted>) <redacted>"
+        );
+        let parsed: Secret =
+            serde_json::from_str("\"hunter2\"").unwrap_or_else(|_| Secret::new(""));
+        assert_eq!(parsed, secret);
+    }
 }
 
 #[cfg(test)]
