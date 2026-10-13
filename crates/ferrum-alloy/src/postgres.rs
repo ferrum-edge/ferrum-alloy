@@ -16,9 +16,10 @@
 //! the service *not ready* rather than crash-looping; an invalid URL still
 //! fails at startup.
 //!
-//! TLS: for a host that is not local (a Unix socket, a loopback address or
-//! `localhost`), `sslmode=prefer`, libpq's and SQLx's default when the URL and
-//! `PGSSLMODE` name none, is raised to `require`, so a server or attacker that
+//! TLS: for a host that is not local (a Unix socket or a literal loopback
+//! address; DNS names, `localhost` included, are not), `sslmode=prefer`,
+//! libpq's and SQLx's default when the URL and `PGSSLMODE` name none, is
+//! raised to `require`, so a server or attacker that
 //! declines TLS gets an error instead of a silent plaintext fallback. Use
 //! `verify-full` (with `sslrootcert` for a private CA) to authenticate the
 //! server too. Plaintext to a remote host needs an explicit `sslmode=disable`
@@ -86,9 +87,9 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
     Ok(pool)
 }
 
-/// Whether the connection stays on this host: a Unix socket, a loopback
-/// address, or `localhost` (the conventional local development name, and
-/// SQLx's default host when the URL names none).
+/// Whether the connection stays on this host: a Unix socket or a literal
+/// loopback address. DNS names, `localhost` included, do not qualify: the
+/// resolver decides where they connect (the same rule as `auth.jwt.jwks_url`).
 fn is_local(options: &PgConnectOptions) -> bool {
     if options.get_socket().is_some() {
         return true;
@@ -100,7 +101,6 @@ fn is_local(options: &PgConnectOptions) -> bool {
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
     host.starts_with('/')
-        || host.eq_ignore_ascii_case("localhost")
         || literal
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())

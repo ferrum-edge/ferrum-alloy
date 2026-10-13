@@ -78,6 +78,9 @@ async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
         "postgres://u:p@db.example/x?sslmode=prefer",
         "postgres://u:p@10.0.0.5:5432/x",
         "postgres://u:p@127.0.0.1.example/x",
+        // A DNS name is not a destination check, `localhost` included.
+        "postgres://u:p@localhost/x?sslmode=prefer",
+        "postgres://u:p@LOCALHOST/x",
     ] {
         assert_eq!(mode(remote), name(PgSslMode::Require), "{remote}");
     }
@@ -111,8 +114,6 @@ async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
         "postgres://u:p@127.0.0.1:5432/x?sslmode=prefer",
         "postgres://u:p@127.0.0.2/x?sslmode=prefer",
         "postgres://u:p@[::1]:5432/x?sslmode=prefer",
-        "postgres://u:p@localhost/x?sslmode=prefer",
-        "postgres://u:p@LOCALHOST/x?sslmode=prefer",
         "postgres:///x?host=/var/run/postgresql&sslmode=prefer",
     ] {
         assert_eq!(mode(local), name(PgSslMode::Prefer), "{local}");

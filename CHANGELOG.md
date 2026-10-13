@@ -9,7 +9,8 @@
   directly, never through an environment proxy (`HTTP_PROXY`).
 - **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
   when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
-  not local (Unix socket, loopback address or `localhost`), so a remote
+  not local (a Unix socket or a literal loopback address; `localhost` and
+  other DNS names are not), so a remote
   database never silently falls back to plaintext (#182). An explicit
   `sslmode=disable` or `allow` to a remote host is kept and logs a warning.
 
