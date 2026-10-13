@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
+  loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
+  `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
+  connects (#181). Use `http://127.0.0.1:<port>`. An `http` JWKS is fetched
+  directly, never through an environment proxy (`HTTP_PROXY`).
+- **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
+  when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
+  not local (Unix socket, loopback address or `localhost`), so a remote
+  database never silently falls back to plaintext (#182). An explicit
+  `sslmode=disable` or `allow` to a remote host is kept and logs a warning.
+
 - Complete the 2026-10 audit fixes after independent review of #177 (#166,
   #167, #171, #172). The parser-free JWKS URL check (CLI `check`) also refuses
   Punycode (`xn--`) and empty host labels, so it never accepts a URL the

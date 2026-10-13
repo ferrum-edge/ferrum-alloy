@@ -60,6 +60,60 @@ async fn invalid_urls_fail_without_revealing_the_secret() {
     assert!(postgres::connect(&settings("postgres://u:hunter2@[::1:bad/x"), "test").is_err());
 }
 
+#[tokio::test]
+async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
+    use sqlx::postgres::PgSslMode;
+    let mode = |url: &str| {
+        postgres::connect(&settings(url), "test")
+            .unwrap()
+            .connect_options()
+            .get_ssl_mode()
+    };
+    // Unset or `prefer` would fall back to plaintext: raised to `require` (#182).
+    assert_eq!(mode("postgres://u:p@db.example/x"), PgSslMode::Require);
+    assert_eq!(
+        mode("postgres://u:p@db.example/x?sslmode=prefer"),
+        PgSslMode::Require
+    );
+    assert_eq!(mode("postgres://u:p@10.0.0.5:5432/x"), PgSslMode::Require);
+    assert_eq!(
+        mode("postgres://u:p@127.0.0.1.example/x"),
+        PgSslMode::Require
+    );
+    // Stronger and explicit plaintext modes are kept as written.
+    assert_eq!(
+        mode("postgres://u:p@db.example/x?sslmode=verify-full"),
+        PgSslMode::VerifyFull
+    );
+    assert_eq!(
+        mode("postgres://u:p@db.example/x?sslmode=verify-ca"),
+        PgSslMode::VerifyCa
+    );
+    assert_eq!(
+        mode("postgres://u:p@db.example/x?sslmode=require"),
+        PgSslMode::Require
+    );
+    assert_eq!(
+        mode("postgres://u:p@db.example/x?sslmode=disable"),
+        PgSslMode::Disable
+    );
+    assert_eq!(
+        mode("postgres://u:p@db.example/x?sslmode=allow"),
+        PgSslMode::Allow
+    );
+    // Local development is unaffected.
+    for local in [
+        "postgres://u:p@127.0.0.1:5432/x?sslmode=prefer",
+        "postgres://u:p@127.0.0.2/x?sslmode=prefer",
+        "postgres://u:p@[::1]:5432/x?sslmode=prefer",
+        "postgres://u:p@localhost/x?sslmode=prefer",
+        "postgres://u:p@LOCALHOST/x?sslmode=prefer",
+        "postgres:///x?host=/var/run/postgresql&sslmode=prefer",
+    ] {
+        assert_eq!(mode(local), PgSslMode::Prefer, "{local}");
+    }
+}
+
 #[test]
 fn connect_outside_a_runtime_is_an_error_not_a_panic() {
     let error = postgres::connect(

@@ -749,11 +749,13 @@ fn jwks_url_check_and_verifier_share_one_parsed_policy() {
     let accepted = [
         "https://idp.example.com/jwks",
         "http://127.0.0.1:8080/jwks",
-        "http://localhost/jwks",
         "http://[::1]:8080/jwks",
+        "https://localhost/jwks",
     ];
     let rejected = [
         "http://idp.example.com/jwks",
+        "http://localhost/jwks",
+        "http://LOCALHOST:8080/jwks",
         "http://localhost.evil.example/jwks",
         "http://127.0.0.1.evil.example/jwks",
         "http://user@localhost.evil.example/jwks",

@@ -336,7 +336,7 @@ impl JwtVerifier {
         // never the original text.
         if !crate::config::jwks_url_policy(&jwks_url) {
             return Err(AlloyError::Integration(
-                "auth.jwt.jwks_url must use https (http is allowed only for loopback)".into(),
+                "auth.jwt.jwks_url must use https (http is allowed only for the literal loopback addresses 127.0.0.1 and [::1], not localhost)".into(),
             ));
         }
         if settings.issuer.is_empty() || settings.audiences.is_empty() {
@@ -393,10 +393,17 @@ impl JwtVerifier {
                     .with_no_client_auth(),
             }
         };
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .timeout(Duration::from_millis(settings.jwks_timeout_ms))
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::none());
+        // Plain `http` is allowed only to a literal loopback address, and only
+        // because it never leaves this host: an environment proxy
+        // (`HTTP_PROXY`) would carry the key set off-host in cleartext.
+        if jwks_url.scheme() == "http" {
+            client = client.no_proxy();
+        }
+        let client = client
             .build()
             .map_err(|e| AlloyError::Integration(format!("JWKS client: {e}")))?;
         Ok(Self {

@@ -15,6 +15,14 @@
 //! Connections are established lazily, so a database outage at startup makes
 //! the service *not ready* rather than crash-looping; an invalid URL still
 //! fails at startup.
+//!
+//! TLS: for a host that is not local (a Unix socket, a loopback address or
+//! `localhost`), `sslmode=prefer`, libpq's and SQLx's default when the URL and
+//! `PGSSLMODE` name none, is raised to `require`, so a server or attacker that
+//! declines TLS gets an error instead of a silent plaintext fallback. Use
+//! `verify-full` (with `sslrootcert` for a private CA) to authenticate the
+//! server too. Plaintext to a remote host needs an explicit `sslmode=disable`
+//! or `allow`, and logs a warning when the pool is built.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -22,7 +30,7 @@ use std::time::{Duration, Instant};
 use ferrum_alloy_telemetry::operation::{Operation, record_pool_wait};
 use sqlx::migrate::Migrator;
 use sqlx::pool::PoolConnection;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Postgres};
 
 use crate::config::DatabaseSettings;
@@ -55,6 +63,18 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
     if let Some(timeout) = settings.statement_timeout_ms {
         options = options.options([("statement_timeout", timeout.to_string())]);
     }
+    if !is_local(&options) {
+        match options.get_ssl_mode() {
+            // No plaintext fallback off this host (#182).
+            PgSslMode::Prefer => options = options.ssl_mode(PgSslMode::Require),
+            PgSslMode::Disable | PgSslMode::Allow => tracing::warn!(
+                target: "ferrum_alloy::postgres",
+                "database.url permits plaintext to a non-local host (sslmode=disable or allow): \
+                 credentials and data can cross the network unencrypted; use sslmode=verify-full"
+            ),
+            _ => {}
+        }
+    }
     let pool = PgPoolOptions::new()
         .max_connections(settings.max_connections)
         .min_connections(settings.min_connections)
@@ -64,6 +84,26 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
         .test_before_acquire(true)
         .connect_lazy_with(options);
     Ok(pool)
+}
+
+/// Whether the connection stays on this host: a Unix socket, a loopback
+/// address, or `localhost` (the conventional local development name, and
+/// SQLx's default host when the URL names none).
+fn is_local(options: &PgConnectOptions) -> bool {
+    if options.get_socket().is_some() {
+        return true;
+    }
+    let host = options.get_host();
+    // SQLx keeps the brackets of an IPv6 literal.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || literal
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Acquires a connection and records the wait on the current operation span.

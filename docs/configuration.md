@@ -371,7 +371,7 @@ The management UI, its assets, and the document require `Authorization: Bearer <
 
 | Key | Default | Meaning |
 |---|---|---|
-| `url` | none | Secret connection URL |
+| `url` | none | Secret connection URL. For a host that is not local (a Unix socket, a loopback address or `localhost`), an unset `sslmode` or `sslmode=prefer` (which would fall back to plaintext) is raised to `require`. Prefer `sslmode=verify-full` (with `sslrootcert` for a private CA) so the server is authenticated as well. Plaintext to a remote host needs an explicit `sslmode=disable` or `allow` and logs a warning when the pool is built. |
 | `max_connections` / `min_connections` | `10` / `0` | Pool size |
 | `acquire_timeout_ms` | `5000` | Pool wait bound (measured as `alloy.db.pool_wait_ms`) |
 | `idle_timeout_ms` / `max_lifetime_ms` | `600000` / `1800000` | Connection recycling |
@@ -386,7 +386,7 @@ The management UI, its assets, and the document require `Authorization: Bearer <
 | `issuer` | required | Required `iss` |
 | `audiences` | required | Accepted `aud` values |
 | `algorithms` | `["RS256"]` | Any of `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `EdDSA`. `none` and HMAC are rejected. |
-| `jwks_url` | required | `https`, or `http` only to the exact loopback hosts `localhost`, `127.0.0.1`, or `[::1]`. The policy is applied to the parsed URL that is fetched. Builds with `http-client` (every build that can verify JWTs) use the same parser for `check` and startup, so they agree. Builds without it, including the standalone CLI, use a conservative parser-free subset: it never accepts a URL startup would reject, but it also refuses some valid ones, such as Punycode (`xn--`) or empty host labels and IPv4 shorthand. |
+| `jwks_url` | required | `https`, or `http` only to the exact literal loopback addresses `127.0.0.1` or `[::1]`. DNS names, `localhost` included, are refused for `http` because the resolver decides where they connect; use `http://127.0.0.1:<port>`. The policy is applied to the parsed URL that is fetched. Builds with `http-client` (every build that can verify JWTs) use the same parser for `check` and startup, so they agree. Builds without it, including the standalone CLI, use a conservative parser-free subset: it never accepts a URL startup would reject, but it also refuses some valid ones, such as Punycode (`xn--`) or empty host labels and IPv4 shorthand. |
 | `jwks_min_refresh_interval_ms` | `60000` | Rate limit for JWKS fetches, whatever triggers them (expiry or unknown `kid`). Also the shortest key-set lifetime. |
 | `jwks_max_age_ms` | `300000` | Longest time a fetched key set is trusted before it is revalidated, even for known `kid`s. Must be greater than zero, at least `jwks_min_refresh_interval_ms`, and at most 24 hours (`86400000`). |
 | `jwks_max_stale_ms` | `300000` | How long an expired key set keeps verifying known `kid`s while it is revalidated in the background or while refreshes fail. After that, requests get `503 auth-unavailable`. `0` fails closed as soon as the key set expires. At most 24 hours (`86400000`). |
