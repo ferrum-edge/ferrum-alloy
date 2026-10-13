@@ -8,8 +8,10 @@
   without bound (#183).
 - `config::Secret` holds its value in `Zeroizing<String>`: the value is
   zeroized when a `Secret` or any clone of it is dropped, and `Secret`
-  implements `ZeroizeOnDrop`. The bytes of a `FERRUM_ALLOY_*_FILE` secret file
-  are zeroized after the value is taken. `zeroize` is now a non-optional
+  implements `ZeroizeOnDrop`. `FERRUM_ALLOY_*_FILE` secret files and the TLS
+  private key are read with the new `files::read_sensitive_file_bounded`,
+  whose buffer is zeroizing and fully reserved before the read, so no
+  reallocation or refused read leaves a plaintext copy. `zeroize` is now a non-optional
   dependency of `ferrum-alloy` (#184).
 
 - Complete the 2026-10 audit fixes after independent review of #177 (#166,

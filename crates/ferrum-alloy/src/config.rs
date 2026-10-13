@@ -1431,10 +1431,9 @@ where
             .map_err(|_| env_error("value is not valid UTF-8".into()))?;
         let value = if from_file {
             // The file's bytes are zeroized once the trimmed value is copied.
-            let bytes = Zeroizing::new(
-                read_regular_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
-                    .map_err(|e| env_error(format!("cannot read secret file: {e}")))?,
-            );
+            let bytes =
+                crate::files::read_sensitive_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
+                    .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
             text.trim_end_matches(['\n', '\r']).to_owned()

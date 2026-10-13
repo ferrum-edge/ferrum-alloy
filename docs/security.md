@@ -109,7 +109,7 @@ The `openapi-ui` feature and `openapi.ui = true` serve Swagger UI at `openapi.ui
 
 ## Configuration and secrets
 
-`management.token` and `database.url` are `Secret`s and are never printed by `Debug`, `Display`, serialization, `ferrum-alloy check --show-effective`, or error messages. For example, an invalid database URL error does not echo the URL. A `Secret` zeroizes its value when it is dropped, and so does each clone of it; the bytes of a secret file are zeroized after the value is taken from them. This is best effort: copies made while a configuration file or the environment is parsed, and strings that callers build from `Secret::expose`, are not covered. `_FILE` variants read secrets from files. Unknown `FERRUM_ALLOY_*` variables and unknown keys are errors.
+`management.token` and `database.url` are `Secret`s and are never printed by `Debug`, `Display`, serialization, `ferrum-alloy check --show-effective`, or error messages. For example, an invalid database URL error does not echo the URL. A `Secret` zeroizes its value when it is dropped, and so does each clone of it; secret files and the TLS private key are read into a buffer that is reserved at its full bounded size before the read (so it is never reallocated) and zeroized when dropped, including when the read fails or the file is too large. This is best effort: copies made while a configuration file or the environment is parsed, and strings that callers build from `Secret::expose`, are not covered. `_FILE` variants read secrets from files. Unknown `FERRUM_ALLOY_*` variables and unknown keys are errors.
 
 Parsing fails before values reach `Secret`, so syntax and schema (type) errors never quote configuration content:
 

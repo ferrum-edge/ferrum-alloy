@@ -12,6 +12,8 @@
 use std::io::Read as _;
 use std::path::Path;
 
+use zeroize::Zeroizing;
+
 /// Why [`read_regular_file_bounded`] refused a path. The message never
 /// quotes the file.
 #[derive(Debug, thiserror::Error)]
@@ -44,20 +46,42 @@ pub fn read_regular_file_bounded(path: &Path, max: u64) -> Result<Vec<u8>, ReadE
     read_opened(path, max)
 }
 
+/// [`read_regular_file_bounded`] for secrets and private keys: the buffer is
+/// [`Zeroizing`] before the first byte is read and holds `max + 1` bytes from
+/// the start, so it is never reallocated (which would leave a plaintext copy
+/// behind) and is zeroized on every path, a refusal or an I/O error included.
+pub fn read_sensitive_file_bounded(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>, ReadError> {
+    check(&std::fs::metadata(path).map_err(ReadError::Io)?, max)?;
+    let capacity =
+        usize::try_from(max.saturating_add(1)).map_err(|_| ReadError::TooLarge { limit: max })?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    read_opened_into(path, max, &mut bytes)?;
+    Ok(bytes)
+}
+
 /// Opens `path` and reads it, checking the type on the opened handle.
 fn read_opened(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
+    let mut bytes = Vec::new();
+    read_opened_into(path, max, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// Opens `path` and reads at most `max` bytes of it into `bytes`, checking
+/// the type on the opened handle. Reserves the reported length when `bytes`
+/// has less spare capacity.
+fn read_opened_into(path: &Path, max: u64, bytes: &mut Vec<u8>) -> Result<(), ReadError> {
     let file = open(path).map_err(ReadError::Io)?;
     let metadata = file.metadata().map_err(ReadError::Io)?;
     check(&metadata, max)?;
 
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    bytes.reserve(usize::try_from(metadata.len()).unwrap_or(0));
     file.take(max.saturating_add(1))
-        .read_to_end(&mut bytes)
+        .read_to_end(bytes)
         .map_err(ReadError::Io)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
         return Err(ReadError::TooLarge { limit: max });
     }
-    Ok(bytes)
+    Ok(())
 }
 
 /// Opens `path` for reading. `O_NONBLOCK` makes opening a FIFO return at
@@ -90,6 +114,25 @@ fn check(metadata: &std::fs::Metadata, max: u64) -> Result<(), ReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sensitive_reads_are_bounded_and_never_reallocate() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("secret");
+        std::fs::write(&path, b"1234")?;
+        let Ok(bytes) = read_sensitive_file_bounded(&path, 4) else {
+            return Err("input at the limit was refused".into());
+        };
+        assert_eq!(bytes.as_slice(), b"1234");
+        assert!(bytes.capacity() >= 5, "max + 1 reserved up front");
+        std::fs::write(&path, b"12345")?;
+        assert!(matches!(
+            read_sensitive_file_bounded(&path, 4),
+            Err(ReadError::TooLarge { limit: 4 })
+        ));
+        Ok(())
+    }
 
     #[test]
     fn reads_a_file_within_the_limit() -> Result<(), Box<dyn std::error::Error>> {
