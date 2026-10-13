@@ -878,6 +878,10 @@ fn does_not_prove_for_token(token: &str) -> &'static [&'static str] {
             "that the service received the request",
             "which gateway phase used up the deadline",
         ],
+        "loop_detected" => &[
+            "that the request crossed other gateways: a client can send X-Ferrum-Hops itself",
+            "that a routing loop exists",
+        ],
         _ => &["any specific root cause"],
     }
 }

@@ -2,9 +2,9 @@
 
 | Path | Contract | Status |
 |---|---|---|
-| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.15` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
-| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.15`; Alloy validates and binds authenticated lookup records per ADR 0009 |
-| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten selected released lookup record fixtures | Byte-exact from `contracts-edge-0.9.15`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
+| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.17` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
+| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.17`; Alloy validates and binds authenticated lookup records per ADR 0009 |
+| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten selected released lookup record fixtures | Byte-exact from `contracts-edge-0.9.17`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
 | `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007 (including an observed Ferrum Edge diagnostic reference), a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests; `fixtures/reports/gateway-diagnostic-ref.json` is a candidate for upstreaming to ferrum-contracts |
 | `fixtures/reports/*.expected.txt` | Deterministic rendering snapshots | Regenerate with `UPDATE_SNAPSHOTS=1` and review the diff |
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
@@ -30,8 +30,8 @@ the earlier qualified consumer slices are not relabeled as new-tag qualification
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
 diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures from the tag recorded
-in `ferrum-contracts/PIN`: `contracts-edge-0.9.15` at
-`6fb64c5dc2e014204c17609fc717d976f3b4589e`. Both shared v1 contracts are now
+in `ferrum-contracts/PIN`: `contracts-edge-0.9.17` at
+`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`. Both shared v1 contracts are now
 EXISTING/implemented; Alloy owner availability remains unreleased. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in
@@ -70,10 +70,14 @@ state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-
 published at 22:41:21 UTC on 2026-10-04. Never rewrite canonical-owned bytes or
 weaken full schema parity to change those descriptions. This adoption updates the
 pin and local metadata together. The current
-[contracts-edge-0.9.15 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.15)
-was published at 20:42:07 UTC on 2026-10-08. Its gateway-errors vocabulary
-confirms the eight client-facing tokens are unchanged; the gateway-headers
-vocabulary adds the released `X-Authenticated-Identity` assertion.
+[contracts-edge-0.9.17 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
+was published on 2026-10-10. Its gateway-errors vocabulary adds the ninth
+client-facing token, `loop_detected`, and clarifies the timeout meanings; the
+diagnostic-ref schema adds the matching rejection phase, and the
+gateway-headers vocabulary adds the `X-Ferrum-Hops` assertion (not consumed by
+Alloy). The `contracts-edge-0.9.15` release it supersedes confirmed the eight
+client-facing tokens unchanged and added the released
+`X-Authenticated-Identity` assertion.
 
 ## Service manifest schema
 

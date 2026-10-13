@@ -7,9 +7,9 @@ at `390edbd5b2485af0988e02f7827fde778d76ae0a` marks `ferrum.diagnostic_report` v
 and `ferrum.service_manifest` v1 EXISTING/implemented. This branch then adopted
 `contracts-edge-0.9.12` and verified Edge v0.9.12 (the dated qualification
 record below); the current adoption on `main` is
-[`contracts-edge-0.9.15`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.15)
-at `6fb64c5dc2e014204c17609fc717d976f3b4589e` with Edge v0.9.15 (baseline) and
-v0.9.14 (previous), as recorded in [compatibility.json](compatibility.json) and
+[`contracts-edge-0.9.17`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
+at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` with Edge v0.9.17 (baseline) and
+v0.9.15 (previous), as recorded in [compatibility.json](compatibility.json) and
 `contracts/ferrum-contracts/PIN`.
 No producer wire fields, bounds, enums, reader rules or fixture payloads change.
 The only generated snapshot changes are the known Edge release/source headers.
@@ -96,7 +96,7 @@ The manifest schema remains a transcription of owner structs and validation;
 post-default bounds, derived IDs and endpoint relationships remain owner rules.
 
 1. **Adoption candidate (this branch, 2026-10-05; superseded on `main` by the
-   `contracts-edge-0.9.15` / Edge v0.9.15 adoption named above):** pin all 16 adopted files byte-exact from
+   `contracts-edge-0.9.17` / Edge v0.9.17 adoption named above):** pin all 16 adopted files byte-exact from
    the canonical tag, update every checksum and local report status metadata,
    and pair the Edge baseline with `v0.9.12` at
    `0d917701b63ef38210c49df830f48cf0457cbc7d`, default image index

@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
   "vocabulary": "gateway-errors",
   "version": 1,
-  "edge_release": "v0.9.15",
-  "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the eight coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
+  "edge_release": "v0.9.17",
+  "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the nine coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.15",
-      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+      "ref": "v0.9.17",
+      "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
       "path": "src/retry.rs",
       "symbols": [
         "ErrorClass",
@@ -29,8 +29,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.15",
-      "commit": "25b37395ff61bfea0f3ffd189d9011c4984fa755",
+      "ref": "v0.9.17",
+      "commit": "669c574c1d1e88e84dccb26a8159939e6694644d",
       "path": "docs/error_classification.md",
       "sections": [
         "Canonical taxonomy (ErrorClass)",
@@ -39,7 +39,7 @@
         "Granular class to header token",
         "Response body-read failures"
       ],
-      "note": "v0.9.15 leaves src/retry.rs and this document unchanged. Its new gateway rejection phase route_protocol_admission (src/diagnostic_ref.rs, ferrum-edge#6090) maps to no X-Gateway-Error token in token_for_rejection_phase, so that refusal carries none. v0.9.14 adds no ErrorClass value or token. The protocol_error, read_write_timeout and response_body_too_large meanings note the v0.9.14 reclassification of backend HTTP/2 resets and buffered read errors (ferrum-edge#6028, #6042; issues #6019, #6022)."
+      "note": "v0.9.17 adds loop_detected for the pre-routing proxy_hop_limit HTTP 508 fence; proxy_hops_invalid and route_protocol_admission map to no token. The closed header vocabulary has nine tokens, the reserved HTTP metrics vocabulary 25 labels, and ErrorClass 19 values. The hop fence emits status counters and bounded warnings, not a transaction summary or loop_detected metric row. Timeout descriptions clarify existing behavior: the backend handoff is marked immediately before send(), including connection setup, rather than after remote acceptance."
     }
   ],
   "header": "X-Gateway-Error",
@@ -47,7 +47,7 @@
     {
       "surface": "X-Gateway-Error response header",
       "values": "x_gateway_error_tokens",
-      "cardinality": 8
+      "cardinality": 9
     },
     {
       "surface": "access-log error_class",
@@ -58,8 +58,8 @@
     {
       "surface": "ferrum_requests_total{error_class}",
       "values": "error_classes plus the tokens whose metric_label_without_error_class is true",
-      "cardinality": 24,
-      "note": "Omitted on 2xx, 3xx and 4xx."
+      "cardinality": 25,
+      "note": "Omitted on 2xx, 3xx and 4xx. loop_detected is reserved; the hop-limit fence currently emits no error-class metric row."
     }
   ],
   "error_classes": [
@@ -244,7 +244,7 @@
       ],
       "metric_label_without_error_class": false,
       "rejection_phases": [],
-      "meaning": "A backend held the request (it accepted the connection and was sent the request) but did not answer in time. Never used for a timeout no backend held."
+      "meaning": "Backend dispatch did not answer before its deadline (504). A route-total deadline is a backend timeout once send() begins, including TCP/TLS connection establishment; remote acceptance or receipt of request bytes is not implied. This clarifies existing behavior."
     },
     {
       "token": "backend_error",
@@ -308,7 +308,18 @@
       ],
       "metric_label_without_error_class": false,
       "rejection_phases": [],
-      "meaning": "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before any backend held the request: during the client upload, a gateway-local phase, admission, or retry backoff. New in v0.9.8 (#5762)."
+      "meaning": "A matched route rule's total request deadline (mesh_route_dispatch request_timeout_ms, Gateway API timeouts.request) expired before backend dispatch began: client upload, a gateway-local phase, admission, or retry backoff (504). The route timeout phase is before_dispatch or retry_backoff. Introduced in v0.9.8; v0.9.17 clarifies existing behavior."
+    },
+    {
+      "token": "loop_detected",
+      "http_statuses": [
+        "508"
+      ],
+      "metric_label_without_error_class": true,
+      "rejection_phases": [
+        "proxy_hop_limit"
+      ],
+      "meaning": "The received X-Ferrum-Hops count reached FERRUM_MAX_PROXY_HOPS; the gateway refuses before routing and contacts no backend. Only the refusing hop writes this token; an outer gateway relaying 508 uses backend_error. HTTP 508 is never retried, regardless of retryable_status_codes. Native gRPC returns trailers-only FAILED_PRECONDITION with no HTTP 5xx token; malformed hop fields return 400 or native gRPC INVALID_ARGUMENT with no token. The metrics label is reserved: this fence currently emits no transaction summary/error-class metric row."
     }
   ]
 }

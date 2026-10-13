@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Adopt `contracts-edge-0.9.17` at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` and pin Ferrum Edge v0.9.17 at `669c574c1d1e88e84dccb26a8159939e6694644d`, with v0.9.15 as the previous supported release. Recognize the `loop_detected` `X-Gateway-Error` token and diagnostic-ref rejection phase; its diagnosis describes the received `X-Ferrum-Hops` count reaching the limit and does not claim a traversal or routing loop.
 - Fix the 2026-10 audit batch (#164–#175, #178). `server.max_connections` and
   `server.max_in_flight_requests` above Tokio's `Semaphore::MAX_PERMITS` fail
   validation instead of panicking. The `auth.jwt.jwks_url` HTTPS/exact-loopback
