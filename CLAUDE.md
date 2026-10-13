@@ -35,6 +35,20 @@ Local cargo runs are permitted in this repository; hosted CI remains the source 
 - Changing the pinned Edge image means updating `docs/compatibility.json` (its `edge_support.tested` list is CI's Edge matrix), `docs/compatibility.md`, the demo Dockerfile, `contract::EDGE_*`, the `edge_contract` release in `crates/ferrum-alloy-cli/tests/cli.rs`, and the `*.edge.yaml` fixture headers; `crates/ferrum-alloy-edge/tests/pairing.rs` enforces the pairing, and the export snapshot tests (`crates/ferrum-alloy-edge/tests/export.rs`) check the fixture headers. The support window is the latest Edge release plus the previous one. `.github/workflows/edge-bump.yml` proposes new releases.
 - Snapshots (`*.expected.txt`, `*.edge.yaml`) regenerate with `UPDATE_SNAPSHOTS=1`. Review the diff.
 
+## Agent-dispatch skills
+
+`.agents/skills/` holds skills that dispatch external CLI coding agents as workers on isolated git worktrees; `.claude/skills/` holds the Claude Code entry points for them. The set mirrors [ferrum-edge](https://github.com/ferrum-edge/ferrum-edge)'s `.agents/skills`, adapted to this repository. Each skill's `scripts/dispatch-agent.sh` pins the worker model, and `references/agent-brief.md` and `references/continuation-brief.md` are the worker briefs.
+
+| Skill | Worker model | CLI |
+| --- | --- | --- |
+| `astra-agents`, `sol-agents`, `luna-agents` | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` | `codex` |
+| `opus-agents`, `fable-5-1-agents` | `claude-opus-5-5[1m]`, `claude-fable-5-1` | `claude` |
+| `grok-agents`, `composer-agents` | `cursor-grok-4.6-<effort>`, `composer-2.5` | `cursor-agent` |
+| `muse-agents` | `muse-wonder-full-1.0` | `muse` |
+| `opencode-laguna-agents`, `deepseek-pro-agents`, `deepseek-flash-agents`, `qwen-agents` | opencode models pinned per launcher | `opencode` |
+
+"Muse ultra" or "opus high" means: use that skill as the orchestrator and dispatch a worker at that reasoning effort. Workers run the "Before every commit" checks above, treat hosted CI as the source of truth, and never dispatch nested workers.
+
 ## PRs
 
 Use concise imperative commit messages. PRs need a summary, the changes, and a test plan. Never merge or publish without the owner's approval.
