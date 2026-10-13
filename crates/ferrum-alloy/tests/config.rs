@@ -761,6 +761,7 @@ fn jwks_url_check_and_verifier_share_one_parsed_policy() {
         "http://idp.example\\@localhost/jwks",
         "https://idp.example:99999/jwks",
         "https://[not-ipv6]/jwks",
+        "https://xn--/jwks",
         "https://",
         "not a url",
     ];

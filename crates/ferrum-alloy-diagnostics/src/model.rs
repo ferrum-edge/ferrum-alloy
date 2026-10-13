@@ -224,21 +224,29 @@ impl Observation {
 }
 
 /// Measurement boundaries, named from the catalog (e.g. `alloy.middleware_entry`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Boundaries {
     /// Where the measurement starts.
     pub start: String,
     /// Where the measurement ends.
     pub end: String,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// Wall-clock interval in Unix nanoseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Interval {
     /// Start, Unix epoch nanoseconds.
     pub start_unix_nano: u64,
     /// End, Unix epoch nanoseconds.
     pub end_unix_nano: u64,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 impl Interval {
@@ -252,7 +260,7 @@ impl Interval {
 }
 
 /// Position on the request path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scope {
     /// Connection leg.
     pub leg: Leg,
@@ -266,10 +274,14 @@ pub struct Scope {
     /// Absent means the attempt is unknown, not "first attempt".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// Trace linkage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpanRef {
     /// 32 lowercase hex characters.
     pub trace_id: String,
@@ -278,6 +290,10 @@ pub struct SpanRef {
     /// Parent span id, when the span has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
+    /// Fields this reader does not recognize. Preserved and reported, never
+    /// interpreted.
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, Value>,
 }
 
 /// A derived conclusion (Anvil `DiagnosticFinding` superset).

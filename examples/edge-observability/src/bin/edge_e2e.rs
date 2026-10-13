@@ -840,6 +840,7 @@ fn client_header(name: &str, value: &str) -> Observation {
             service: None,
             gateway: None,
             attempt: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         span: None,
         attributes: BTreeMap::from([

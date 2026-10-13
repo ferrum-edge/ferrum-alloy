@@ -1278,6 +1278,7 @@ fn base(
         boundaries: catalog::entry(name).map(|entry| Boundaries {
             start: entry.start.to_owned(),
             end: entry.end.to_owned(),
+            unrecognized: std::collections::BTreeMap::new(),
         }),
         clock: None,
         interval: None,
@@ -1286,11 +1287,13 @@ fn base(
             service: Some(service.to_owned()),
             gateway: None,
             attempt: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         span: Some(SpanRef {
             trace_id: record.trace_id.to_hex(),
             span_id: span_id.clone(),
             parent_span_id: None,
+            unrecognized: std::collections::BTreeMap::new(),
         }),
         attributes: BTreeMap::new(),
         trust: Trust::Unverified,

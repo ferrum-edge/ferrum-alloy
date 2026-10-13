@@ -516,7 +516,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 );
             }
         }
-        if let Some(interval) = observation.interval {
+        if let Some(interval) = &observation.interval {
             if interval.end_unix_nano < interval.start_unix_nano {
                 error(format!("{path}/interval"), "end precedes start".into());
             }
@@ -595,20 +595,33 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 ),
             });
         }
-        if !observation.producer.unrecognized.is_empty() {
-            warnings.push(Issue {
-                path: format!("{path}/producer"),
-                message: format!(
-                    "unrecognized fields preserved but not interpreted: {}",
-                    observation
-                        .producer
-                        .unrecognized
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
+        // Unknown members of nested evidence objects are preserved on
+        // round-trip too (see the flatten fields in the model).
+        let nested = [
+            ("producer", Some(&observation.producer.unrecognized)),
+            (
+                "boundaries",
+                observation.boundaries.as_ref().map(|b| &b.unrecognized),
+            ),
+            (
+                "interval",
+                observation.interval.as_ref().map(|i| &i.unrecognized),
+            ),
+            ("scope", Some(&observation.scope.unrecognized)),
+            ("span", observation.span.as_ref().map(|s| &s.unrecognized)),
+        ];
+        for (member, unrecognized) in nested {
+            if let Some(unrecognized) = unrecognized
+                && !unrecognized.is_empty()
+            {
+                warnings.push(Issue {
+                    path: format!("{path}/{member}"),
+                    message: format!(
+                        "unrecognized fields preserved but not interpreted: {}",
+                        unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                });
+            }
         }
     }
     if earliest != u64::MAX && latest.saturating_sub(earliest) > limits.max_time_range_nanos {

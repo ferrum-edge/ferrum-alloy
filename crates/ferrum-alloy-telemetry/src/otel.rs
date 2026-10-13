@@ -594,9 +594,21 @@ impl SpanProcessor for BoundedSpanProcessor {
                 self.metrics.telemetry_spans_lost.inc("queue_full");
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.queued_bytes.fetch_sub(size, Ordering::Relaxed);
-                self.queued_spans.fetch_sub(1, Ordering::Relaxed);
-                self.metrics.telemetry_spans_lost.inc("shutdown");
+                let _ = self
+                    .queued_bytes
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                        Some(v.saturating_sub(size))
+                    });
+                // The exiting worker may already have counted this span
+                // (it counts everything still queued when it ends), so it
+                // is counted here only while still accounted as queued.
+                if self
+                    .queued_spans
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+                    .is_ok()
+                {
+                    self.metrics.telemetry_spans_lost.inc("shutdown");
+                }
             }
         }
     }
@@ -607,28 +619,19 @@ impl SpanProcessor for BoundedSpanProcessor {
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         let result = self.control(Message::Shutdown, timeout);
-        // The worker is finished once it acknowledged the shutdown, or gone
-        // when the queue or the acknowledgement disconnected (for example
-        // after an exporter panic). Only then has it given up ownership of
-        // its spans, so whatever is still counted as queued is genuinely
-        // lost. On a timeout the worker still owns the in-flight and queued
-        // spans and will count each one exported or export-failed when it
-        // resumes, so counting them as shutdown losses here would count
-        // every such span twice.
-        let worker_done = matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown));
-        if worker_done
+        // The worker owns terminal accounting for every span it accepted:
+        // each is counted exported or export-failed, and whatever is left
+        // when the worker ends (normally or by unwinding from an exporter
+        // panic) is counted as a shutdown loss by `Worker`'s `Drop`. Here we
+        // only wait for a worker that is finished (it acknowledged the
+        // shutdown) or gone (the queue or acknowledgement disconnected), so
+        // its accounting is complete when this returns. On a timeout the
+        // worker still owns its spans and counts them when it resumes.
+        if matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown))
             && let Ok(mut worker) = self.worker.lock()
             && let Some(handle) = worker.take()
         {
             let _ = handle.join();
-        }
-        if worker_done {
-            let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
-            if stranded > 0 {
-                self.metrics
-                    .telemetry_spans_lost
-                    .add("shutdown", stranded as u64);
-            }
         }
         result
     }
@@ -650,6 +653,26 @@ struct Worker {
     /// Queue capacity: the most messages queued behind a shutdown that are
     /// still handled, so producers that keep sending cannot hold it open.
     capacity: usize,
+}
+
+impl Drop for Worker {
+    /// Runs on every worker exit, including unwinding from an exporter
+    /// panic. Disconnects the queue first, so a producer can no longer hand
+    /// this worker a span (later `on_end` calls count their own `shutdown`
+    /// loss), then counts every span still accounted as queued (discarded
+    /// queue messages, an unexported batch, or an export that unwound) as a
+    /// shutdown loss, exactly once.
+    fn drop(&mut self) {
+        let (_, disconnected) = mpsc::sync_channel(0);
+        drop(std::mem::replace(&mut self.receiver, disconnected));
+        let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
+        if stranded > 0 {
+            self.metrics
+                .telemetry_spans_lost
+                .add("shutdown", stranded as u64);
+        }
+        self.queued_bytes.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Spans accumulated for the next export request.
@@ -757,11 +780,13 @@ impl Worker {
             let chunk: Vec<SpanData> = batch.spans.drain(..take).collect();
             let count = chunk.len();
             // An exporter panic unwinds and ends this thread: waiting
-            // callers then get `AlreadyShutdown`, later spans are counted as
-            // `shutdown` losses, and `exporter.shutdown()` is not called.
+            // callers then get `AlreadyShutdown`, `Worker`'s `Drop` counts
+            // this chunk and everything still queued as `shutdown` losses,
+            // later spans count their own, and `exporter.shutdown()` is not
+            // called.
             let result = block_on(exporter.export(chunk));
-            // Saturating for safety; shutdown-timeout accounting stays with
-            // this worker, so each span is still counted exactly once.
+            // Saturating for safety; terminal accounting stays with this
+            // worker, so each span is still counted exactly once.
             let _ = self
                 .queued_spans
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {

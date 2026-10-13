@@ -254,11 +254,13 @@ fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
             service: None,
             gateway: None,
             attempt: None,
+            unrecognized: std::collections::BTreeMap::new(),
         },
         span: Some(SpanRef {
             trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
             span_id: edge_span.into(),
             parent_span_id: None,
+            unrecognized: std::collections::BTreeMap::new(),
         }),
         attributes: [("phase".to_owned(), "before_proxy".to_owned())].into(),
         trust: Trust::Verified,
@@ -281,6 +283,7 @@ fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
             trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
             span_id: "b7ad6b7169203331".into(),
             parent_span_id: Some(edge_span.into()),
+            unrecognized: std::collections::BTreeMap::new(),
         });
         report.observations.push(service);
     }
@@ -989,8 +992,8 @@ fn unsupported_major_version_is_rejected() {
 
 #[test]
 fn unknown_fields_inside_nested_objects_survive_a_round_trip() {
-    // Collection, its collector, Subject, and each observation's producer
-    // keep additive members from a newer minor version instead of dropping
+    // Collection, its collector, Subject, and each observation's producer,
+    // scope, boundaries, interval and span keep additive members from a newer minor version instead of dropping
     // them silently on deserialize.
     let mut report: serde_json::Value =
         serde_json::from_slice(&fixture("gateway-error-token.json")).unwrap();
@@ -998,6 +1001,22 @@ fn unknown_fields_inside_nested_objects_survive_a_round_trip() {
     report["collection"]["collector"]["x-future-collector"] = serde_json::json!("kept");
     report["subject"]["x-future-subject"] = serde_json::json!(7);
     report["observations"][0]["producer"]["x-future-producer"] = serde_json::json!(true);
+    report["observations"][0]["scope"]["x-future-scope"] = serde_json::json!("s");
+    report["observations"][0]["boundaries"] = serde_json::json!({
+        "start": "client.request_start",
+        "end": "client.response_headers",
+        "x-future-boundaries": "b"
+    });
+    report["observations"][0]["interval"] = serde_json::json!({
+        "start_unix_nano": 1_700_000_000_000_000_000u64,
+        "end_unix_nano": 1_700_000_000_001_000_000u64,
+        "x-future-interval": "i"
+    });
+    report["observations"][0]["span"] = serde_json::json!({
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b7",
+        "x-future-span": "p"
+    });
     let bytes = serde_json::to_vec(&report).unwrap();
     let parsed = parse_offline(&bytes, &Limits::default()).unwrap();
 
@@ -1007,6 +1026,10 @@ fn unknown_fields_inside_nested_objects_survive_a_round_trip() {
         "/collection/collector",
         "/subject",
         "/observations/0/producer",
+        "/observations/0/scope",
+        "/observations/0/boundaries",
+        "/observations/0/interval",
+        "/observations/0/span",
     ] {
         assert!(
             paths.contains(&want),
@@ -1026,6 +1049,26 @@ fn unknown_fields_inside_nested_objects_survive_a_round_trip() {
     assert_eq!(
         round_tripped["observations"][0]["producer"]["x-future-producer"],
         true
+    );
+    for (member, key, value) in [
+        ("scope", "x-future-scope", "s"),
+        ("boundaries", "x-future-boundaries", "b"),
+        ("interval", "x-future-interval", "i"),
+        ("span", "x-future-span", "p"),
+    ] {
+        assert_eq!(
+            round_tripped["observations"][0][member][key], value,
+            "{member}"
+        );
+    }
+    // Known members still round-trip unchanged next to the unknown ones.
+    assert_eq!(
+        round_tripped["observations"][0]["interval"]["end_unix_nano"],
+        1_700_000_000_001_000_000u64
+    );
+    assert_eq!(
+        round_tripped["observations"][0]["scope"]["leg"],
+        "client_to_gateway"
     );
 }
 

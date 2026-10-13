@@ -213,6 +213,7 @@ fn verified_report(value: &str) -> DiagnosticReport {
                 service: None,
                 gateway: None,
                 attempt: None,
+                unrecognized: std::collections::BTreeMap::new(),
             },
             span: None,
             attributes: BTreeMap::from([

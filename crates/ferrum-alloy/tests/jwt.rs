@@ -1065,6 +1065,7 @@ fn jwks_url_check_and_verifier_agree() {
         "http://idp.example\\@localhost/jwks",
         "https://idp.example:99999/jwks",
         "https://[not-ipv6]/jwks",
+        "https://xn--/jwks",
         "https://",
         "ftp://localhost/jwks",
         "not a url",

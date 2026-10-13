@@ -490,6 +490,8 @@ struct GateState {
     exported: usize,
     shutdowns: usize,
     resources: usize,
+    /// Panic instead of exporting once the gate opens.
+    panic_when_open: bool,
 }
 
 /// Blocks every export until the gate opens and counts lifecycle calls.
@@ -528,6 +530,10 @@ impl SpanExporter for GatedExporter {
         guard.exporting = true;
         changed.notify_all();
         guard = changed.wait_while(guard, |s| !s.open).unwrap();
+        if guard.panic_when_open {
+            drop(guard);
+            panic!("exporter panic after the gate opened");
+        }
         guard.exported += batch.len();
         std::future::ready(Ok(()))
     }
@@ -641,6 +647,55 @@ fn a_timed_out_shutdown_does_not_count_spans_the_worker_still_owns() {
     );
     assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 0);
     assert_eq!(metrics.telemetry_spans_lost.get("export_failed"), 0);
+}
+
+#[test]
+fn an_exporter_panic_after_a_timed_out_shutdown_still_accounts_for_every_span() {
+    let exporter = GatedExporter::default();
+    exporter.0.0.lock().unwrap().panic_when_open = true;
+    let shared = exporter.clone();
+    let mut config = config();
+    config.max_queue_spans = 8;
+    config.max_export_batch = 1;
+    let metrics = Arc::new(Metrics::default());
+    let factory = move || Ok(shared);
+    let processor = BoundedSpanProcessor::spawn(factory, &config, Arc::clone(&metrics)).unwrap();
+
+    // One span in flight, two queued behind it.
+    for _ in 0..3 {
+        processor.on_end(new_test_export_span_data());
+    }
+    exporter.wait_until_exporting();
+    let result = processor.shutdown_with_timeout(Duration::from_millis(50));
+    assert!(
+        matches!(result, Err(OTelSdkError::Timeout(_))),
+        "{result:?}"
+    );
+    // The export then unwinds: every accepted span must still end up counted
+    // exactly once, with no later shutdown call to do it.
+    exporter.open();
+    let accounted = || {
+        metrics
+            .telemetry_spans_exported
+            .load(std::sync::atomic::Ordering::Relaxed)
+            + metrics.telemetry_spans_lost.get("shutdown")
+            + metrics.telemetry_spans_lost.get("export_failed")
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while accounted() < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "spans were never accounted for: {}",
+            accounted()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(accounted(), 3, "each span is counted exactly once");
+    assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 3);
+    // A span offered after the worker is gone counts its own loss.
+    processor.on_end(new_test_export_span_data());
+    assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 4);
 }
 
 #[tokio::test(flavor = "current_thread")]
