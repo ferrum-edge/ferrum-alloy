@@ -9,8 +9,9 @@
   configuration, so a retry reports the same error instead of silently
   loading a file or the environment. A listener task that ends on its
   own now begins shutdown instead of leaving the process reporting
-  ready, and a panicked TLS reload task is logged instead of silently
-  stopping reloads. `server.request_timeout_ms` documentation now
+  ready, and a panicked TLS reload task is now logged (reloads stop;
+  serving continues on the previous material) instead of stopping
+  silently. `server.request_timeout_ms` documentation now
   states that admission wait is not counted (#197).
 
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
