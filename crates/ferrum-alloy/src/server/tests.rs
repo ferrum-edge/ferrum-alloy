@@ -854,3 +854,39 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
     let mut remaining = Vec::new();
     client.read_to_end(&mut remaining).await.unwrap();
 }
+
+/// The stall sampler keys its history to the body epoch, which advances
+/// exactly when the last waiting body stops waiting, so a dropped
+/// body's stall history can never be credited to a later request.
+#[test]
+fn the_body_epoch_advances_when_the_last_waiter_leaves() {
+    let activity = Arc::new(Activity::default());
+    let mut first = TrackedRequestBody::new((), Arc::clone(&activity));
+    let mut second = TrackedRequestBody::new((), Arc::clone(&activity));
+    let epoch = activity.body_epoch();
+    first.waiting.set(true);
+    second.waiting.set(true);
+    assert_eq!(
+        activity.body_epoch(),
+        epoch,
+        "waiters joining keep the epoch"
+    );
+    first.waiting.set(false);
+    assert_eq!(
+        activity.body_epoch(),
+        epoch,
+        "one waiter remains, so the epoch stands"
+    );
+    second.waiting.set(false);
+    assert_eq!(
+        activity.body_epoch(),
+        epoch + 1,
+        "the last waiter leaving starts a new epoch"
+    );
+    drop(second);
+    assert_eq!(
+        activity.body_epoch(),
+        epoch + 1,
+        "dropping an already-uncounted body does not advance it again"
+    );
+}

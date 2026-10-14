@@ -215,8 +215,12 @@ pub struct ServerConfig {
     /// while a handler is waiting to read it (the peer trickles or stops
     /// sending the body it declared), before it is closed (HTTP/2
     /// `GOAWAY`). A peer that keeps sending, however slowly, is never cut:
-    /// this is not a minimum transfer rate. Time a handler spends before
-    /// it starts reading the body does not count.
+    /// this is not a minimum transfer rate. Waiting starts when a body
+    /// read pends and ends when a frame is delivered or the body is
+    /// dropped: time before the first read does not count, but time the
+    /// handler spends on other work after a read has pended does, and
+    /// data counts only once it is delivered to the handler, not when
+    /// the peer sent it into transport buffers.
     pub body_read_stall_timeout_ms: u64,
     /// Deadline for producing response *headers*. Never applied to response
     /// body streaming (SSE) or upgraded connections. `0` disables it.

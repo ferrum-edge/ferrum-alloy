@@ -841,6 +841,10 @@ struct Activity {
     /// Request-body data bytes delivered to handlers so far, plus one per
     /// trailers frame: any frame is progress.
     body_read: AtomicU64,
+    /// Bumped whenever the last waiting body stops waiting, so the stall
+    /// sampler cannot credit one request's stall history to the next
+    /// request that starts waiting between samples.
+    body_epoch: AtomicU64,
 }
 
 impl Activity {
@@ -883,6 +887,10 @@ impl Activity {
 
     fn body_read(&self) -> u64 {
         self.body_read.load(Ordering::Relaxed)
+    }
+
+    fn body_epoch(&self) -> u64 {
+        self.body_epoch.load(Ordering::Relaxed)
     }
 
     /// Whether a handler is waiting for the peer to send more request-body
@@ -1139,8 +1147,11 @@ impl BodyWaiting {
             self.counted = waiting;
             if waiting {
                 self.activity.body_waiting.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.activity.body_waiting.fetch_sub(1, Ordering::Relaxed);
+            } else if self.activity.body_waiting.fetch_sub(1, Ordering::Relaxed) == 1 {
+                // The last waiter left: a later waiter starts a fresh
+                // stall history, even if the sampler never observes the
+                // connection with nobody waiting.
+                self.activity.body_epoch.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1708,7 +1719,9 @@ async fn serve_io<I>(
     let body_stall_check = options.body_read_stall_timeout / 2;
     let body_stall_timer = tokio::time::sleep(body_stall_check);
     tokio::pin!(body_stall_timer);
-    let mut body_stalled: Option<(u64, u32)> = None;
+    // (body epoch, delivered count, checks): a new epoch — every waiter
+    // left and a later one arrived — restarts the count.
+    let mut body_stalled: Option<(u64, u64, u32)> = None;
     let grace = options.header_read_timeout.min(Duration::from_secs(1));
     // The request count when the deadline was armed with no request in
     // flight, or `None` when it was armed with requests in flight, and the
@@ -1824,12 +1837,15 @@ async fn serve_io<I>(
             }
             () = body_stall_timer.as_mut(), if phase == Phase::Open => {
                 let read = activity.body_read();
+                let epoch = activity.body_epoch();
                 body_stalled = match body_stalled {
                     _ if !activity.body_pending() => None,
-                    Some((mark, checks)) if mark == read => Some((mark, checks + 1)),
-                    _ => Some((read, 0)),
+                    Some((seen_epoch, mark, checks)) if seen_epoch == epoch && mark == read => {
+                        Some((seen_epoch, mark, checks + 1))
+                    }
+                    _ => Some((epoch, read, 0)),
                 };
-                if matches!(body_stalled, Some((_, checks)) if checks >= 2) {
+                if matches!(body_stalled, Some((_, _, checks)) if checks >= 2) {
                     stats.body_read_stall_timeouts.fetch_add(1, Ordering::Relaxed);
                     tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request body data delivered within the body read stall timeout; closing");
                     // As with a write stall: an HTTP/2 peer is sent `GOAWAY`
