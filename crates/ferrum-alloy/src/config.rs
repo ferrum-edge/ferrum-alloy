@@ -2090,13 +2090,20 @@ fn redact_endpoint(endpoint: &str) -> String {
     let Some((scheme, rest)) = endpoint.split_once("://") else {
         return "<redacted>".to_owned();
     };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
+    // URL parsers skip extra slashes after the scheme of hierarchical
+    // URLs (`https:////user:secret@host` has that authority), so the
+    // authority here is what follows any run of leading slashes, not
+    // merely the text up to the first one.
+    let after_slashes = rest.trim_start_matches('/');
+    let authority_end = after_slashes
+        .find(['/', '?', '#'])
+        .unwrap_or(after_slashes.len());
+    let authority = &after_slashes[..authority_end];
     let authority = authority.rfind('@').map_or_else(
         || authority.to_owned(),
         |at| format!("<redacted>@{}", &authority[at + 1..]),
     );
-    let suffix = &rest[authority_end..];
+    let suffix = &after_slashes[authority_end..];
     let query_start = suffix.find('?');
     let fragment_start = suffix.find('#');
     let safe_suffix_end = query_start

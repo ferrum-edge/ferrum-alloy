@@ -401,9 +401,16 @@ fn jwks_url_credentials_are_never_printed() {
     assert!(debug.contains("<configured>"), "{debug}");
     // Redaction is display-only; the configuration itself is unchanged.
     assert_eq!(
-        config.auth.jwt.unwrap().jwks_url.as_deref(),
+        config.auth.jwt.as_ref().unwrap().jwks_url.as_deref(),
         Some("https://user:hunter2@idp.example.com/jwks?key=querysecret")
     );
+    // Noncanonical forms the URL parser still reads as carrying that
+    // authority must not slip the password past the redactor either.
+    config.auth.jwt.as_mut().unwrap().jwks_url =
+        Some("https:////user:hunter2@idp.example.com/jwks".into());
+    let rendered = config.redacted_toml();
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(rendered.contains("idp.example.com"), "{rendered}");
 }
 
 #[test]
