@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Operation spans are now created at the wrapped future's first poll
+  instead of when `Operation::run` is called, so a stored-then-awaited
+  operation's span interval starts when its work starts and a future
+  dropped unpolled exports no span. Rejected trace context now also
+  strips the `baggage` header before application code runs.
+  `alloy.db.pool_wait` is documented as last-acquire-wins, and the
+  detailed-health `latency_ms`, `age_ms`, and `uptime_seconds` fields
+  are defined in `docs/measurement-semantics.md` (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name

@@ -30,6 +30,18 @@ received with its declared length, and distinguish time spent with a blocked
 server write from time spent reading data the server has already written. These
 boundaries do not add a client-delivery timing to Alloy's measurements.
 
+## Management health fields
+
+Detailed health (`GET /health` on the management listener) exposes three
+timings that are not diagnostic observations and are never read by diagnosis
+rules or the catalog:
+
+| Field | Start | End | Notes |
+|---|---|---|---|
+| `readiness.checks[].latency_ms` | The check is invoked | It returns, fails, times out (`health.check_timeout_ms`), or panics | Local monotonic clock, fractional milliseconds. A timeout reports at least the timeout. |
+| `readiness.age_ms` | The evaluation completed (all checks finished and the snapshot was taken) | The response is served | `0` for a just-completed evaluation; grows while the cached snapshot is served within `health.cache_ttl_ms`. |
+| `uptime_seconds` | The application's `Lifecycle` was created during startup composition | The response is served | Whole seconds on the local monotonic clock. Not process start, and not when serving began. |
+
 ## Availability states
 
 | State | Meaning |
@@ -92,7 +104,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 | Name | Start | End | Notes |
 |---|---|---|---|
 | `alloy.operation.duration` | First poll of the wrapped future | Its completion, or drop (`outcome=cancelled`) | Created with `ferrum_alloy_telemetry::operation::Operation`. A database operation's duration is **application-observed call time**: pool wait, network, driver, and server work. It is **not** database server execution time. |
-| `alloy.db.pool_wait` | `pool.acquire()` called | Connection obtained or failed | Recorded by `ferrum_alloy::postgres::acquire` on the current operation span. Separate from the query. |
+| `alloy.db.pool_wait` | `pool.acquire()` called | Connection obtained or failed | Recorded by `ferrum_alloy::postgres::acquire` on the current operation span. Separate from the query. When one operation acquires more than once, the span carries the **last** wait only; earlier waits are overwritten, never summed. |
 | Outbound HTTP (`http.client.request` span, `alloy.operation.duration_ms`) | Request sent | Response **headers** received | Reading the response body happens afterwards and is outside the span. |
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.

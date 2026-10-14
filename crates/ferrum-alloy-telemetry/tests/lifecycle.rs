@@ -7,10 +7,13 @@ use std::convert::Infallible;
 use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use ferrum_alloy_telemetry::metrics::Metrics;
+use ferrum_alloy_telemetry::operation::Operation;
 use ferrum_alloy_telemetry::{TelemetryConfig, TelemetryLayer};
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body::Body;
@@ -316,4 +319,57 @@ async fn end_of_stream_after_last_frame_completes_without_a_final_poll() {
     );
     drop(body);
     assert_eq!(total_outcomes(&metrics), 1);
+}
+
+/// Counts `alloy.operation` spans as they are created.
+struct CountOperations(Arc<AtomicUsize>);
+
+impl<S> tracing_subscriber::Layer<S> for CountOperations
+where
+    S: tracing::Subscriber,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attrs.metadata().name() == "alloy.operation" {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The operation span is created at first poll, when work starts: a
+/// future dropped unpolled leaves no span, and a stored future creates
+/// its span only once it is awaited.
+#[tokio::test]
+async fn operation_spans_start_at_first_poll() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let created = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(CountOperations(Arc::clone(&created)));
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    drop(Operation::new("orders.load").run(async {}));
+    assert_eq!(
+        created.load(Ordering::Relaxed),
+        0,
+        "an unpolled operation future creates no span"
+    );
+
+    Operation::new("orders.load").run(async {}).await;
+    assert_eq!(created.load(Ordering::Relaxed), 1);
+
+    let stored = Operation::new("orders.load").run(pending::<()>());
+    assert_eq!(
+        created.load(Ordering::Relaxed),
+        1,
+        "a stored operation future has no span yet"
+    );
+    let _ = tokio::time::timeout(Duration::from_millis(20), stored).await;
+    assert_eq!(
+        created.load(Ordering::Relaxed),
+        2,
+        "the span is created when the stored future is first polled"
+    );
 }

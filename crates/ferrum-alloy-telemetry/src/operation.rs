@@ -133,14 +133,19 @@ impl Operation {
         span
     }
 
-    /// Runs `future` inside the operation span.
+    /// Runs `future` inside the operation span. The span is created at
+    /// the future's first poll, as a child of the then-current span, so
+    /// its interval starts when work starts — a future stored and only
+    /// later awaited, or dropped unpolled, leaves no inflated or phantom
+    /// span.
     pub fn run<F: Future>(self, future: F) -> OperationFuture<F> {
         fn never<O>(_: &O) -> bool {
             false
         }
         OperationFuture {
             inner: future,
-            span: self.span(),
+            operation: self,
+            span: None,
             start: None,
             done: false,
             is_error: never::<F::Output>,
@@ -158,7 +163,8 @@ impl Operation {
         }
         OperationFuture {
             inner: future,
-            span: self.span(),
+            operation: self,
+            span: None,
             start: None,
             done: false,
             is_error: is_err::<T, E>,
@@ -167,7 +173,10 @@ impl Operation {
 }
 
 /// Records the time spent waiting for a pooled connection on the current
-/// operation span (no-op outside an operation span).
+/// operation span (no-op outside an operation span). When one operation
+/// acquires more than once, the **last** wait is what the span carries;
+/// earlier waits are overwritten, never summed (nested or sequential
+/// waits are not added together, like every other Alloy duration).
 pub fn record_pool_wait(duration: std::time::Duration) {
     Span::current().record("alloy.db.pool_wait_ms", duration.as_secs_f64() * 1_000.0);
 }
@@ -180,7 +189,8 @@ pin_project! {
     {
         #[pin]
         inner: F,
-        span: Span,
+        operation: Operation,
+        span: Option<Span>,
         start: Option<Instant>,
         done: bool,
         is_error: fn(&F::Output) -> bool,
@@ -192,10 +202,13 @@ pin_project! {
     {
         fn drop(this: Pin<&mut Self>) {
             let this = this.project();
-            if !*this.done && let Some(start) = this.start {
-                let _entered = this.span.enter();
-                this.span.record("alloy.operation.duration_ms", start.elapsed().as_secs_f64() * 1_000.0);
-                this.span.record("alloy.operation.outcome", "cancelled");
+            if !*this.done
+                && let Some(span) = this.span
+                && let Some(start) = this.start
+            {
+                let _entered = span.enter();
+                span.record("alloy.operation.duration_ms", start.elapsed().as_secs_f64() * 1_000.0);
+                span.record("alloy.operation.outcome", "cancelled");
             }
         }
     }
@@ -206,20 +219,30 @@ impl<F: Future> Future for OperationFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
+        // Create the span at first poll, when work actually starts, so
+        // the span interval and the monotonic duration share a start. A
+        // future dropped before this exports no span at all.
+        let span = match this.span.as_ref() {
+            Some(span) => span,
+            None => {
+                let span = this.operation.span();
+                this.span.insert(span)
+            }
+        };
         let start = *this.start.get_or_insert_with(Instant::now);
-        let _entered = this.span.enter();
+        let _entered = span.enter();
         let output = std::task::ready!(this.inner.poll(cx));
         *this.done = true;
-        this.span.record(
+        span.record(
             "alloy.operation.duration_ms",
             start.elapsed().as_secs_f64() * 1_000.0,
         );
         if (this.is_error)(&output) {
-            this.span.record("alloy.operation.outcome", "error");
-            this.span.record("otel.status_code", "error");
-            this.span.record("error.type", "operation_error");
+            span.record("alloy.operation.outcome", "error");
+            span.record("otel.status_code", "error");
+            span.record("error.type", "operation_error");
         } else {
-            this.span.record("alloy.operation.outcome", "completed");
+            span.record("alloy.operation.outcome", "completed");
         }
         Poll::Ready(output)
     }
