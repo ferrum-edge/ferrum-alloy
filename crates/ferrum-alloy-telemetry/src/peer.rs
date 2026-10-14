@@ -77,6 +77,13 @@ impl PeerTrust {
 /// Classifies the peer of a request.
 pub trait TrustClassifier: Send + Sync + fmt::Debug + 'static {
     /// Decides trust from request extensions (never from headers).
+    ///
+    /// Implementations must decide from the connection's transport
+    /// identity ([`PeerInfo`]) alone: a connection's peer cannot change
+    /// between its requests, and Alloy's own server invokes this once
+    /// per connection with extensions holding only [`PeerInfo`], then
+    /// reuses the result ([`ClassifiedPeer`]) for every request on that
+    /// connection.
     fn classify(&self, extensions: &Extensions) -> PeerTrust;
 }
 

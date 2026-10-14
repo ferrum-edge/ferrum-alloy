@@ -174,7 +174,9 @@ impl AlloyApp {
         self
     }
 
-    /// Replaces the peer trust classifier built from `[trust]`.
+    /// Replaces the peer trust classifier built from `[trust]`. The
+    /// classifier is invoked once per connection with the connection's
+    /// `PeerInfo` only (see `TrustClassifier::classify`).
     pub fn trust_classifier(mut self, classifier: SharedClassifier) -> Self {
         self.classifier = Some(classifier);
         self
