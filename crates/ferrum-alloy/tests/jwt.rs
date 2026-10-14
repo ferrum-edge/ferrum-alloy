@@ -1107,6 +1107,20 @@ async fn non_plain_jwt_headers_are_rejected() {
                 h.typ = Some("logout+jwt".into());
             }),
         ),
+        // Only the `application/` prefix may be present or omitted;
+        // any other prefix is a different type.
+        (
+            "typ text/jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("text/jwt".into());
+            }),
+        ),
+        (
+            "typ application/unrelated/jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("application/unrelated/jwt".into());
+            }),
+        ),
     ] {
         let (status, _, _) = call(&router, Some(&token)).await;
         assert_eq!(status, 401, "{name} must be rejected");
@@ -1125,6 +1139,12 @@ async fn non_plain_jwt_headers_are_rejected() {
             }),
         ),
         (
+            "typ application/jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("application/jwt".into());
+            }),
+        ),
+        (
             "no typ",
             key.sign_with_header(&claims, Some("k1"), |h| {
                 h.typ = None;
@@ -1133,6 +1153,56 @@ async fn non_plain_jwt_headers_are_rejected() {
     ] {
         let (status, _, _) = call(&router, Some(&token)).await;
         assert_eq!(status, 200, "{name} must verify");
+    }
+}
+
+/// Header members present with a `null` value are still present: typed
+/// deserialization maps them to `None`, so the verifier judges presence
+/// on the raw header. These tokens are signed by hand (Ed25519, whose
+/// signatures need no reformatting) because the typed signing helper
+/// cannot emit a `null` member.
+#[tokio::test]
+async fn explicitly_null_header_members_are_rejected() {
+    let key = SigningKey::ed25519("ed");
+    let jwks = jwks_server(&[&key]).await;
+    let mut config = settings(jwks.addr, 60_000);
+    config.algorithms = vec!["EdDSA".into()];
+    let verifier = JwtVerifier::new(&config).unwrap();
+    let router = protected(&verifier);
+    let sign_raw = |header: &Value| -> String {
+        let input = format!(
+            "{}.{}",
+            b64url(header.to_string().as_bytes()),
+            b64url(claims().to_string().as_bytes())
+        );
+        let signature = rcgen::SigningKey::sign(&key.pair, input.as_bytes()).unwrap();
+        format!("{input}.{}", b64url(&signature))
+    };
+    // The control token verifies, so the signature itself is sound.
+    let (status, _, _) = call(
+        &router,
+        Some(&sign_raw(
+            &json!({"alg": "EdDSA", "kid": "ed", "typ": "JWT"}),
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "hand-signed control token must verify");
+    for (name, header) in [
+        (
+            "crit null",
+            json!({"alg": "EdDSA", "kid": "ed", "crit": null}),
+        ),
+        (
+            "enc null",
+            json!({"alg": "EdDSA", "kid": "ed", "enc": null}),
+        ),
+        (
+            "typ null",
+            json!({"alg": "EdDSA", "kid": "ed", "typ": null}),
+        ),
+    ] {
+        let (status, _, _) = call(&router, Some(&sign_raw(&header))).await;
+        assert_eq!(status, 401, "{name} must be rejected");
     }
 }
 
