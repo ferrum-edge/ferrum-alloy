@@ -73,6 +73,16 @@ impl AlloyClient {
     /// Builds a client from `[http_client]`.
     pub fn new(settings: &HttpClientSettings) -> Result<Self, AlloyError> {
         use rustls_platform_verifier::BuilderVerifierExt;
+        if settings.connect_timeout_ms == 0 {
+            return Err(AlloyError::Integration(
+                "http_client.connect_timeout_ms must be greater than zero".into(),
+            ));
+        }
+        if settings.request_timeout_ms == 0 {
+            return Err(AlloyError::Integration(
+                "http_client.request_timeout_ms must be greater than zero".into(),
+            ));
+        }
         let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))

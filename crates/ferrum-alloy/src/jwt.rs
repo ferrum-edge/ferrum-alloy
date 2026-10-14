@@ -52,7 +52,10 @@ use tokio::sync::watch;
 use tower_layer::Layer;
 use tower_service::Service;
 
-use crate::config::{JwtSettings, MAX_JWKS_LIFETIME_MS};
+use crate::config::{
+    JwtSettings, MAX_JWKS_LIFETIME_MS, MAX_JWKS_MAX_BYTES, MAX_JWKS_TIMEOUT_MS,
+    MAX_JWT_LEEWAY_SECONDS,
+};
 use crate::error::AlloyError;
 use crate::problem::{Problem, ProblemKind};
 
@@ -362,6 +365,23 @@ impl JwtVerifier {
                 "auth.jwt.jwks_min_refresh_interval_ms must not exceed auth.jwt.jwks_max_age_ms"
                     .into(),
             ));
+        }
+        if settings.jwks_timeout_ms == 0 || settings.jwks_timeout_ms > MAX_JWKS_TIMEOUT_MS {
+            return Err(AlloyError::Integration(format!(
+                "auth.jwt.jwks_timeout_ms must be within 1..={MAX_JWKS_TIMEOUT_MS}"
+            )));
+        }
+        if settings.jwks_max_bytes == 0 || settings.jwks_max_bytes > MAX_JWKS_MAX_BYTES {
+            return Err(AlloyError::Integration(format!(
+                "auth.jwt.jwks_max_bytes must be within 1..={MAX_JWKS_MAX_BYTES}"
+            )));
+        }
+        // The validation library adds and subtracts the leeway from the
+        // current epoch time in `u64`; an unbounded leeway underflows it.
+        if settings.leeway_seconds > MAX_JWT_LEEWAY_SECONDS {
+            return Err(AlloyError::Integration(format!(
+                "auth.jwt.leeway_seconds must not exceed {MAX_JWT_LEEWAY_SECONDS}"
+            )));
         }
         let algorithms = settings
             .algorithms
