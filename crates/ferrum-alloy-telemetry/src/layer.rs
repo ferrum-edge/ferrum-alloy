@@ -36,7 +36,7 @@ use crate::cache::is_shared_cacheable;
 use crate::context::{RequestContext, TraceDecision};
 use crate::evidence::{EvidenceSink, Pending, RequestEvidence, RequestIdOrigin, TenantTag};
 use crate::metrics::{Metrics, method_label};
-use crate::peer::{PeerTrust, SharedClassifier, TrustNobody, peer_info};
+use crate::peer::{ClassifiedPeer, PeerTrust, SharedClassifier, TrustNobody, peer_info};
 use crate::request_id::{DEFAULT_REQUEST_ID_HEADER, RequestId, RequestIdSource};
 use crate::route::{NOT_ROUTED, RouteLabel, RouteSlot, matched_route};
 use crate::trace_context::{
@@ -395,7 +395,12 @@ where
         let config = &shared.config;
         request.extensions_mut().insert(Instrumented);
 
-        let peer_trust = shared.classifier.classify(request.extensions());
+        // The transport may have classified this connection once already
+        // (Alloy's server does, for every connection it serves).
+        let peer_trust = match request.extensions().get::<ClassifiedPeer>() {
+            Some(classified) => (*classified.0).clone(),
+            None => shared.classifier.classify(request.extensions()),
+        };
         let (request_id, id_source) = choose_request_id(
             &request,
             &shared.request_id_header,

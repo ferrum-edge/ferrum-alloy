@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Alloy's server now classifies each connection's peer once and passes
+  the result to the telemetry layer as the new `ClassifiedPeer`
+  extension, instead of classifying on every request; applications
+  serving the router themselves keep per-request classification.
+  Matched route templates are interned, so each distinct template is
+  allocated once process-wide instead of per request (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name

@@ -80,6 +80,17 @@ pub trait TrustClassifier: Send + Sync + fmt::Debug + 'static {
     fn classify(&self, extensions: &Extensions) -> PeerTrust;
 }
 
+/// A trust classification computed once per connection by the transport
+/// (Alloy's own server does this), inserted into request extensions next
+/// to [`PeerInfo`]. When present, the telemetry layer uses it instead of
+/// classifying again for every request on the connection.
+///
+/// Only transport code that owns the connection may insert this — it is
+/// believed exactly like [`PeerInfo`] itself. Never derive it from
+/// headers.
+#[derive(Debug, Clone)]
+pub struct ClassifiedPeer(pub Arc<PeerTrust>);
+
 /// Trusts nobody. The default.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TrustNobody;

@@ -502,6 +502,7 @@ impl AlloyApp {
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
             app_stats,
+            classifier,
             management_token,
             #[cfg(feature = "diagnostics")]
             diagnostics_retrieval,
@@ -568,6 +569,9 @@ pub struct AlloyParts {
     service_name: String,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     app_stats: Arc<ServerStats>,
+    /// The classifier the telemetry layer uses, kept so Alloy's server
+    /// can classify each connection once instead of per request.
+    classifier: SharedClassifier,
     /// Whether the management router was built with a token.
     management_token: bool,
     /// Whether the management router serves diagnostic retrieval.
@@ -691,6 +695,7 @@ impl AlloyParts {
         let config = &self.config;
         let options = ServeOptions {
             name: "application",
+            classifier: Some(Arc::clone(&self.classifier)),
             max_connections: config.server.max_connections,
             max_header_count: config.server.max_header_count,
             max_header_bytes: config.server.max_header_bytes,
