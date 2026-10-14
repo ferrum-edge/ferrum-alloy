@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **Breaking:** `trust.networks` rejects IPv4-mapped IPv6 CIDRs, which
+  could never match a canonicalized peer address; use the IPv4 network
+  (the same rule rate-limit exempt networks already applied). A
+  non-loopback `management.bind` now also warns in `check` output that
+  the management listener has no TLS and its token crosses the network
+  in cleartext (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name

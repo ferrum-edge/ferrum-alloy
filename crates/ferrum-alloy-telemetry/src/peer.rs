@@ -101,7 +101,9 @@ pub struct TrustedPeersConfig {
     pub identities: Vec<String>,
     /// Source networks treated as a trusted termination boundary. Use only
     /// when the network path is isolated (for example loopback from a
-    /// sidecar) and direct access is prevented.
+    /// sidecar) and direct access is prevented. IPv4-mapped IPv6 networks
+    /// (`::ffff:127.0.0.0/120`) are rejected; use the IPv4 network, which
+    /// mapped peer addresses are canonicalized to before matching.
     #[serde(default)]
     pub networks: Vec<IpNet>,
 }
@@ -115,6 +117,10 @@ pub enum TrustedPeersError {
     /// A network would trust every address.
     #[error("trusted network {0} would trust every address; list specific networks")]
     TooBroad(IpNet),
+    /// An IPv4-mapped IPv6 network, which the canonicalized peer address
+    /// can never match; the IPv4 form is meant.
+    #[error("trusted network {0} is IPv4-mapped IPv6; use the IPv4 network instead")]
+    MappedNetwork(IpNet),
 }
 
 /// Matches verified identities and trusted networks.
@@ -147,6 +153,16 @@ impl TrustedPeers {
         for network in &config.networks {
             if network.prefix_len() == 0 {
                 return Err(TrustedPeersError::TooBroad(*network));
+            }
+            // Classification canonicalizes IPv4-mapped peer addresses to
+            // IPv4 and `IpNet::contains` never matches across families, so
+            // a mapped network would silently never match (the same rule
+            // as rate-limit exempt networks).
+            if let IpNet::V6(v6) = network
+                && v6.prefix_len() >= 96
+                && v6.addr().to_ipv4_mapped().is_some()
+            {
+                return Err(TrustedPeersError::MappedNetwork(*network));
             }
             peers.networks.push(network.trunc());
         }

@@ -562,6 +562,25 @@ fn trusted_peer_configuration_is_validated() {
         TrustedPeers::new(&trust).is_err(),
         "trusting every address must be rejected"
     );
+    // IPv4-mapped peers are canonicalized to IPv4 before matching, so a
+    // mapped network could never match; reject it instead of silently
+    // trusting nobody. The IPv4 form and unmapped IPv6 stay accepted.
+    for (network, accepted) in [
+        ("::ffff:127.0.0.0/120", false),
+        ("::ffff:127.0.0.1/128", false),
+        ("::ffff:10.0.0.0/104", false),
+        ("127.0.0.0/8", true),
+        ("::1/128", true),
+        ("2001:db8::/32", true),
+    ] {
+        let mut trust = TrustedPeersConfig::default();
+        trust.networks = vec![network.parse().unwrap()];
+        assert_eq!(
+            TrustedPeers::new(&trust).is_ok(),
+            accepted,
+            "{network} acceptance"
+        );
+    }
 }
 
 #[test]
