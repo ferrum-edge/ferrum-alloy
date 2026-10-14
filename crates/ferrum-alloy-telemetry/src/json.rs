@@ -258,6 +258,11 @@ fn with_scratch(f: impl FnOnce(&mut SpanFields)) {
         if let Ok(mut scratch) = scratch.try_borrow_mut()
             && let Some(f) = f.take()
         {
+            // Clear on entry as well as on exit: if a previous call
+            // panicked mid-render (a field's `Debug` can), the exit
+            // clear never ran and its partial entries must not leak
+            // into this span.
+            scratch.clear();
             f(&mut scratch);
             scratch.clear();
         }
@@ -731,5 +736,35 @@ impl<'w> MakeWriter<'w> for NonBlockingMakeWriter {
             sender: self.sender.clone(),
             dropped: std::sync::Arc::clone(&self.dropped),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::*;
+
+    /// A render that panics midway (a field's `Debug` can) skips the
+    /// scratch's exit clear; the next use on this thread must still
+    /// start empty instead of inheriting the partial entries.
+    #[test]
+    fn scratch_is_cleared_after_a_panicking_render() {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_scratch(|fields| {
+                fields.set("leaked", |buf| {
+                    buf.extend_from_slice(b"1");
+                    Ok(())
+                });
+                panic!("render failed");
+            });
+        }));
+        assert!(panicked.is_err());
+        with_scratch(|fields| {
+            assert!(
+                fields.entries.is_empty(),
+                "a panicking render must not leak entries into the next span"
+            );
+        });
     }
 }
