@@ -8,6 +8,9 @@
 //!   bodies do not hold it.
 //! * [`HeadersDeadlineLayer`]: bounds the time to produce response headers.
 //!   It never applies to response body streaming (SSE) or upgraded sessions.
+//!   In the composed application it sits inside admission control, so its
+//!   clock starts once a request is admitted: time waiting for an admission
+//!   permit is not counted (measured `time_to_headers` includes that wait).
 //!
 //! Request-head read time is bounded separately by the server
 //! (`server.header_read_timeout_ms`), idle connections by

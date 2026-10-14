@@ -88,13 +88,16 @@ pub struct Snapshot {
 
 type Checks = Vec<(String, Arc<dyn HealthCheck>)>;
 
-/// Readiness registry with caching and single-flight refresh.
+/// Readiness registry with caching and single-flight refresh. A refresh
+/// runs in a detached task, so a caller that gives up waiting (a probe
+/// client disconnecting) cannot cancel it and starve the cache.
 pub struct Readiness {
     checks: Checks,
     ttl: Duration,
     timeout: Duration,
-    cache: Mutex<Option<Snapshot>>,
-    refresh: tokio::sync::Mutex<()>,
+    cache: Arc<Mutex<Option<Snapshot>>>,
+    refresh: Arc<tokio::sync::Mutex<()>>,
+    refreshed: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for Readiness {
@@ -116,8 +119,9 @@ impl Readiness {
             checks,
             ttl,
             timeout,
-            cache: Mutex::new(None),
-            refresh: tokio::sync::Mutex::new(()),
+            cache: Arc::new(Mutex::new(None)),
+            refresh: Arc::new(tokio::sync::Mutex::new(())),
+            refreshed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -142,64 +146,84 @@ impl Readiness {
 
     /// Returns the current readiness, running checks at most once per TTL.
     pub async fn snapshot(&self) -> Snapshot {
-        if let Some(snapshot) = self.fresh() {
-            return with_age(snapshot);
-        }
-        let _guard = match self.refresh.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                // Another caller is refreshing: serve the previous result if
-                // there is one, otherwise wait for the refresh.
-                if let Some(snapshot) = self.cached() {
-                    return with_age(snapshot);
-                }
-                let guard = self.refresh.lock().await;
-                if let Some(snapshot) = self.fresh() {
-                    return with_age(snapshot);
-                }
-                guard
+        loop {
+            if let Some(snapshot) = self.fresh() {
+                return with_age(snapshot);
             }
-        };
-        let results = futures_util::future::join_all(self.checks.iter().map(|(name, check)| {
-            let name = name.clone();
-            let timeout = self.timeout;
-            async move {
-                let started = Instant::now();
-                // A callback may panic while constructing its future or
-                // while that future is polled. Contain both: the check
-                // fails with a sanitized message (never the panic payload)
-                // instead of unwinding the readiness request.
-                let outcome = std::panic::AssertUnwindSafe(async {
-                    tokio::time::timeout(timeout, check.check()).await
-                })
-                .catch_unwind()
-                .await;
-                let latency_ms = started.elapsed().as_secs_f64() * 1_000.0;
-                let error = match outcome {
-                    Ok(Ok(Ok(()))) => None,
-                    Ok(Ok(Err(error))) => Some(error.0),
-                    Ok(Err(_)) => Some(format!("timed out after {} ms", timeout.as_millis())),
-                    Err(_) => Some("readiness check panicked".to_string()),
-                };
-                CheckResult {
-                    name,
-                    ok: error.is_none(),
-                    error,
-                    latency_ms,
-                }
+            // Register for the next completed refresh before re-checking,
+            // so a refresh finishing in between is never missed.
+            let refreshed = self.refreshed.notified();
+            tokio::pin!(refreshed);
+            let _ = refreshed.as_mut().enable();
+            if let Ok(guard) = Arc::clone(&self.refresh).try_lock_owned() {
+                // Refresh in a detached task: this caller's future may be
+                // dropped (a probe client disconnecting, a headers
+                // deadline) and the cache must still fill, or a probe
+                // timeout shorter than a slow check would starve it
+                // forever. The guard moves with the task, keeping the
+                // refresh single-flight.
+                let checks = self.checks.clone();
+                let timeout = self.timeout;
+                let cache = Arc::clone(&self.cache);
+                let refreshed = Arc::clone(&self.refreshed);
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    let snapshot = run_checks(&checks, timeout).await;
+                    if let Ok(mut cache) = cache.lock() {
+                        *cache = Some(snapshot);
+                    }
+                    refreshed.notify_waiters();
+                });
             }
-        }))
-        .await;
-        let snapshot = Snapshot {
-            ready: results.iter().all(|r| r.ok),
-            checks: results,
-            age_ms: 0,
-            at: Some(Instant::now()),
-        };
-        if let Ok(mut cache) = self.cache.lock() {
-            *cache = Some(snapshot.clone());
+            if let Some(snapshot) = self.fresh() {
+                return with_age(snapshot);
+            }
+            // A refresh is running: serve the previous result if there is
+            // one, otherwise wait for the refresh to land.
+            if let Some(snapshot) = self.cached() {
+                return with_age(snapshot);
+            }
+            refreshed.await;
         }
-        snapshot
+    }
+}
+
+/// Runs every check once, each bounded by `timeout`.
+async fn run_checks(checks: &Checks, timeout: Duration) -> Snapshot {
+    let results = futures_util::future::join_all(checks.iter().map(|(name, check)| {
+        let name = name.clone();
+        async move {
+            let started = Instant::now();
+            // A callback may panic while constructing its future or
+            // while that future is polled. Contain both: the check
+            // fails with a sanitized message (never the panic payload)
+            // instead of unwinding the readiness request.
+            let outcome = std::panic::AssertUnwindSafe(async {
+                tokio::time::timeout(timeout, check.check()).await
+            })
+            .catch_unwind()
+            .await;
+            let latency_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            let error = match outcome {
+                Ok(Ok(Ok(()))) => None,
+                Ok(Ok(Err(error))) => Some(error.0),
+                Ok(Err(_)) => Some(format!("timed out after {} ms", timeout.as_millis())),
+                Err(_) => Some("readiness check panicked".to_string()),
+            };
+            CheckResult {
+                name,
+                ok: error.is_none(),
+                error,
+                latency_ms,
+            }
+        }
+    }))
+    .await;
+    Snapshot {
+        ready: results.iter().all(|r| r.ok),
+        checks: results,
+        age_ms: 0,
+        at: Some(Instant::now()),
     }
 }
 

@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
 use ferrum_alloy::extract::{Json, ValidJson, Validate, ValidationErrors};
-use ferrum_alloy::health::CheckError;
+use ferrum_alloy::health::{CheckError, HealthCheck, Readiness};
 use ferrum_alloy::telemetry::RequestContext;
 use http::Request;
 use http_body_util::{BodyExt, Full};
@@ -493,6 +493,60 @@ async fn readiness_checks_are_cached_and_single_flight() {
         "a flood of readiness requests runs the check once"
     );
     server.shutdown().await.unwrap();
+}
+
+/// A caller that stops waiting must not cancel the refresh: with a probe
+/// timeout shorter than the check, the cache still fills — once — and the
+/// next caller is served from it.
+#[tokio::test]
+async fn a_cancelled_readiness_caller_does_not_starve_the_cache() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let check: Arc<dyn HealthCheck> = Arc::new(move || {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<(), CheckError>(())
+        }
+    });
+    let readiness = Readiness::new(
+        vec![("slow-db".to_owned(), check)],
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+    );
+    // The first caller gives up long before the check completes.
+    let first = tokio::time::timeout(Duration::from_millis(30), readiness.snapshot()).await;
+    assert!(first.is_err(), "the first caller times out waiting");
+    // The detached refresh still lands, and serves the next caller.
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), readiness.snapshot())
+        .await
+        .expect("the refresh completes without its first caller");
+    assert!(snapshot.ready, "{snapshot:?}");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the cancelled caller did not cancel or duplicate the refresh"
+    );
+}
+
+/// A failed `prepare()` keeps the explicit configuration: retrying
+/// reports the same validation error instead of loading a file or the
+/// environment.
+#[test]
+fn a_failed_prepare_keeps_the_explicit_configuration() {
+    let mut cfg = config();
+    cfg.server.idle_timeout_ms = 0;
+    let mut app = AlloyApp::new("core-test")
+        .config_file("/nonexistent/ferrum-alloy-test.toml")
+        .config(cfg);
+    let first = app.prepare().unwrap_err().to_string();
+    let second = app.prepare().unwrap_err().to_string();
+    assert!(
+        first.contains("server.idle_timeout_ms must be greater than zero"),
+        "{first}"
+    );
+    assert_eq!(first, second, "a retry uses the explicit configuration");
 }
 
 #[tokio::test]

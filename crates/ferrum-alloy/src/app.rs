@@ -11,6 +11,8 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::get;
 use ferrum_alloy_telemetry::peer::SharedClassifier;
 use ferrum_alloy_telemetry::{Metrics, RecordRouteLayer, TelemetryLayer, TrustedPeers};
+#[cfg(feature = "tls")]
+use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use tokio::net::TcpListener;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -218,7 +220,10 @@ impl AlloyApp {
     /// later calls return the same configuration.
     pub fn prepare(&mut self) -> Result<&AlloyConfig, AlloyError> {
         if self.prepared.is_none() {
-            let config = match self.explicit_config.take() {
+            // Clone, do not take: when validation or telemetry setup
+            // fails, a retry must use the same explicit configuration
+            // instead of silently loading a file or the environment.
+            let config = match self.explicit_config.clone() {
                 Some(mut config) => {
                     if config.service.name.is_none() {
                         config.service.name = Some(self.name.clone());
@@ -244,6 +249,8 @@ impl AlloyApp {
                 telemetry,
                 metrics,
             });
+            // The prepared clone is authoritative now.
+            self.explicit_config = None;
         }
         match &self.prepared {
             Some(prepared) => Ok(&prepared.config),
@@ -715,23 +722,36 @@ impl AlloyParts {
             features = ?crate::enabled_features(),
             "serving"
         );
-        let app_task = tokio::spawn(server::serve(
+        let mut app_task = tokio::spawn(server::serve(
             app_listener,
             self.router.clone(),
             options.clone(),
             self.lifecycle.clone(),
             Arc::clone(&self.app_stats),
         ));
-        // New handshakes keep getting reloaded material until accepting stops.
+        // New handshakes keep getting reloaded material until accepting
+        // stops. A panicked reload task must not stop reloads silently:
+        // log it (never the panic payload) and keep serving the previous
+        // material.
         #[cfg(feature = "tls")]
         if let Some(tls) = self.tls.clone() {
-            tokio::spawn(crate::tls::reload_until(
-                tls,
-                Arc::clone(&self.app_stats),
-                self.lifecycle.stop_accepting().clone(),
-            ));
+            let stats = Arc::clone(&self.app_stats);
+            let stop_accepting = self.lifecycle.stop_accepting().clone();
+            tokio::spawn(async move {
+                let reload = std::panic::AssertUnwindSafe(crate::tls::reload_until(
+                    tls,
+                    stats,
+                    stop_accepting,
+                ));
+                if reload.catch_unwind().await.is_err() {
+                    tracing::error!(
+                        target: "ferrum_alloy::tls",
+                        "TLS reload task panicked; certificate reloads have stopped"
+                    );
+                }
+            });
         }
-        let management_task = match (management_listener, self.management_router.clone()) {
+        let mut management_task = match (management_listener, self.management_router.clone()) {
             (Some(listener), Some(router)) => Some(tokio::spawn(server::serve(
                 listener,
                 router,
@@ -750,6 +770,11 @@ impl AlloyParts {
 
         let signal = self.shutdown_signal.take();
         let token = self.lifecycle.shutdown_token();
+        // A listener task that ends on its own (an accept failure, a
+        // panic) begins shutdown too: the process must not stay up
+        // reporting ready with a dead listener.
+        let mut app_result = None;
+        let mut management_result = None;
         tokio::select! {
             () = async {
                 match signal {
@@ -758,6 +783,19 @@ impl AlloyParts {
                 }
             } => {}
             () = token.cancelled() => {}
+            result = &mut app_task => {
+                tracing::error!(target: "ferrum_alloy::lifecycle", "application listener ended; shutting down");
+                app_result = Some(result);
+            }
+            result = async {
+                match &mut management_task {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tracing::error!(target: "ferrum_alloy::lifecycle", "management listener ended; shutting down");
+                management_result = Some(result);
+            }
         }
         self.lifecycle.trigger_shutdown();
         let grace = Duration::from_millis(self.config.shutdown.readiness_grace_ms);
@@ -772,8 +810,19 @@ impl AlloyParts {
         }
         self.lifecycle.stop_accepting().cancel();
         let mut result = Ok(());
-        for task in std::iter::once(app_task).chain(management_task) {
-            match task.await {
+        let outcomes = vec![
+            match app_result {
+                Some(outcome) => Some(outcome),
+                None => Some(app_task.await),
+            },
+            match (management_result, management_task) {
+                (Some(outcome), _) => Some(outcome),
+                (None, Some(task)) => Some(task.await),
+                (None, None) => None,
+            },
+        ];
+        for outcome in outcomes.into_iter().flatten() {
+            match outcome {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => result = Err(AlloyError::Serve(error)),
                 Err(error) => {

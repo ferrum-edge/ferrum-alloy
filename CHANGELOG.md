@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Readiness refreshes now run in a detached task, so a probe client that
+  disconnects cannot cancel the refresh and starve the cache (with a
+  probe timeout shorter than a slow check, readiness could never become
+  ready). A failed `AlloyApp::prepare()` keeps the explicit
+  configuration, so a retry reports the same error instead of silently
+  loading a file or the environment. A listener task that ends on its
+  own now begins shutdown instead of leaving the process reporting
+  ready, and a panicked TLS reload task is logged instead of silently
+  stopping reloads. `server.request_timeout_ms` documentation now
+  states that admission wait is not counted (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
