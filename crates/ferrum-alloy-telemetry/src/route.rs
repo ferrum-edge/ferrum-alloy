@@ -6,8 +6,11 @@
 //! route matching (including for the fallback) and writes the matched template
 //! into a per-request slot the telemetry layer reads when headers are produced.
 
+#[cfg(feature = "axum")]
 use std::collections::HashSet;
-use std::sync::{Arc, LazyLock, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
+#[cfg(feature = "axum")]
+use std::sync::{LazyLock, RwLock};
 use std::task::{Context, Poll};
 
 use http::Request;
@@ -75,8 +78,10 @@ pub fn matched_route<B>(request: &Request<B>) -> Option<RouteLabel> {
 /// cache. The cap only guards against a caller stuffing unbounded values
 /// where templates belong; past it, templates are allocated per request
 /// as before.
+#[cfg(feature = "axum")]
 const MAX_INTERNED_TEMPLATES: usize = 4_096;
 
+#[cfg(feature = "axum")]
 fn intern_template(template: &str) -> Arc<str> {
     static INTERNED: LazyLock<RwLock<HashSet<Arc<str>>>> =
         LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -140,7 +145,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "axum"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
