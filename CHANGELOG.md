@@ -11,9 +11,14 @@
   are refused instead of being baked into the generated `Cargo.toml`,
   template substitution no longer re-expands operator values, Windows
   device names are refused as project names, printed follow-up commands
-  shell-quote their paths, manifest paths use an RFC 3986 allowlist,
-  and YAML keys YAML would type as bool/null/number are quoted in any
-  letter case (#197).
+  shell-quote their paths for the platform shell, manifest paths use an
+  RFC 3986 allowlist, and YAML keys YAML would type as bool/null/number
+  are quoted in any letter case (#197).
+- **Breaking:** manifest literal paths must now be plain ASCII
+  RFC 3986 `pchar` paths. Paths previously accepted with non-ASCII
+  bytes or characters such as `|` are refused; Edge itself admits some
+  of them, so this is Alloy's narrower canonical subset for generated
+  configuration, not an Edge limit.
 
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by

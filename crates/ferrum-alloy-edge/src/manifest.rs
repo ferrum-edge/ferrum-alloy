@@ -257,12 +257,15 @@ fn valid_id(value: &str) -> bool {
 /// non-ASCII bytes, spaces, query/fragment delimiters, templates — is
 /// refused by construction, not by enumerating bad characters.
 ///
-/// For `api.public_path`, exported as the `listen_path`, this is what Ferrum
-/// Edge admits as written (`policy_path` canonical form): v0.9.9 refuses a `;`
-/// path parameter unless the proxy sets `allow_path_parameters`, which export
-/// never does, and both supported releases refuse percent-escapes,
-/// backslashes, and dot segments. `api.service_base_path` and `health.path`
-/// use the same rule for simplicity; it is stricter than Edge requires there.
+/// For `api.public_path`, exported as the `listen_path`, this is Alloy's
+/// canonical subset of what Ferrum Edge admits as written (`policy_path`
+/// accepts more, including non-ASCII bytes and `|`): v0.9.9 refuses a `;`
+/// path parameter unless the proxy sets `allow_path_parameters`, which
+/// export never does, and both supported releases refuse percent-escapes,
+/// backslashes, and dot segments. Export writes only plain ASCII `pchar`
+/// paths, which every supported release admits unambiguously.
+/// `api.service_base_path` and `health.path` use the same rule for
+/// simplicity; it is stricter than Edge requires there.
 fn valid_path(value: &str) -> bool {
     value.starts_with('/')
         && value.bytes().all(|b| {

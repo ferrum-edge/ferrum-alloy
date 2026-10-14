@@ -30,8 +30,11 @@ fn key(text: &str) -> String {
     let reserved_word = ["true", "false", "null", "yes", "no", "on", "off", "y", "n"]
         .iter()
         .any(|word| text.eq_ignore_ascii_case(word));
+    // A leading minus followed by a digit starts every signed numeric
+    // spelling YAML resolves (`-123`, `-0xFF`, `-1e3`, `-1_000`), so it
+    // is quoted whether or not the rest is all digits.
     let digits = text.strip_prefix('-').unwrap_or(text);
-    let numeric = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+    let numeric = digits.bytes().next().is_some_and(|b| b.is_ascii_digit());
     let simple = !text.is_empty()
         && text
             .bytes()

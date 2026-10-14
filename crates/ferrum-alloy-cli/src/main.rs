@@ -84,10 +84,21 @@ pub(crate) fn eprint(text: &str) {
 }
 
 /// Quotes a path for the copy-paste commands the CLI prints, when it
-/// contains anything a POSIX shell would split or expand. Plain paths
-/// print unchanged.
+/// contains anything the platform shell would split or expand. Plain
+/// paths print unchanged. The quoting follows the shell the binary
+/// runs under: POSIX single quotes off Windows, `CommandLineToArgvW`
+/// double quotes on Windows (what Command Prompt and PowerShell pass
+/// to the command being run).
 pub(crate) fn shell_quote(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
+    if cfg!(windows) {
+        quote_windows(&text)
+    } else {
+        quote_posix(&text)
+    }
+}
+
+fn quote_posix(text: &str) -> String {
     let plain = !text.is_empty()
         && text.bytes().all(|b| {
             b.is_ascii_alphanumeric()
@@ -97,10 +108,48 @@ pub(crate) fn shell_quote(path: &std::path::Path) -> String {
                 )
         });
     if plain {
-        text.into_owned()
+        text.to_owned()
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
+}
+
+fn quote_windows(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'-' | b'.' | b'/' | b'\\' | b':' | b'@' | b'+' | b'=' | b','
+                )
+        });
+    if plain {
+        return text.to_owned();
+    }
+    // Double backslashes only where they precede a quote or the
+    // closing quote, and escape embedded quotes, per
+    // `CommandLineToArgvW` parsing.
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
 }
 
 fn version(format: Format) -> Result<(), CliError> {
@@ -163,4 +212,27 @@ pub(crate) fn absolute(path: &std::path::Path) -> Result<PathBuf, CliError> {
     std::env::current_dir()
         .map(|dir| dir.join(path))
         .map_err(|e| CliError::Io(format!("current directory: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{quote_posix, quote_windows};
+
+    #[test]
+    fn posix_quoting_wraps_only_what_needs_it() {
+        assert_eq!(quote_posix("orders-api"), "orders-api");
+        assert_eq!(quote_posix("my svc"), "'my svc'");
+        assert_eq!(quote_posix("it's"), "'it'\\''s'");
+        assert_eq!(quote_posix("$HOME/x"), "'$HOME/x'");
+    }
+
+    #[test]
+    fn windows_quoting_uses_double_quotes() {
+        assert_eq!(quote_windows(r"C:\work\svc"), r"C:\work\svc");
+        assert_eq!(quote_windows(r"C:\my svc"), r#""C:\my svc""#);
+        assert_eq!(quote_windows(r"C:\my svc\"), r#""C:\my svc\\""#);
+        assert_eq!(quote_windows(r#"a"b"#), r#""a\"b""#);
+    }
 }

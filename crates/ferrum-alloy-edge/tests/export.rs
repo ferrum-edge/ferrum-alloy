@@ -347,9 +347,12 @@ fn direct_proxy_id_can_use_the_full_edge_limit_without_derived_resources() {
     );
 }
 
-/// Literal paths Ferrum Edge refuses as a `listen_path`: a `;` path parameter
-/// (v0.9.9 without `allow_path_parameters`, which export never sets), and on
-/// both supported releases a `.` segment, a percent-escape, or a backslash.
+/// Literal paths outside Alloy's canonical subset. The first four are
+/// ones Ferrum Edge itself refuses as a `listen_path`: a `;` path
+/// parameter (v0.9.9 without `allow_path_parameters`, which export
+/// never sets), a `.` segment, a percent-escape, and a backslash. The
+/// rest Edge's `policy_path` admits, but export only writes plain
+/// ASCII `pchar` paths, so they are refused here instead.
 const REFUSED_PATHS: &[&str] = &[
     "/orders;v=1",
     "/orders/./items",
@@ -362,7 +365,7 @@ const REFUSED_PATHS: &[&str] = &[
 ];
 
 #[test]
-fn paths_edge_would_refuse_are_rejected() {
+fn paths_outside_the_canonical_subset_are_rejected() {
     let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
     for path in REFUSED_PATHS {
         let line = format!("public_path = {path:?}");
@@ -417,14 +420,18 @@ fn yaml_keys_that_would_change_type_are_quoted() {
         "NULL": 2,
         "Off": 3,
         "-123": 4,
-        "plain_key": 5,
+        "-0xFF": 5,
+        "-1e3": 6,
+        "plain_key": 7,
     }));
     for expected in [
         "\"True\": 1",
         "\"NULL\": 2",
         "\"Off\": 3",
         "\"-123\": 4",
-        "plain_key: 5",
+        "\"-0xFF\": 5",
+        "\"-1e3\": 6",
+        "plain_key: 7",
     ] {
         assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
     }
