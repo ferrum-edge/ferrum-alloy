@@ -4,8 +4,11 @@
 
 - OTLP export requests are now chunked by estimated bytes
   (`max_request_bytes`) as well as by span count, so a batch of large
-  spans can no longer exceed the exporter's request-body cap and be
-  rejected whole; a single span larger than the budget is sent alone.
+  spans no longer sails past the exporter's request-body cap by span
+  size alone and gets rejected whole. The estimate is the queue
+  budget's (resource and instrumentation-scope encoding are not in
+  it), so staying within the cap is best-effort, not guaranteed; a
+  single span larger than the budget is sent alone.
   `OtelPipeline::queued_spans()` and `queued_bytes()` expose the
   export queue depth (#197).
 

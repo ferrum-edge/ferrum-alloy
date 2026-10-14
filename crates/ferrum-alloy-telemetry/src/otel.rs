@@ -614,6 +614,16 @@ impl BoundedSpanProcessor {
     }
 }
 
+/// Releases a byte charge against the queue budget. Saturating: the
+/// exiting worker retires every outstanding charge at once
+/// (`Worker::drop`), and a producer rolling back afterwards must not
+/// wrap the counter.
+fn release_bytes(queued_bytes: &AtomicUsize, size: usize) {
+    let _ = queued_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(size))
+    });
+}
+
 /// Releases one span reservation taken in `on_end` that did not reach the
 /// worker. Returns `false` when the exiting worker already counted it (it
 /// counts every reservation outstanding when it ends), in which case the
@@ -640,7 +650,7 @@ impl SpanProcessor for BoundedSpanProcessor {
         let size = estimate_bytes(&span);
         let previous = self.queued_bytes.fetch_add(size, Ordering::Relaxed);
         if previous + size > self.max_queue_bytes {
-            self.queued_bytes.fetch_sub(size, Ordering::Relaxed);
+            release_bytes(&self.queued_bytes, size);
             self.metrics.telemetry_spans_lost.inc("byte_budget");
             return;
         }
@@ -648,13 +658,13 @@ impl SpanProcessor for BoundedSpanProcessor {
         match self.sender.try_send(Message::Span(Box::new(span), size)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                self.queued_bytes.fetch_sub(size, Ordering::Relaxed);
+                release_bytes(&self.queued_bytes, size);
                 if release_span_reservation(&self.queued_spans) {
                     self.metrics.telemetry_spans_lost.inc("queue_full");
                 }
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.queued_bytes.fetch_sub(size, Ordering::Relaxed);
+                release_bytes(&self.queued_bytes, size);
                 if release_span_reservation(&self.queued_spans) {
                     self.metrics.telemetry_spans_lost.inc("shutdown");
                 }
@@ -715,13 +725,16 @@ impl Drop for Worker {
     /// unwound, or a producer about to roll back) as a shutdown loss. A
     /// producer that then rolls back finds its reservation already taken
     /// (`release_span_reservation`) and does not count it again, so every
-    /// span is counted exactly once. The byte budget is left alone: producers
-    /// roll back only the bytes they added.
+    /// span is counted exactly once. Outstanding byte charges are
+    /// retired the same way, so `queued_bytes()` reaches zero with the
+    /// spans they charged; producer byte rollbacks saturate
+    /// (`release_bytes`), so one racing this swap cannot wrap it.
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
         let (_, disconnected) = mpsc::sync_channel(0);
         drop(std::mem::replace(&mut self.receiver, disconnected));
         let stranded = self.queued_spans.swap(0, Ordering::Relaxed);
+        self.queued_bytes.swap(0, Ordering::Relaxed);
         if stranded > 0 {
             self.metrics
                 .telemetry_spans_lost
@@ -831,7 +844,6 @@ impl Worker {
     }
 
     fn export<E: SpanExporter>(&self, exporter: &E, batch: &mut Batch) {
-        let mut released = 0usize;
         while !batch.spans.is_empty() {
             // Chunk by count and by estimated bytes, so a chunk cannot
             // exceed the exporter's request-body cap just because the
@@ -852,7 +864,6 @@ impl Worker {
             }
             let chunk: Vec<SpanData> = batch.spans.drain(..take).map(|(span, _)| span).collect();
             batch.bytes -= chunk_bytes;
-            released += chunk_bytes;
             let count = chunk.len();
             // An exporter panic unwinds and ends this thread: waiting
             // callers then get `AlreadyShutdown`, `Worker`'s `Drop` counts
@@ -867,6 +878,10 @@ impl Worker {
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                     Some(v.saturating_sub(count))
                 });
+            // Release this chunk's bytes as soon as its export resolves,
+            // so a slow later chunk does not keep completed chunks
+            // charged against the queue budget.
+            release_bytes(&self.queued_bytes, chunk_bytes);
             match result {
                 Ok(()) => {
                     self.metrics
@@ -879,11 +894,6 @@ impl Worker {
                     .add("export_failed", count as u64),
             }
         }
-        let _ = self
-            .queued_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(released))
-            });
     }
 }
 
@@ -1048,6 +1058,84 @@ mod tests {
         );
     }
 
+    /// An exporter that reports each export as it begins and parks the
+    /// second one until released, so byte release timing is observable.
+    #[derive(Debug)]
+    struct GatedExporter {
+        began: SyncSender<usize>,
+        release: std::sync::Mutex<Receiver<()>>,
+        calls: AtomicUsize,
+    }
+
+    impl SpanExporter for GatedExporter {
+        fn export(
+            &self,
+            _batch: Vec<SpanData>,
+        ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = self.began.send(call);
+            if call == 2 {
+                let _ = self.release.lock().unwrap().recv();
+            }
+            std::future::ready(Ok(()))
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn force_flush(&self) -> OTelSdkResult {
+            Ok(())
+        }
+    }
+
+    /// A completed chunk's bytes leave the queue budget as soon as its
+    /// export resolves, not when the whole batch finishes: while the
+    /// second chunk's export is still parked, only its bytes remain
+    /// charged.
+    #[test]
+    fn chunk_bytes_are_released_as_each_export_resolves() {
+        let size = estimate_bytes(&new_test_export_span_data());
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let queued_bytes = Arc::new(AtomicUsize::new(size * 2));
+        let worker = Worker {
+            receiver,
+            queued_bytes: Arc::clone(&queued_bytes),
+            queued_spans: Arc::new(AtomicUsize::new(2)),
+            closed: Arc::new(AtomicBool::new(false)),
+            metrics: Arc::new(Metrics::default()),
+            max_batch: 16,
+            // One span per export request.
+            max_request_bytes: size,
+            delay: Duration::from_secs(60),
+            capacity: 16,
+        };
+        sender.send(span()).unwrap();
+        sender.send(span()).unwrap();
+        let flush = ask(&sender, Message::Flush);
+        let (began_tx, began_rx) = mpsc::sync_channel(4);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let exporter = GatedExporter {
+            began: began_tx,
+            release: std::sync::Mutex::new(release_rx),
+            calls: AtomicUsize::new(0),
+        };
+        let handle = std::thread::spawn(move || worker.run(exporter));
+        let within = Duration::from_secs(5);
+        assert_eq!(began_rx.recv_timeout(within).unwrap(), 1);
+        assert_eq!(began_rx.recv_timeout(within).unwrap(), 2);
+        assert_eq!(
+            queued_bytes.load(Ordering::Relaxed),
+            size,
+            "the first chunk's bytes are released before the second export runs"
+        );
+        release_tx.send(()).unwrap();
+        flush.recv().unwrap();
+        drop(sender);
+        handle.join().unwrap();
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
+    }
+
     #[test]
     fn messages_queued_behind_a_flush_or_shutdown_are_handled_in_order() {
         let (sender, receiver) = mpsc::sync_channel(16);
@@ -1132,9 +1220,13 @@ mod tests {
         assert!(!release_span_reservation(&queued_spans));
         assert!(!release_span_reservation(&queued_spans));
         assert_eq!(queued_spans.load(Ordering::Relaxed), 0);
-        // The byte budget is untouched, so each producer's own byte
-        // rollback cannot wrap it.
-        assert_eq!(queued_bytes.load(Ordering::Relaxed), 200);
+        // Outstanding byte charges are retired with their spans, so the
+        // reported queue depth reaches zero; each producer's own byte
+        // rollback then saturates instead of wrapping.
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
+        release_bytes(&queued_bytes, 100);
+        release_bytes(&queued_bytes, 100);
+        assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
 
         // A reservation taken after the worker ended is released normally.
         queued_spans.fetch_add(1, Ordering::Relaxed);
