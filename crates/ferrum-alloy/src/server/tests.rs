@@ -79,6 +79,7 @@ impl AdmissionTest {
             header_read_timeout: WITHIN,
             idle_timeout: WITHIN,
             write_stall_timeout: WITHIN,
+            body_read_stall_timeout: WITHIN,
             drain_timeout: WITHIN,
             #[cfg(feature = "tls")]
             tls: None,
@@ -393,6 +394,7 @@ async fn finished_connection(body_size: usize, write_stall_timeout: Duration) ->
         header_read_timeout: WITHIN,
         idle_timeout: IDLE_TIMEOUT,
         write_stall_timeout,
+        body_read_stall_timeout: WITHIN,
         drain_timeout: WITHIN,
         #[cfg(feature = "tls")]
         tls: None,
@@ -679,6 +681,7 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
         header_read_timeout: IDLE_TIMEOUT,
         idle_timeout,
         write_stall_timeout: IDLE_TIMEOUT,
+        body_read_stall_timeout: WITHIN,
         drain_timeout: WITHIN,
         #[cfg(feature = "tls")]
         tls: None,

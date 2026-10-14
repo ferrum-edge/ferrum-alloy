@@ -19,7 +19,11 @@ Hyper's write buffer. On HTTP/1.1, a blocked transport write keeps that connecti
 from being idle; the write stall timeout bounds the wait instead. On HTTP/2,
 only response DATA writes count as progress; blocked control writes, including
 PING and SETTINGS acknowledgements, do not defer idle closure after the response
-body has ended.
+body has ended. Request bodies have the symmetric boundary: a frame delivered
+to a handler that is waiting to read counts as progress for the body read stall
+timeout, and time before the handler starts reading does not. Delivered to the
+handler means the body yielded the frame; it says nothing about when the peer
+sent it.
 
 A completed transport write means the transport accepted those bytes, which can
 still be buffered in the kernel or on the client. Once the body has ended and

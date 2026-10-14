@@ -20,7 +20,13 @@
 //! data waits from the moment a response body hands it to Hyper until Hyper
 //! takes it for writing or drops it, including the part of a chunk that Hyper
 //! holds beyond the peer's flow-control window while the body goes back to
-//! waiting for the application. An established HTTP/2 connection is sent
+//! waiting for the application. Symmetrically, the body read stall timeout
+//! bounds the time a connection may go without delivering any request-body
+//! data while a handler waits to read it: a peer that sends a head and then
+//! trickles or stops sending the body it declared cannot keep its slot,
+//! while a peer that keeps sending, however slowly, is never cut, and time
+//! before a handler starts reading does not count. An established HTTP/2
+//! connection is sent
 //! `GOAWAY` at any of these deadlines, so a client can retry elsewhere, and is
 //! closed shortly after.
 //!
@@ -129,6 +135,9 @@ pub struct ServerStats {
     /// Connections closed because a response waiting to be written got no
     /// data written for the write stall timeout.
     pub write_stall_timeouts: AtomicU64,
+    /// Connections closed because a handler waiting to read a request body
+    /// got no body data for the body read stall timeout.
+    pub body_read_stall_timeouts: AtomicU64,
 }
 
 impl ServerStats {
@@ -201,6 +210,12 @@ impl ServerStats {
                 "counter",
                 "Connections closed with a response unwritten for the write stall timeout.",
                 &self.write_stall_timeouts,
+            ),
+            (
+                "ferrum_alloy_body_read_stall_timeouts_total",
+                "counter",
+                "Connections closed with a request body unread for the body read stall timeout.",
+                &self.body_read_stall_timeouts,
             ),
         ] {
             out.push_str(&format!(
@@ -358,6 +373,7 @@ pub(crate) struct ServeOptions {
     pub(crate) header_read_timeout: Duration,
     pub(crate) idle_timeout: Duration,
     pub(crate) write_stall_timeout: Duration,
+    pub(crate) body_read_stall_timeout: Duration,
     pub(crate) drain_timeout: Duration,
     #[cfg(feature = "tls")]
     pub(crate) tls: Option<crate::tls::TlsServer>,
@@ -819,6 +835,12 @@ struct Activity {
     /// body, which may then wait for the application: only this count still
     /// shows the held data.
     held: AtomicU64,
+    /// Request bodies whose handler is waiting for the peer to send more
+    /// body data (their last `poll_frame` returned `Pending`).
+    body_waiting: AtomicUsize,
+    /// Request-body data bytes delivered to handlers so far, plus one per
+    /// trailers frame: any frame is progress.
+    body_read: AtomicU64,
 }
 
 impl Activity {
@@ -857,6 +879,17 @@ impl Activity {
         self.write_blocked()
             || self.unsent.load(Ordering::Relaxed) > 0
             || self.held.load(Ordering::Relaxed) > 0
+    }
+
+    fn body_read(&self) -> u64 {
+        self.body_read.load(Ordering::Relaxed)
+    }
+
+    /// Whether a handler is waiting for the peer to send more request-body
+    /// data. A body its handler has not started reading, or has finished
+    /// with, is not waiting, however long the handler takes otherwise.
+    fn body_pending(&self) -> bool {
+        self.body_waiting.load(Ordering::Relaxed) > 0
     }
 }
 
@@ -1079,6 +1112,100 @@ where
             frame.map_data(|data| HeldData::new(data, held_in))
         };
         frame.map(|frame| frame.map(|frame| frame.map(hold)))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Whether one request body is counted in its connection's `body_waiting`.
+/// Dropping the body uncounts it, however it ends.
+struct BodyWaiting {
+    activity: Arc<Activity>,
+    counted: bool,
+}
+
+impl BodyWaiting {
+    /// Records whether the handler is now waiting for the peer (`true`) or
+    /// a frame arrived or the body ended (`false`). The shared count
+    /// changes only when this does.
+    fn set(&mut self, waiting: bool) {
+        if self.counted != waiting {
+            self.counted = waiting;
+            if waiting {
+                self.activity.body_waiting.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.activity.body_waiting.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for BodyWaiting {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+pin_project! {
+    /// A request body that reports its read progress to its connection's
+    /// [`Activity`]: every frame it delivers counts in `body_read`, and
+    /// while a poll is pending it counts in `body_waiting`, so the
+    /// connection task can tell a peer that stopped sending a body its
+    /// handler is reading from one whose handler simply has not read yet.
+    /// Frames pass through unchanged.
+    struct TrackedRequestBody<B> {
+        #[pin]
+        inner: B,
+        waiting: BodyWaiting,
+    }
+}
+
+impl<B> TrackedRequestBody<B> {
+    fn new(inner: B, activity: Arc<Activity>) -> Self {
+        Self {
+            inner,
+            waiting: BodyWaiting {
+                activity,
+                counted: false,
+            },
+        }
+    }
+}
+
+impl<B> http_body::Body for TrackedRequestBody<B>
+where
+    B: http_body::Body,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.project();
+        let frame = this.inner.poll_frame(cx);
+        match &frame {
+            Poll::Pending => this.waiting.set(true),
+            Poll::Ready(Some(Ok(frame))) => {
+                this.waiting.set(false);
+                let progress = frame
+                    .data_ref()
+                    .map_or(1, |data| (data.remaining() as u64).max(1));
+                this.waiting
+                    .activity
+                    .body_read
+                    .fetch_add(progress, Ordering::Relaxed);
+            }
+            Poll::Ready(_) => this.waiting.set(false),
+        }
+        frame
     }
 
     fn is_end_stream(&self) -> bool {
@@ -1502,8 +1629,9 @@ enum Phase {
     /// A request raced the close. The deadline is the hard cap for it to
     /// finish.
     Finishing,
-    /// Asked to close because a response could not be written. The deadline
-    /// ends a short grace period; the stalled response will not finish.
+    /// Asked to close because a response could not be written, or a
+    /// request body could not be read. The deadline ends a short grace
+    /// period; the stalled request or response will not finish.
     Stalled,
 }
 
@@ -1521,8 +1649,10 @@ async fn serve_io<I>(
     let stats = Arc::clone(&active.stats);
     let remote = peer.remote_addr;
     let activity = Arc::new(Activity::default());
+    let body_activity = Arc::clone(&activity);
     let service = app.map_request(move |request: http::Request<Incoming>| {
-        let mut request = request.map(Body::new);
+        let mut request = request
+            .map(|body| Body::new(TrackedRequestBody::new(body, Arc::clone(&body_activity))));
         request.extensions_mut().insert(peer.clone());
         if let Some(remote) = remote {
             request.extensions_mut().insert(ConnectInfo(remote));
@@ -1569,6 +1699,16 @@ async fn serve_io<I>(
     // written, and how many checks since have seen it waiting with none
     // written. `None` while no response data is waiting.
     let mut stalled: Option<(u64, u32)> = None;
+    // The body read stall check is the request-side mirror: it samples
+    // request-body progress every half period and closes the connection
+    // once a handler has been waiting for body data at three checks in a
+    // row with none delivered in between. A peer that keeps sending,
+    // however slowly, is never cut, and time before a handler starts
+    // reading does not count (see `TrackedRequestBody`).
+    let body_stall_check = options.body_read_stall_timeout / 2;
+    let body_stall_timer = tokio::time::sleep(body_stall_check);
+    tokio::pin!(body_stall_timer);
+    let mut body_stalled: Option<(u64, u32)> = None;
     let grace = options.header_read_timeout.min(Duration::from_secs(1));
     // The request count when the deadline was armed with no request in
     // flight, or `None` when it was armed with requests in flight, and the
@@ -1680,6 +1820,31 @@ async fn serve_io<I>(
                     deadline.as_mut().reset(Instant::now() + grace);
                 } else {
                     stall_timer.as_mut().reset(Instant::now() + stall_check);
+                }
+            }
+            () = body_stall_timer.as_mut(), if phase == Phase::Open => {
+                let read = activity.body_read();
+                body_stalled = match body_stalled {
+                    _ if !activity.body_pending() => None,
+                    Some((mark, checks)) if mark == read => Some((mark, checks + 1)),
+                    _ => Some((read, 0)),
+                };
+                if matches!(body_stalled, Some((_, checks)) if checks >= 2) {
+                    stats.body_read_stall_timeouts.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(target: "ferrum_alloy::server", listener = options.name, ?remote, "no request body data delivered within the body read stall timeout; closing");
+                    // As with a write stall: an HTTP/2 peer is sent `GOAWAY`
+                    // first, and the connection is dropped after the grace
+                    // period whatever else is in flight on it. The stalled
+                    // request cannot finish; its handler sees the body end
+                    // with the connection.
+                    phase = Phase::Stalled;
+                    if !draining {
+                        draining = true;
+                        connection.as_mut().graceful_shutdown();
+                    }
+                    deadline.as_mut().reset(Instant::now() + grace);
+                } else {
+                    body_stall_timer.as_mut().reset(Instant::now() + body_stall_check);
                 }
             }
             () = lifecycle.drain_connections().cancelled(), if !draining => {

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- New `server.body_read_stall_timeout_ms` (default `60000`,
+  `FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS`): a connection whose handler
+  is waiting to read a request body and receives no body data for the
+  timeout is closed and counted in
+  `ferrum_alloy_body_read_stall_timeouts_total`, mirroring the write
+  stall timeout. Previously only the headers deadline bounded a
+  trickling upload, and with `server.request_timeout_ms = 0` nothing did.
+  A sender that keeps sending, however slowly, is never cut, and time a
+  handler spends before it starts reading does not count (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
