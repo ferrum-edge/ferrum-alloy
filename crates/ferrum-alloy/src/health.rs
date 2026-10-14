@@ -155,6 +155,7 @@ impl Readiness {
             let refreshed = self.refreshed.notified();
             tokio::pin!(refreshed);
             let _ = refreshed.as_mut().enable();
+            let mut spawned = false;
             if let Ok(guard) = Arc::clone(&self.refresh).try_lock_owned() {
                 // Refresh in a detached task: this caller's future may be
                 // dropped (a probe client disconnecting, a headers
@@ -174,13 +175,18 @@ impl Readiness {
                     }
                     refreshed.notify_waiters();
                 });
+                spawned = true;
             }
             if let Some(snapshot) = self.fresh() {
                 return with_age(snapshot);
             }
-            // A refresh is running: serve the previous result if there is
-            // one, otherwise wait for the refresh to land.
-            if let Some(snapshot) = self.cached() {
+            // A refresh is running. Callers that did not start it serve
+            // the previous result if there is one; the caller that
+            // started it awaits the new result instead (serving the
+            // expired snapshot would report a just-failed dependency
+            // ready for another probe interval), as does any caller
+            // when nothing is cached yet.
+            if !spawned && let Some(snapshot) = self.cached() {
                 return with_age(snapshot);
             }
             refreshed.await;

@@ -530,6 +530,40 @@ async fn a_cancelled_readiness_caller_does_not_starve_the_cache() {
     );
 }
 
+/// The caller that starts a refresh after the TTL expires awaits the
+/// new result: a dependency that failed during the TTL is reported by
+/// that very probe, not one probe later from the expired snapshot.
+#[tokio::test]
+async fn the_refresh_starter_awaits_the_new_result_after_ttl_expiry() {
+    use std::sync::atomic::AtomicBool;
+    let healthy = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&healthy);
+    let check: Arc<dyn HealthCheck> = Arc::new(move || {
+        let flag = Arc::clone(&flag);
+        async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            if flag.load(Ordering::Relaxed) {
+                Ok::<(), CheckError>(())
+            } else {
+                Err(CheckError::new("connection refused"))
+            }
+        }
+    });
+    let readiness = Readiness::new(
+        vec![("db".to_owned(), check)],
+        Duration::from_millis(60),
+        Duration::from_secs(5),
+    );
+    assert!(readiness.snapshot().await.ready, "starts healthy");
+    healthy.store(false, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(90)).await;
+    let snapshot = readiness.snapshot().await;
+    assert!(
+        !snapshot.ready,
+        "the probe that starts the refresh reports the failure: {snapshot:?}"
+    );
+}
+
 /// A failed `prepare()` keeps the explicit configuration: retrying
 /// reports the same validation error instead of loading a file or the
 /// environment.
