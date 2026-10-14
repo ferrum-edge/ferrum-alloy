@@ -175,6 +175,8 @@ impl OtlpConfig {
 pub struct OtelPipeline {
     provider: SdkTracerProvider,
     tracer: SdkTracer,
+    queued_spans: Arc<AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for OtelPipeline {
@@ -248,6 +250,7 @@ impl OtelPipeline {
     {
         config.validate()?;
         let processor = BoundedSpanProcessor::spawn(factory, config, metrics)?;
+        let (queued_spans, queued_bytes) = processor.queue_counters();
         let instance_id = resource
             .instance_id
             .clone()
@@ -275,7 +278,12 @@ impl OtelPipeline {
             )
             .build();
         let tracer = provider.tracer(SCOPE_NAME);
-        Ok(Self { provider, tracer })
+        Ok(Self {
+            provider,
+            tracer,
+            queued_spans,
+            queued_bytes,
+        })
     }
 
     /// A `tracing` layer that exports spans through this pipeline. Spans and
@@ -295,6 +303,18 @@ impl OtelPipeline {
                     || target.starts_with("h2")
                     || target.starts_with("ferrum_alloy::access"))
             }))
+    }
+
+    /// Spans accepted by the processor and not yet exported or counted
+    /// lost. Load tests and graceful-drain checks can wait for this to
+    /// reach zero instead of guessing with sleeps.
+    pub fn queued_spans(&self) -> usize {
+        self.queued_spans.load(Ordering::Relaxed)
+    }
+
+    /// Estimated bytes of the spans currently queued for export.
+    pub fn queued_bytes(&self) -> usize {
+        self.queued_bytes.load(Ordering::Relaxed)
     }
 
     /// Exports everything queued so far (bounded by the processor's flush
@@ -491,6 +511,7 @@ impl BoundedSpanProcessor {
             closed: Arc::clone(&closed),
             metrics: Arc::clone(&metrics),
             max_batch: config.max_export_batch,
+            max_request_bytes: config.max_request_bytes,
             delay: Duration::from_millis(config.scheduled_delay_ms),
             capacity: config.max_queue_spans,
         };
@@ -541,6 +562,23 @@ impl BoundedSpanProcessor {
     #[doc(hidden)]
     pub fn controls_queued(&self) -> usize {
         self.controls_queued.load(Ordering::SeqCst)
+    }
+
+    /// Spans accepted and not yet exported or counted lost.
+    pub fn queued_spans(&self) -> usize {
+        self.queued_spans.load(Ordering::Relaxed)
+    }
+
+    /// Estimated bytes of the spans currently queued.
+    pub fn queued_bytes(&self) -> usize {
+        self.queued_bytes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn queue_counters(&self) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        (
+            Arc::clone(&self.queued_spans),
+            Arc::clone(&self.queued_bytes),
+        )
     }
 
     /// Queues `message`, waiting for queue space until `deadline`.
@@ -661,6 +699,7 @@ struct Worker {
     closed: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     max_batch: usize,
+    max_request_bytes: usize,
     delay: Duration,
     /// Queue capacity: the most messages queued behind a shutdown that are
     /// still handled, so producers that keep sending cannot hold it open.
@@ -691,9 +730,10 @@ impl Drop for Worker {
     }
 }
 
-/// Spans accumulated for the next export request.
+/// Spans accumulated for the next export request, each with the byte
+/// estimate it was charged at queue time.
 struct Batch {
-    spans: Vec<SpanData>,
+    spans: Vec<(SpanData, usize)>,
     bytes: usize,
 }
 
@@ -743,9 +783,9 @@ impl Worker {
     ) -> bool {
         match message {
             Message::Span(span, size) => {
-                batch.spans.push(*span);
+                batch.spans.push((*span, size));
                 batch.bytes += size;
-                if batch.spans.len() >= self.max_batch {
+                if batch.spans.len() >= self.max_batch || batch.bytes >= self.max_request_bytes {
                     self.export(exporter, batch);
                     return true;
                 }
@@ -791,9 +831,28 @@ impl Worker {
     }
 
     fn export<E: SpanExporter>(&self, exporter: &E, batch: &mut Batch) {
+        let mut released = 0usize;
         while !batch.spans.is_empty() {
-            let take = batch.spans.len().min(self.max_batch);
-            let chunk: Vec<SpanData> = batch.spans.drain(..take).collect();
+            // Chunk by count and by estimated bytes, so a chunk cannot
+            // exceed the exporter's request-body cap just because the
+            // spans in it are large (it would be rejected whole). The
+            // estimate is the same one the queue budget uses, not the
+            // exact encoded size; a single span larger than the budget
+            // still goes alone and the exporter decides its fate.
+            let mut take = 0usize;
+            let mut chunk_bytes = 0usize;
+            for (_, size) in &batch.spans {
+                if take >= self.max_batch
+                    || (take > 0 && chunk_bytes + size > self.max_request_bytes)
+                {
+                    break;
+                }
+                chunk_bytes += size;
+                take += 1;
+            }
+            let chunk: Vec<SpanData> = batch.spans.drain(..take).map(|(span, _)| span).collect();
+            batch.bytes -= chunk_bytes;
+            released += chunk_bytes;
             let count = chunk.len();
             // An exporter panic unwinds and ends this thread: waiting
             // callers then get `AlreadyShutdown`, `Worker`'s `Drop` counts
@@ -820,13 +879,11 @@ impl Worker {
                     .add("export_failed", count as u64),
             }
         }
-        let released = batch.bytes;
         let _ = self
             .queued_bytes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(released))
             });
-        batch.bytes = 0;
     }
 }
 
@@ -922,6 +979,75 @@ mod tests {
         );
     }
 
+    /// Export requests are chunked by estimated bytes as well as by span
+    /// count, so large spans cannot form a request over the body cap.
+    #[test]
+    fn exports_are_chunked_by_estimated_bytes() {
+        let size = estimate_bytes(&new_test_export_span_data());
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let metrics = Arc::new(Metrics::default());
+        let worker = Worker {
+            receiver,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            queued_spans: Arc::new(AtomicUsize::new(5)),
+            closed: Arc::new(AtomicBool::new(false)),
+            metrics: Arc::clone(&metrics),
+            max_batch: 16,
+            // Room for exactly two spans per request.
+            max_request_bytes: size * 2,
+            delay: Duration::from_secs(60),
+            capacity: 16,
+        };
+        for _ in 0..5 {
+            sender.send(span()).unwrap();
+        }
+        let flush = ask(&sender, Message::Flush);
+        let recorder = Recorder::default();
+        let seen = recorder.clone();
+        let handle = std::thread::spawn(move || worker.run(recorder));
+        flush.recv().unwrap();
+        drop(sender);
+        handle.join().unwrap();
+        assert_eq!(
+            seen.events(),
+            ["export:2", "export:2", "export:1", "flush", "shutdown"]
+        );
+        assert_eq!(metrics.telemetry_spans_exported.load(Ordering::Relaxed), 5);
+    }
+
+    /// A single span larger than the byte budget is exported alone (it
+    /// cannot be split); the exporter decides its fate.
+    #[test]
+    fn an_oversized_span_is_exported_alone() {
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let metrics = Arc::new(Metrics::default());
+        let worker = Worker {
+            receiver,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            queued_spans: Arc::new(AtomicUsize::new(3)),
+            closed: Arc::new(AtomicBool::new(false)),
+            metrics: Arc::clone(&metrics),
+            max_batch: 16,
+            max_request_bytes: 1,
+            delay: Duration::from_secs(60),
+            capacity: 16,
+        };
+        for _ in 0..3 {
+            sender.send(span()).unwrap();
+        }
+        let flush = ask(&sender, Message::Flush);
+        let recorder = Recorder::default();
+        let seen = recorder.clone();
+        let handle = std::thread::spawn(move || worker.run(recorder));
+        flush.recv().unwrap();
+        drop(sender);
+        handle.join().unwrap();
+        assert_eq!(
+            seen.events(),
+            ["export:1", "export:1", "export:1", "flush", "shutdown"]
+        );
+    }
+
     #[test]
     fn messages_queued_behind_a_flush_or_shutdown_are_handled_in_order() {
         let (sender, receiver) = mpsc::sync_channel(16);
@@ -933,6 +1059,7 @@ mod tests {
             closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::clone(&metrics),
             max_batch: 16,
+            max_request_bytes: usize::MAX,
             delay: Duration::from_secs(60),
             capacity: 16,
         };
@@ -996,6 +1123,7 @@ mod tests {
             closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::clone(&metrics),
             max_batch: 1,
+            max_request_bytes: usize::MAX,
             delay: Duration::from_secs(60),
             capacity: 1,
         };
@@ -1024,6 +1152,7 @@ mod tests {
             closed: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(Metrics::default()),
             max_batch: 8,
+            max_request_bytes: usize::MAX,
             delay: Duration::from_secs(60),
             capacity: 2,
         };

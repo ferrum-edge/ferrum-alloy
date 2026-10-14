@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- OTLP export requests are now chunked by estimated bytes
+  (`max_request_bytes`) as well as by span count, so a batch of large
+  spans can no longer exceed the exporter's request-body cap and be
+  rejected whole; a single span larger than the budget is sent alone.
+  `OtelPipeline::queued_spans()` and `queued_bytes()` expose the
+  export queue depth (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
