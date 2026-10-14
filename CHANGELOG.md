@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- `ferrum-alloy diagnose` redacts the service diagnostics credential
+  (`FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or `--token-file`) from every output,
+  as it already did the Edge admin credential. Previously only the Edge
+  credential was redacted, so a service reflecting the credential it was
+  sent into its report leaked it to the terminal and to `--write-report`
+  files (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name

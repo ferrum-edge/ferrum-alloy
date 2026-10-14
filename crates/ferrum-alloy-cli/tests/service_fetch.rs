@@ -155,6 +155,63 @@ fn an_ordinary_service_report_is_fetched_successfully() {
     assert_private(&output);
 }
 
+/// A hostile or wrong service receives the credential and can reflect it
+/// into the report; no output may repeat it.
+#[test]
+fn a_reflected_service_credential_is_redacted_from_output() {
+    let body = report().replace("orders-1", TOKEN);
+    let (url, _started_rx, server) = serve(body, false);
+    let output = diagnose(&url, "1000");
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_private(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("[REDACTED]"));
+}
+
+/// A `--token-file` credential never appears in the environment, so the
+/// redactor must learn it from the resolved credential itself — for the
+/// terminal and for `--write-report`, whose purpose is sharing evidence.
+#[test]
+fn a_reflected_token_file_credential_is_redacted_everywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let token_file = dir.path().join("token");
+    std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
+    let saved = dir.path().join("report.json");
+    let body = report().replace("orders-1", TOKEN);
+    let (url, _started_rx, server) = serve(body, false);
+    let output = bin()
+        .env_remove(TOKEN_ENV)
+        .args([
+            "diagnose",
+            "--url",
+            &url,
+            "--request-id",
+            "req-1",
+            "--token-file",
+            token_file.to_str().unwrap(),
+            "--write-report",
+            saved.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_private(&output);
+    let written = std::fs::read_to_string(&saved).unwrap();
+    assert!(!written.contains(TOKEN), "{written}");
+    assert!(written.contains("[REDACTED]"), "{written}");
+}
+
 #[test]
 fn a_trickling_service_body_cannot_extend_the_whole_operation_deadline() {
     let (url, started_rx, server) = serve(report(), true);

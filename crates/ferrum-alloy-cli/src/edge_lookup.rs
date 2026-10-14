@@ -14,6 +14,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use crate::error::CliError;
 
 const TOKEN_ENV: &str = ferrum_alloy::config::EDGE_DIAGNOSTICS_TOKEN_ENV;
+const SERVICE_TOKEN_ENV: &str = ferrum_alloy::config::DIAGNOSTICS_TOKEN_ENV;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -49,24 +50,43 @@ pub(crate) struct CredentialRedactor {
 }
 
 impl CredentialRedactor {
+    /// Every credential this command may send: the Edge admin token and the
+    /// service diagnostics token. A credential read from `--token-file` is
+    /// added with [`Self::add_credential`] once resolved.
     pub(crate) fn from_env() -> Self {
-        let raw = std::env::var_os(TOKEN_ENV).unwrap_or_default();
-        Self::new(&raw.to_string_lossy())
+        let mut redactor = Self {
+            credentials: Vec::new(),
+        };
+        for name in [TOKEN_ENV, SERVICE_TOKEN_ENV] {
+            let raw = std::env::var_os(name).unwrap_or_default();
+            redactor.add_credential(&raw.to_string_lossy());
+        }
+        redactor
     }
 
+    #[cfg(test)]
     fn new(raw: &str) -> Self {
-        let mut credentials = Vec::new();
+        let mut redactor = Self {
+            credentials: Vec::new(),
+        };
+        redactor.add_credential(raw);
+        redactor
+    }
+
+    /// Adds one credential (and the forms errors may reflect it in).
+    pub(crate) fn add_credential(&mut self, raw: &str) {
         for token in [raw, raw.trim()] {
             if !token.is_empty() {
-                credentials.push(token.to_owned());
+                self.credentials.push(token.to_owned());
                 // Parser errors may Debug-format even an invalid credential.
                 let quoted = format!("{token:?}");
-                credentials.push(quoted[1..quoted.len() - 1].to_owned());
+                self.credentials
+                    .push(quoted[1..quoted.len() - 1].to_owned());
             }
         }
-        credentials.sort_by_key(|token| std::cmp::Reverse(token.len()));
-        credentials.dedup();
-        Self { credentials }
+        self.credentials
+            .sort_by_key(|token| std::cmp::Reverse(token.len()));
+        self.credentials.dedup();
     }
 
     fn contains_credential(&self, text: &str) -> bool {
@@ -301,6 +321,19 @@ mod tests {
         redactor.redact_json(&mut value);
         assert_eq!(value["boolean"], true);
         assert_eq!(value["string"], "[REDACTED]");
+    }
+
+    #[test]
+    fn added_credentials_are_redacted_like_env_credentials() {
+        let mut redactor = CredentialRedactor::new("edge-secret");
+        redactor.add_credential("service-secret\n");
+        assert_eq!(
+            redactor.redact("edge-secret then service-secret"),
+            "[REDACTED] then [REDACTED]"
+        );
+        let mut value = serde_json::json!({ "reflected": "service-secret" });
+        redactor.redact_json(&mut value);
+        assert_eq!(value["reflected"], "[REDACTED]");
     }
 
     #[test]
