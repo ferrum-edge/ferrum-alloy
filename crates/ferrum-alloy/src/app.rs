@@ -882,11 +882,20 @@ impl TelemetryGuard {
     /// Flushes and stops export, waiting at most `timeout`.
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), String> {
         #[cfg(feature = "otel")]
-        if let Some(pipeline) = self.pipeline.take() {
-            return pipeline.shutdown(timeout).map_err(|e| e.to_string());
+        let result = match self.pipeline.take() {
+            Some(pipeline) => pipeline.shutdown(timeout).map_err(|e| e.to_string()),
+            None => Ok(()),
+        };
+        #[cfg(not(feature = "otel"))]
+        let result = Ok(());
+        // Drain the non-blocking log queue last, so shutdown's own
+        // final events are flushed with everything before them. Only
+        // Alloy-installed logging is owned here; an application's own
+        // subscriber keeps its own lifecycle.
+        if self.mode == "alloy" {
+            ferrum_alloy_telemetry::json::shutdown_nonblocking_stdout(timeout);
         }
-        let _ = timeout;
-        Ok(())
+        result
     }
 }
 

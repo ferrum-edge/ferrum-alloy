@@ -101,14 +101,14 @@ where
     let base = tracing_subscriber::fmt::layer().with_target(true);
     match config.format {
         LogFormat::Json if config.non_blocking_queue_lines > 0 => {
-            let (make_writer, guard) =
-                crate::json::non_blocking_stdout(config.non_blocking_queue_lines);
-            // The subscriber this feeds is process-global, so the worker
-            // is kept for the life of the process rather than flushed at
-            // some guard's drop. Lines it drops are counted by
-            // `crate::json::dropped_log_lines`.
-            std::mem::forget(guard);
-            Box::new(crate::json::JsonLayer::new().with_writer(make_writer))
+            // The worker's guard is held process-wide and flushed by
+            // `crate::json::shutdown_nonblocking_stdout`. If its thread
+            // cannot start, fall back to synchronous writing rather
+            // than a dead logger.
+            match crate::json::non_blocking_stdout(config.non_blocking_queue_lines) {
+                Ok(make_writer) => Box::new(crate::json::JsonLayer::new().with_writer(make_writer)),
+                Err(_) => Box::new(crate::json::JsonLayer::new()),
+            }
         }
         LogFormat::Json => Box::new(crate::json::JsonLayer::new()),
         LogFormat::Pretty => Box::new(base.pretty().with_ansi(config.ansi)),
