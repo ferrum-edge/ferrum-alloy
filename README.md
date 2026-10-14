@@ -72,6 +72,7 @@ The management listener binds to loopback by default, but loopback does not auth
 | `ferrum-alloy openapi export` | Exports the OpenAPI spec, with the AI-agent tool metadata Ferrum Edge reads (`x-ferrum-mcp`), and detects drift |
 | `ferrum-alloy edge export` | Exports Edge file-mode YAML (checked in CI with `ferrum-edge validate`) or a GitForgeOps tree |
 | `ferrum-alloy diagnose` | Explains evidence deterministically, from files or from one request's live report fetched from a running service on explicit request |
+| `ferrum-alloy version` | Prints tool and contract versions |
 
 ## Workspace
 
