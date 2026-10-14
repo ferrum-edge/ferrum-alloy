@@ -93,6 +93,24 @@ impl CredentialRedactor {
         self.credentials.iter().any(|token| text.contains(token))
     }
 
+    /// Whether a JSON number carries a credential: its text contains
+    /// one, or it equals a credential read as a number (a reflection
+    /// may drop leading zeros or use exponent form, so text alone is
+    /// not enough for numeric credentials).
+    fn credential_matches_number(&self, number: &serde_json::Number) -> bool {
+        if self.contains_credential(&number.to_string()) {
+            return true;
+        }
+        let Some(value) = number.as_f64() else {
+            return false;
+        };
+        self.credentials.iter().any(|token| {
+            token
+                .parse::<f64>()
+                .is_ok_and(|parsed| parsed.is_finite() && parsed == value)
+        })
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.credentials.is_empty()
     }
@@ -127,6 +145,15 @@ impl CredentialRedactor {
     pub(crate) fn redact_json(&self, value: &mut serde_json::Value) {
         match value {
             serde_json::Value::String(text) => *text = self.redact(text),
+            // An all-digit credential can be reflected as a JSON number
+            // instead of a string; replace the number rather than
+            // retyping it, so the output stays valid JSON of the same
+            // shape.
+            serde_json::Value::Number(number) => {
+                if self.credential_matches_number(number) {
+                    *number = serde_json::Number::from(0);
+                }
+            }
             serde_json::Value::Array(values) => {
                 for value in values {
                     self.redact_json(value);
@@ -321,6 +348,24 @@ mod tests {
         redactor.redact_json(&mut value);
         assert_eq!(value["boolean"], true);
         assert_eq!(value["string"], "[REDACTED]");
+    }
+
+    /// An all-digit credential reflected as a JSON number (not a
+    /// string) is redacted too, including exponent spellings, while
+    /// unrelated numbers keep their value and type.
+    #[test]
+    fn numeric_credentials_are_redacted_from_json_numbers() {
+        let redactor = CredentialRedactor::new("738492615073849261");
+        let mut value: serde_json::Value = serde_json::from_str(
+            r#"{"exact":738492615073849261,"exponent":7.38492615073849261e17,"safe":42,"nested":[738492615073849261]}"#,
+        )
+        .unwrap();
+        redactor.redact_json(&mut value);
+        assert_eq!(value["exact"], 0);
+        assert_eq!(value["exponent"], 0);
+        assert_eq!(value["safe"], 42);
+        assert_eq!(value["nested"][0], 0);
+        assert!(!value.to_string().contains("738492615073849261"));
     }
 
     #[test]
