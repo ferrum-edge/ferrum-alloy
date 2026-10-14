@@ -745,6 +745,10 @@ impl AlloyParts {
                 ServeOptions {
                     name: "management",
                     max_connections: 64,
+                    // The management router has no telemetry layer to
+                    // consume a classification; never invoke the
+                    // application classifier for its connections.
+                    classifier: None,
                     #[cfg(feature = "tls")]
                     tls: None,
                     ..options

@@ -877,3 +877,43 @@ async fn missing_router_is_an_error() {
         .unwrap_err();
     assert!(matches!(error, ferrum_alloy::AlloyError::MissingRouter));
 }
+
+/// Counts classifications; trusts nobody.
+#[derive(Debug)]
+struct CountingClassifier(Arc<AtomicUsize>);
+
+impl ferrum_alloy::telemetry::peer::TrustClassifier for CountingClassifier {
+    fn classify(&self, _extensions: &http::Extensions) -> ferrum_alloy::telemetry::peer::PeerTrust {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        ferrum_alloy::telemetry::peer::PeerTrust::Untrusted
+    }
+}
+
+/// Management connections never invoke the application trust classifier
+/// (nothing there consumes a classification); application connections
+/// classify once as they are served.
+#[tokio::test]
+async fn management_connections_do_not_invoke_the_trust_classifier() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = AlloyApp::new("core-test")
+        .router(router())
+        .trust_classifier(Arc::new(CountingClassifier(Arc::clone(&calls))));
+    let server = start(app, config()).await;
+
+    let live = fetch(&server.management_url("/livez")).await;
+    assert_eq!(live.status, 200);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "management traffic must not classify"
+    );
+
+    let reply = fetch(&server.url("/hello")).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "one application connection classifies once"
+    );
+    server.shutdown().await.unwrap();
+}
