@@ -447,3 +447,41 @@ fn temporary_names_differ_between_attempts() {
     assert_ne!(first, second);
     assert!(first.ends_with(".tmp"));
 }
+
+/// Replacing a private file must not expose the new bytes under a wider
+/// mode even briefly: the temporary file is created with the replaced
+/// file's mode, not the umask default it used to get until after the
+/// write.
+#[cfg(unix)]
+#[test]
+fn atomic_replacement_creates_the_temporary_with_the_final_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("report.json");
+    std::fs::write(&target, b"old").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let seen_mode = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let captured = std::sync::Arc::clone(&seen_mode);
+    HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |stage: &str, path: &Path| {
+            if stage == "temporary-created" {
+                let mode = path.metadata().unwrap().permissions().mode() & 0o777;
+                *captured.lock().unwrap() = Some(mode);
+            }
+        }));
+    });
+    let _clear = ClearHook;
+    write_atomically(&target, b"new", NewFileMode::Umask).unwrap();
+    assert_eq!(
+        *seen_mode.lock().unwrap(),
+        Some(0o600),
+        "the temporary file held the new bytes at the replaced file's mode"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    assert_eq!(
+        target.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

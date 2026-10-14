@@ -83,6 +83,26 @@ pub(crate) fn eprint(text: &str) {
     let _ = std::io::stderr().lock().write_all(safe.as_bytes());
 }
 
+/// Quotes a path for the copy-paste commands the CLI prints, when it
+/// contains anything a POSIX shell would split or expand. Plain paths
+/// print unchanged.
+pub(crate) fn shell_quote(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    let plain = !text.is_empty()
+        && text.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'+' | b'=' | b','
+                )
+        });
+    if plain {
+        text.into_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
 fn version(format: Format) -> Result<(), CliError> {
     let info = serde_json::json!({
         "ferrum_alloy_cli": env!("CARGO_PKG_VERSION"),

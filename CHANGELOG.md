@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
+  no Edge authentication plugin is exported yet, so the generated
+  configuration authenticates nobody until authentication is configured
+  in Edge. Also in this batch: atomic CLI writes create the temporary
+  file with its final mode (replaced private files are never briefly
+  world-readable), `--alloy-git` is URL-parsed and credentialed URLs
+  are refused instead of being baked into the generated `Cargo.toml`,
+  template substitution no longer re-expands operator values, Windows
+  device names are refused as project names, printed follow-up commands
+  shell-quote their paths, manifest paths use an RFC 3986 allowlist,
+  and YAML keys YAML would type as bool/null/number are quoted in any
+  letter case (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name

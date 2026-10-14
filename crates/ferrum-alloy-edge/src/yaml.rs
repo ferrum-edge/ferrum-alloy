@@ -24,15 +24,22 @@ fn quoted(text: &str) -> String {
 }
 
 fn key(text: &str) -> String {
+    // YAML plain-scalar typing is case-insensitive for the core-schema
+    // words `True`/`NULL`/`Off`, and `-123` reads back as a number, so
+    // anything spelled like a bool, null, or integer is quoted too.
+    let reserved_word = ["true", "false", "null", "yes", "no", "on", "off", "y", "n"]
+        .iter()
+        .any(|word| text.eq_ignore_ascii_case(word));
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let numeric = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
     let simple = !text.is_empty()
         && text
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
         && !text.as_bytes()[0].is_ascii_digit()
-        && !matches!(
-            text,
-            "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "y" | "n"
-        );
+        && text != "-"
+        && !reserved_word
+        && !numeric;
     if simple {
         text.to_owned()
     } else {

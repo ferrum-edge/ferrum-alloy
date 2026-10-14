@@ -313,6 +313,13 @@ fn starter_text(chosen: &[&Starter]) -> StarterText {
     text
 }
 
+/// Windows reserved device names (project names are lowercase-only, and
+/// Windows compares case-insensitively, with or without an extension).
+const WINDOWS_DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
 const RESERVED: &[&str] = &[
     "test",
     "core",
@@ -363,6 +370,11 @@ pub(crate) fn validate_name(name: &str) -> Result<(), CliError> {
         )));
     }
     let crate_name = name.replace('-', "_");
+    if WINDOWS_DEVICE_NAMES.contains(&name) {
+        return Err(CliError::Invalid(format!(
+            "project name {name:?} is a reserved Windows device name"
+        )));
+    }
     if RESERVED.contains(&name) || KEYWORDS.contains(&crate_name.as_str()) {
         return Err(CliError::Invalid(format!(
             "project name {name:?} is reserved"
@@ -373,6 +385,30 @@ pub(crate) fn validate_name(name: &str) -> Result<(), CliError> {
 
 fn toml_string(value: &str) -> String {
     toml::Value::String(value.to_owned()).to_string()
+}
+
+/// Validates `--alloy-git` by parsing it. The value is written verbatim
+/// into the generated `Cargo.toml`, so credentials are refused here
+/// rather than baked into the project. Errors never echo the value.
+fn validate_alloy_git(value: &str) -> Result<(), CliError> {
+    let invalid = |message: &str| CliError::Invalid(message.into());
+    if value.contains(char::is_whitespace) {
+        return Err(invalid("--alloy-git must be an https URL"));
+    }
+    let parsed =
+        reqwest::Url::parse(value).map_err(|_| invalid("--alloy-git must be an https URL"))?;
+    if parsed.scheme() != "https" || parsed.host().is_none() {
+        return Err(invalid("--alloy-git must be an https URL"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid(
+            "--alloy-git must not contain credentials; they would be written into the generated Cargo.toml",
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(invalid("--alloy-git must not contain a fragment"));
+    }
+    Ok(())
 }
 
 fn validate_git_selector(option: &str, value: &str) -> Result<(), CliError> {
@@ -411,11 +447,7 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
             )
         }
         None => {
-            if !args.alloy_git.starts_with("https://")
-                || args.alloy_git.contains(char::is_whitespace)
-            {
-                return Err(CliError::Invalid("--alloy-git must be an https URL".into()));
-            }
+            validate_alloy_git(&args.alloy_git)?;
             let (key, value) = if let Some(branch) = &args.alloy_branch {
                 validate_git_selector("--alloy-branch", branch)?;
                 ("branch", branch.as_str())
@@ -478,10 +510,14 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
     } else {
         format!("{}{openapi_readme}", starters.readme)
     };
+    // Order matters: template-derived values first (they may themselves
+    // contain `{{name}}`/`{{crate_name}}`), operator-derived values last,
+    // in one pass each, so operator text (the `--alloy-git` URL, a git
+    // selector, `--alloy-path`) is inserted once and never re-scanned: a
+    // value containing a placeholder's text is written literally and the
+    // unreplaced-placeholder check below reports it, instead of silently
+    // expanding it into an unrelated part of the project.
     let replacements = [
-        ("{{name}}", args.name.as_str()),
-        ("{{crate_name}}", crate_name.as_str()),
-        ("{{alloy_dependency}}", alloy_dependency.as_str()),
         ("{{default_run}}", default_run),
         ("{{extra_dependencies}}", extra_dependencies.as_str()),
         (
@@ -517,6 +553,9 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
             "{{manifest_agents}}",
             if openapi { OPENAPI_AGENTS } else { "" },
         ),
+        ("{{name}}", args.name.as_str()),
+        ("{{crate_name}}", crate_name.as_str()),
+        ("{{alloy_dependency}}", alloy_dependency.as_str()),
     ];
     let mut sources: Vec<(&str, &str)> = BASE.to_vec();
     if openapi {
@@ -531,11 +570,8 @@ pub(crate) fn render(args: &NewArgs) -> Result<Vec<(String, String)>, CliError> 
     let mut files: Vec<(String, String)> = Vec::new();
     for (path, template) in &sources {
         let mut content = (*template).to_owned();
-        // Two passes: some replacements insert other placeholders.
-        for _ in 0..2 {
-            for (placeholder, value) in &replacements {
-                content = content.replace(placeholder, value);
-            }
+        for (placeholder, value) in &replacements {
+            content = content.replace(placeholder, value);
         }
         if let Some(existing) = files.iter_mut().find(|(p, _)| p == path) {
             existing.1 = content;
@@ -578,6 +614,101 @@ pub(crate) fn run(args: NewArgs) -> Result<(), CliError> {
         "Created {} in {}\n\nNext:\n  cd {}\n  cargo test\n  cargo run\n",
         args.name,
         target.display(),
-        target.display()
+        crate::shell_quote(&target)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn args() -> NewArgs {
+        NewArgs {
+            name: "demo-api".into(),
+            path: None,
+            with: Vec::new(),
+            alloy_path: None,
+            alloy_git: "https://github.com/ferrum-edge/ferrum-alloy".into(),
+            alloy_branch: None,
+            alloy_tag: None,
+            alloy_rev: None,
+        }
+    }
+
+    #[test]
+    fn windows_device_names_are_refused() {
+        for name in ["con", "prn", "aux", "nul", "com1", "com9", "lpt3"] {
+            let error = validate_name(name).unwrap_err().to_string();
+            assert!(error.contains("Windows device name"), "{name}: {error}");
+        }
+        validate_name("console-api").unwrap();
+        validate_name("com10").unwrap();
+    }
+
+    #[test]
+    fn credentialed_alloy_git_is_refused_without_echoing_it() {
+        let mut new = args();
+        new.alloy_git = "https://user:hunter2secret@example.com/ferrum-alloy.git".into();
+        let error = render(&new).unwrap_err().to_string();
+        assert!(error.contains("must not contain credentials"), "{error}");
+        assert!(!error.contains("hunter2secret"), "{error}");
+        for bad in [
+            "http://github.com/ferrum-edge/ferrum-alloy",
+            "https://",
+            "not a url",
+            "https://github.com/ferrum-edge/ferrum-alloy#fragment",
+        ] {
+            new.alloy_git = bad.into();
+            assert!(render(&new).is_err(), "{bad} must be refused");
+        }
+    }
+
+    /// Operator text is substituted once, never re-scanned: a selector
+    /// containing a placeholder's text fails the unreplaced-placeholder
+    /// check instead of expanding into an unrelated file.
+    #[test]
+    fn operator_values_are_not_reexpanded_as_placeholders() {
+        let mut new = args();
+        new.alloy_branch = Some("{{ci_services}}".into());
+        let error = render(&new).unwrap_err().to_string();
+        assert!(
+            error.contains("unreplaced placeholder"),
+            "the operator value stayed literal and was reported: {error}"
+        );
+    }
+
+    #[test]
+    fn base_render_still_expands_chained_placeholders() {
+        // Every integration at once exercises every fragment chain
+        // (fragments carry `{{name}}`/`{{crate_name}}` themselves).
+        let mut full = args();
+        full.with = vec![
+            Integration::Openapi,
+            Integration::Otel,
+            Integration::Edge,
+            Integration::Tls,
+            Integration::Postgres,
+            Integration::Jwt,
+            Integration::HttpClient,
+        ];
+        let files = render(&full).unwrap();
+        assert!(
+            files.iter().all(|(_, content)| !content.contains("{{")),
+            "chained placeholders still expand in one ordered pass"
+        );
+        let files = render(&args()).unwrap();
+        let cargo = &files
+            .iter()
+            .find(|(path, _)| path == "Cargo.toml")
+            .unwrap()
+            .1;
+        assert!(cargo.contains("name = \"demo-api\""), "{cargo}");
+        assert!(
+            cargo.contains("git = \"https://github.com/ferrum-edge/ferrum-alloy\""),
+            "{cargo}"
+        );
+        assert!(files.iter().all(|(_, content)| !content.contains("{{")));
+    }
 }

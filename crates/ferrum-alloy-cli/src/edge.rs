@@ -70,6 +70,9 @@ pub(crate) fn read_manifest(path: &Path) -> Result<ServiceManifest, CliError> {
 pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
     let EdgeCommand::Export(args) = command;
     let manifest = read_manifest(&args.manifest)?;
+    for warning in export::export_warnings(&manifest) {
+        crate::eprint(&format!("warning: {warning}\n"));
+    }
     let resources = export::resources(&manifest);
     match args.format {
         EdgeFormat::EdgeFile => {
@@ -100,7 +103,7 @@ pub(crate) fn run(command: EdgeCommand) -> Result<(), CliError> {
                     crate::eprint(&format!(
                         "wrote {} (validate with: ferrum-edge validate -m file -c {})\n",
                         path.display(),
-                        path.display()
+                        crate::shell_quote(path)
                     ));
                     Ok(())
                 }

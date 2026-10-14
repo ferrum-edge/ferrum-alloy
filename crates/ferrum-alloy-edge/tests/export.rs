@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-use ferrum_alloy_edge::export::{file_mode_document, file_mode_yaml, gitforgeops_files, resources};
+use ferrum_alloy_edge::export::{
+    export_warnings, file_mode_document, file_mode_yaml, gitforgeops_files, resources,
+};
 use ferrum_alloy_edge::manifest::{EDGE_RESOURCE_ID_MAX_LENGTH, ServiceManifest};
 use ferrum_alloy_edge::yaml;
 use serde_json::{Value, json};
@@ -353,6 +355,10 @@ const REFUSED_PATHS: &[&str] = &[
     "/orders/./items",
     "/orders%2Fitems",
     "/orders\\items",
+    "/orders items",
+    "/orders|items",
+    "/orders\"items",
+    "/ordérs",
 ];
 
 #[test]
@@ -364,6 +370,63 @@ fn paths_edge_would_refuse_are_rejected() {
         assert_ne!(text, fixture);
         let error = ServiceManifest::from_toml(&text).unwrap_err().to_string();
         assert!(error.contains("api.public_path"), "{path}: {error}");
+    }
+}
+
+#[test]
+fn ordinary_pchar_paths_are_accepted() {
+    let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
+    for path in ["/orders-v2/items.json", "/items~draft", "/a:b@c"] {
+        let text = fixture.replace(
+            "public_path = \"/orders\"",
+            &format!("public_path = {path:?}"),
+        );
+        assert_ne!(text, fixture);
+        assert!(
+            ServiceManifest::from_toml(&text).is_ok(),
+            "{path} must be accepted"
+        );
+    }
+}
+
+/// `gateway` auth is accepted by the manifest schema but export cannot
+/// generate the Edge authentication plugin yet; that must be loud, not a
+/// silently unauthenticated proxy.
+#[test]
+fn gateway_auth_produces_an_export_warning() {
+    assert!(export_warnings(&manifest()).is_empty());
+    let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
+    let text = fixture.replace("mode = \"service\"", "mode = \"gateway\"");
+    assert_ne!(text, fixture);
+    let manifest = ServiceManifest::from_toml(&text).unwrap();
+    let warnings = export_warnings(&manifest);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("gateway"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("does not authenticate"),
+        "{warnings:?}"
+    );
+}
+
+/// Keys YAML would read back as a bool, null, or number are quoted, in
+/// any letter case; plain identifiers stay bare.
+#[test]
+fn yaml_keys_that_would_change_type_are_quoted() {
+    let out = yaml::to_string(&json!({
+        "True": 1,
+        "NULL": 2,
+        "Off": 3,
+        "-123": 4,
+        "plain_key": 5,
+    }));
+    for expected in [
+        "\"True\": 1",
+        "\"NULL\": 2",
+        "\"Off\": 3",
+        "\"-123\": 4",
+        "plain_key: 5",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
     }
 }
 
