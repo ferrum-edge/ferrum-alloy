@@ -23,8 +23,30 @@ pub const DEFAULT_MAX_SERIES: usize = 2_000;
 /// Label used when the series cap is reached.
 pub const OVERFLOW_LABEL: &str = "__overflow__";
 
-/// A fixed-bucket histogram.
+/// [`DURATION_BUCKETS`] in nanoseconds, for integer bucket assignment.
+const DURATION_BUCKET_NANOS: [u64; DURATION_BUCKETS.len()] = [
+    5_000_000,
+    10_000_000,
+    25_000_000,
+    50_000_000,
+    75_000_000,
+    100_000_000,
+    250_000_000,
+    500_000_000,
+    750_000_000,
+    1_000_000_000,
+    2_500_000_000,
+    5_000_000_000,
+    7_500_000_000,
+    10_000_000_000,
+];
+
+/// A fixed-bucket histogram. Buckets hold per-bucket (non-cumulative)
+/// counts, so recording touches one bucket; rendering sums them into the
+/// cumulative counts Prometheus expects. Cache-line aligned so the two
+/// histograms in a series (and neighboring series) do not share lines.
 #[derive(Debug, Default)]
+#[repr(align(64))]
 pub struct Histogram {
     buckets: [AtomicU64; DURATION_BUCKETS.len()],
     count: AtomicU64,
@@ -34,14 +56,12 @@ pub struct Histogram {
 impl Histogram {
     /// Records one duration.
     pub fn record(&self, duration: Duration) {
-        let seconds = duration.as_secs_f64();
-        for (bound, bucket) in DURATION_BUCKETS.iter().zip(&self.buckets) {
-            if seconds <= *bound {
-                bucket.fetch_add(1, Ordering::Relaxed);
-            }
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        let bucket = DURATION_BUCKET_NANOS.partition_point(|&bound| nanos > bound);
+        if let Some(bucket) = self.buckets.get(bucket) {
+            bucket.fetch_add(1, Ordering::Relaxed);
         }
         self.count.fetch_add(1, Ordering::Relaxed);
-        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
         self.sum_nanos.fetch_add(nanos, Ordering::Relaxed);
     }
 
@@ -58,9 +78,19 @@ type SeriesMap = HashMap<Arc<str>, HashMap<(&'static str, u16), Arc<Series>>>;
 type SeriesEntry = ((&'static str, Arc<str>, u16), Arc<Series>);
 
 #[derive(Debug, Default)]
-struct Series {
+pub(crate) struct Series {
     duration: Histogram,
     time_to_headers: Histogram,
+}
+
+impl Series {
+    pub(crate) fn record_time_to_headers(&self, elapsed: Duration) {
+        self.time_to_headers.record(elapsed);
+    }
+
+    pub(crate) fn record_duration(&self, elapsed: Duration) {
+        self.duration.record(elapsed);
+    }
 }
 
 /// A labeled counter family with a fixed, known label set.
@@ -206,7 +236,7 @@ impl Metrics {
         self.in_flight.load(Ordering::Relaxed)
     }
 
-    fn series_for(&self, method: &'static str, route: &str, status: u16) -> Arc<Series> {
+    pub(crate) fn series_for(&self, method: &'static str, route: &str, status: u16) -> Arc<Series> {
         if let Ok(map) = self.series.read()
             && let Some(series) = map.get(route).and_then(|by| by.get(&(method, status)))
         {
@@ -227,18 +257,6 @@ impl Metrics {
             .insert((method, status), Arc::clone(&series));
         self.series_len.fetch_add(1, Ordering::Relaxed);
         series
-    }
-
-    pub(crate) fn record_time_to_headers(
-        &self,
-        method: &'static str,
-        route: &str,
-        status: u16,
-        elapsed: Duration,
-    ) {
-        self.series_for(method, route, status)
-            .time_to_headers
-            .record(elapsed);
     }
 
     pub(crate) fn record_duration(
@@ -322,12 +340,10 @@ impl Metrics {
                     escape(&key.1),
                     key.2
                 );
+                let mut cumulative = 0u64;
                 for (bound, bucket) in DURATION_BUCKETS.iter().zip(&histogram.buckets) {
-                    let _ = writeln!(
-                        out,
-                        "{name}_bucket{{{labels},le=\"{bound}\"}} {}",
-                        bucket.load(Ordering::Relaxed)
-                    );
+                    cumulative += bucket.load(Ordering::Relaxed);
+                    let _ = writeln!(out, "{name}_bucket{{{labels},le=\"{bound}\"}} {cumulative}");
                 }
                 let count = histogram.count();
                 let _ = writeln!(out, "{name}_bucket{{{labels},le=\"+Inf\"}} {count}");
@@ -398,11 +414,17 @@ impl Metrics {
     }
 }
 
-fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+fn escape(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.bytes().any(|b| matches!(b, b'\\' | b'"' | b'\n')) {
+        std::borrow::Cow::Owned(
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n"),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
 }
 
 /// Normalizes a method to one of the nine standard methods or `_OTHER`
@@ -419,5 +441,47 @@ pub fn method_label(method: &http::Method) -> &'static str {
         http::Method::TRACE => "TRACE",
         http::Method::PATCH => "PATCH",
         _ => "_OTHER",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn bucket_nanos_match_the_second_bounds() {
+        for (seconds, nanos) in DURATION_BUCKETS.iter().zip(DURATION_BUCKET_NANOS) {
+            assert_eq!((seconds * 1e9) as u64, nanos);
+        }
+    }
+
+    #[test]
+    fn rendered_buckets_are_cumulative_with_inclusive_bounds() {
+        let metrics = Metrics::default();
+        let series = metrics.series_for("GET", "/items/{id}", 200);
+        // 3 ms (first bucket), 5 ms (exactly the first bound), 300 ms
+        // (the 0.5 bucket), 30 s (past every bound).
+        for ms in [3, 5, 300, 30_000] {
+            series.record_duration(Duration::from_millis(ms));
+        }
+        let out = metrics.render_prometheus();
+        let bucket = |le: &str| {
+            out.lines()
+                .find(|l| {
+                    l.starts_with("http_server_request_duration_seconds_bucket")
+                        && l.contains(&format!("le=\"{le}\""))
+                })
+                .and_then(|l| l.rsplit(' ').next())
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(bucket("0.005"), "2", "both sub-5ms observations: {out}");
+        assert_eq!(bucket("0.25"), "2");
+        assert_eq!(bucket("0.5"), "3");
+        assert_eq!(bucket("10"), "3");
+        assert_eq!(bucket("+Inf"), "4");
+        assert!(out.contains("_count{http_request_method=\"GET\""), "{out}");
     }
 }

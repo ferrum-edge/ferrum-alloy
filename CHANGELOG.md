@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Request-path overhead reduced with identical output: histograms now
+  record into a single bucket (integer bucket assignment) and sum to
+  cumulative counts only when rendered, the metrics series and route
+  label are resolved once per request instead of twice, label escaping
+  borrows unless escaping is needed, request/trace/span ids are
+  hex-encoded from a table without formatting calls, and shared-cache
+  classification compares `Cache-Control` directives in place instead
+  of allocating lowercased copies (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
