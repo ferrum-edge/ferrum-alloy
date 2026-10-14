@@ -598,3 +598,79 @@ fn mutated_fixtures_never_panic() {
         }
     }
 }
+
+#[test]
+fn an_oversized_schema_value_is_truncated_in_the_error() {
+    let mut report = base();
+    report["schema"] = json!("x".repeat(100_000));
+    let error = parse(&report).unwrap_err().to_string();
+    assert!(
+        error.len() < 400,
+        "error must not echo the whole value ({} bytes)",
+        error.len()
+    );
+    assert!(error.contains("100000 bytes"), "{error}");
+}
+
+#[test]
+fn max_depth_above_the_parser_limit_is_clamped() {
+    let limits = Limits {
+        max_depth: 10_000,
+        ..Limits::default()
+    };
+    let mut input = String::from("{\"schema\":");
+    input.push_str(&"[".repeat(200));
+    input.push_str(&"]".repeat(200));
+    input.push('}');
+    let error = parse_offline(input.as_bytes(), &limits).unwrap_err();
+    assert!(
+        error.to_string().contains("nesting depth exceeds 128"),
+        "{error}"
+    );
+}
+
+#[test]
+fn validation_errors_are_capped_with_a_suppression_marker() {
+    let mut report = base();
+    // 200 observations that each fail validation (measured, no unit).
+    let observations: Vec<Value> = (0..200)
+        .map(|i| {
+            let mut obs = observation(&format!("obs-{i}"));
+            obs.as_object_mut().unwrap().remove("unit");
+            obs
+        })
+        .collect();
+    report["observations"] = json!(observations);
+    let messages = validation_messages(parse(&report).unwrap_err());
+    assert_eq!(messages.len(), 101, "100 errors plus the marker");
+    assert!(
+        messages.last().unwrap().contains("suppressed"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn warnings_are_capped_with_a_suppression_marker() {
+    let mut report = base();
+    // 200 observations with unknown names: valid, but each warns.
+    let observations: Vec<Value> = (0..200)
+        .map(|i| {
+            let mut obs = observation(&format!("obs-{i}"));
+            obs["name"] = json!("custom.unknown_thing");
+            obs
+        })
+        .collect();
+    report["observations"] = json!(observations);
+    let parsed = parse(&report).unwrap();
+    assert_eq!(parsed.warnings.len(), 101, "100 warnings plus the marker");
+    assert!(
+        parsed
+            .warnings
+            .last()
+            .unwrap()
+            .message
+            .contains("suppressed"),
+        "{:?}",
+        parsed.warnings.last()
+    );
+}

@@ -19,7 +19,9 @@ use crate::model::{
 pub struct Limits {
     /// Maximum input size in bytes.
     pub max_bytes: usize,
-    /// Maximum JSON nesting depth.
+    /// Maximum JSON nesting depth. Values above 128 are clamped to 128:
+    /// the JSON parser's own recursion limit rejects deeper input first,
+    /// so a larger setting could never take effect.
     pub max_depth: usize,
     /// Maximum number of observations.
     pub max_observations: usize,
@@ -78,6 +80,49 @@ pub enum ReportError {
     Invalid(Vec<Issue>),
 }
 
+/// Most issues (errors or warnings) one parse reports, plus one marker
+/// issue saying the rest were suppressed. Validation runs to completion
+/// either way; only the reporting is bounded, so output size stays
+/// proportional to this cap rather than to the input.
+const MAX_ISSUES: usize = 100;
+
+/// Most bytes of an untrusted `schema`/`schema_version` value echoed in
+/// an error.
+const MAX_FOUND_BYTES: usize = 128;
+
+fn truncate_found(value: &str) -> String {
+    if value.len() <= MAX_FOUND_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_FOUND_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} bytes)", &value[..end], value.len())
+}
+
+fn push_issue(list: &mut Vec<Issue>, issue: Issue, suppressed: &'static str) {
+    if list.len() < MAX_ISSUES {
+        list.push(issue);
+    } else if list.len() == MAX_ISSUES {
+        list.push(Issue {
+            path: String::new(),
+            message: suppressed.to_owned(),
+        });
+    }
+}
+
+fn warn(warnings: &mut Vec<Issue>, path: &str, message: String) {
+    push_issue(
+        warnings,
+        Issue {
+            path: path.to_owned(),
+            message,
+        },
+        "further warnings suppressed",
+    );
+}
+
 /// A validation problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
@@ -121,7 +166,7 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
             limits.max_bytes
         )));
     }
-    check_depth(input, limits.max_depth)?;
+    check_depth(input, limits.max_depth.min(128))?;
 
     let value: Value =
         serde_json::from_slice(input).map_err(|e| ReportError::InvalidJson(e.to_string()))?;
@@ -139,13 +184,14 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
 
     let claimed_verification = report.collection.verification.clone();
     if claimed_verification != Verification::Unverified {
-        warnings.push(Issue {
-            path: "/collection/verification".into(),
-            message: format!(
+        warn(
+            &mut warnings,
+            "/collection/verification",
+            format!(
                 "report claims verification {:?}; offline input cannot be authenticated and is treated as unverified",
                 claimed_verification.as_str()
             ),
-        });
+        );
     }
     report.collection.verification = Verification::Unverified;
     if report.collection.method == CollectionMethod::LiveExport {
@@ -162,24 +208,24 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
         }
     }
     if downgraded > 0 {
-        warnings.push(Issue {
-            path: "/observations".into(),
-            message: format!(
-                "{downgraded} observation(s) claimed verified trust; treated as unverified"
-            ),
-        });
+        warn(
+            &mut warnings,
+            "/observations",
+            format!("{downgraded} observation(s) claimed verified trust; treated as unverified"),
+        );
     }
     // Supplied findings never leave the parser, so no caller can mistake
     // them for conclusions recomputed from the downgraded observations.
     let supplied = std::mem::take(&mut report.findings);
     if !supplied.is_empty() {
-        warnings.push(Issue {
-            path: "/findings".into(),
-            message: format!(
+        warn(
+            &mut warnings,
+            "/findings",
+            format!(
                 "{} supplied finding(s) discarded; findings are recomputed from observations",
                 supplied.len()
             ),
-        });
+        );
     }
 
     Ok(ParsedReport {
@@ -235,7 +281,7 @@ fn check_header(value: &Value, warnings: &mut Vec<Issue>) -> Result<(), ReportEr
     let schema = value.get("schema").and_then(Value::as_str);
     if schema != Some(SCHEMA_NAME) {
         return Err(ReportError::WrongSchema {
-            found: schema.map(str::to_owned),
+            found: schema.map(truncate_found),
         });
     }
     let version = value
@@ -245,20 +291,21 @@ fn check_header(value: &Value, warnings: &mut Vec<Issue>) -> Result<(), ReportEr
             found: "<missing>".into(),
         })?;
     let (major, minor) = parse_version(version).ok_or_else(|| ReportError::UnsupportedVersion {
-        found: version.to_owned(),
+        found: truncate_found(version),
     })?;
     if major != SCHEMA_MAJOR {
         return Err(ReportError::UnsupportedVersion {
-            found: version.to_owned(),
+            found: truncate_found(version),
         });
     }
     if minor > SCHEMA_MINOR {
-        warnings.push(Issue {
-            path: "/schema_version".into(),
-            message: format!(
+        warn(
+            warnings,
+            "/schema_version",
+            format!(
                 "report uses minor version {minor}, newer than {SCHEMA_MINOR}; unrecognized fields are preserved but not interpreted"
             ),
-        });
+        );
     }
     Ok(())
 }
@@ -408,7 +455,13 @@ fn valid_hex(value: &str, len: usize) -> bool {
 /// Semantic validation. Returns errors; pushes warnings.
 fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue>) -> Vec<Issue> {
     let mut errors = Vec::new();
-    let mut error = |path: String, message: String| errors.push(Issue { path, message });
+    let mut error = |path: String, message: String| {
+        push_issue(
+            &mut errors,
+            Issue { path, message },
+            "further validation errors suppressed",
+        );
+    };
 
     if report.observations.len() > limits.max_observations {
         error(
@@ -439,13 +492,14 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
         );
     }
     if report.collection.verification.is_unrecognized() {
-        warnings.push(Issue {
-            path: "/collection/verification".into(),
-            message: format!(
+        warn(
+            warnings,
+            "/collection/verification",
+            format!(
                 "unrecognized verification {:?}",
                 report.collection.verification.as_str()
             ),
-        });
+        );
     }
     // Unknown members of nested objects are preserved on round-trip (see
     // the flatten fields in the model); say so, as for the top level.
@@ -458,13 +512,14 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
         ("/subject", &report.subject.unrecognized),
     ] {
         if !unrecognized.is_empty() {
-            warnings.push(Issue {
-                path: path.into(),
-                message: format!(
+            warn(
+                warnings,
+                path,
+                format!(
                     "unrecognized fields preserved but not interpreted: {}",
                     unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
                 ),
-            });
+            );
         }
     }
 
@@ -534,10 +589,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 if !value.is_finite() {
                     error(format!("{path}/value"), "value must be finite".into());
                 } else if value < 0.0 {
-                    warnings.push(Issue {
-                        path: format!("{path}/value"),
-                        message: "negative measured value; it is reported as an inconsistency and never clamped to zero".into(),
-                    });
+                    warn(warnings, &format!("{path}/value"), "negative measured value; it is reported as an inconsistency and never clamped to zero".into(),);
                 }
                 if observation.unit.is_none() {
                     error(
@@ -547,13 +599,14 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 }
             }
             (availability, Some(_)) if *availability != Availability::Measured => {
-                warnings.push(Issue {
-                    path: format!("{path}/value"),
-                    message: format!(
+                warn(
+                    warnings,
+                    &format!("{path}/value"),
+                    format!(
                         "value ignored because availability is {:?}",
                         availability.as_str()
                     ),
-                });
+                );
             }
             _ => {}
         }
@@ -564,27 +617,29 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
             ("scope/leg", observation.scope.leg.is_unrecognized()),
         ] {
             if unknown {
-                warnings.push(Issue {
-                    path: format!("{path}/{field}"),
-                    message:
-                        "unrecognized value; the observation is not used as evidence for this field"
-                            .into(),
-                });
+                warn(
+                    warnings,
+                    &format!("{path}/{field}"),
+                    "unrecognized value; the observation is not used as evidence for this field"
+                        .into(),
+                );
             }
         }
         if !catalog::is_known(&observation.name) {
-            warnings.push(Issue {
-                path: format!("{path}/name"),
-                message: format!(
+            warn(
+                warnings,
+                &format!("{path}/name"),
+                format!(
                     "unknown observation name {:?}; preserved but not interpreted",
                     observation.name
                 ),
-            });
+            );
         }
         if !observation.unrecognized.is_empty() {
-            warnings.push(Issue {
-                path: path.clone(),
-                message: format!(
+            warn(
+                warnings,
+                &path,
+                format!(
                     "unrecognized fields preserved but not interpreted: {}",
                     observation
                         .unrecognized
@@ -593,7 +648,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-            });
+            );
         }
         // Unknown members of nested evidence objects are preserved on
         // round-trip too (see the flatten fields in the model).
@@ -614,13 +669,14 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
             if let Some(unrecognized) = unrecognized
                 && !unrecognized.is_empty()
             {
-                warnings.push(Issue {
-                    path: format!("{path}/{member}"),
-                    message: format!(
+                warn(
+                    warnings,
+                    &format!("{path}/{member}"),
+                    format!(
                         "unrecognized fields preserved but not interpreted: {}",
                         unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
                     ),
-                });
+                );
             }
         }
     }
@@ -635,9 +691,10 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
         );
     }
     if !report.unrecognized.is_empty() {
-        warnings.push(Issue {
-            path: String::new(),
-            message: format!(
+        warn(
+            warnings,
+            "",
+            format!(
                 "unrecognized top-level fields preserved but not interpreted: {}",
                 report
                     .unrecognized
@@ -646,7 +703,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-        });
+        );
     }
     errors
 }

@@ -62,3 +62,10 @@ path = "fuzz_targets/config_file.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "edge_record"
+path = "fuzz_targets/edge_record.rs"
+test = false
+doc = false
+bench = false
