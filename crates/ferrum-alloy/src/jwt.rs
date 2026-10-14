@@ -54,7 +54,7 @@ use tower_service::Service;
 
 use crate::config::{JwtSettings, MAX_JWKS_LIFETIME_MS};
 use crate::error::AlloyError;
-use crate::problem::{Problem, ProblemKind};
+use crate::problem::{Problem, ProblemKind, sanitize_detail};
 
 /// A verified caller.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,7 +106,9 @@ pub enum AuthError {
 
 /// Application authorization policy, evaluated after authentication.
 pub trait Authorize: Send + Sync + 'static {
-    /// `Err(detail)` denies with `403`. Keep `detail` free of secrets.
+    /// `Err(detail)` denies with `403`. The detail reaches the client
+    /// sanitized like framework problem details (control characters
+    /// blanked, length bounded); keep it free of secrets regardless.
     fn authorize(&self, principal: &Principal, request: &Parts) -> Result<(), String>;
 }
 
@@ -697,11 +699,33 @@ impl JwtVerifier {
     }
 
     /// Verifies a compact JWS and returns the principal.
+    ///
+    /// Only plain JWTs are accepted: a header carrying `crit`, `enc`,
+    /// `zip`, or `cty`, or an explicit `typ` other than `JWT` or `at+jwt`
+    /// (compared after any media-type prefix, case-insensitively), is
+    /// rejected before any key is fetched.
     pub async fn verify(&self, token: &str) -> Result<Principal, AuthError> {
         if token.len() > 16 * 1024 {
             return Err(AuthError::Invalid("token too large"));
         }
         let header = decode_header(token).map_err(|_| AuthError::Invalid("malformed token"))?;
+        // This verifier understands no `crit` extension, and `enc`/`zip`/
+        // `cty` mark encrypted, compressed, or nested tokens rather than
+        // the plain JWTs accepted here (RFC 7515 §4.2, RFC 8725 §3.11).
+        // `jku`/`x5u`/`jwk` stay ignored: keys come only from the JWKS.
+        if header.crit.is_some()
+            || header.enc.is_some()
+            || header.zip.is_some()
+            || header.cty.is_some()
+        {
+            return Err(AuthError::Invalid("unsupported token header"));
+        }
+        if let Some(typ) = &header.typ {
+            let typ = typ.rsplit('/').next().unwrap_or(typ);
+            if !typ.eq_ignore_ascii_case("jwt") && !typ.eq_ignore_ascii_case("at+jwt") {
+                return Err(AuthError::Invalid("unsupported token type"));
+            }
+        }
         if !self.inner.algorithms.contains(&header.alg) {
             return Err(AuthError::Invalid("algorithm not allowed"));
         }
@@ -753,6 +777,12 @@ impl JwtVerifier {
         let data = decode::<Map<String, Value>>(token, key, &validation)
             .map_err(|_| AuthError::Invalid("signature or claims rejected"))?;
         let claims = data.claims;
+        // The validation library also accepts an `iss` array containing
+        // the configured issuer; `iss` is a single StringOrURI (RFC 7519
+        // §4.1.1), and `Principal.issuer` must be what the token carries.
+        if claims.get("iss").and_then(Value::as_str) != Some(self.inner.issuer.as_str()) {
+            return Err(AuthError::Invalid("signature or claims rejected"));
+        }
         let audiences = match claims.get("aud") {
             Some(Value::String(aud)) => vec![aud.clone()],
             Some(Value::Array(items)) => items
@@ -903,7 +933,7 @@ where
                 && let Err(detail) = authorizer.authorize(&principal, &parts)
             {
                 return Ok(Problem::new(ProblemKind::Forbidden)
-                    .with_detail(detail)
+                    .with_detail(sanitize_detail(&detail))
                     .into_response());
             }
             parts.extensions.insert(principal);

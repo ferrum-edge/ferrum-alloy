@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **Breaking:** JWT verification accepts only plain JWTs. Tokens whose
+  header carries `crit`, `enc`, `zip`, or `cty`, an explicit `typ` other
+  than `JWT` or `at+jwt`, or an `iss` array instead of the single issuer
+  string are now rejected with `401` (RFC 7515 §4.2, RFC 7519 §4.1.1,
+  RFC 8725 §3.11). An `Authorize` denial detail is sanitized like other
+  framework problem details before it reaches the client (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
