@@ -122,30 +122,29 @@ const RECOGNIZED_PARAMETERS: &[&str] = &[
 /// then ignores it, so a libpq parameter it does not know (for example
 /// `sslpassword`, a secret) would reach the logs, and a typo in a security
 /// parameter (for example `sslmod=verify-full`) would silently not apply.
-/// The error names the parameter, never its value.
+/// The URL is parsed with the same parser SQLx uses, so normalization
+/// (tab/newline stripping, percent-decoding) cannot split a name past
+/// this check. The error names the parameter, never its value, and only
+/// when the name is a plain parameter-shaped token: anything else could
+/// be a fragment of a malformed URL's credential, so it is withheld.
 fn reject_unrecognized_parameters(text: &str) -> Result<(), AlloyError> {
-    // The query runs from the first `?` to the fragment, as in the URL
-    // grammar SQLx parses with.
-    let before_fragment = text.split('#').next().unwrap_or(text);
-    let Some((_, query)) = before_fragment.split_once('?') else {
-        return Ok(());
-    };
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        let raw_key = pair.split('=').next().unwrap_or(pair);
-        // SQLx reads parameters with `url::Url::query_pairs`, which
-        // percent-decodes names (and reads `+` as a space); decode the
-        // same way so an encoded name cannot slip past the check.
-        let key = decode_query_key(raw_key);
+    let url = url::Url::parse(text).map_err(|_| {
+        AlloyError::Integration("database.url is not a valid PostgreSQL URL".into())
+    })?;
+    for (key, _value) in url.query_pairs() {
+        let key = key.as_ref();
         let options_entry = key
             .strip_prefix("options[")
             .and_then(|rest| rest.strip_suffix(']'))
             .is_some_and(|name| !name.is_empty());
-        if !RECOGNIZED_PARAMETERS.contains(&key.as_str()) && !options_entry {
+        if !RECOGNIZED_PARAMETERS.contains(&key) && !options_entry {
+            let named = if is_plain_parameter_name(key) {
+                format!(" {key:?}")
+            } else {
+                String::new()
+            };
             return Err(AlloyError::Integration(format!(
-                "database.url: unrecognized connection parameter {key:?} \
+                "database.url: unrecognized connection parameter{named} \
                  (SQLx ignores parameters it does not recognize)"
             )));
         }
@@ -153,51 +152,16 @@ fn reject_unrecognized_parameters(text: &str) -> Result<(), AlloyError> {
     Ok(())
 }
 
-/// Decodes one query parameter name as `application/x-www-form-urlencoded`
-/// does: `+` is a space and `%XX` is a byte. Invalid escapes stay literal
-/// and undecodable bytes are replaced, matching `query_pairs`.
-fn decode_query_key(raw: &str) -> String {
-    fn hex(byte: u8) -> Option<u8> {
-        match byte {
-            b'0'..=b'9' => Some(byte - b'0'),
-            b'a'..=b'f' => Some(byte - b'a' + 10),
-            b'A'..=b'F' => Some(byte - b'A' + 10),
-            _ => None,
-        }
-    }
-    let bytes = raw.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            b'%' => {
-                let escape = bytes
-                    .get(index + 1)
-                    .and_then(|&hi| hex(hi))
-                    .zip(bytes.get(index + 2).and_then(|&lo| hex(lo)))
-                    .map(|(hi, lo)| (hi << 4) | lo);
-                match escape {
-                    Some(byte) => {
-                        decoded.push(byte);
-                        index += 3;
-                    }
-                    None => {
-                        decoded.push(b'%');
-                        index += 1;
-                    }
-                }
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
+/// Whether a parameter name is safe to repeat in an error: short and
+/// made only of the characters real parameter names use. Anything else
+/// (an `@`, a `/`, whitespace) is more likely a piece of a malformed
+/// URL's userinfo than a parameter name.
+fn is_plain_parameter_name(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'[' | b']'))
 }
 
 /// Whether the connection stays on this host: a Unix socket or a literal

@@ -92,11 +92,26 @@ async fn unrecognized_url_parameters_are_rejected_without_their_values() {
         assert!(!text.contains("hunter2secret"), "{text}");
         assert!(!text.contains("verify-full"), "{text}");
     }
+    // A `?` inside unencoded userinfo makes the rest of the credential
+    // look like a query key to a naive scanner; it must never be echoed.
+    let error = postgres::connect(
+        &settings("postgres://user:prefix?hunter2secret@127.0.0.1/db"),
+        "test",
+    )
+    .unwrap_err();
+    assert!(
+        !error.to_string().contains("hunter2secret"),
+        "malformed userinfo must not leak: {error}"
+    );
     // Everything SQLx recognizes keeps working, `options[...]` included.
+    // The parser SQLx uses strips tabs and newlines from the URL, so a
+    // name split by one is the recognized name, not an unknown one.
     for url in [
         "postgres://u:p@127.0.0.1/db?sslmode=require&sslrootcert=/tmp/ca.pem",
         "postgres://u:p@127.0.0.1/db?statement-cache-capacity=10&options[statement_timeout]=5",
         "postgres://u:p@127.0.0.1/db?sslmode=require#fragment",
+        "postgres://u:p@127.0.0.1/db?sslmo\nde=require",
+        "postgres://u:p@127.0.0.1/db?sslmode=require&\t",
         "postgres://u:p@127.0.0.1/db",
     ] {
         assert!(
