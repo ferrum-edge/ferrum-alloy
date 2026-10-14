@@ -191,12 +191,13 @@ where
         };
         // `Debug` implementations are application code and can re-enter
         // tracing, so render before locking the span extensions.
-        let mut rendered = SpanFields::default();
-        attrs.record(&mut SpanVisitor(&mut rendered));
-        let mut extensions = span.extensions_mut();
-        if extensions.get_mut::<SpanFields>().is_none() {
-            extensions.insert(rendered);
-        }
+        with_scratch(|rendered| {
+            attrs.record(&mut SpanVisitor(rendered));
+            let mut extensions = span.extensions_mut();
+            if extensions.get_mut::<SpanFields>().is_none() {
+                extensions.insert(std::mem::take(rendered));
+            }
+        });
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
@@ -205,15 +206,16 @@ where
         };
         // `Debug` implementations are application code and can re-enter
         // tracing, so render before locking the span extensions.
-        let mut rendered = SpanFields::default();
-        values.record(&mut SpanVisitor(&mut rendered));
-        let mut extensions = span.extensions_mut();
-        match extensions.get_mut::<SpanFields>() {
-            Some(fields) => fields.merge(rendered),
-            None => {
-                extensions.insert(rendered);
+        with_scratch(|rendered| {
+            values.record(&mut SpanVisitor(rendered));
+            let mut extensions = span.extensions_mut();
+            match extensions.get_mut::<SpanFields>() {
+                Some(fields) => fields.merge(rendered),
+                None => {
+                    extensions.insert(std::mem::take(rendered));
+                }
             }
-        }
+        });
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
@@ -234,6 +236,34 @@ where
         if !done {
             self.emit(event, &ctx, &mut Vec::new());
         }
+    }
+}
+
+/// Runs `f` with a per-thread scratch [`SpanFields`], cleared afterwards,
+/// so rendering a `record` call reuses its vectors instead of growing new
+/// ones every time. A re-entrant call (from a `Debug` implementation that
+/// logs) finds the scratch borrowed and uses a fresh one.
+fn with_scratch(f: impl FnOnce(&mut SpanFields)) {
+    thread_local! {
+        static SCRATCH: RefCell<SpanFields> = const {
+            RefCell::new(SpanFields {
+                entries: Vec::new(),
+                values: Vec::new(),
+                stale: 0,
+            })
+        };
+    }
+    let mut f = Some(f);
+    let _ = SCRATCH.try_with(|scratch| {
+        if let Ok(mut scratch) = scratch.try_borrow_mut()
+            && let Some(f) = f.take()
+        {
+            f(&mut scratch);
+            scratch.clear();
+        }
+    });
+    if let Some(f) = f {
+        f(&mut SpanFields::default());
     }
 }
 
@@ -291,13 +321,23 @@ impl SpanFields {
     }
 
     /// Merges fields rendered without holding the span extensions lock.
-    fn merge(&mut self, other: SpanFields) {
+    fn merge(&mut self, other: &SpanFields) {
         for entry in &other.entries {
             let value = other.values.get(entry.start..entry.end).unwrap_or_default();
             self.set(entry.name, |buf| {
                 buf.extend_from_slice(value);
                 Ok(())
             });
+        }
+    }
+
+    /// Empties the scratch, keeping a bounded capacity for the next use.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.values.clear();
+        self.stale = 0;
+        if self.values.capacity() > RETAINED_CAPACITY {
+            self.values.shrink_to(RETAINED_CAPACITY);
         }
     }
 
@@ -533,5 +573,163 @@ fn write_f64(buf: &mut Vec<u8>, value: f64) -> fmt::Result {
     } else {
         buf.extend_from_slice(b"null");
         Ok(())
+    }
+}
+
+/// Messages for the non-blocking log worker.
+enum LogMessage {
+    Line(Vec<u8>),
+    Shutdown,
+}
+
+/// A `MakeWriter` that hands each rendered line to a bounded queue drained
+/// by a dedicated writer thread, so a slow log consumer (a full pipe, a
+/// stalled collector) never blocks the threads serving requests.
+///
+/// The trade is loss: when the queue is full, the line is dropped and
+/// counted in [`NonBlockingMakeWriter::dropped_lines`] instead of
+/// blocking. Keep the paired [`LogWorkerGuard`] alive for as long as
+/// anything may log; dropping it flushes what is queued and stops the
+/// thread, after which lines are counted as dropped.
+#[derive(Debug, Clone)]
+pub struct NonBlockingMakeWriter {
+    sender: std::sync::mpsc::SyncSender<LogMessage>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl NonBlockingMakeWriter {
+    /// Lines dropped so far because the queue was full (or the worker
+    /// had stopped).
+    pub fn dropped_lines(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Owns the non-blocking log worker thread. Dropping the guard flushes
+/// queued lines and joins the thread, so it may block while the writer
+/// drains.
+#[derive(Debug)]
+pub struct LogWorkerGuard {
+    sender: Option<std::sync::mpsc::SyncSender<LogMessage>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for LogWorkerGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(LogMessage::Shutdown);
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Starts a bounded non-blocking writer over `writer`, holding at most
+/// `capacity_lines` rendered lines (at least one). See
+/// [`NonBlockingMakeWriter`] for the loss semantics.
+pub fn non_blocking<W>(
+    mut writer: W,
+    capacity_lines: usize,
+) -> (NonBlockingMakeWriter, LogWorkerGuard)
+where
+    W: io::Write + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::sync_channel(capacity_lines.max(1));
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = std::sync::Arc::clone(&dropped);
+    let worker = std::thread::Builder::new()
+        .name("ferrum-alloy-log-writer".into())
+        .spawn(move || {
+            // Nothing the writer does may create telemetry about itself.
+            let _no_tracing = tracing::dispatcher::set_default(&tracing::Dispatch::none());
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    LogMessage::Line(line) => {
+                        if writer.write_all(&line).is_err() {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    LogMessage::Shutdown => break,
+                }
+            }
+            let _ = writer.flush();
+        })
+        .ok();
+    let make_writer = NonBlockingMakeWriter {
+        sender: sender.clone(),
+        dropped,
+    };
+    (
+        make_writer,
+        LogWorkerGuard {
+            sender: Some(sender),
+            worker,
+        },
+    )
+}
+
+/// Starts a bounded non-blocking writer to standard output, and registers
+/// its dropped-line counter for [`dropped_log_lines`]. Used by
+/// [`crate::init::fmt_layer`] when `logging.non_blocking_queue_lines` is
+/// set; that path keeps the worker for the life of the process, like the
+/// global subscriber it feeds.
+pub fn non_blocking_stdout(capacity_lines: usize) -> (NonBlockingMakeWriter, LogWorkerGuard) {
+    let (make_writer, guard) = non_blocking(io::stdout(), capacity_lines);
+    register_dropped_counter(&make_writer.dropped);
+    (make_writer, guard)
+}
+
+static FMT_DROPPED: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicU64>> =
+    std::sync::OnceLock::new();
+
+fn register_dropped_counter(counter: &std::sync::Arc<std::sync::atomic::AtomicU64>) {
+    let _ = FMT_DROPPED.set(std::sync::Arc::clone(counter));
+}
+
+/// Lines dropped by the process-wide non-blocking stdout writer started
+/// through [`non_blocking_stdout`] (zero when none was started). Writers
+/// started with [`non_blocking`] report through their own handle instead.
+pub fn dropped_log_lines() -> u64 {
+    FMT_DROPPED.get().map_or(0, |counter| {
+        counter.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
+/// The per-event writer handed out by [`NonBlockingMakeWriter`]. Each
+/// `write` call is queued as one message, preserving write-call order.
+#[derive(Debug)]
+pub struct NonBlockingWriter {
+    sender: std::sync::mpsc::SyncSender<LogMessage>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl io::Write for NonBlockingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.sender.try_send(LogMessage::Line(buf.to_vec())) {
+            Ok(()) => Ok(buf.len()),
+            Err(_) => {
+                // Full or stopped: drop the line rather than block the
+                // caller or report an error per event.
+                self.dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'w> MakeWriter<'w> for NonBlockingMakeWriter {
+    type Writer = NonBlockingWriter;
+
+    fn make_writer(&'w self) -> Self::Writer {
+        NonBlockingWriter {
+            sender: self.sender.clone(),
+            dropped: std::sync::Arc::clone(&self.dropped),
+        }
     }
 }

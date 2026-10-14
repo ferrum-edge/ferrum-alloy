@@ -35,6 +35,14 @@ pub struct LoggingConfig {
     pub filter: Option<String>,
     /// Emit ANSI colors (text formats only).
     pub ansi: bool,
+    /// Lines the non-blocking JSON writer may queue. `0` (default) writes
+    /// synchronously: a slow stdout consumer blocks the logging thread.
+    /// When greater than zero, `json` lines go through a bounded queue
+    /// drained by a dedicated thread; lines beyond the queue are dropped
+    /// and counted by [`crate::json::dropped_log_lines`]. Only the `json`
+    /// format is affected.
+    #[serde(default)]
+    pub non_blocking_queue_lines: usize,
 }
 
 /// Why initialization did not happen.
@@ -92,6 +100,16 @@ where
 {
     let base = tracing_subscriber::fmt::layer().with_target(true);
     match config.format {
+        LogFormat::Json if config.non_blocking_queue_lines > 0 => {
+            let (make_writer, guard) =
+                crate::json::non_blocking_stdout(config.non_blocking_queue_lines);
+            // The subscriber this feeds is process-global, so the worker
+            // is kept for the life of the process rather than flushed at
+            // some guard's drop. Lines it drops are counted by
+            // `crate::json::dropped_log_lines`.
+            std::mem::forget(guard);
+            Box::new(crate::json::JsonLayer::new().with_writer(make_writer))
+        }
         LogFormat::Json => Box::new(crate::json::JsonLayer::new()),
         LogFormat::Pretty => Box::new(base.pretty().with_ansi(config.ansi)),
         LogFormat::Compact => Box::new(base.compact().with_ansi(config.ansi)),

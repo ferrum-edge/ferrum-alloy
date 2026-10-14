@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- JSON logging gained an opt-in bounded non-blocking writer:
+  `logging.non_blocking_queue_lines` (`FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES`)
+  sends lines through a dedicated writer thread so a slow stdout
+  consumer cannot block request threads; lines past the queue are
+  dropped and counted by `ferrum_alloy_telemetry::json::dropped_log_lines`.
+  The default stays synchronous and lossless. Span-field rendering now
+  reuses a per-thread scratch instead of allocating per `record` call
+  (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name

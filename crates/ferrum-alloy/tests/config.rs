@@ -579,6 +579,42 @@ fn lists_and_secret_files_are_supported() {
 }
 
 #[test]
+fn non_blocking_log_queue_is_bounded_and_json_scoped() {
+    let (config, sources) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES", "1024")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.logging.non_blocking_queue_lines, 1024);
+    assert_eq!(
+        sources.env,
+        vec!["FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES"]
+    );
+    config.validate(NO_FEATURES).unwrap();
+
+    let mut config = AlloyConfig::default();
+    config.logging.non_blocking_queue_lines = 1_000_001;
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("logging.non_blocking_queue_lines"),
+        "{error}"
+    );
+
+    // With a text format the setting is ignored, with a warning.
+    let mut config = AlloyConfig::default();
+    config.logging.non_blocking_queue_lines = 10;
+    config.logging.format = ferrum_alloy::telemetry::init::LogFormat::Pretty;
+    let warnings = config.validate(NO_FEATURES).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|issue| issue.message.contains("non_blocking_queue_lines")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
 fn secrets_are_never_printed() {
     let mut config = AlloyConfig::default();
     config.management.token = Some(Secret::new("super-secret-token-value-1234567890"));
