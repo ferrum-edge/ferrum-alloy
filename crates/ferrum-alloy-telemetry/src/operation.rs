@@ -174,9 +174,12 @@ impl Operation {
 
 /// Records the time spent waiting for a pooled connection on the current
 /// operation span (no-op outside an operation span). When one operation
-/// acquires more than once, the **last** wait is what the span carries;
-/// earlier waits are overwritten, never summed (nested or sequential
-/// waits are not added together, like every other Alloy duration).
+/// acquires more than once, each wait is recorded; export may carry the
+/// repeated values, and Alloy's import and diagnosis use the **last**
+/// value present — waits are never summed (nested or sequential waits
+/// are not added together, like every other Alloy duration). Under an
+/// exporter's span attribute limit, later values can be dropped, so with
+/// very many acquires the last value present may not be the last wait.
 pub fn record_pool_wait(duration: std::time::Duration) {
     Span::current().record("alloy.db.pool_wait_ms", duration.as_secs_f64() * 1_000.0);
 }

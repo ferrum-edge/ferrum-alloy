@@ -373,3 +373,94 @@ async fn operation_spans_start_at_first_poll() {
         "the span is created when the stored future is first polled"
     );
 }
+
+/// Captures each span's parent name and recorded operation outcomes.
+#[derive(Clone, Default)]
+struct CaptureSpans {
+    names: std::sync::Arc<std::sync::Mutex<Vec<(tracing::span::Id, &'static str)>>>,
+    operation_parents: std::sync::Arc<std::sync::Mutex<Vec<Option<&'static str>>>>,
+    outcomes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl<S> tracing_subscriber::Layer<S> for CaptureSpans
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let name = attrs.metadata().name();
+        if name == "alloy.operation" {
+            let parent = ctx.current_span().id().and_then(|parent_id| {
+                self.names
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(seen, _)| seen == parent_id)
+                    .map(|(_, parent_name)| *parent_name)
+            });
+            self.operation_parents.lock().unwrap().push(parent);
+        }
+        self.names.lock().unwrap().push((id.clone(), name));
+    }
+
+    fn on_record(
+        &self,
+        _id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Outcomes<'a>(&'a std::sync::Mutex<Vec<String>>);
+        impl tracing::field::Visit for Outcomes<'_> {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "alloy.operation.outcome" {
+                    self.0.lock().unwrap().push(value.to_owned());
+                }
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "alloy.operation.outcome" {
+                    self.0.lock().unwrap().push(format!("{value:?}"));
+                }
+            }
+        }
+        values.record(&mut Outcomes(&self.outcomes));
+    }
+}
+
+/// The parent is the span current at first poll, not at construction,
+/// and cancelling a polled operation still records its outcome.
+#[tokio::test]
+async fn operation_parentage_and_cancellation_follow_first_poll() {
+    use tracing::Instrument as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let capture = CaptureSpans::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let parent_a = tracing::info_span!("parent_a");
+    let stored = parent_a.in_scope(|| Operation::new("orders.load").run(pending::<()>()));
+    let parent_b = tracing::info_span!("parent_b");
+    let _ = tokio::time::timeout(Duration::from_millis(20), stored)
+        .instrument(parent_b)
+        .await;
+    assert_eq!(
+        capture.operation_parents.lock().unwrap().as_slice(),
+        [Some("parent_b")],
+        "the operation span's parent is the span current at first poll"
+    );
+    assert!(
+        capture
+            .outcomes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.contains("cancelled")),
+        "dropping the polled future records a cancelled outcome: {:?}",
+        capture.outcomes.lock().unwrap()
+    );
+}

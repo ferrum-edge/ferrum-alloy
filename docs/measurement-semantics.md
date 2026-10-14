@@ -39,7 +39,7 @@ rules or the catalog:
 | Field | Start | End | Notes |
 |---|---|---|---|
 | `readiness.checks[].latency_ms` | The check is invoked | It returns, fails, times out (`health.check_timeout_ms`), or panics | Local monotonic clock, fractional milliseconds. A timeout reports at least the timeout. |
-| `readiness.age_ms` | The evaluation completed (all checks finished and the snapshot was taken) | The response is served | `0` for a just-completed evaluation; grows while the cached snapshot is served within `health.cache_ttl_ms`. |
+| `readiness.age_ms` | The evaluation completed (all checks finished and the snapshot was taken) | The response is served | Whole milliseconds at serving time. `0` for a just-completed evaluation; grows while the cached snapshot is served. It can exceed `health.cache_ttl_ms` while a refresh is running, because callers that did not start the refresh keep serving the previous snapshot. |
 | `uptime_seconds` | The application's `Lifecycle` was created during startup composition | The response is served | Whole seconds on the local monotonic clock. Not process start, and not when serving began. |
 
 ## Availability states
@@ -104,7 +104,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 | Name | Start | End | Notes |
 |---|---|---|---|
 | `alloy.operation.duration` | First poll of the wrapped future | Its completion, or drop (`outcome=cancelled`) | Created with `ferrum_alloy_telemetry::operation::Operation`. A database operation's duration is **application-observed call time**: pool wait, network, driver, and server work. It is **not** database server execution time. |
-| `alloy.db.pool_wait` | `pool.acquire()` called | Connection obtained or failed | Recorded by `ferrum_alloy::postgres::acquire` on the current operation span. Separate from the query. When one operation acquires more than once, the span carries the **last** wait only; earlier waits are overwritten, never summed. |
+| `alloy.db.pool_wait` | `pool.acquire()` called | Connection obtained or failed | Recorded by `ferrum_alloy::postgres::acquire` on the current operation span. Separate from the query. When one operation acquires more than once, each wait is recorded and export may carry repeated values; import and diagnosis use the **last** value present, never a sum. Under an exporter's span attribute limit later values can be dropped, so with very many acquires the last value present may not be the last wait. |
 | Outbound HTTP (`http.client.request` span, `alloy.operation.duration_ms`) | Request sent | Response **headers** received | Reading the response body happens afterwards and is outside the span. |
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.

@@ -2,12 +2,18 @@
 
 ## [Unreleased]
 
-- Operation spans are now created at the wrapped future's first poll
-  instead of when `Operation::run` is called, so a stored-then-awaited
-  operation's span interval starts when its work starts and a future
-  dropped unpolled exports no span. Rejected trace context now also
-  strips the `baggage` header before application code runs.
-  `alloy.db.pool_wait` is documented as last-acquire-wins, and the
+- **Breaking:** operation spans are now created at the wrapped
+  future's first poll instead of when `Operation::run` is called, so a
+  stored-then-awaited operation's span interval starts when its work
+  starts and a future dropped unpolled exports no span. The span's
+  parent is the span current at first poll, not at construction: a
+  future built under one span and first polled under another (or in an
+  uninstrumented spawned task, where it becomes a root) changes
+  parentage; instrument deferred or spawned futures with their
+  intended parent. Rejected trace context now also strips the
+  `baggage` header before application code runs. `alloy.db.pool_wait`
+  documentation now states that repeated acquires record repeated
+  values and the last value present is used, never a sum, and the
   detailed-health `latency_ms`, `age_ms`, and `uptime_seconds` fields
   are defined in `docs/measurement-semantics.md` (#197).
 
