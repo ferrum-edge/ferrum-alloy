@@ -24,6 +24,12 @@
 //! `verify-full` (with `sslrootcert` for a private CA) to authenticate the
 //! server too. Plaintext to a remote host needs an explicit `sslmode=disable`
 //! or `allow`, and logs a warning when the pool is built.
+//!
+//! URL query parameters SQLx does not recognize are rejected before SQLx
+//! parses the URL: SQLx would log each one with its value (a libpq
+//! `sslpassword` is a secret) and silently ignore it (a typo such as
+//! `sslmod=verify-full` would not apply). The error names the parameter,
+//! never its value.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -53,6 +59,7 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
                 .into(),
         ));
     }
+    reject_unrecognized_parameters(text)?;
     if tokio::runtime::Handle::try_current().is_err() {
         return Err(AlloyError::Integration(
             "ferrum_alloy::postgres::connect must be called inside a Tokio runtime".into(),
@@ -85,6 +92,112 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
         .test_before_acquire(true)
         .connect_lazy_with(options);
     Ok(pool)
+}
+
+/// Query parameters SQLx 0.9 recognizes in a connection URL (its
+/// `options/parse.rs`), besides the `options[<name>]` form handled below.
+const RECOGNIZED_PARAMETERS: &[&str] = &[
+    "sslmode",
+    "ssl-mode",
+    "sslrootcert",
+    "ssl-root-cert",
+    "ssl-ca",
+    "sslcert",
+    "ssl-cert",
+    "sslkey",
+    "ssl-key",
+    "statement-cache-capacity",
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "application_name",
+    "options",
+];
+
+/// Rejects URL query parameters SQLx does not recognize, before SQLx sees
+/// the URL. SQLx logs every unrecognized parameter *with its value* and
+/// then ignores it, so a libpq parameter it does not know (for example
+/// `sslpassword`, a secret) would reach the logs, and a typo in a security
+/// parameter (for example `sslmod=verify-full`) would silently not apply.
+/// The error names the parameter, never its value.
+fn reject_unrecognized_parameters(text: &str) -> Result<(), AlloyError> {
+    // The query runs from the first `?` to the fragment, as in the URL
+    // grammar SQLx parses with.
+    let before_fragment = text.split('#').next().unwrap_or(text);
+    let Some((_, query)) = before_fragment.split_once('?') else {
+        return Ok(());
+    };
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let raw_key = pair.split('=').next().unwrap_or(pair);
+        // SQLx reads parameters with `url::Url::query_pairs`, which
+        // percent-decodes names (and reads `+` as a space); decode the
+        // same way so an encoded name cannot slip past the check.
+        let key = decode_query_key(raw_key);
+        let options_entry = key
+            .strip_prefix("options[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|name| !name.is_empty());
+        if !RECOGNIZED_PARAMETERS.contains(&key.as_str()) && !options_entry {
+            return Err(AlloyError::Integration(format!(
+                "database.url: unrecognized connection parameter {key:?} \
+                 (SQLx ignores parameters it does not recognize)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Decodes one query parameter name as `application/x-www-form-urlencoded`
+/// does: `+` is a space and `%XX` is a byte. Invalid escapes stay literal
+/// and undecodable bytes are replaced, matching `query_pairs`.
+fn decode_query_key(raw: &str) -> String {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                let escape = bytes
+                    .get(index + 1)
+                    .and_then(|&hi| hex(hi))
+                    .zip(bytes.get(index + 2).and_then(|&lo| hex(lo)))
+                    .map(|(hi, lo)| (hi << 4) | lo);
+                match escape {
+                    Some(byte) => {
+                        decoded.push(byte);
+                        index += 3;
+                    }
+                    None => {
+                        decoded.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Whether the connection stays on this host: a Unix socket or a literal

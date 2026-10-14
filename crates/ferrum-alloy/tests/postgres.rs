@@ -60,6 +60,52 @@ async fn invalid_urls_fail_without_revealing_the_secret() {
     assert!(postgres::connect(&settings("postgres://u:hunter2@[::1:bad/x"), "test").is_err());
 }
 
+/// SQLx logs unrecognized URL parameters with their values and then
+/// ignores them, so `connect` rejects them first — naming the parameter,
+/// never its value.
+#[tokio::test]
+async fn unrecognized_url_parameters_are_rejected_without_their_values() {
+    for (url, parameter) in [
+        (
+            "postgres://u:p@127.0.0.1/db?sslpassword=hunter2secret",
+            "sslpassword",
+        ),
+        ("postgres://u:p@127.0.0.1/db?sslmod=verify-full", "sslmod"),
+        (
+            "postgres://u:p@127.0.0.1/db?%73slpassword=hunter2secret",
+            "sslpassword",
+        ),
+        (
+            "postgres://u:p@127.0.0.1/db?connect_timeout=5",
+            "connect_timeout",
+        ),
+        (
+            "postgres://u:p@127.0.0.1/db?options[statement_timeout=5",
+            "options[statement_timeout",
+        ),
+        ("postgres://u:p@127.0.0.1/db?options[]=5", "options[]"),
+    ] {
+        let error = postgres::connect(&settings(url), "test").unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("unrecognized connection parameter"), "{text}");
+        assert!(text.contains(parameter), "{text}");
+        assert!(!text.contains("hunter2secret"), "{text}");
+        assert!(!text.contains("verify-full"), "{text}");
+    }
+    // Everything SQLx recognizes keeps working, `options[...]` included.
+    for url in [
+        "postgres://u:p@127.0.0.1/db?sslmode=require&sslrootcert=/tmp/ca.pem",
+        "postgres://u:p@127.0.0.1/db?statement-cache-capacity=10&options[statement_timeout]=5",
+        "postgres://u:p@127.0.0.1/db?sslmode=require#fragment",
+        "postgres://u:p@127.0.0.1/db",
+    ] {
+        assert!(
+            postgres::connect(&settings(url), "test").is_ok(),
+            "{url} must still connect"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_remote_host_never_falls_back_to_plaintext_by_default() {
     use sqlx::postgres::PgSslMode;

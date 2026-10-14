@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Breaking:** `postgres::connect` rejects `database.url` query
+  parameters SQLx does not recognize, naming the parameter and never its
+  value. SQLx previously logged each one with its value (libpq's
+  `sslpassword` is a secret) and silently ignored it, so a typo such as
+  `sslmod=verify-full` quietly dropped the requested verification (#197).
+
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
