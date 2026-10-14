@@ -1,7 +1,7 @@
 //! Optional Ferrum Edge adapter for Alloy services.
 //!
-//! * [`contract`]: the `contracts-edge-0.9.11` headers, tokens, and span attributes this
-//!   adapter uses, each traceable to Edge source.
+//! * [`contract`]: the headers, tokens, and span attributes of the pinned
+//!   Edge release ([`contract::EDGE_RELEASE`]), each traceable to Edge source.
 //! * [`policy`]: gateway trust modes, verified consumer-identity handoff, and
 //!   removal of unverified gateway-asserted headers.
 //! * [`manifest`] and [`export`]: the frozen shared v1 service manifest and generation of

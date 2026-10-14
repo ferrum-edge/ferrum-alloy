@@ -6,9 +6,9 @@
 //! Nexus #519 qualify authenticated read-only previews of the historical r2 fields;
 //! their immutable slices do not qualify this new pin adoption. Alloy is unreleased.
 //! `ferrum-alloy edge export` turns the manifest into Ferrum Edge file-mode
-//! configuration or GitForgeOps resources using Edge's *existing* schema
-//! (the `contracts-edge-0.9.11` schema; hosted CI validates exports against
-//! supported Edge v0.9.17 and v0.9.15).
+//! configuration or GitForgeOps resources using Edge's *existing*
+//! file-mode schema; hosted CI validates exports against supported Edge
+//! v0.9.17 and v0.9.15.
 //! Edge does not consume the manifest. See `docs/shared-contract-qualification.md`;
 //! current wire fields and validation bounds are unchanged.
 //!

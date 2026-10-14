@@ -1,8 +1,8 @@
 //! Generates reviewable Ferrum Edge configuration from a service manifest.
 //!
-//! Output uses only fields that exist in the configuration schema of Ferrum Edge
-//! as of `contracts-edge-0.9.11` (`src/config/types.rs`: `Proxy`, `Upstream`,
-//! `PluginConfig`,
+//! Output uses only fields that exist in the configuration schema of Ferrum
+//! Edge in the supported releases (`src/config/types.rs`: `Proxy`,
+//! `Upstream`, `PluginConfig`,
 //! `GatewayConfig`, all `deny_unknown_fields`) and GitForgeOps's per-resource
 //! `kind`/`spec` wrapper. The `Proxy` fields v0.9.9 added are left at their
 //! defaults: `allow_path_parameters` stays `false`, so Edge refuses `;` path
