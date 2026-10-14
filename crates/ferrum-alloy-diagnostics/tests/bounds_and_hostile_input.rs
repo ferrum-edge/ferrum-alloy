@@ -610,6 +610,39 @@ fn an_oversized_schema_value_is_truncated_in_the_error() {
         error.len()
     );
     assert!(error.contains("100000 bytes"), "{error}");
+    assert!(
+        !error.contains(&"x".repeat(64)),
+        "no prefix of the oversized value is echoed: {error}"
+    );
+}
+
+/// Warnings are bounded in bytes, not only in count: hundreds of long
+/// unrecognized keys produce a short preview, not a message sized by
+/// the input.
+#[test]
+fn warnings_bound_bytes_as_well_as_count() {
+    let mut report = base();
+    for i in 0..300 {
+        report[format!("x-key-{i:03}-{}", "k".repeat(1_000))] = json!(0);
+    }
+    let parsed = parse(&report).unwrap();
+    let total: usize = parsed
+        .warnings
+        .iter()
+        .map(|issue| issue.path.len() + issue.message.len())
+        .sum();
+    assert!(
+        total < 4_096,
+        "warnings must not scale with key count/length ({total} bytes)"
+    );
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("and 292 more")),
+        "{:?}",
+        parsed.warnings
+    );
 }
 
 #[test]
@@ -624,9 +657,39 @@ fn max_depth_above_the_parser_limit_is_clamped() {
     input.push('}');
     let error = parse_offline(input.as_bytes(), &limits).unwrap_err();
     assert!(
-        error.to_string().contains("nesting depth exceeds 128"),
+        error.to_string().contains("nesting depth exceeds 127"),
         "{error}"
     );
+}
+
+/// The clamp is the deepest nesting the JSON parser itself accepts:
+/// a report nested exactly to it parses, and one level more is the
+/// parser's own nesting error, not a raw parser failure.
+#[test]
+fn nesting_at_the_parser_boundary_is_accepted_and_beyond_it_rejected_cleanly() {
+    let limits = Limits {
+        max_depth: 10_000,
+        ..Limits::default()
+    };
+    let nested = |arrays: usize| -> Vec<u8> {
+        let mut report = base();
+        let mut value = json!(0);
+        for _ in 0..arrays {
+            value = json!([value]);
+        }
+        report["x-nested"] = value;
+        serde_json::to_vec(&report).unwrap()
+    };
+    // Root object (1) + 126 arrays = depth 127: accepted.
+    assert!(parse_offline(&nested(126), &limits).is_ok());
+    // Depth 128 and 129: the nesting error, never InvalidJson.
+    for arrays in [127, 128] {
+        let error = parse_offline(&nested(arrays), &limits).unwrap_err();
+        assert!(
+            matches!(error, ReportError::TooLarge(_)),
+            "{arrays} arrays: {error:?}"
+        );
+    }
 }
 
 #[test]

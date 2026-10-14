@@ -19,9 +19,10 @@ use crate::model::{
 pub struct Limits {
     /// Maximum input size in bytes.
     pub max_bytes: usize,
-    /// Maximum JSON nesting depth. Values above 128 are clamped to 128:
-    /// the JSON parser's own recursion limit rejects deeper input first,
-    /// so a larger setting could never take effect.
+    /// Maximum JSON nesting depth. Values above 127 are clamped to 127:
+    /// that is the deepest nesting the JSON parser itself accepts (its
+    /// recursion limit rejects depth 128), so a larger setting could
+    /// never take effect.
     pub max_depth: usize,
     /// Maximum number of observations.
     pub max_observations: usize,
@@ -87,23 +88,70 @@ pub enum ReportError {
 const MAX_ISSUES: usize = 100;
 
 /// Most bytes of an untrusted `schema`/`schema_version` value echoed in
-/// an error.
+/// an error. A longer value is omitted entirely, never truncated to a
+/// prefix: a prefix of a reflected credential would survive downstream
+/// redactors that match the whole credential.
 const MAX_FOUND_BYTES: usize = 128;
 
 fn truncate_found(value: &str) -> String {
     if value.len() <= MAX_FOUND_BYTES {
         return value.to_owned();
     }
-    let mut end = MAX_FOUND_BYTES;
-    while !value.is_char_boundary(end) {
+    format!("<{} bytes>", value.len())
+}
+
+/// Most bytes of one issue's path or message. Issue counts are capped
+/// by [`MAX_ISSUES`]; this bounds each issue too, so total reported
+/// output stays proportional to the caps rather than to the input
+/// (a warning joining thousands of long unrecognized keys, say).
+const MAX_ISSUE_BYTES: usize = 512;
+
+fn bound_issue_text(text: String) -> String {
+    if text.len() <= MAX_ISSUE_BYTES {
+        return text;
+    }
+    let suffix = format!("… ({} bytes)", text.len());
+    let mut end = MAX_ISSUE_BYTES.saturating_sub(suffix.len());
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}… ({} bytes)", &value[..end], value.len())
+    format!("{}{suffix}", &text[..end])
+}
+
+/// Names up to eight keys (each truncated) and counts the rest, for
+/// warnings listing unrecognized fields: naming every key in full
+/// would size the warning by the input.
+fn key_preview<'a>(keys: impl Iterator<Item = &'a String>) -> String {
+    let mut shown: Vec<String> = Vec::new();
+    let mut more = 0usize;
+    for key in keys {
+        if shown.len() < 8 {
+            shown.push(if key.len() <= 64 {
+                key.clone()
+            } else {
+                let mut end = 32;
+                while !key.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &key[..end])
+            });
+        } else {
+            more += 1;
+        }
+    }
+    let mut preview = shown.join(", ");
+    if more > 0 {
+        preview.push_str(&format!(", and {more} more"));
+    }
+    preview
 }
 
 fn push_issue(list: &mut Vec<Issue>, issue: Issue, suppressed: &'static str) {
     if list.len() < MAX_ISSUES {
-        list.push(issue);
+        list.push(Issue {
+            path: bound_issue_text(issue.path),
+            message: bound_issue_text(issue.message),
+        });
     } else if list.len() == MAX_ISSUES {
         list.push(Issue {
             path: String::new(),
@@ -166,7 +214,7 @@ pub fn parse_offline(input: &[u8], limits: &Limits) -> Result<ParsedReport, Repo
             limits.max_bytes
         )));
     }
-    check_depth(input, limits.max_depth.min(128))?;
+    check_depth(input, limits.max_depth.min(127))?;
 
     let value: Value =
         serde_json::from_slice(input).map_err(|e| ReportError::InvalidJson(e.to_string()))?;
@@ -517,7 +565,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 path,
                 format!(
                     "unrecognized fields preserved but not interpreted: {}",
-                    unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
+                    key_preview(unrecognized.keys())
                 ),
             );
         }
@@ -641,12 +689,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                 &path,
                 format!(
                     "unrecognized fields preserved but not interpreted: {}",
-                    observation
-                        .unrecognized
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    key_preview(observation.unrecognized.keys())
                 ),
             );
         }
@@ -674,7 +717,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
                     &format!("{path}/{member}"),
                     format!(
                         "unrecognized fields preserved but not interpreted: {}",
-                        unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
+                        key_preview(unrecognized.keys())
                     ),
                 );
             }
@@ -696,12 +739,7 @@ fn validate(report: &DiagnosticReport, limits: &Limits, warnings: &mut Vec<Issue
             "",
             format!(
                 "unrecognized top-level fields preserved but not interpreted: {}",
-                report
-                    .unrecognized
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                key_preview(report.unrecognized.keys())
             ),
         );
     }
