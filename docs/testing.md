@@ -45,6 +45,7 @@ To run it locally, start `cargo run -p example-openapi-ui` with `FERRUM_ALLOY_MA
 | `request_id` | `RequestId::parse` | `fuzz/seeds/request_id` | Accepted ids are kept verbatim and within Edge's alphabet and length |
 | `diagnostic_report` | `parse_offline`, then `analyze` and `render_text` | `contracts/fixtures/reports` | No `confirmed` finding, `does_not_prove` is never empty, rules and rendering are deterministic |
 | `otlp_import` | `otlp::import`, `otlp::trace_ids` | `contracts/fixtures/otlp` | As for `diagnostic_report` |
+| `edge_record` | `edge_record::parse_observation`, `edge_record::bind_record` | `fuzz/seeds/edge_record` (derived from the vendored diagnostic-ref fixtures) | No `confirmed` finding, `does_not_prove` is never empty, parsing and binding are deterministic |
 | `config_file` | `config::load_from` | `contracts/fixtures/manifests`, `fuzz/seeds/config_file` | Errors never repeat the canary value the seeds place in keys and values. `fuzz/dicts/config_file.dict` supplies the text serde puts around a supplied value, such as `, expected ` and a newline |
 
 ### CI smoke run

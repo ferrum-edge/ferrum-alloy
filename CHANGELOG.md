@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Diagnostic report parsing bounds its output as well as its input:
+  echoed `schema`/`schema_version` values are truncated in errors,
+  validation errors and warnings are capped at 100 plus a suppression
+  marker, and `Limits::max_depth` above the JSON parser's 128 limit is
+  clamped instead of silently ineffective. A `edge_record` fuzz target
+  now covers `parse_observation`/`bind_record` (#197).
 - `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
   no Edge authentication plugin is exported yet, so the generated
   configuration authenticates nobody until authentication is configured
