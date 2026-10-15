@@ -1813,7 +1813,7 @@ async fn serve_io<I>(
     tokio::pin!(body_stall_timer);
     // (body epoch, delivered count, checks): a new epoch — every waiter
     // left and a later one arrived — restarts the count.
-    let mut body_stalled: Option<(u64, u64, u32)> = None;
+    let mut body_stalled: Option<(u32, u64, u32)> = None;
     let grace = options.header_read_timeout.min(Duration::from_secs(1));
     // The request count when the deadline was armed with no request in
     // flight, or `None` when it was armed with requests in flight, and the

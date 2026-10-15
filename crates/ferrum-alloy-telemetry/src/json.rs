@@ -902,12 +902,16 @@ mod tests {
         }
     }
 
-    fn gated() -> (
+    /// The gated writer, its "write started" signal, its release
+    /// handle, and the bytes it wrote.
+    type GatedParts = (
         Gated,
         std::sync::mpsc::Receiver<()>,
         std::sync::mpsc::SyncSender<()>,
         std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    ) {
+    );
+
+    fn gated() -> GatedParts {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -934,12 +938,14 @@ mod tests {
         // The worker holds "one" inside its blocked write.
         started.recv().unwrap();
         log.write_all(b"two\n").unwrap();
-        guard
-            .sender
-            .as_ref()
-            .unwrap()
-            .try_send(LogMessage::Shutdown)
-            .unwrap();
+        assert!(
+            guard
+                .sender
+                .as_ref()
+                .unwrap()
+                .try_send(LogMessage::Shutdown)
+                .is_ok()
+        );
         log.write_all(b"three\n").unwrap();
         release.send(()).unwrap();
         drop(guard);
