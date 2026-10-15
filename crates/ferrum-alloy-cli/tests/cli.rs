@@ -1392,7 +1392,9 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
             "x-payload":{"$ref":"#/paths/~1internal~1items"}
         },"components":{"pathItems":{"Other":{}},
             "schemas":{
-                "Named":{"properties":{"x-prop":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}}},
+                "Named":{"properties":{"x-prop":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}},
+                    "metadata":{"$ref":"#/paths/~1internal~1items"},
+                    "allOf":[{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}]},
                 "Embedded":{"$id":"https://example.test/s","paths":{"/internal/items":{"type":"string"}},"$ref":"#/paths/~1internal~1items"}
             },
             "securitySchemes":{"oauth":{"type":"oauth2","flows":{"implicit":{
@@ -1456,6 +1458,15 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
             components["schemas"]["Named"]["properties"]["x-prop"]["$ref"],
             "#/paths/~1items/get/responses/200/x-schema",
             "{name}: a property named x-* is a schema"
+        );
+        assert_eq!(
+            components["schemas"]["Named"]["allOf"][0]["$ref"],
+            "#/paths/~1items/get/responses/200/x-schema",
+            "{name}: subschemas follow"
+        );
+        assert_eq!(
+            components["schemas"]["Named"]["metadata"], unchanged,
+            "{name}: unknown schema annotations are data"
         );
         assert_eq!(
             components["schemas"]["Embedded"]["$ref"], "#/paths/~1internal~1items",
