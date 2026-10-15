@@ -20,6 +20,17 @@
   keep per-request classification.
   Matched route templates are interned, so each distinct template is
   allocated once process-wide instead of per request (#197).
+- **Breaking:** new `server.body_read_stall_timeout_ms` (default
+  `60000`, `FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS`): a connection
+  whose handler is waiting to read a request body and receives no body
+  data for the timeout is closed and counted in
+  `ferrum_alloy_body_read_stall_timeouts_total`, mirroring the write
+  stall timeout. Previously only the headers deadline bounded a
+  trickling upload, and with `server.request_timeout_ms = 0` nothing
+  did, so uploads that pause longer than a minute mid-body now
+  disconnect; raise the value for such workloads. A sender that keeps
+  sending, however slowly, is never cut, and time a handler spends
+  before it starts reading does not count (#197).
 - Request-path overhead reduced with identical output: histograms now
   record into a single bucket (integer bucket assignment) and sum to
   cumulative counts only when rendered, the metrics series and route

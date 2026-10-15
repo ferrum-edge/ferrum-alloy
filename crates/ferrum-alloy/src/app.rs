@@ -705,6 +705,9 @@ impl AlloyParts {
             header_read_timeout: Duration::from_millis(config.server.header_read_timeout_ms),
             idle_timeout: Duration::from_millis(config.server.idle_timeout_ms),
             write_stall_timeout: Duration::from_millis(config.server.write_stall_timeout_ms),
+            body_read_stall_timeout: Duration::from_millis(
+                config.server.body_read_stall_timeout_ms,
+            ),
             drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
             #[cfg(feature = "tls")]
             tls: self.tls.clone(),
