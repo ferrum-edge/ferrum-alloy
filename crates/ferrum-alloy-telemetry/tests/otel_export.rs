@@ -897,3 +897,51 @@ fn layer_active_is_false_without_an_opentelemetry_layer() {
     let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
     assert!(!layer_active());
 }
+
+/// An exporter whose destructor blocks until released.
+#[derive(Debug)]
+struct BlocksOnDrop(Mutex<Option<std::sync::mpsc::Receiver<()>>>);
+impl SpanExporter for BlocksOnDrop {
+    fn export(
+        &self,
+        _batch: Vec<SpanData>,
+    ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+        async { Ok(()) }
+    }
+}
+impl Drop for BlocksOnDrop {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.lock().unwrap().take() {
+            let _ = release.recv();
+        }
+    }
+}
+
+/// The exporter is dropped after the worker acknowledges shutdown. A
+/// destructor that blocks cannot hold the shutdown past its timeout.
+#[test]
+fn shutdown_is_bounded_when_the_exporter_destructor_blocks() {
+    let (release_tx, release) = std::sync::mpsc::sync_channel(1);
+    let metrics = Arc::new(Metrics::default());
+    let factory = move || Ok(BlocksOnDrop(Mutex::new(Some(release))));
+    let processor = BoundedSpanProcessor::spawn(factory, &config(), Arc::clone(&metrics)).unwrap();
+    processor.on_end(new_test_export_span_data());
+    let begun = Instant::now();
+    let result = processor.shutdown_with_timeout(Duration::from_millis(200));
+    assert!(
+        begun.elapsed() < Duration::from_secs(2),
+        "shutdown returned by its timeout: {result:?}"
+    );
+    assert!(
+        matches!(result, Err(OTelSdkError::Timeout(_))),
+        "{result:?}"
+    );
+    // The span itself was exported before the acknowledgement.
+    assert_eq!(
+        metrics
+            .telemetry_spans_exported
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let _ = release_tx.send(());
+}

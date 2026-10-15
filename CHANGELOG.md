@@ -15,7 +15,8 @@
   `TelemetryGuard::shutdown` reports a log queue that did not drain and
   shares one budget between span export and logging (new
   `shutdown_export`/`shutdown_logging`), log-queue shutdown never blocks
-  past its timeout (`LogWorkerGuard::shutdown_timeout`), and the logging
+  past its timeout (`LogWorkerGuard::shutdown_timeout`), nor does span
+  export shutdown when an exporter's destructor blocks, and the logging
   helpers document the drain call (#209); the contract docs list the
   ninth `X-Gateway-Error` token, `loop_detected`, and record the hosted
   qualification of the v0.9.17/v0.9.15 pairing (#212).
