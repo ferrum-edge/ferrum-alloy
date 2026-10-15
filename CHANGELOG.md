@@ -21,6 +21,7 @@
     PROPOSED (#226).
   - `yaml::to_string` emits valid YAML for sequences nested in sequences
     (#227).
+  - Getting started names v0.9.17 as the demo's contract baseline (#228).
 - CI hardening from the #197 audit: `cargo-deny` pinned to 0.20.2, checkouts
   no longer persist credentials, a weekly `Advisories` workflow re-checks
   `main`'s lockfiles, the per-feature job and the MSRV job now build the
