@@ -1020,56 +1020,70 @@ fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
     }
 }
 
-/// Most ordinary Alloy spans skipped between an observation and its nearest
+/// Most ordinary spans skipped between an observation and its nearest
 /// observed ancestor; the walk also stops at a repeated span, so a parent
 /// cycle in hostile input cannot loop.
 const MAX_LINEAGE_HOPS: usize = 64;
 
-/// Ordinary Alloy spans (a `tracing` span around a handler step, for
-/// example) carry no Alloy measurement, so they yield no observation and
-/// the report does not contain them. An observation under one would lose
-/// its path to the server it belongs to. Each Alloy observation whose
-/// parent is such a span gets [`catalog::LINEAGE_PARENT_SPAN_ID`]: the
-/// nearest ancestor, past only such spans, that the report does contain or
-/// that another producer exported (a gateway attempt, for example). Nothing
-/// is set when the walk ends at an unobserved Alloy root, a missing span,
-/// or the hop limit.
+/// Ordinary spans of the service process (a `tracing` span around a handler
+/// step, for example) carry no Alloy measurement, so they yield no
+/// observation and the report does not contain them, whether they were
+/// exported under Alloy's instrumentation scope or the application's own.
+/// An observation under one would lose its path to the server it belongs
+/// to. Each Alloy observation whose parent is such a span gets
+/// [`catalog::LINEAGE_PARENT_SPAN_ID`]: the nearest ancestor, past only such
+/// spans, that the report does contain or that another producer exported (a
+/// gateway attempt, for example). A skipped span must not be a gateway span
+/// and must come from the observation's own service and instance, so the
+/// walk never crosses into another process. Nothing is set when the walk
+/// ends at an unobserved root, a missing span, or the hop limit.
 fn link_through_unobserved_alloy_spans(spans: &[RawSpan], report: &mut DiagnosticReport) {
-    let alloy_parents: HashMap<&str, Option<&str>> = spans
+    let by_id: HashMap<&str, &RawSpan> = spans
         .iter()
-        .filter(|span| span.producer.kind == ProducerKind::Alloy)
-        .map(|span| (span.span_id.as_str(), span.parent_span_id.as_deref()))
+        .map(|span| (span.span_id.as_str(), span))
         .collect();
-    let exported: HashSet<&str> = spans.iter().map(|span| span.span_id.as_str()).collect();
     let observed: HashSet<String> = report
         .observations
         .iter()
         .filter_map(|o| o.span.as_ref().map(|span| span.span_id.clone()))
         .collect();
-    let unobserved_alloy = |id: &str| alloy_parents.contains_key(id) && !observed.contains(id);
     for observation in &mut report.observations {
         if observation.producer.kind != ProducerKind::Alloy {
             continue;
         }
-        let Some(mut current) = observation
-            .span
-            .as_ref()
-            .and_then(|span| span.parent_span_id.as_deref())
-        else {
+        let Some(span) = observation.span.as_ref() else {
             continue;
         };
-        if !unobserved_alloy(current) {
+        let Some(own) = by_id.get(span.span_id.as_str()) else {
+            continue;
+        };
+        // An unobserved span of the same process: parent-only lineage.
+        let skippable = |id: &str| {
+            by_id.get(id).is_some_and(|candidate| {
+                candidate.producer.kind != ProducerKind::Edge
+                    && !observed.contains(id)
+                    && candidate.service == own.service
+                    && candidate.producer.instance == own.producer.instance
+            })
+        };
+        let Some(mut current) = span.parent_span_id.as_deref() else {
+            continue;
+        };
+        if !skippable(current) {
             continue;
         }
         let mut visited = HashSet::new();
         let ancestor = loop {
-            if !unobserved_alloy(current) {
-                break exported.contains(current).then(|| current.to_owned());
+            if !skippable(current) {
+                break by_id.contains_key(current).then(|| current.to_owned());
             }
             if visited.len() == MAX_LINEAGE_HOPS || !visited.insert(current) {
                 break None;
             }
-            match alloy_parents.get(current).copied().flatten() {
+            match by_id
+                .get(current)
+                .and_then(|span| span.parent_span_id.as_deref())
+            {
                 Some(parent) => current = parent,
                 None => break None,
             }

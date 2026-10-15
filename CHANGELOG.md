@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 - `diagnose --otlp` keeps an operation linked to its server when ordinary
-  Alloy spans (with no Alloy measurement) sit between them: the importer
+  spans of the same service instance (with no Alloy measurement, under
+  Alloy's or the application's instrumentation scope) sit between them: the importer
   records the nearest observed ancestor as `lineage.parent_span_id`, and
   diagnosis follows it, so `alloy.service.operation_dominates` no longer
   disappears behind a wrapper span (#219).

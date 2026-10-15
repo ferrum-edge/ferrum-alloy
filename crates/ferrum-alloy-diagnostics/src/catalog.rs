@@ -68,9 +68,10 @@ pub const ALLOY_RESPONSE: &str = "alloy.response";
 
 /// Observation attribute naming the nearest ancestor of an Alloy span that
 /// yielded observations of its own, set by the OTLP importer only when the
-/// span's own parent is an ordinary Alloy span (one with no Alloy
-/// measurement, such as a `tracing` span around a handler step) that the
-/// report therefore does not contain. Diagnosis follows it in place of the
+/// span's own parent is an ordinary span of the same service instance (one
+/// with no Alloy measurement, such as a `tracing` span around a handler
+/// step, under any instrumentation scope) that the report therefore does
+/// not contain. Diagnosis follows it in place of the
 /// parent id when linking an operation to its server. It is lineage only:
 /// the skipped spans are never measurements, and `span.parent_span_id`
 /// still names the real parent.

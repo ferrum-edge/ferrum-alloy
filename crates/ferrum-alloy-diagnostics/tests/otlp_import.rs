@@ -448,6 +448,8 @@ struct PhaseCase {
     /// the operation, outermost first; their parents are given explicitly
     /// so hostile lineage can be built too.
     wrappers: Vec<(&'static str, &'static str)>,
+    /// The instrumentation scope every span is exported under.
+    scope: &'static str,
 }
 
 impl PhaseCase {
@@ -460,6 +462,7 @@ impl PhaseCase {
             op_recorded_ms: op_len_ms as f64,
             instance: Some("orders-1"),
             wrappers: Vec::new(),
+            scope: "ferrum-alloy-telemetry",
         }
     }
 
@@ -519,7 +522,7 @@ impl PhaseCase {
             "resourceSpans": [{
                 "resource": { "attributes": resource },
                 "scopeSpans": [{
-                    "scope": { "name": "ferrum-alloy-telemetry" },
+                    "scope": { "name": self.scope },
                     "spans": spans,
                 }],
             }],
@@ -1795,7 +1798,19 @@ fn an_operation_under_ordinary_spans_still_dominates_its_server() {
         ],
         ..PhaseCase::op(10, 80)
     };
-    for case in [direct, wrapped] {
+    // Alloy instrumentation exported through the application's own tracer:
+    // the wrappers are not recognized as Alloy spans, but are the same
+    // process's spans all the same.
+    let app_scope = |case: PhaseCase| PhaseCase {
+        scope: "orders-app",
+        ..case
+    };
+    let app_direct = app_scope(PhaseCase::op(10, 80));
+    let app_wrapped = app_scope(PhaseCase {
+        wrappers: wrapped.wrappers.clone(),
+        ..PhaseCase::op(10, 80)
+    });
+    for case in [direct, wrapped, app_direct, app_wrapped] {
         let report = case.report();
         // The wrappers are lineage only: they yield no observation.
         for (span_id, _) in &case.wrappers {
@@ -1875,4 +1890,40 @@ fn a_malformed_lineage_hint_is_ignored() {
     let findings = analyze(&round_trip(&report), &Thresholds::default());
     let finding = by_code(&findings, "alloy.service.operation_dominates");
     assert_eq!(finding.confidence, Confidence::Likely, "{finding:?}");
+}
+
+/// Lineage never skips a span of another process: a wrapper exported by a
+/// different service instance ends the walk.
+#[test]
+fn lineage_does_not_cross_into_another_process() {
+    let case = PhaseCase {
+        wrappers: vec![("0000000000000002", PHASE_SERVER)],
+        ..PhaseCase::op(10, 80)
+    };
+    let mut otlp: Value = serde_json::from_str(&case.otlp()).unwrap();
+    // Move the wrapper into its own resource (another instance).
+    let spans = otlp["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array_mut()
+        .unwrap();
+    let wrapper_index = spans
+        .iter()
+        .position(|s| s["spanId"] == "0000000000000002")
+        .unwrap();
+    let wrapper = spans.remove(wrapper_index);
+    otlp["resourceSpans"].as_array_mut().unwrap().push(json!({
+        "resource": { "attributes": [
+            str_attr("service.name", "orders-api"),
+            str_attr("service.instance.id", "orders-2"),
+        ] },
+        "scopeSpans": [{ "scope": { "name": "other" }, "spans": [wrapper] }],
+    }));
+    let report = import(
+        &otlp.to_string(),
+        None,
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let operation = operation_observation(&report);
+    assert_eq!(operation.attributes.get("lineage.parent_span_id"), None);
 }
