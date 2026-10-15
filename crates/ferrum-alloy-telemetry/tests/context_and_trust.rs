@@ -12,7 +12,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use ferrum_alloy_telemetry::peer::{PeerInfo, TlsPeer, TrustedPeers, TrustedPeersConfig};
+use ferrum_alloy_telemetry::peer::{
+    ClassifiedPeer, PeerInfo, TlsPeer, TrustedPeers, TrustedPeersConfig,
+};
 use ferrum_alloy_telemetry::trace_context::{
     SpanId, TraceContextError, TraceId, parse_traceparent, validate_tracestate,
 };
@@ -555,6 +557,22 @@ fn reserved_request_id_headers_are_rejected() {
         config.request_id.header = header.into();
         assert!(TelemetryLayer::new(config).is_err(), "{header}");
     }
+}
+
+/// A classification the transport computed for the connection is used
+/// as-is: the layer's own (trust-nobody) classifier is not consulted.
+#[tokio::test]
+async fn a_preclassified_peer_is_used_without_classifying_again() {
+    let layer = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let mut request = request_from("203.0.113.9:4000", None, &[("traceparent", INCOMING)]);
+    request
+        .extensions_mut()
+        .insert(ClassifiedPeer(Arc::new(PeerTrust::VerifiedIdentity(
+            "spiffe://ferrum.test/ns/edge/sa/gateway".into(),
+        ))));
+    let (seen, _) = run(layer, request, &[]).await;
+    assert_eq!(seen.context.trace_decision, TraceDecision::AcceptedRemote);
+    assert!(seen.context.peer_trust.is_verified_identity());
 }
 
 #[test]

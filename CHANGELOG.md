@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **Breaking:** Alloy's server now classifies each connection's peer
+  once and passes the result to the telemetry layer as the new
+  `ClassifiedPeer` extension, instead of classifying on every request;
+  a custom `TrustClassifier` is therefore invoked once per connection
+  with extensions holding only `PeerInfo` and must decide from the
+  transport identity alone. Applications serving the router themselves
+  keep per-request classification.
+  Matched route templates are interned, so each distinct template is
+  allocated once process-wide instead of per request (#197).
 - Request-path overhead reduced with identical output: histograms now
   record into a single bucket (integer bucket assignment) and sum to
   cumulative counts only when rendered, the metrics series and route
