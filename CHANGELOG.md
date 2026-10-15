@@ -10,7 +10,10 @@
   hex-encoded from a table without formatting calls, and shared-cache
   classification compares `Cache-Control` directives in place instead
   of allocating lowercased copies (#197).
-
+- Updated `rustls` in the lockfile to 0.23.46, clearing
+  RUSTSEC-2026-0346 through RUSTSEC-2026-0349 (ECH fallback data
+  exposure and certificate-decompression allocation bounds);
+  `cargo deny check` passes again.
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
