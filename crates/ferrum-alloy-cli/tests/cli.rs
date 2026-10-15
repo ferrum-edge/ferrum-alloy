@@ -1388,8 +1388,18 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
             }}},
             "/alias":{"$ref":"#/paths/~1internal~1items"},
             "/encoded":{"$ref":"#/%70aths/~1internal~1items"},
-            "/elsewhere":{"$ref":"#/components/pathItems/Other"}
-        },"components":{"pathItems":{"Other":{}}}}"##,
+            "/elsewhere":{"$ref":"#/components/pathItems/Other"},
+            "x-payload":{"$ref":"#/paths/~1internal~1items"}
+        },"components":{"pathItems":{"Other":{}},
+            "schemas":{
+                "Named":{"properties":{"x-prop":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}}},
+                "Embedded":{"$id":"https://example.test/s","paths":{"/internal/items":{"type":"string"}},"$ref":"#/paths/~1internal~1items"}
+            },
+            "securitySchemes":{"oauth":{"type":"oauth2","flows":{"implicit":{
+                "authorizationUrl":"https://example.test/auth",
+                "scopes":{"$ref":"#/paths/~1internal~1items"}
+            }}}}
+        }}"##,
     );
     for (name, agents) in [("plain", ""), ("agents", "[agents]\nenabled = false\n")] {
         let manifest = write(
@@ -1437,6 +1447,25 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
         assert_eq!(ok["links"]["self"]["parameters"]["literal"], unchanged);
         let literal = &responses["default"]["content"]["application/json"]["schema"];
         assert_eq!(literal["const"], unchanged, "{name}");
+        assert_eq!(
+            paths["x-payload"], unchanged,
+            "{name}: Paths extensions are data"
+        );
+        let components = &written["components"];
+        assert_eq!(
+            components["schemas"]["Named"]["properties"]["x-prop"]["$ref"],
+            "#/paths/~1items/get/responses/200/x-schema",
+            "{name}: a property named x-* is a schema"
+        );
+        assert_eq!(
+            components["schemas"]["Embedded"]["$ref"], "#/paths/~1internal~1items",
+            "{name}: fragments of an embedded schema resource are its own"
+        );
+        assert_eq!(
+            components["securitySchemes"]["oauth"]["flows"]["implicit"]["scopes"]["$ref"],
+            "#/paths/~1internal~1items",
+            "{name}: OAuth scopes are data"
+        );
         assert_eq!(
             literal["x-payload"], unchanged,
             "{name}: extensions are opaque"

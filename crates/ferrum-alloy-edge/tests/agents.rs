@@ -767,3 +767,33 @@ fn shared_request_bodies_are_checked_once() {
     );
     assert_problem(&problems, "takes a request body with no JSON media type");
 }
+
+/// The endpoint overlap check compares a long shared public path once, not
+/// once per selected operation: 50,000 operations under a 200 KiB public
+/// path would otherwise copy it 50,000 times.
+#[test]
+fn a_long_public_path_is_compared_once() {
+    let public = format!("/{}", "p".repeat(200 * 1024));
+    let mut paths = serde_json::Map::new();
+    for index in 0..50_000 {
+        paths.insert(
+            format!("/r{index}"),
+            json!({ "get": operation(&format!("r{index}"), Value::Null) }),
+        );
+    }
+    paths.insert(
+        "/mcp/x".to_owned(),
+        json!({ "get": operation("x", Value::Null) }),
+    );
+    let document = json!({ X_FERRUM_MCP: true, "paths": paths });
+    let started = std::time::Instant::now();
+    let problems = lint(&document, Some(&public));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_problem(&problems, "selects 50001 operations");
+    assert_problem(&problems, "paths./mcp/x.get is served at");
+    assert!(problems.iter().all(|problem| problem.len() < 2048));
+}

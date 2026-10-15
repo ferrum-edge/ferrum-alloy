@@ -210,13 +210,19 @@ fn normalize_paths(
 #[derive(Clone, Copy)]
 enum Context {
     Keywords,
-    Names,
+    /// A map from names to objects; `true` when the map also takes `x-*`
+    /// specification extensions (the Paths and Responses Objects), which
+    /// are then data, not names.
+    Names(bool),
     Link,
 }
 
 /// Keywords whose value is literal instance data, never a reference: a
 /// `$ref` key inside one is data and is left alone.
-const LITERAL_KEYWORDS: &[&str] = &["const", "default", "enum", "example", "value"];
+const LITERAL_KEYWORDS: &[&str] = &["const", "default", "enum", "example", "scopes", "value"];
+
+/// Name maps that also take specification extensions.
+const EXTENSIBLE_NAME_MAPS: &[&str] = &["paths", "responses"];
 
 /// Keywords whose value is a map from names to objects (OpenAPI and JSON
 /// Schema), so a name such as `default` there is not a keyword.
@@ -247,8 +253,11 @@ const NAME_MAP_KEYWORDS: &[&str] = &[
 /// objects, a Discriminator Object's `mapping` values, and a Link Object's
 /// `operationRef`. Literal instance data (`example`, an `examples` array, an
 /// Example Object's `value`, `default`, `const`, `enum`, and a Link's
-/// `parameters` and `requestBody`) and specification extensions (`x-*`) are
-/// never changed, even when they hold a `$ref` key.
+/// `parameters` and `requestBody`, OAuth `scopes`) and specification
+/// extensions (`x-*`) are never changed, even when they hold a `$ref` key,
+/// and neither is anything inside a schema with its own `$id`, whose
+/// fragments resolve against that schema resource rather than the
+/// document.
 fn rewrite_path_refs(value: &mut Value, renamed: &HashMap<String, String>) {
     rewrite_in(value, renamed, Context::Keywords);
 }
@@ -256,10 +265,16 @@ fn rewrite_path_refs(value: &mut Value, renamed: &HashMap<String, String>) {
 fn rewrite_in(value: &mut Value, renamed: &HashMap<String, String>, context: Context) {
     match value {
         Value::Object(map) => {
+            if matches!(context, Context::Keywords) && map.contains_key("$id") {
+                // A schema resource of its own: its fragments are relative
+                // to its `$id`, not to this document.
+                return;
+            }
             for (key, child) in map.iter_mut() {
                 let key = key.as_str();
                 match context {
-                    Context::Names => rewrite_in(child, renamed, Context::Keywords),
+                    Context::Names(true) if key.starts_with("x-") => {}
+                    Context::Names(_) => rewrite_in(child, renamed, Context::Keywords),
                     Context::Link if key == "operationRef" => rewrite_reference(child, renamed),
                     Context::Link if key == "parameters" || key == "requestBody" => {}
                     Context::Keywords | Context::Link => {
@@ -287,7 +302,8 @@ fn rewrite_in(value: &mut Value, renamed: &HashMap<String, String>, context: Con
                         } else if (NAME_MAP_KEYWORDS.contains(&key) || key == "examples")
                             && child.is_object()
                         {
-                            rewrite_in(child, renamed, Context::Names);
+                            let extensible = EXTENSIBLE_NAME_MAPS.contains(&key);
+                            rewrite_in(child, renamed, Context::Names(extensible));
                         } else {
                             rewrite_in(child, renamed, Context::Keywords);
                         }

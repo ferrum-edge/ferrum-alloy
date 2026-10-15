@@ -1119,23 +1119,40 @@ fn endpoint_problems(
         .clone()
         .unwrap_or_else(|| format!("{prefix}/mcp"));
     let shown_endpoint = excerpt_text(&endpoint);
+    let shown_public_path = excerpt_text(public_path);
     if !prefix.is_empty() && endpoint != prefix && !endpoint.starts_with(&format!("{prefix}/")) {
         problems.push(format!(
-            "`{X_FERRUM_MCP}.endpoint.path` {shown_endpoint:?} is not under api.public_path {public_path:?}"
+            "`{X_FERRUM_MCP}.endpoint.path` {shown_endpoint:?} is not under api.public_path {shown_public_path:?}"
         ));
     }
+    // A client sees each operation at the public path followed by its Paths
+    // key (the public path alone for `/`). The shared prefix is compared
+    // once, and each path only against what is left of the endpoint, so no
+    // per-path string is built.
     let scope = endpoint.trim_end_matches('/');
-    let scope_subtree = format!("{scope}/");
+    let within_prefix = prefix == scope
+        || prefix
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.starts_with('/'));
+    let rest_of_scope = scope.strip_prefix(prefix);
     for (path, location) in selected {
-        let public = if !prefix.is_empty() && *path == "/" {
-            prefix.to_owned()
+        let suffix = if !prefix.is_empty() && *path == "/" {
+            ""
         } else {
-            format!("{prefix}{path}")
+            path
         };
-        if public == scope || public.starts_with(&scope_subtree) {
+        let inside = within_prefix
+            || rest_of_scope.is_some_and(|rest| {
+                suffix == rest
+                    || suffix
+                        .strip_prefix(rest)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            });
+        if inside {
             problems.push(format!(
-                "{location} is served at {:?}, inside the MCP endpoint {shown_endpoint:?}; move the endpoint ([agents] endpoint_path)",
-                excerpt_text(&public)
+                "{location} is served at \"{}{}\", inside the MCP endpoint {shown_endpoint:?}; move the endpoint ([agents] endpoint_path)",
+                excerpt_text(prefix),
+                excerpt_text(suffix)
             ));
         }
     }
