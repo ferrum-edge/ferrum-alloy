@@ -94,6 +94,11 @@ pub fn build_filter(config: &LoggingConfig) -> Result<EnvFilter, InitError> {
 /// `json` uses [`crate::json::JsonLayer`], whose lines match
 /// tracing-subscriber's JSON formatter with flattened event fields, the
 /// current span, and no span list.
+///
+/// With `json` and `non_blocking_queue_lines` above zero, lines go through
+/// a process-wide writer thread; call
+/// [`crate::json::shutdown_nonblocking_stdout`] last on exit, after the
+/// final events, or lines still queued are lost when the process ends.
 pub fn fmt_layer<S>(config: &LoggingConfig) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
@@ -117,6 +122,11 @@ where
 }
 
 /// Installs a global subscriber with logging only.
+///
+/// With `json` and `non_blocking_queue_lines` above zero, lines go through
+/// a process-wide writer thread; call
+/// [`crate::json::shutdown_nonblocking_stdout`] last on exit, after the
+/// final events, or lines still queued are lost when the process ends.
 pub fn init_logging(config: &LoggingConfig) -> Result<(), InitError> {
     if global_subscriber_installed() {
         return Err(InitError::AlreadyInitialized);
@@ -129,7 +139,11 @@ pub fn init_logging(config: &LoggingConfig) -> Result<(), InitError> {
 }
 
 /// Installs a global subscriber with logging and OpenTelemetry export.
-/// Keep the returned pipeline and shut it down on exit.
+/// Keep the returned pipeline and shut it down on exit. Shutting the
+/// pipeline down stops span export only: with `json` and
+/// `non_blocking_queue_lines` above zero, also call
+/// [`crate::json::shutdown_nonblocking_stdout`] last, after the final
+/// events, or lines still queued are lost when the process ends.
 #[cfg(feature = "otel")]
 pub fn init_logging_and_otel(
     config: &LoggingConfig,

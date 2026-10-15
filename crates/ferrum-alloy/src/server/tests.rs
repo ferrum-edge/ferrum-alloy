@@ -866,30 +866,271 @@ fn the_body_epoch_advances_when_the_last_waiter_leaves() {
     let activity = Arc::new(Activity::default());
     let mut first = TrackedRequestBody::new((), Arc::clone(&activity));
     let mut second = TrackedRequestBody::new((), Arc::clone(&activity));
-    let epoch = activity.body_epoch();
+    let epoch = activity.body_wait_state().epoch;
     first.waiting.set(true);
     second.waiting.set(true);
     assert_eq!(
-        activity.body_epoch(),
-        epoch,
+        activity.body_wait_state(),
+        BodyWaitState { waiting: 2, epoch },
         "waiters joining keep the epoch"
     );
     first.waiting.set(false);
     assert_eq!(
-        activity.body_epoch(),
-        epoch,
+        activity.body_wait_state(),
+        BodyWaitState { waiting: 1, epoch },
         "one waiter remains, so the epoch stands"
     );
     second.waiting.set(false);
     assert_eq!(
-        activity.body_epoch(),
-        epoch + 1,
+        activity.body_wait_state(),
+        BodyWaitState {
+            waiting: 0,
+            epoch: epoch + 1
+        },
         "the last waiter leaving starts a new epoch"
     );
     drop(second);
     assert_eq!(
-        activity.body_epoch(),
+        activity.body_wait_state().epoch,
         epoch + 1,
         "dropping an already-uncounted body does not advance it again"
+    );
+}
+
+/// The count and the epoch change in one atomic transition: there is no
+/// intermediate state in which the last waiter has left but the epoch
+/// still stands, so a request that starts waiting at any point after the
+/// last waiter left is always seen under a new epoch, never with the
+/// previous body's stall history.
+#[test]
+fn a_new_waiter_after_the_last_one_left_never_shares_its_epoch() {
+    let before = BodyWaitState {
+        waiting: 1,
+        epoch: 7,
+    };
+    let left = before.left();
+    assert_eq!(
+        left,
+        BodyWaitState {
+            waiting: 0,
+            epoch: 8
+        }
+    );
+    let rejoined = left.joined();
+    assert_eq!(
+        rejoined,
+        BodyWaitState {
+            waiting: 1,
+            epoch: 8
+        }
+    );
+    assert_ne!(rejoined.epoch, before.epoch);
+    // Packing round-trips, including the wrap of the epoch.
+    for state in [
+        before,
+        left,
+        BodyWaitState {
+            waiting: u32::MAX,
+            epoch: u32::MAX,
+        },
+    ] {
+        assert_eq!(BodyWaitState::unpack(state.pack()), state);
+    }
+    let wrapped = BodyWaitState {
+        waiting: 1,
+        epoch: u32::MAX,
+    }
+    .left();
+    assert_eq!(
+        wrapped,
+        BodyWaitState {
+            waiting: 0,
+            epoch: 0
+        }
+    );
+
+    // Concurrent joins and leaves on one connection's word: every leave
+    // that empties the count advances the epoch in the same update, so
+    // the count always ends balanced.
+    let activity = Arc::new(Activity::default());
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let activity = Arc::clone(&activity);
+            std::thread::spawn(move || {
+                for _ in 0..1_000 {
+                    activity.update_body_waiting(BodyWaitState::joined);
+                    activity.update_body_waiting(BodyWaitState::left);
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let end = activity.body_wait_state();
+    assert_eq!(end.waiting, 0);
+    assert!(end.epoch > 0);
+}
+
+/// Sets its flag when dropped.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A panic in the accept loop does not leave the listener's connections
+/// behind: an application-held upgrade loses its TCP connection and a
+/// pending HTTP/2 handler is cancelled before the panic reaches the
+/// supervisor, exactly as when the drain budget runs out at shutdown.
+#[tokio::test]
+async fn an_accept_loop_panic_closes_upgrades_and_cancels_stream_tasks() {
+    use axum::extract::ws::WebSocketUpgrade;
+    use hyper::client::conn::http2;
+    use hyper_util::rt::TokioExecutor;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stats = Arc::new(ServerStats::default());
+    let lifecycle = Lifecycle::new(Arc::default());
+    let state = AcceptState::new(8);
+    let accept_panic = Arc::clone(&state.accept_panic);
+    let upgrade_ended = Arc::new(AtomicBool::new(false));
+    let handler_dropped = Arc::new(AtomicBool::new(false));
+    let (handler_started_tx, handler_started) = tokio::sync::oneshot::channel::<()>();
+    let handler_started_tx = Arc::new(Mutex::new(Some(handler_started_tx)));
+    let ended = Arc::clone(&upgrade_ended);
+    let dropped = Arc::clone(&handler_dropped);
+    let routes = Router::new()
+        .route(
+            "/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let ended = Arc::clone(&ended);
+                async move {
+                    upgrade.on_upgrade(|mut socket| async move {
+                        let _ended = DropFlag(ended);
+                        // Ignores shutdown: only the transport closing ends it.
+                        while let Some(Ok(_)) = socket.recv().await {}
+                    })
+                }
+            }),
+        )
+        .route(
+            "/pending",
+            get(move || {
+                let dropped = Arc::clone(&dropped);
+                let started = handler_started_tx.lock().unwrap().take();
+                async move {
+                    let _dropped = DropFlag(dropped);
+                    if let Some(started) = started {
+                        let _ = started.send(());
+                    }
+                    std::future::pending::<&'static str>().await
+                }
+            }),
+        );
+    let options = ServeOptions {
+        name: "app",
+        classifier: None,
+        max_connections: 8,
+        max_header_count: 100,
+        max_header_bytes: 8192,
+        http2_max_concurrent_streams: 8,
+        header_read_timeout: WITHIN,
+        idle_timeout: WITHIN,
+        write_stall_timeout: WITHIN,
+        body_read_stall_timeout: WITHIN,
+        drain_timeout: Duration::from_millis(500),
+        #[cfg(feature = "tls")]
+        tls: None,
+    };
+    let mut task = tokio::spawn(serve_with_state(
+        listener,
+        routes,
+        options,
+        lifecycle.clone(),
+        Arc::clone(&stats),
+        state,
+    ));
+
+    // An upgraded session the application holds open.
+    let mut upgraded = TcpStream::connect(addr).await.unwrap();
+    upgraded
+        .write_all(
+            b"GET /ws HTTP/1.1\r\nhost: t\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut head = vec![0u8; 1024];
+    let n = upgraded.read(&mut head).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 101"),
+        "the upgrade is accepted"
+    );
+
+    // An HTTP/2 request whose handler never finishes.
+    let io = hyper_util::rt::TokioIo::new(TcpStream::connect(addr).await.unwrap());
+    let (mut sender, connection) = http2::handshake(TokioExecutor::new(), io).await.unwrap();
+    let connection = tokio::spawn(connection);
+    let request = http::Request::get(format!("http://{addr}/pending"))
+        .body(http_body_util::Empty::<Bytes>::new())
+        .unwrap();
+    let pending = tokio::spawn(async move { sender.send_request(request).await });
+    tokio::time::timeout(WITHIN, handler_started)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The next accept panics.
+    accept_panic.store(true, Ordering::Relaxed);
+    let _trigger = TcpStream::connect(addr).await.unwrap();
+    // Shutdown is signalled as soon as the panic is caught, while the
+    // pending handler and the upgrade still hold the drain open.
+    let shutdown = lifecycle.shutdown_token();
+    tokio::time::timeout(WITHIN, shutdown.cancelled())
+        .await
+        .expect("the panic triggers process shutdown");
+    assert!(lifecycle.is_draining(), "readiness reports draining");
+    assert!(
+        !handler_dropped.load(Ordering::Relaxed),
+        "shutdown was signalled before cleanup finished"
+    );
+    let joined = tokio::time::timeout(WITHIN, &mut task).await.unwrap();
+    assert!(
+        joined.as_ref().err().is_some_and(JoinError::is_panic),
+        "the panic still reaches the supervisor"
+    );
+
+    // By the time the panic surfaced, the listener had cancelled its stream
+    // task and shut down the upgraded TCP connection.
+    assert!(
+        handler_dropped.load(Ordering::Relaxed),
+        "the pending HTTP/2 handler was dropped before the panic resumed"
+    );
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(WITHIN, upgraded.read_to_end(&mut rest)).await;
+    assert!(read.is_ok(), "the upgraded connection was closed");
+    assert!(
+        tokio::time::timeout(WITHIN, async {
+            while !upgrade_ended.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok(),
+        "the application's upgraded session ended with its transport"
+    );
+    let response = tokio::time::timeout(WITHIN, pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.is_err(), "the pending request failed, not served");
+    let _ = tokio::time::timeout(WITHIN, connection).await;
+    assert_eq!(
+        stats.force_closed_connections.load(Ordering::Relaxed),
+        2,
+        "both open connections were force-closed"
     );
 }
