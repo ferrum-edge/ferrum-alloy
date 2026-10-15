@@ -2060,6 +2060,12 @@ impl AlloyConfig {
                 server.bind
             ));
         }
+        if management.enabled && !management.bind.ip().is_loopback() {
+            warn(format!(
+                "management.bind {} is not loopback: the management listener has no TLS, so its token crosses the network in cleartext on every request; bind to loopback or reach it through a same-host TLS-terminating proxy",
+                management.bind
+            ));
+        }
         if self.trust.identities.is_empty() && !self.trust.networks.is_empty() {
             warn("trust relies on network boundaries only; prefer verified mTLS identities for gateway metadata".into());
         }

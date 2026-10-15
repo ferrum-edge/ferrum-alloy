@@ -174,7 +174,9 @@ impl AlloyApp {
         self
     }
 
-    /// Replaces the peer trust classifier built from `[trust]`.
+    /// Replaces the peer trust classifier built from `[trust]`. The
+    /// classifier is invoked once per connection with the connection's
+    /// `PeerInfo` only (see `TrustClassifier::classify`).
     pub fn trust_classifier(mut self, classifier: SharedClassifier) -> Self {
         self.classifier = Some(classifier);
         self
@@ -502,6 +504,7 @@ impl AlloyApp {
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
             app_stats,
+            classifier,
             management_token,
             #[cfg(feature = "diagnostics")]
             diagnostics_retrieval,
@@ -568,6 +571,9 @@ pub struct AlloyParts {
     service_name: String,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     app_stats: Arc<ServerStats>,
+    /// The classifier the telemetry layer uses, kept so Alloy's server
+    /// can classify each connection once instead of per request.
+    classifier: SharedClassifier,
     /// Whether the management router was built with a token.
     management_token: bool,
     /// Whether the management router serves diagnostic retrieval.
@@ -691,6 +697,7 @@ impl AlloyParts {
         let config = &self.config;
         let options = ServeOptions {
             name: "application",
+            classifier: Some(Arc::clone(&self.classifier)),
             max_connections: config.server.max_connections,
             max_header_count: config.server.max_header_count,
             max_header_bytes: config.server.max_header_bytes,
@@ -741,6 +748,10 @@ impl AlloyParts {
                 ServeOptions {
                     name: "management",
                     max_connections: 64,
+                    // The management router has no telemetry layer to
+                    // consume a classification; never invoke the
+                    // application classifier for its connections.
+                    classifier: None,
                     #[cfg(feature = "tls")]
                     tls: None,
                     ..options

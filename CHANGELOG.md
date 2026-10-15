@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **Breaking:** Alloy's server now classifies each connection's peer
+  once and passes the result to the telemetry layer as the new
+  `ClassifiedPeer` extension, instead of classifying on every request;
+  a custom `TrustClassifier` is therefore invoked once per connection
+  with extensions holding only `PeerInfo` and must decide from the
+  transport identity alone. Applications serving the router themselves
+  keep per-request classification.
+  Matched route templates are interned, so each distinct template is
+  allocated once process-wide instead of per request (#197).
 - **Breaking:** new `server.body_read_stall_timeout_ms` (default
   `60000`, `FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS`): a connection
   whose handler is waiting to read a request body and receives no body
@@ -21,6 +30,12 @@
   hex-encoded from a table without formatting calls, and shared-cache
   classification compares `Cache-Control` directives in place instead
   of allocating lowercased copies (#197).
+- **Breaking:** `trust.networks` rejects IPv4-mapped IPv6 CIDRs, which
+  could never match a canonicalized peer address; use the IPv4 network
+  (the same rule rate-limit exempt networks already applied). A
+  non-loopback `management.bind` now also warns in `check` output that
+  the management listener has no TLS and its token crosses the network
+  in cleartext (#197).
 - Updated `rustls` in the lockfile to 0.23.46, clearing
   RUSTSEC-2026-0346 through RUSTSEC-2026-0349 (ECH fallback data
   exposure and certificate-decompression allocation bounds);

@@ -68,7 +68,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use bytes::Buf;
-use ferrum_alloy_telemetry::PeerInfo;
+use ferrum_alloy_telemetry::peer::SharedClassifier;
+use ferrum_alloy_telemetry::{ClassifiedPeer, PeerInfo};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
@@ -366,6 +367,10 @@ impl Drop for ActiveConnection {
 #[derive(Debug, Clone)]
 pub(crate) struct ServeOptions {
     pub(crate) name: &'static str,
+    /// Classifies each connection's peer once, when set; the result is
+    /// inserted as [`ClassifiedPeer`] so the telemetry layer does not
+    /// classify again per request.
+    pub(crate) classifier: Option<SharedClassifier>,
     pub(crate) max_connections: usize,
     pub(crate) max_header_count: usize,
     pub(crate) max_header_bytes: usize,
@@ -1659,12 +1664,22 @@ async fn serve_io<I>(
 {
     let stats = Arc::clone(&active.stats);
     let remote = peer.remote_addr;
+    // Classify the connection's peer once, here where its transport
+    // identity is known, instead of per request in the telemetry layer.
+    let classified = options.classifier.as_ref().map(|classifier| {
+        let mut extensions = http::Extensions::new();
+        extensions.insert(peer.clone());
+        ClassifiedPeer(Arc::new(classifier.classify(&extensions)))
+    });
     let activity = Arc::new(Activity::default());
     let body_activity = Arc::clone(&activity);
     let service = app.map_request(move |request: http::Request<Incoming>| {
         let mut request = request
             .map(|body| Body::new(TrackedRequestBody::new(body, Arc::clone(&body_activity))));
         request.extensions_mut().insert(peer.clone());
+        if let Some(classified) = &classified {
+            request.extensions_mut().insert(classified.clone());
+        }
         if let Some(remote) = remote {
             request.extensions_mut().insert(ConnectInfo(remote));
         }

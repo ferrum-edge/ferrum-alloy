@@ -756,6 +756,31 @@ fn lists_and_secret_files_are_supported() {
     );
 }
 
+/// The management listener has no TLS, so a non-loopback bind with a
+/// token is valid but warns that the token travels in cleartext.
+#[test]
+fn a_non_loopback_management_bind_warns_about_cleartext() {
+    let mut config = AlloyConfig::default();
+    config.management.bind = "0.0.0.0:9090".parse().unwrap();
+    config.management.token = Some(Secret::new("x".repeat(32)));
+    let warnings = config.validate(NO_FEATURES).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|issue| issue.message.contains("management.bind")
+                && issue.message.contains("cleartext")),
+        "{warnings:?}"
+    );
+
+    let warnings = AlloyConfig::default().validate(NO_FEATURES).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|issue| !issue.message.contains("cleartext")),
+        "{warnings:?}"
+    );
+}
+
 #[test]
 fn secrets_are_never_printed() {
     let mut config = AlloyConfig::default();

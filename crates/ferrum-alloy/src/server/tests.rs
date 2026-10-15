@@ -72,6 +72,7 @@ impl AdmissionTest {
         let registry = Arc::clone(&state.shutdown);
         let options = ServeOptions {
             name: "app",
+            classifier: None,
             max_connections: 1,
             max_header_count: 100,
             max_header_bytes: 8192,
@@ -386,6 +387,7 @@ struct TestConnection {
 async fn finished_connection(body_size: usize, write_stall_timeout: Duration) -> TestConnection {
     let options = ServeOptions {
         name: "app",
+        classifier: None,
         max_connections: 1,
         max_header_count: 100,
         max_header_bytes: 8192,
@@ -674,6 +676,7 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
     let idle_timeout = IDLE_TIMEOUT * 4;
     let options = ServeOptions {
         name: "app",
+        classifier: None,
         max_connections: 1,
         max_header_count: 100,
         max_header_bytes: 8192,

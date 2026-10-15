@@ -12,7 +12,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use ferrum_alloy_telemetry::peer::{PeerInfo, TlsPeer, TrustedPeers, TrustedPeersConfig};
+use ferrum_alloy_telemetry::peer::{
+    ClassifiedPeer, PeerInfo, TlsPeer, TrustedPeers, TrustedPeersConfig,
+};
 use ferrum_alloy_telemetry::trace_context::{
     SpanId, TraceContextError, TraceId, parse_traceparent, validate_tracestate,
 };
@@ -557,6 +559,22 @@ fn reserved_request_id_headers_are_rejected() {
     }
 }
 
+/// A classification the transport computed for the connection is used
+/// as-is: the layer's own (trust-nobody) classifier is not consulted.
+#[tokio::test]
+async fn a_preclassified_peer_is_used_without_classifying_again() {
+    let layer = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let mut request = request_from("203.0.113.9:4000", None, &[("traceparent", INCOMING)]);
+    request
+        .extensions_mut()
+        .insert(ClassifiedPeer(Arc::new(PeerTrust::VerifiedIdentity(
+            "spiffe://ferrum.test/ns/edge/sa/gateway".into(),
+        ))));
+    let (seen, _) = run(layer, request, &[]).await;
+    assert_eq!(seen.context.trace_decision, TraceDecision::AcceptedRemote);
+    assert!(seen.context.peer_trust.is_verified_identity());
+}
+
 #[test]
 fn trusted_peer_configuration_is_validated() {
     for identity in ["gateway", "spiffe://", "dns:", "http://x"] {
@@ -570,6 +588,25 @@ fn trusted_peer_configuration_is_validated() {
         TrustedPeers::new(&trust).is_err(),
         "trusting every address must be rejected"
     );
+    // IPv4-mapped peers are canonicalized to IPv4 before matching, so a
+    // mapped network could never match; reject it instead of silently
+    // trusting nobody. The IPv4 form and unmapped IPv6 stay accepted.
+    for (network, accepted) in [
+        ("::ffff:127.0.0.0/120", false),
+        ("::ffff:127.0.0.1/128", false),
+        ("::ffff:10.0.0.0/104", false),
+        ("127.0.0.0/8", true),
+        ("::1/128", true),
+        ("2001:db8::/32", true),
+    ] {
+        let mut trust = TrustedPeersConfig::default();
+        trust.networks = vec![network.parse().unwrap()];
+        assert_eq!(
+            TrustedPeers::new(&trust).is_ok(),
+            accepted,
+            "{network} acceptance"
+        );
+    }
 }
 
 #[test]

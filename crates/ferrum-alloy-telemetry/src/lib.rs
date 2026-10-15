@@ -44,6 +44,8 @@ pub use layer::{
     TelemetryConfigError, TelemetryLayer, TelemetryService, TraceContextConfig,
 };
 pub use metrics::Metrics;
-pub use peer::{PeerInfo, PeerTrust, TlsPeer, TrustClassifier, TrustedPeers, TrustedPeersConfig};
+pub use peer::{
+    ClassifiedPeer, PeerInfo, PeerTrust, TlsPeer, TrustClassifier, TrustedPeers, TrustedPeersConfig,
+};
 pub use request_id::RequestId;
 pub use route::{RecordRouteLayer, RouteSlot};
