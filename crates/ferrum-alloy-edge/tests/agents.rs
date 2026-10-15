@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use ferrum_alloy_edge::agents::{
-    AgentToolError, MAX_TEXT_BYTES, MAX_TOOLS, X_FERRUM_MCP, default_annotations,
+    AgentToolError, MAX_PROBLEMS, MAX_TEXT_BYTES, MAX_TOOLS, X_FERRUM_MCP, default_annotations,
     fill_default_annotations, lint, prepare, stamp, warnings,
 };
 use ferrum_alloy_edge::manifest::ServiceManifest;
@@ -543,4 +543,257 @@ fn manifest_agents_section_is_validated() {
     assert!(ServiceManifest::from_toml(&unknown).is_err());
     let agents = manifest_with("[agents]\n").agents.unwrap();
     assert!(!agents.enabled, "off unless enabled");
+}
+
+/// Paths that alias one Path Item share its operations: each operation is
+/// parsed and checked once, so its problems are reported once and the work
+/// does not grow with the alias count times the size of what is shared.
+#[test]
+fn aliased_operations_are_checked_once() {
+    let unknown_key = "k".repeat(4096);
+    let mut paths = serde_json::Map::new();
+    for index in 0..2000 {
+        paths.insert(
+            format!("/alias{index}"),
+            json!({ "$ref": "#/components/pathItems/Shared" }),
+        );
+    }
+    let mut document = json!({
+        "paths": paths,
+        "components": { "pathItems": { "Shared": {
+            "get": {
+                "operationId": "shared",
+                "description": "d".repeat(1024 * 1024),
+                X_FERRUM_MCP: { unknown_key.as_str(): true }
+            },
+            "post": { "operationId": "shared_post", X_FERRUM_MCP: { "expose": true } }
+        } } }
+    });
+    // Disabled publication still checks the per-operation extension, once.
+    let problems = lint(&document, None);
+    let unknown: Vec<_> = problems
+        .iter()
+        .filter(|problem| problem.contains("has the unknown key"))
+        .collect();
+    assert_eq!(unknown.len(), 1, "{problems:#?}");
+
+    document[X_FERRUM_MCP] = json!(true);
+    let problems = lint(&document, None);
+    let undocumented = problems
+        .iter()
+        .filter(|problem| problem.contains("has no description"))
+        .count();
+    assert_eq!(undocumented, 1, "the shared POST is reported once");
+    // Each alias is still its own Edge operation: the selection count and
+    // tool-name uniqueness see every path.
+    assert_problem(&problems, "selects 4000 operations");
+    assert_problem(&problems, "both produce the tool name \"shared\"");
+}
+
+/// `$ref` chains are followed once however many paths share them, with the
+/// same hop limit wherever a path enters the chain.
+#[test]
+fn shared_reference_chains_resolve_consistently() {
+    // c1 -> c2 -> ... -> c16 -> Item. A path naming c2 takes sixteen hops
+    // to reach Item, which is refused; one naming c3 takes fifteen.
+    let mut components = serde_json::Map::new();
+    for index in 1..16 {
+        components.insert(
+            format!("c{index}"),
+            json!({ "$ref": format!("#/components/pathItems/c{}", index + 1) }),
+        );
+    }
+    components.insert(
+        "c16".to_owned(),
+        json!({ "$ref": "#/components/pathItems/Item" }),
+    );
+    components.insert(
+        "Item".to_owned(),
+        json!({ "get": operation("item", json!({ "expose": true })) }),
+    );
+    components.insert(
+        "Loop".to_owned(),
+        json!({ "$ref": "#/components/pathItems/Loop" }),
+    );
+    let long = "x".repeat(10_000);
+    let document = |first: &str| {
+        let mut paths = serde_json::Map::new();
+        // Visited first, so a shorter walk is never answered from a longer
+        // one's memo, and the other way round.
+        paths.insert("/a".to_owned(), json!({ "$ref": first }));
+        paths.insert(
+            "/b-long".to_owned(),
+            json!({ "$ref": "#/components/pathItems/c2" }),
+        );
+        paths.insert(
+            "/c-short".to_owned(),
+            json!({ "$ref": "#/components/pathItems/c3" }),
+        );
+        paths.insert(
+            "/d-loop".to_owned(),
+            json!({ "$ref": "#/components/pathItems/Loop" }),
+        );
+        paths.insert(
+            "/e-missing".to_owned(),
+            json!({ "$ref": format!("#/components/pathItems/{long}") }),
+        );
+        json!({
+            X_FERRUM_MCP: { "include": { "operations": ["item"] } },
+            "paths": paths,
+            "components": { "pathItems": components.clone() }
+        })
+    };
+    for first in [
+        "#/components/pathItems/c2",
+        "#/components/pathItems/c3",
+        "#/components/pathItems/Item",
+    ] {
+        let problems = lint(&document(first), None);
+        assert_problem(
+            &problems,
+            "paths./b-long: has a $ref chain longer than 16 hops",
+        );
+        assert!(
+            !problems.iter().any(|p| p.starts_with("paths./c-short:")),
+            "{first}: {problems:#?}"
+        );
+        assert_problem(
+            &problems,
+            "paths./d-loop: has a $ref chain longer than 16 hops",
+        );
+        let missing = problems
+            .iter()
+            .find(|p| p.starts_with("paths./e-missing:"))
+            .unwrap();
+        assert!(missing.contains("does not resolve"), "{missing}");
+        assert!(missing.len() < 200, "the reference is shortened: {missing}");
+    }
+}
+
+/// Many distinct referenced Path Items are each filled once.
+#[test]
+fn many_referenced_path_items_are_filled() {
+    let mut paths = serde_json::Map::new();
+    let mut items = serde_json::Map::new();
+    for index in 0..20_000 {
+        paths.insert(
+            format!("/r{index}"),
+            json!({ "$ref": format!("#/components/pathItems/i{index}") }),
+        );
+        items.insert(
+            format!("i{index}"),
+            json!({ "get": { X_FERRUM_MCP: true } }),
+        );
+    }
+    paths.insert(
+        "/again".to_owned(),
+        json!({ "$ref": "#/components/pathItems/i0" }),
+    );
+    let mut document = json!({ "paths": paths, "components": { "pathItems": items } });
+    fill_default_annotations(&mut document);
+    for index in [0, 19_999] {
+        assert_eq!(
+            document["components"]["pathItems"][format!("i{index}")]["get"][X_FERRUM_MCP],
+            json!({ "expose": true, "annotations": { "readOnlyHint": true } })
+        );
+    }
+}
+
+/// Problems echo bounded excerpts of what they name and stop at
+/// `MAX_PROBLEMS`, so a long path with many unknown keys cannot make the
+/// report grow with their product.
+#[test]
+fn problem_reports_are_bounded() {
+    let path = format!("/{}", "p".repeat(1024 * 1024));
+    let mut extension = serde_json::Map::new();
+    for index in 0..10_000 {
+        extension.insert(format!("unknown{index}"), json!(true));
+    }
+    let document = json!({
+        "paths": { path.as_str(): { "get": { X_FERRUM_MCP: extension } } }
+    });
+    let problems = lint(&document, None);
+    // Wrong-typed annotation and limit keys are echoed shortened too.
+    let long_key = "k".repeat(1024 * 1024);
+    let typed = json!({
+        X_FERRUM_MCP: { "limits": { long_key.as_str(): "x" } },
+        "paths": { "/a": { "get": {
+            "operationId": "a",
+            "summary": "A.",
+            X_FERRUM_MCP: { "annotations": { long_key.as_str(): null } }
+        } } }
+    });
+    let typed_problems = lint(&typed, None);
+    assert!(typed_problems.len() >= 3, "{typed_problems:?}");
+    assert!(
+        typed_problems.iter().all(|problem| problem.len() < 1024),
+        "{:?}",
+        typed_problems.iter().map(String::len).collect::<Vec<_>>()
+    );
+    assert_eq!(problems.len(), MAX_PROBLEMS + 1, "{:?}", problems.last());
+    assert!(problems.iter().all(|problem| problem.len() < 1024));
+    assert_eq!(
+        problems.last().map(String::as_str),
+        Some("9900 further problems not listed")
+    );
+}
+
+/// A request body shared by many operations is checked for a JSON media type
+/// once: the verdict is kept per body. Rescanning its 100,000 media types for
+/// each of 4,000 operations would take far longer than the bound.
+#[test]
+fn shared_request_bodies_are_checked_once() {
+    let mut content = serde_json::Map::new();
+    for index in 0..100_000 {
+        content.insert(format!("text/x-{index}"), json!({}));
+    }
+    let mut paths = serde_json::Map::new();
+    for index in 0..4_000 {
+        let mut post = operation(&format!("p{index}"), json!({ "expose": true }));
+        post["requestBody"] = json!({ "$ref": "#/components/requestBodies/Shared" });
+        paths.insert(format!("/p{index}"), json!({ "post": post }));
+    }
+    let document = json!({
+        X_FERRUM_MCP: true,
+        "paths": paths,
+        "components": { "requestBodies": { "Shared": { "content": content } } }
+    });
+    let started = std::time::Instant::now();
+    let problems = lint(&document, None);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_problem(&problems, "takes a request body with no JSON media type");
+}
+
+/// The endpoint overlap check compares a long shared public path once, not
+/// once per selected operation: 50,000 operations under a 200 KiB public
+/// path would otherwise copy it 50,000 times.
+#[test]
+fn a_long_public_path_is_compared_once() {
+    let public = format!("/{}", "p".repeat(200 * 1024));
+    let mut paths = serde_json::Map::new();
+    for index in 0..50_000 {
+        paths.insert(
+            format!("/r{index}"),
+            json!({ "get": operation(&format!("r{index}"), Value::Null) }),
+        );
+    }
+    paths.insert(
+        "/mcp/x".to_owned(),
+        json!({ "get": operation("x", Value::Null) }),
+    );
+    let document = json!({ X_FERRUM_MCP: true, "paths": paths });
+    let started = std::time::Instant::now();
+    let problems = lint(&document, Some(&public));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_problem(&problems, "selects 50001 operations");
+    assert_problem(&problems, "paths./mcp/x.get is served at");
+    assert!(problems.iter().all(|problem| problem.len() < 2048));
 }

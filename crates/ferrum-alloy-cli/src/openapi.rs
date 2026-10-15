@@ -7,6 +7,10 @@
 //! `--manifest`, `servers` is set to the manifest's gateway-facing
 //! `public_path`, and stripped service base paths are removed from operations.
 //!
+//! The written document is held to `MAX_OUTPUT_BYTES`: pretty-printing can
+//! make it several times larger than its compact input, but not without
+//! bound. `--check` compares parsed documents and renders nothing.
+//!
 //! AI-agent tool metadata (`x-ferrum-mcp`, see
 //! [`ferrum_alloy_edge::agents`]): the manifest's `[agents]` section becomes
 //! the document-level extension, exposed operations get their method's
@@ -14,7 +18,7 @@
 //! could not use fails the export and `--check` with exit 3. A hand-written
 //! selection that publishes every `GET` operation is a warning.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -56,6 +60,9 @@ pub(crate) struct ExportArgs {
 }
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Most bytes `openapi export` writes, and reads back for `--check`: four
+/// times the input limit, room for indentation a real document needs.
+const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 fn load(args: &ExportArgs) -> Result<Vec<u8>, CliError> {
     if let Some(input) = &args.input {
@@ -187,6 +194,47 @@ fn normalize_paths(
     Ok(())
 }
 
+/// A `Vec` that refuses to grow past `limit` bytes.
+struct BoundedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for BoundedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("output limit reached"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The pretty-printed document and a final newline, at most `limit` bytes.
+fn render(document: &Value, limit: usize) -> Result<Vec<u8>, CliError> {
+    let mut out = BoundedBuffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    let rendered = serde_json::to_writer_pretty(&mut out, document)
+        .map_err(|e| e.to_string())
+        .and_then(|()| out.write_all(b"\n").map_err(|e| e.to_string()));
+    match rendered {
+        Ok(()) => Ok(out.bytes),
+        Err(_) if out.exceeded => Err(CliError::Invalid(format!(
+            "the exported document is larger than {limit} bytes once pretty-printed"
+        ))),
+        Err(e) => Err(CliError::Io(e)),
+    }
+}
+
 /// Runs an `openapi` subcommand.
 pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
     let OpenapiCommand::Export(args) = command;
@@ -212,14 +260,11 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
     for warning in warnings {
         crate::eprint(&format!("warning: {warning}\n"));
     }
-    let rendered = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&document).map_err(|e| CliError::Io(e.to_string()))?
-    );
     if args.check {
-        // The existing output may be laid out differently from `rendered`,
-        // which can exceed the input limit once pretty-printed.
-        let limit = MAX_DOCUMENT_BYTES.max(u64::try_from(rendered.len()).unwrap_or(u64::MAX));
+        // Compared as parsed JSON, so nothing is rendered. The existing
+        // output may be laid out differently and is held to the output
+        // limit, which exceeds the input limit for pretty-printed text.
+        let limit = u64::try_from(MAX_OUTPUT_BYTES).unwrap_or(u64::MAX);
         let existing = match read_regular_file_bounded(&args.output, limit) {
             Ok(existing) => existing,
             Err(ReadError::Io(e)) => {
@@ -241,11 +286,28 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
         crate::print(&format!("{} is up to date\n", args.output.display()))?;
         return Ok(ExitCode::SUCCESS);
     }
-    crate::fsout::write_atomically(
-        &args.output,
-        rendered.as_bytes(),
-        crate::fsout::NewFileMode::Umask,
-    )?;
+    let rendered = render(&document, MAX_OUTPUT_BYTES)?;
+    crate::fsout::write_atomically(&args.output, &rendered, crate::fsout::NewFileMode::Umask)?;
     crate::eprint(&format!("wrote {}\n", args.output.display()));
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn rendering_stops_at_the_output_limit() {
+        let document = serde_json::json!({ "a": [[[[1, 2, 3]]]] });
+        let full = render(&document, MAX_OUTPUT_BYTES).unwrap();
+        assert_eq!(full.last(), Some(&b'\n'));
+        assert_eq!(render(&document, full.len()).unwrap(), full);
+        let error = render(&document, full.len() - 1).unwrap_err();
+        assert!(
+            matches!(&error, CliError::Invalid(message) if message.contains("larger than")),
+            "{error:?}"
+        );
+    }
 }
