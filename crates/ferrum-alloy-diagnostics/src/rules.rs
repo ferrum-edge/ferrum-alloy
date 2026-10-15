@@ -82,6 +82,7 @@ fn lineage_parent<'a>(observation: &'a Observation, span: &'a SpanRef) -> Option
                 && id
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && id.bytes().any(|b| b != b'0')
         })
         .or(span.parent_span_id.as_deref())
 }

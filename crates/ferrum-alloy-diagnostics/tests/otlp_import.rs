@@ -1857,3 +1857,22 @@ fn ordinary_span_lineage_that_never_reaches_a_server_adds_nothing() {
         );
     }
 }
+
+/// A malformed hint (here the all-zero span id, which is never a valid
+/// span) is ignored, and diagnosis follows the span's own parent.
+#[test]
+fn a_malformed_lineage_hint_is_ignored() {
+    let mut report = PhaseCase::op(10, 80).report();
+    let operation = report
+        .observations
+        .iter_mut()
+        .find(|o| o.name == "alloy.operation.duration")
+        .unwrap();
+    operation.attributes.insert(
+        "lineage.parent_span_id".to_owned(),
+        "0000000000000000".to_owned(),
+    );
+    let findings = analyze(&round_trip(&report), &Thresholds::default());
+    let finding = by_code(&findings, "alloy.service.operation_dominates");
+    assert_eq!(finding.confidence, Confidence::Likely, "{finding:?}");
+}
