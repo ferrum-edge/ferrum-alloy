@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- CI hardening from the #197 audit: `cargo-deny` pinned to 0.20.2, checkouts
+  no longer persist credentials, a weekly `Advisories` workflow re-checks
+  `main`'s lockfiles, the per-feature job and the MSRV job now build the
+  tests, a `Rustdoc` job fails on documentation warnings, macOS and Windows
+  runners are pinned (`macos-26`, `windows-2025`), and the unused workspace
+  `time` dependency is removed.
 - `SECURITY.md` vulnerability-reporting policy and supported-version statement
   (landed earlier; recorded here).
 - Documentation refresh: the supported Ferrum Edge window is stated as
