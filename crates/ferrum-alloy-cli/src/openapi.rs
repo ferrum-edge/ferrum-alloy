@@ -204,48 +204,123 @@ fn normalize_paths(
     Ok(())
 }
 
-/// Points every local `$ref` into a renamed `paths` key (`#/paths/<key>...`)
-/// at the key's new name, so an alias of a stripped path still resolves.
+/// Where [`rewrite_path_refs`] is in the document: an object whose keys are
+/// keywords (an OpenAPI or Schema object), one whose keys are names
+/// (`properties`, `responses`, ...), or a Link Object.
+#[derive(Clone, Copy)]
+enum Context {
+    Keywords,
+    Names,
+    Link,
+}
+
+/// Keywords whose value is literal instance data, never a reference: a
+/// `$ref` key inside one is data and is left alone.
+const LITERAL_KEYWORDS: &[&str] = &["const", "default", "enum", "example", "value"];
+
+/// Keywords whose value is a map from names to objects (OpenAPI and JSON
+/// Schema), so a name such as `default` there is not a keyword.
+const NAME_MAP_KEYWORDS: &[&str] = &[
+    "$defs",
+    "callbacks",
+    "content",
+    "definitions",
+    "dependentSchemas",
+    "encoding",
+    "headers",
+    "parameters",
+    "pathItems",
+    "paths",
+    "patternProperties",
+    "properties",
+    "requestBodies",
+    "responses",
+    "schemas",
+    "securitySchemes",
+    "variables",
+    "webhooks",
+];
+
+/// Points every local reference into a renamed `paths` key
+/// (`#/paths/<key>...`) at the key's new name, so an alias of a stripped
+/// path still resolves: `$ref` in OpenAPI and Schema objects, and a Link
+/// Object's `operationRef`. Literal instance data (`example`, an `examples`
+/// array, an Example Object's `value`, `default`, `const`, `enum`, and a
+/// Link's `parameters` and `requestBody`) is never changed, even when it
+/// holds a `$ref` key.
 fn rewrite_path_refs(value: &mut Value, renamed: &HashMap<String, String>) {
+    rewrite_in(value, renamed, Context::Keywords);
+}
+
+fn rewrite_in(value: &mut Value, renamed: &HashMap<String, String>, context: Context) {
     match value {
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                if key == "$ref"
-                    && let Value::String(reference) = child
-                {
-                    if let Some(rewritten) = rewritten_path_ref(reference, renamed) {
-                        *reference = rewritten;
+                let key = key.as_str();
+                match context {
+                    Context::Names => rewrite_in(child, renamed, Context::Keywords),
+                    Context::Link if key == "operationRef" => rewrite_reference(child, renamed),
+                    Context::Link if key == "parameters" || key == "requestBody" => {}
+                    Context::Keywords | Context::Link => {
+                        if key == "$ref" {
+                            rewrite_reference(child, renamed);
+                        } else if LITERAL_KEYWORDS.contains(&key)
+                            || (key == "examples" && child.is_array())
+                        {
+                            // Literal data.
+                        } else if key == "links" {
+                            if let Value::Object(links) = child {
+                                for link in links.values_mut() {
+                                    rewrite_in(link, renamed, Context::Link);
+                                }
+                            }
+                        } else if (NAME_MAP_KEYWORDS.contains(&key) || key == "examples")
+                            && child.is_object()
+                        {
+                            rewrite_in(child, renamed, Context::Names);
+                        } else {
+                            rewrite_in(child, renamed, Context::Keywords);
+                        }
                     }
-                    continue;
                 }
-                rewrite_path_refs(child, renamed);
             }
         }
         Value::Array(items) => {
             for item in items {
-                rewrite_path_refs(item, renamed);
+                rewrite_in(item, renamed, Context::Keywords);
             }
         }
         _ => {}
     }
 }
 
+fn rewrite_reference(reference: &mut Value, renamed: &HashMap<String, String>) {
+    if let Value::String(text) = reference
+        && let Some(rewritten) = rewritten_path_ref(text, renamed)
+    {
+        *text = rewritten;
+    }
+}
+
 /// `reference` with its `paths` key renamed, or `None` when it does not
-/// point into a renamed key. The key is a JSON Pointer token in a URI
-/// fragment: percent-decoded, then `~1`/`~0` unescaped (RFC 6901 sections 4
-/// and 6). The new token keeps the original's percent-encoding style.
+/// point into a renamed key. A local reference is a URI fragment holding a
+/// JSON Pointer: the whole fragment is percent-decoded first, then split
+/// into tokens and each token `~1`/`~0`-unescaped (RFC 6901 sections 4 and
+/// 6). The result keeps the original's percent-encoding style.
 fn rewritten_path_ref(reference: &str, renamed: &HashMap<String, String>) -> Option<String> {
-    let rest = reference.strip_prefix("#/paths/")?;
+    let fragment = reference.strip_prefix('#')?;
+    let pointer = percent_decode(fragment)?;
+    let rest = pointer.strip_prefix("/paths/")?;
     let (token, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    let key = percent_decode(token)?.replace("~1", "/").replace("~0", "~");
+    let key = token.replace("~1", "/").replace("~0", "~");
     let new = renamed.get(&key)?;
     let escaped = new.replace('~', "~0").replace('/', "~1");
-    let escaped = if token.contains('%') {
-        percent_encode(&escaped)
+    let pointer = format!("/paths/{escaped}{tail}");
+    Some(if fragment.contains('%') {
+        format!("#{}", percent_encode(&pointer))
     } else {
-        escaped
-    };
-    Some(format!("#/paths/{escaped}{tail}"))
+        format!("#{pointer}")
+    })
 }
 
 fn percent_decode(text: &str) -> Option<String> {
@@ -412,6 +487,11 @@ mod tests {
                 "#/paths/%7E1internal%7E1%7Bid%7D",
                 Some("#/paths/~1%7Bid%7D"),
             ),
+            (
+                "#/%70aths/~1internal~1items/get",
+                Some("#/paths/~1items/get"),
+            ),
+            ("#%2Fpaths%2F~1internal~1items", Some("#/paths/~1items")),
             ("#/paths/~1other", None),
             ("#/paths/%zz", None),
             ("#/components/pathItems/x", None),

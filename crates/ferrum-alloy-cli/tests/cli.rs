@@ -1367,8 +1367,21 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
         dir.path(),
         "raw.json",
         r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
-            "/internal/items":{"get":{"operationId":"items","summary":"Items.","responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}}}}}}},
+            "/internal/items":{"get":{"operationId":"items","summary":"Items.","responses":{
+                "200":{"description":"OK","content":{"application/json":{
+                    "schema":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"},
+                    "example":{"$ref":"#/paths/~1internal~1items"}
+                }},"links":{"self":{
+                    "operationRef":"#/paths/~1internal~1items/get",
+                    "parameters":{"literal":{"$ref":"#/paths/~1internal~1items"}}
+                }}},
+                "default":{"description":"Literal","content":{"application/json":{"schema":{
+                    "const":{"$ref":"#/paths/~1internal~1items"},
+                    "properties":{"default":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}}
+                }}}}
+            }}},
             "/alias":{"$ref":"#/paths/~1internal~1items"},
+            "/encoded":{"$ref":"#/%70aths/~1internal~1items"},
             "/elsewhere":{"$ref":"#/components/pathItems/Other"}
         },"components":{"pathItems":{"Other":{}}}}"##,
     );
@@ -1400,8 +1413,30 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
             paths["/elsewhere"]["$ref"], "#/components/pathItems/Other",
             "{name}"
         );
-        let schema = &paths["/items"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
-            ["$ref"];
+        assert_eq!(paths["/encoded"]["$ref"], "#/paths/~1items", "{name}");
+        let responses = &paths["/items"]["get"]["responses"];
+        let ok = &responses["200"];
+        assert_eq!(
+            ok["links"]["self"]["operationRef"], "#/paths/~1items/get",
+            "{name}"
+        );
+        let target = ok["links"]["self"]["operationRef"].as_str().unwrap();
+        assert!(
+            written.pointer(&target[1..]).is_some(),
+            "{name}: link resolves"
+        );
+        // Literal instance data is never rewritten.
+        let unchanged = serde_json::json!({ "$ref": "#/paths/~1internal~1items" });
+        assert_eq!(ok["content"]["application/json"]["example"], unchanged);
+        assert_eq!(ok["links"]["self"]["parameters"]["literal"], unchanged);
+        let literal = &responses["default"]["content"]["application/json"]["schema"];
+        assert_eq!(literal["const"], unchanged, "{name}");
+        // A property named like a keyword is a schema, so its `$ref` follows.
+        assert_eq!(
+            literal["properties"]["default"]["$ref"],
+            "#/paths/~1items/get/responses/200/x-schema"
+        );
+        let schema = &ok["content"]["application/json"]["schema"]["$ref"];
         assert_eq!(
             schema, "#/paths/~1items/get/responses/200/x-schema",
             "{name}"

@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use ferrum_alloy_edge::agents::{
-    AgentToolError, MAX_TEXT_BYTES, MAX_TOOLS, X_FERRUM_MCP, default_annotations,
+    AgentToolError, MAX_PROBLEMS, MAX_TEXT_BYTES, MAX_TOOLS, X_FERRUM_MCP, default_annotations,
     fill_default_annotations, lint, prepare, stamp, warnings,
 };
 use ferrum_alloy_edge::manifest::ServiceManifest;
@@ -697,4 +697,26 @@ fn many_referenced_path_items_are_filled() {
             json!({ "expose": true, "annotations": { "readOnlyHint": true } })
         );
     }
+}
+
+/// Problems echo bounded excerpts of what they name and stop at
+/// `MAX_PROBLEMS`, so a long path with many unknown keys cannot make the
+/// report grow with their product.
+#[test]
+fn problem_reports_are_bounded() {
+    let path = format!("/{}", "p".repeat(1024 * 1024));
+    let mut extension = serde_json::Map::new();
+    for index in 0..10_000 {
+        extension.insert(format!("unknown{index}"), json!(true));
+    }
+    let document = json!({
+        "paths": { path.as_str(): { "get": { X_FERRUM_MCP: extension } } }
+    });
+    let problems = lint(&document, None);
+    assert_eq!(problems.len(), MAX_PROBLEMS + 1, "{:?}", problems.last());
+    assert!(problems.iter().all(|problem| problem.len() < 1024));
+    assert_eq!(
+        problems.last().map(String::as_str),
+        Some("9900 further problems not listed")
+    );
 }

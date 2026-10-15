@@ -80,6 +80,66 @@ pub const MAX_TEXT_BYTES: usize = 8 * 1024;
 const MAX_REF_HOPS: usize = 16;
 /// Most characters of a `$ref` value echoed in a problem.
 const MAX_REF_EXCERPT_CHARS: usize = 80;
+/// Most characters of a path, key, or endpoint echoed in a problem.
+const MAX_TEXT_EXCERPT_CHARS: usize = 120;
+/// Most problems [`lint`] lists; the rest are counted in a final line.
+pub const MAX_PROBLEMS: usize = 100;
+/// Most paths one warning names.
+const MAX_WARNING_PATHS: usize = 20;
+
+/// Problems found so far, held to [`MAX_PROBLEMS`] so that hostile input
+/// cannot make the report grow with it: every message is bounded (input it
+/// echoes is shortened) and only the first [`MAX_PROBLEMS`] are kept.
+#[derive(Default)]
+struct Problems {
+    list: Vec<String>,
+    suppressed: usize,
+}
+
+impl Problems {
+    fn push(&mut self, problem: String) {
+        if self.list.len() < MAX_PROBLEMS {
+            self.list.push(problem);
+        } else {
+            self.suppressed += 1;
+        }
+    }
+
+    /// Keeps a document-wide problem even past the limit; called a fixed
+    /// number of times per document.
+    fn push_summary(&mut self, problem: String) {
+        self.list.push(problem);
+    }
+
+    fn extend(&mut self, problems: impl IntoIterator<Item = String>) {
+        for problem in problems {
+            self.push(problem);
+        }
+    }
+
+    fn into_list(mut self) -> Vec<String> {
+        if self.suppressed > 0 {
+            self.list
+                .push(format!("{} further problems not listed", self.suppressed));
+        }
+        self.list
+    }
+}
+
+/// `text` for a problem message, cut at [`MAX_TEXT_EXCERPT_CHARS`]; never
+/// walks more of it than it keeps.
+fn excerpt_text(text: &str) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(MAX_TEXT_EXCERPT_CHARS) {
+        None => std::borrow::Cow::Borrowed(text),
+        Some((end, _)) => std::borrow::Cow::Owned(format!("{}…", &text[..end])),
+    }
+}
+
+/// An operation's location in problems: `paths.<path>.<method>`, with a
+/// long path shortened.
+fn location(path: &str, method: &str) -> String {
+    format!("paths.{}.{method}", excerpt_text(path))
+}
 
 /// Invalid or unsafe AI-agent tool metadata. Every problem is listed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -127,20 +187,29 @@ pub fn prepare(
 /// `GET` operation that does not set `expose: false`. `openapi export` never
 /// writes one from `[agents]`; this catches a hand-written extension.
 pub fn warnings(document: &Value) -> Vec<String> {
-    let mut ignored = Vec::new();
+    let mut ignored = Problems::default();
     let Some(extension) = document_extension(document.get(X_FERRUM_MCP), &mut ignored) else {
         return Vec::new();
     };
     if !extension.include_operations.is_empty() || !extension.include_tags.is_empty() {
         return Vec::new();
     }
-    let undeclared: Vec<String> = operations(&mut Resolver::new(document))
-        .into_iter()
-        .filter(|(_, method, operation)| *method == "get" && explicit_expose(operation).is_none())
-        .map(|(path, method, _)| format!("paths.{path}.{method}"))
-        .collect();
+    let mut undeclared: Vec<String> = Vec::new();
+    let mut unlisted = 0usize;
+    for (path, method, operation) in operations(&mut Resolver::new(document)) {
+        if method == "get" && explicit_expose(operation).is_none() {
+            if undeclared.len() < MAX_WARNING_PATHS {
+                undeclared.push(location(path, method));
+            } else {
+                unlisted += 1;
+            }
+        }
+    }
     if undeclared.is_empty() {
         return Vec::new();
+    }
+    if unlisted > 0 {
+        undeclared.push(format!("{unlisted} more"));
     }
     vec![format!(
         "`{X_FERRUM_MCP}` has no `include`, so Edge publishes every GET operation, including {} that no handler declared; declare tools with `AgentTool::expose()` and use the manifest's [agents] section to publish only those",
@@ -312,7 +381,7 @@ fn fill_item_annotations(item: &mut Map<String, Value>) {
 /// document, not with the number of aliases times the size of what they
 /// share.
 pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
-    let mut problems = Vec::new();
+    let mut problems = Problems::default();
     let extension = document_extension(document.get(X_FERRUM_MCP), &mut problems);
     let mut resolver = Resolver::new(document);
     let found = operations(&mut resolver);
@@ -321,11 +390,11 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
         parsed
             .entry(std::ptr::from_ref(operation))
             .or_insert_with(|| {
-                operation_extension(operation, &format!("paths.{path}.{method}"), &mut problems)
+                operation_extension(operation, &location(path, method), &mut problems)
             });
     }
     let Some(extension) = extension else {
-        return problems;
+        return problems.into_list();
     };
     problems.extend(path_item_problems(&mut resolver));
     if document
@@ -344,7 +413,7 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     // valid tool name, if it has one.
     let mut tools: HashMap<*const Map<String, Value>, Option<Option<String>>> = HashMap::new();
     for &(path, method, operation) in &found {
-        let location = format!("paths.{path}.{method}");
+        let location = location(path, method);
         let key = std::ptr::from_ref(operation);
         let tool = match tools.get(&key) {
             Some(tool) => tool.clone(),
@@ -378,18 +447,18 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
         public_paths.push((path, location));
     }
     if selected == 0 {
-        problems.push(format!(
+        problems.push_summary(format!(
             "`{X_FERRUM_MCP}` is enabled but selects no operation Edge can publish; Edge refuses such a document"
         ));
     } else if selected > MAX_TOOLS {
-        problems.push(format!(
+        problems.push_summary(format!(
             "`{X_FERRUM_MCP}` selects {selected} operations; Edge publishes at most {MAX_TOOLS}, so narrow the selection"
         ));
     }
     if let Some(public_path) = public_path {
         endpoint_problems(&extension, public_path, &public_paths, &mut problems);
     }
-    problems
+    problems.into_list()
 }
 
 /// The checks of one operation Edge's selection would consider, run once per
@@ -402,7 +471,7 @@ fn check_selected<'a>(
     operation: &'a Map<String, Value>,
     operation_extension: &OperationExtension<'_>,
     location: &str,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) -> Option<Option<String>> {
     if !extension.selects(operation, operation_extension, method) {
         return None;
@@ -578,7 +647,7 @@ fn path_item_problems(resolver: &mut Resolver<'_>) -> Vec<String> {
             resolver
                 .resolve(item)
                 .err()
-                .map(|problem| format!("paths.{path}: {problem}"))
+                .map(|problem| format!("paths.{}: {problem}", excerpt_text(path)))
         })
         .collect()
 }
@@ -795,16 +864,12 @@ pub(crate) fn is_valid_namespace(namespace: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
-fn unknown_keys(
-    object: &Map<String, Value>,
-    allowed: &[&str],
-    at: &str,
-    problems: &mut Vec<String>,
-) {
+fn unknown_keys(object: &Map<String, Value>, allowed: &[&str], at: &str, problems: &mut Problems) {
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
             problems.push(format!(
-                "`{at}` has the unknown key {key:?}; Edge accepts only {}",
+                "`{at}` has the unknown key {:?}; Edge accepts only {}",
+                excerpt_text(key),
                 allowed.join(", ")
             ));
         }
@@ -815,7 +880,7 @@ fn string_set(
     object: &Map<String, Value>,
     key: &str,
     at: &str,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) -> BTreeSet<String> {
     match object.get(key) {
         None | Some(Value::Null) => BTreeSet::new(),
@@ -838,7 +903,7 @@ fn strings(items: &[Value]) -> BTreeSet<String> {
 fn selector(
     object: &Map<String, Value>,
     key: &str,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) -> (BTreeSet<String>, BTreeSet<String>) {
     let at = format!("{X_FERRUM_MCP}.{key}");
     match object.get(key) {
@@ -861,10 +926,7 @@ fn selector(
 
 /// Parses the document-level extension (Edge `parse_x_ferrum_mcp_extension`).
 /// `None` when it is absent, `null`, `false`, or `enabled: false`.
-fn document_extension(
-    value: Option<&Value>,
-    problems: &mut Vec<String>,
-) -> Option<DocumentExtension> {
+fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<DocumentExtension> {
     let object = match value {
         None | Some(Value::Null) | Some(Value::Bool(false)) => return None,
         Some(Value::Bool(true)) => return Some(DocumentExtension::default()),
@@ -938,7 +1000,7 @@ fn optional_text<'a>(
     object: &'a Map<String, Value>,
     key: &str,
     at: &str,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) -> Option<&'a str> {
     match object.get(key) {
         None | Some(Value::Null) => None,
@@ -955,7 +1017,7 @@ fn optional_text<'a>(
 fn operation_extension<'a>(
     operation: &'a Map<String, Value>,
     location: &str,
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) -> OperationExtension<'a> {
     let object = match operation.get(X_FERRUM_MCP) {
         None | Some(Value::Null) => return OperationExtension::default(),
@@ -1033,16 +1095,17 @@ fn endpoint_problems(
     extension: &DocumentExtension,
     public_path: &str,
     selected: &[(&str, String)],
-    problems: &mut Vec<String>,
+    problems: &mut Problems,
 ) {
     let prefix = public_path.trim_end_matches('/');
     let endpoint = extension
         .endpoint_path
         .clone()
         .unwrap_or_else(|| format!("{prefix}/mcp"));
+    let shown_endpoint = excerpt_text(&endpoint);
     if !prefix.is_empty() && endpoint != prefix && !endpoint.starts_with(&format!("{prefix}/")) {
         problems.push(format!(
-            "`{X_FERRUM_MCP}.endpoint.path` {endpoint:?} is not under api.public_path {public_path:?}"
+            "`{X_FERRUM_MCP}.endpoint.path` {shown_endpoint:?} is not under api.public_path {public_path:?}"
         ));
     }
     let scope = endpoint.trim_end_matches('/');
@@ -1055,7 +1118,8 @@ fn endpoint_problems(
         };
         if public == scope || public.starts_with(&scope_subtree) {
             problems.push(format!(
-                "{location} is served at {public:?}, inside the MCP endpoint {endpoint:?}; move the endpoint ([agents] endpoint_path)"
+                "{location} is served at {:?}, inside the MCP endpoint {shown_endpoint:?}; move the endpoint ([agents] endpoint_path)",
+                excerpt_text(&public)
             ));
         }
     }
