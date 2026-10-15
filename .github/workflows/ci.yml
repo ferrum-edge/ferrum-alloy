@@ -28,6 +28,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -40,6 +42,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -49,17 +53,25 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
-    # Preserve the required status context configured in the main ruleset.
-    # This display name is historical; runs-on below pins Ubuntu 26.04.
-    name: Test (${{ matrix.os == 'ubuntu-26.04' && 'ubuntu-latest' || matrix.os }})
+    # Preserve the required status contexts configured in the main ruleset.
+    # The display names are historical; runs-on pins each runner image.
+    name: Test (${{ matrix.context }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-26.04
+            context: ubuntu-latest
+          - os: macos-26
+            context: macos-latest
+          - os: windows-2025
+            context: windows-latest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -78,6 +90,8 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -99,13 +113,15 @@ jobs:
           cargo clippy --locked -p ferrum-alloy-edge --all-targets --no-default-features -- -D warnings
           cargo test --locked -p ferrum-alloy-edge --no-default-features
       - name: Each optional integration alone
+        # --all-targets compiles the tests, examples, and benches too, so a
+        # feature-gated test that only builds with every feature on fails here.
         run: |
           set -euxo pipefail
-          cargo check --locked -p ferrum-alloy --no-default-features
+          cargo check --locked -p ferrum-alloy --all-targets --no-default-features
           for feature in otel edge tls postgres openapi openapi-ui jwt http-client compression cors diagnostics; do
-            cargo check --locked -p ferrum-alloy --no-default-features --features "$feature"
+            cargo check --locked -p ferrum-alloy --all-targets --no-default-features --features "$feature"
           done
-          cargo check --locked -p ferrum-alloy --features full
+          cargo check --locked -p ferrum-alloy --all-targets --features full
       - name: Minimal build has no optional batteries
         run: |
           set -euxo pipefail
@@ -123,11 +139,32 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo +1.94.0 check --workspace --all-targets --all-features --locked
+      - name: Build every target and the tests (all features)
+        run: cargo +1.94.0 test --workspace --all-targets --all-features --locked --no-run
+      - name: Build every target and the tests (default features)
+        run: cargo +1.94.0 test --workspace --all-targets --locked --no-run
+
+  rustdoc:
+    name: Rustdoc
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo doc --workspace --all-features --no-deps --locked
 
   generator:
     name: Generated projects
@@ -151,6 +188,8 @@ jobs:
       FERRUM_ALLOY_TEST_DATABASE_URL: postgres://alloy:alloy@127.0.0.1:5432/alloy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -180,6 +219,8 @@ jobs:
       FERRUM_ALLOY_TEST_DATABASE_URL: postgres://alloy:alloy@127.0.0.1:5432/alloy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -199,6 +240,8 @@ jobs:
       SMOKE_OUT: target/browser-smoke
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -278,9 +321,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       - run: cargo deny check
       - name: Fuzz crate dependencies
         # The fuzz crate is its own workspace with its own lockfile. Alloy's
@@ -298,6 +343,8 @@ jobs:
         ferrum-alloy ferrum-alloy-cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -388,6 +435,8 @@ jobs:
       FUZZ_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -442,6 +491,8 @@ jobs:
       tested: ${{ steps.read.outputs.tested }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - name: Read the tested Edge releases
         id: read
         # Every Edge image the jobs below run comes from this list (newest
@@ -473,6 +524,8 @@ jobs:
       EDGE_IMAGE: ${{ matrix.edge.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
@@ -514,6 +567,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
       - name: ferrum-edge validate (${{ matrix.edge.release }}) on the plain-HTTP fixture
         env:
           EDGE_IMAGE: ${{ matrix.edge.image }}
