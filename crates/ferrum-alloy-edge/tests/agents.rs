@@ -713,10 +713,57 @@ fn problem_reports_are_bounded() {
         "paths": { path.as_str(): { "get": { X_FERRUM_MCP: extension } } }
     });
     let problems = lint(&document, None);
+    // Wrong-typed annotation and limit keys are echoed shortened too.
+    let long_key = "k".repeat(1024 * 1024);
+    let typed = json!({
+        X_FERRUM_MCP: { "limits": { long_key.as_str(): "x" } },
+        "paths": { "/a": { "get": {
+            "operationId": "a",
+            "summary": "A.",
+            X_FERRUM_MCP: { "annotations": { long_key.as_str(): null } }
+        } } }
+    });
+    let typed_problems = lint(&typed, None);
+    assert!(typed_problems.len() >= 3, "{typed_problems:?}");
+    assert!(
+        typed_problems.iter().all(|problem| problem.len() < 1024),
+        "{:?}",
+        typed_problems.iter().map(String::len).collect::<Vec<_>>()
+    );
     assert_eq!(problems.len(), MAX_PROBLEMS + 1, "{:?}", problems.last());
     assert!(problems.iter().all(|problem| problem.len() < 1024));
     assert_eq!(
         problems.last().map(String::as_str),
         Some("9900 further problems not listed")
     );
+}
+
+/// A request body shared by many operations is checked for a JSON media type
+/// once: the verdict is kept per body. Rescanning its 100,000 media types for
+/// each of 4,000 operations would take far longer than the bound.
+#[test]
+fn shared_request_bodies_are_checked_once() {
+    let mut content = serde_json::Map::new();
+    for index in 0..100_000 {
+        content.insert(format!("text/x-{index}"), json!({}));
+    }
+    let mut paths = serde_json::Map::new();
+    for index in 0..4_000 {
+        let mut post = operation(&format!("p{index}"), json!({ "expose": true }));
+        post["requestBody"] = json!({ "$ref": "#/components/requestBodies/Shared" });
+        paths.insert(format!("/p{index}"), json!({ "post": post }));
+    }
+    let document = json!({
+        X_FERRUM_MCP: true,
+        "paths": paths,
+        "components": { "requestBodies": { "Shared": { "content": content } } }
+    });
+    let started = std::time::Instant::now();
+    let problems = lint(&document, None);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_problem(&problems, "takes a request body with no JSON media type");
 }

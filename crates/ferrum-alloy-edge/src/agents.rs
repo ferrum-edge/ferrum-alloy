@@ -688,6 +688,10 @@ struct Resolver<'a> {
     document: &'a Value,
     /// Keyed by the address of a value that has a `$ref`.
     memo: HashMap<*const Value, Result<Resolved<'a>, String>>,
+    /// Whether a resolved request body offers a JSON media type, keyed by
+    /// the body's address, so a body shared by many operations is scanned
+    /// once.
+    json_bodies: HashMap<*const Value, bool>,
 }
 
 impl<'a> Resolver<'a> {
@@ -695,6 +699,7 @@ impl<'a> Resolver<'a> {
         Self {
             document,
             memo: HashMap::new(),
+            json_bodies: HashMap::new(),
         }
     }
 
@@ -798,8 +803,11 @@ fn is_json_media_type(media_type: &str) -> bool {
         .next()
         .unwrap_or(media_type)
         .trim()
-        .to_ascii_lowercase();
-    essence == "application/json" || essence.ends_with("+json")
+        .as_bytes();
+    let suffix = b"+json";
+    essence.eq_ignore_ascii_case(b"application/json")
+        || (essence.len() >= suffix.len()
+            && essence[essence.len() - suffix.len()..].eq_ignore_ascii_case(suffix))
 }
 
 /// A request body the bridge cannot send. Edge refuses a required one at
@@ -815,10 +823,14 @@ fn request_body_problem<'a>(
         Ok(resolved) => resolved.value,
         Err(problem) => return Some(format!("{location} request body: {problem}")),
     };
-    let json = body
-        .get("content")
-        .and_then(Value::as_object)
-        .is_some_and(|content| content.keys().any(|media| is_json_media_type(media)));
+    let json = *resolver
+        .json_bodies
+        .entry(std::ptr::from_ref(body))
+        .or_insert_with(|| {
+            body.get("content")
+                .and_then(Value::as_object)
+                .is_some_and(|content| content.keys().any(|media| is_json_media_type(media)))
+        });
     if json {
         return None;
     }
@@ -974,7 +986,10 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
             unknown_keys(limits, LIMIT_KEYS, &at, problems);
             for (key, value) in limits {
                 if value.as_u64().is_none_or(|limit| limit == 0) {
-                    problems.push(format!("`{at}.{key}` must be a positive integer"));
+                    problems.push(format!(
+                        "`{at}.{}` must be a positive integer",
+                        excerpt_text(key)
+                    ));
                 }
             }
         }
@@ -1072,7 +1087,8 @@ fn operation_extension<'a>(
                 };
                 if !valid {
                     problems.push(format!(
-                        "`{at}.{key}` has the wrong type or is longer than {MAX_TEXT_BYTES} bytes"
+                        "`{at}.{}` has the wrong type or is longer than {MAX_TEXT_BYTES} bytes",
+                        excerpt_text(key)
                     ));
                 }
             }

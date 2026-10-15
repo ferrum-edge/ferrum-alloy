@@ -243,11 +243,12 @@ const NAME_MAP_KEYWORDS: &[&str] = &[
 
 /// Points every local reference into a renamed `paths` key
 /// (`#/paths/<key>...`) at the key's new name, so an alias of a stripped
-/// path still resolves: `$ref` in OpenAPI and Schema objects, and a Link
-/// Object's `operationRef`. Literal instance data (`example`, an `examples`
-/// array, an Example Object's `value`, `default`, `const`, `enum`, and a
-/// Link's `parameters` and `requestBody`) is never changed, even when it
-/// holds a `$ref` key.
+/// path still resolves: `$ref` and `$dynamicRef` in OpenAPI and Schema
+/// objects, a Discriminator Object's `mapping` values, and a Link Object's
+/// `operationRef`. Literal instance data (`example`, an `examples` array, an
+/// Example Object's `value`, `default`, `const`, `enum`, and a Link's
+/// `parameters` and `requestBody`) and specification extensions (`x-*`) are
+/// never changed, even when they hold a `$ref` key.
 fn rewrite_path_refs(value: &mut Value, renamed: &HashMap<String, String>) {
     rewrite_in(value, renamed, Context::Keywords);
 }
@@ -262,8 +263,17 @@ fn rewrite_in(value: &mut Value, renamed: &HashMap<String, String>, context: Con
                     Context::Link if key == "operationRef" => rewrite_reference(child, renamed),
                     Context::Link if key == "parameters" || key == "requestBody" => {}
                     Context::Keywords | Context::Link => {
-                        if key == "$ref" {
+                        if key == "$ref" || key == "$dynamicRef" {
                             rewrite_reference(child, renamed);
+                        } else if key.starts_with("x-") {
+                            // Specification extensions hold arbitrary data
+                            // without reference semantics.
+                        } else if key == "discriminator" {
+                            if let Some(Value::Object(mapping)) = child.get_mut("mapping") {
+                                for target in mapping.values_mut() {
+                                    rewrite_reference(target, renamed);
+                                }
+                            }
                         } else if LITERAL_KEYWORDS.contains(&key)
                             || (key == "examples" && child.is_array())
                         {

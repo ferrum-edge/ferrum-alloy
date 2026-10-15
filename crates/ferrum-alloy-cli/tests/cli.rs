@@ -1377,6 +1377,12 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
                 }}},
                 "default":{"description":"Literal","content":{"application/json":{"schema":{
                     "const":{"$ref":"#/paths/~1internal~1items"},
+                    "x-payload":{"$ref":"#/paths/~1internal~1items"},
+                    "$dynamicRef":"#/paths/~1internal~1items/get/responses/200/content/application~1json/schema",
+                    "discriminator":{"propertyName":"kind","mapping":{
+                        "item":"#/paths/~1internal~1items/get/responses/200/content/application~1json/schema",
+                        "named":"Other"
+                    }},
                     "properties":{"default":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}}
                 }}}}
             }}},
@@ -1431,6 +1437,18 @@ fn openapi_export_rewrites_references_to_stripped_paths() {
         assert_eq!(ok["links"]["self"]["parameters"]["literal"], unchanged);
         let literal = &responses["default"]["content"]["application/json"]["schema"];
         assert_eq!(literal["const"], unchanged, "{name}");
+        assert_eq!(
+            literal["x-payload"], unchanged,
+            "{name}: extensions are opaque"
+        );
+        let moved = "#/paths/~1items/get/responses/200/content/application~1json/schema";
+        assert_eq!(literal["$dynamicRef"], moved, "{name}");
+        assert_eq!(literal["discriminator"]["mapping"]["item"], moved, "{name}");
+        assert_eq!(literal["discriminator"]["mapping"]["named"], "Other");
+        assert!(
+            written.pointer(&moved[1..]).is_some(),
+            "{name}: target resolves"
+        );
         // A property named like a keyword is a schema, so its `$ref` follows.
         assert_eq!(
             literal["properties"]["default"]["$ref"],
