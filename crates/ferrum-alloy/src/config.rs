@@ -47,6 +47,37 @@ pub const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
 /// `auth.jwt.jwks_max_stale_ms`: 24 hours.
 pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// Upper bound, in milliseconds, of the connection timeouts
+/// (`server.header_read_timeout_ms`, `server.idle_timeout_ms`,
+/// `server.write_stall_timeout_ms`, `server.request_timeout_ms`,
+/// `server.admission_wait_timeout_ms`, `server.tls.handshake_timeout_ms`,
+/// and `shutdown.drain_timeout_ms`): 24 hours. It exists so a units typo
+/// cannot silently negate a timeout; it is far above every default.
+pub const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Upper bound of `server.max_header_bytes`: 16 MiB.
+pub const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Upper bound of `server.request_body_limit_bytes`: 1 GiB.
+pub const MAX_REQUEST_BODY_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Upper bound of `server.max_header_count`.
+pub const MAX_HEADER_COUNT: usize = 10_000;
+
+/// Upper bound of `server.http2_max_concurrent_streams`.
+pub const MAX_HTTP2_CONCURRENT_STREAMS: u32 = 16_384;
+
+/// Upper bound, in seconds, of `auth.jwt.leeway_seconds`: one hour. Leeway
+/// extends `exp`/`nbf` acceptance, so an unbounded value (for example a
+/// milliseconds-as-seconds typo) must not be accepted.
+pub const MAX_JWT_LEEWAY_SECONDS: u64 = 3_600;
+
+/// Upper bound of `auth.jwt.jwks_max_bytes`: 16 MiB.
+pub const MAX_JWKS_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Upper bound, in milliseconds, of `auth.jwt.jwks_timeout_ms`: 60 seconds.
+pub const MAX_JWKS_TIMEOUT_MS: u64 = 60_000;
+
 /// The environment variable naming the configuration file.
 pub const CONFIG_FILE_ENV: &str = "FERRUM_ALLOY_CONFIG";
 
@@ -730,7 +761,7 @@ pub struct AuthSettings {
 }
 
 /// JWT verification policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct JwtSettings {
@@ -761,15 +792,38 @@ pub struct JwtSettings {
     /// key set expires. At most [`MAX_JWKS_LIFETIME_MS`].
     #[serde(default = "default_jwks_max_stale_ms")]
     pub jwks_max_stale_ms: u64,
-    /// Maximum JWKS response size.
+    /// Maximum JWKS response size. At most [`MAX_JWKS_MAX_BYTES`].
     #[serde(default = "default_jwks_max_bytes")]
     pub jwks_max_bytes: usize,
-    /// JWKS request timeout.
+    /// JWKS request timeout. At most [`MAX_JWKS_TIMEOUT_MS`].
     #[serde(default = "default_jwks_timeout_ms")]
     pub jwks_timeout_ms: u64,
-    /// Clock skew tolerance for `exp`/`nbf`.
+    /// Clock skew tolerance for `exp`/`nbf`. At most
+    /// [`MAX_JWT_LEEWAY_SECONDS`].
     #[serde(default = "default_leeway")]
     pub leeway_seconds: u64,
+}
+
+/// The JWKS URL may carry gateway credentials (userinfo or a query key),
+/// so `Debug` never prints it, like [`OtlpSettings`]' endpoint.
+impl fmt::Debug for JwtSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JwtSettings")
+            .field("issuer", &self.issuer)
+            .field("audiences", &self.audiences)
+            .field("algorithms", &self.algorithms)
+            .field("jwks_url", &self.jwks_url.as_ref().map(|_| "<configured>"))
+            .field(
+                "jwks_min_refresh_interval_ms",
+                &self.jwks_min_refresh_interval_ms,
+            )
+            .field("jwks_max_age_ms", &self.jwks_max_age_ms)
+            .field("jwks_max_stale_ms", &self.jwks_max_stale_ms)
+            .field("jwks_max_bytes", &self.jwks_max_bytes)
+            .field("jwks_timeout_ms", &self.jwks_timeout_ms)
+            .field("leeway_seconds", &self.leeway_seconds)
+            .finish()
+    }
 }
 
 impl JwtSettings {
@@ -1571,6 +1625,11 @@ impl AlloyConfig {
         if let Some(endpoint) = &mut config.otlp.endpoint {
             *endpoint = redact_endpoint(endpoint);
         }
+        if let Some(jwt) = &mut config.auth.jwt
+            && let Some(url) = &mut jwt.jwks_url
+        {
+            *url = redact_endpoint(url);
+        }
         config
     }
 
@@ -1619,11 +1678,58 @@ impl AlloyConfig {
                 error(format!("{name} must be greater than zero"));
             }
         }
+        // The same timeouts are capped, so a units typo cannot silently
+        // negate them; the two timeouts where zero is meaningful are
+        // capped too.
+        for (name, value) in [
+            (
+                "server.header_read_timeout_ms",
+                server.header_read_timeout_ms,
+            ),
+            ("server.idle_timeout_ms", server.idle_timeout_ms),
+            (
+                "server.write_stall_timeout_ms",
+                server.write_stall_timeout_ms,
+            ),
+            (
+                "server.body_read_stall_timeout_ms",
+                server.body_read_stall_timeout_ms,
+            ),
+            ("server.request_timeout_ms", server.request_timeout_ms),
+            (
+                "server.admission_wait_timeout_ms",
+                server.admission_wait_timeout_ms,
+            ),
+            ("shutdown.drain_timeout_ms", self.shutdown.drain_timeout_ms),
+        ] {
+            if value > MAX_TIMEOUT_MS {
+                error(format!(
+                    "{name} must not exceed 24 hours ({MAX_TIMEOUT_MS})"
+                ));
+            }
+        }
+        if server.request_body_limit_bytes > MAX_REQUEST_BODY_LIMIT_BYTES {
+            error(format!(
+                "server.request_body_limit_bytes must not exceed {MAX_REQUEST_BODY_LIMIT_BYTES}"
+            ));
+        }
+        if server.max_header_count > MAX_HEADER_COUNT {
+            error(format!(
+                "server.max_header_count must not exceed {MAX_HEADER_COUNT}"
+            ));
+        }
+        if server.http2_max_concurrent_streams > MAX_HTTP2_CONCURRENT_STREAMS {
+            error(format!(
+                "server.http2_max_concurrent_streams must not exceed {MAX_HTTP2_CONCURRENT_STREAMS}"
+            ));
+        }
         if server.max_header_bytes < 8_192 {
             error("server.max_header_bytes must be at least 8192".into());
         }
-        if server.max_header_bytes > u32::MAX as usize {
-            error("server.max_header_bytes is too large".into());
+        if server.max_header_bytes > MAX_HEADER_BYTES {
+            error(format!(
+                "server.max_header_bytes must not exceed {MAX_HEADER_BYTES}"
+            ));
         }
         // Both counts become Tokio semaphore permits; `Semaphore::new`
         // panics above `MAX_PERMITS`, so reject them here instead of
@@ -1667,6 +1773,14 @@ impl AlloyConfig {
             }
             if tls.client_auth == ClientAuth::None && !tls.client_crl_paths.is_empty() {
                 error("server.tls.client_crl_paths is set but client_auth is none".into());
+            }
+            if tls.handshake_timeout_ms == 0 {
+                error("server.tls.handshake_timeout_ms must be greater than zero".into());
+            }
+            if tls.handshake_timeout_ms > MAX_TIMEOUT_MS {
+                error(format!(
+                    "server.tls.handshake_timeout_ms must not exceed 24 hours ({MAX_TIMEOUT_MS})"
+                ));
             }
             let interval = tls.reload_interval_ms;
             if interval != 0 && !TLS_RELOAD_INTERVAL_MS.contains(&interval) {
@@ -1821,6 +1935,22 @@ impl AlloyConfig {
         {
             error("database pool sizes are invalid (need 0 <= min_connections <= max_connections, max > 0)".into());
         }
+        if self.database.acquire_timeout_ms == 0 {
+            error("database.acquire_timeout_ms must be greater than zero".into());
+        }
+        if self.http_client.connect_timeout_ms == 0 {
+            error("http_client.connect_timeout_ms must be greater than zero".into());
+        }
+        if self.http_client.request_timeout_ms == 0 {
+            error("http_client.request_timeout_ms must be greater than zero".into());
+        }
+        for rule in &self.http_client.propagate_trace_context_to {
+            if !host_rule_valid(rule) {
+                error(format!(
+                    "http_client.propagate_trace_context_to: invalid host rule {rule:?} (use host or .suffix)"
+                ));
+            }
+        }
         if let Some(jwt) = &self.auth.jwt {
             if !has("jwt") {
                 error("auth.jwt is configured but the `jwt` feature is not enabled".into());
@@ -1856,6 +1986,21 @@ impl AlloyConfig {
                     "auth.jwt.jwks_min_refresh_interval_ms must not exceed auth.jwt.jwks_max_age_ms"
                         .into(),
                 );
+            }
+            if jwt.jwks_timeout_ms == 0 || jwt.jwks_timeout_ms > MAX_JWKS_TIMEOUT_MS {
+                error(format!(
+                    "auth.jwt.jwks_timeout_ms must be within 1..={MAX_JWKS_TIMEOUT_MS}"
+                ));
+            }
+            if jwt.jwks_max_bytes == 0 || jwt.jwks_max_bytes > MAX_JWKS_MAX_BYTES {
+                error(format!(
+                    "auth.jwt.jwks_max_bytes must be within 1..={MAX_JWKS_MAX_BYTES}"
+                ));
+            }
+            if jwt.leeway_seconds > MAX_JWT_LEEWAY_SECONDS {
+                error(format!(
+                    "auth.jwt.leeway_seconds must not exceed {MAX_JWT_LEEWAY_SECONDS}"
+                ));
             }
             match &jwt.jwks_url {
                 None => error("auth.jwt.jwks_url is required".into()),
@@ -1953,17 +2098,33 @@ impl AlloyConfig {
     }
 }
 
+/// Whether `rule` is a host rule `AlloyClient::new` accepts (an exact host
+/// or a `.suffix`). Mirrors `HostRule::parse` in `http_client.rs`, which is
+/// feature-gated, so `check` accepts precisely what client construction
+/// accepts, with or without the `http-client` feature.
+fn host_rule_valid(rule: &str) -> bool {
+    let rule = rule.trim().to_ascii_lowercase();
+    !rule.is_empty() && !rule.contains(['/', ':', ' ', '*', '@'])
+}
+
 fn redact_endpoint(endpoint: &str) -> String {
     let Some((scheme, rest)) = endpoint.split_once("://") else {
         return "<redacted>".to_owned();
     };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
+    // URL parsers skip extra slashes after the scheme of hierarchical
+    // URLs (`https:////user:secret@host` has that authority), so the
+    // authority here is what follows any run of leading slashes, not
+    // merely the text up to the first one.
+    let after_slashes = rest.trim_start_matches('/');
+    let authority_end = after_slashes
+        .find(['/', '?', '#'])
+        .unwrap_or(after_slashes.len());
+    let authority = &after_slashes[..authority_end];
     let authority = authority.rfind('@').map_or_else(
         || authority.to_owned(),
         |at| format!("<redacted>@{}", &authority[at + 1..]),
     );
-    let suffix = &rest[authority_end..];
+    let suffix = &after_slashes[authority_end..];
     let query_start = suffix.find('?');
     let fragment_start = suffix.find('#');
     let safe_suffix_end = query_start

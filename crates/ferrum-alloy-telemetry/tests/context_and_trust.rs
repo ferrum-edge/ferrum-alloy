@@ -104,7 +104,11 @@ async fn untrusted_trace_context_is_rerooted_and_not_forwarded() {
     let request = request_from(
         "203.0.113.9:4000",
         None,
-        &[("traceparent", INCOMING), ("tracestate", "vendor=value")],
+        &[
+            ("traceparent", INCOMING),
+            ("tracestate", "vendor=value"),
+            ("baggage", "user=alice"),
+        ],
     );
     let (seen, _) = run(layer, request, &[]).await;
     assert_eq!(
@@ -125,6 +129,10 @@ async fn untrusted_trace_context_is_rerooted_and_not_forwarded() {
         "rejected context must not reach the handler"
     );
     assert!(!seen.headers.contains_key("tracestate"));
+    assert!(
+        !seen.headers.contains_key("baggage"),
+        "rejected baggage must not reach the handler either"
+    );
     assert_eq!(metrics.trace_decisions.get("rerooted_untrusted"), 1);
 }
 

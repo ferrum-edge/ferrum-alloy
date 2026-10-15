@@ -418,8 +418,12 @@ where
         shared.metrics.trace_decisions.inc(trace.decision.as_str());
         if trace.accepted.is_none() {
             // Do not let application code forward rejected context.
+            // `baggage` goes too: outbound policy never forwards it, and a
+            // handler copying headers by hand must not propagate baggage
+            // from a re-rooted (untrusted) request.
             request.headers_mut().remove(TRACEPARENT);
             request.headers_mut().remove(TRACESTATE);
+            request.headers_mut().remove("baggage");
         }
 
         let method = method_label(request.method());
@@ -579,6 +583,7 @@ where
             is_head,
             route_slot,
             route: None,
+            series: None,
             status: None,
             body_bytes: 0,
             trailers: false,
@@ -741,6 +746,10 @@ pub(crate) struct Finalizer {
     is_head: bool,
     route_slot: RouteSlot,
     route: Option<RouteLabel>,
+    /// The metrics series resolved at headers (with its route label), so
+    /// finalization records the duration without a second lookup or a
+    /// second route allocation.
+    series: Option<(Arc<crate::metrics::Series>, String)>,
     status: Option<StatusCode>,
     body_bytes: u64,
     trailers: bool,
@@ -791,9 +800,12 @@ impl Finalizer {
         if let Some(name) = name {
             crate::otel_bridge::rename(&self.span, name);
         }
-        self.shared
+        let series = self
+            .shared
             .metrics
-            .record_time_to_headers(self.method, &route, status.as_u16(), elapsed);
+            .series_for(self.method, &route, status.as_u16());
+        series.record_time_to_headers(elapsed);
+        self.series = Some((series, route));
         elapsed
     }
 
@@ -825,11 +837,19 @@ impl Finalizer {
             return;
         }
         self.done = true;
+        // Taken before the route label is borrowed below.
+        let pending = self.evidence.take();
         let now = Instant::now();
         let total = now.saturating_duration_since(self.start);
         let body = self.headers_at.map(|at| now.saturating_duration_since(at));
         let status = self.status.map_or(0, |s| s.as_u16());
-        let route = self.route_label().to_owned();
+        // Borrow the route label resolved at headers; only a request
+        // that never produced headers resolves it here. Either way this
+        // borrows instead of allocating.
+        let route: &str = match &self.series {
+            Some((_, label)) => label.as_str(),
+            None => self.route_label(),
+        };
 
         let failed = matches!(outcome, BodyOutcome::Error | BodyOutcome::ServiceError);
         tracing::record_all!(
@@ -843,11 +863,14 @@ impl Finalizer {
         );
 
         let metrics = &self.shared.metrics;
-        metrics.record_duration(self.method, &route, status, total);
+        match &self.series {
+            Some((series, _)) => series.record_duration(total),
+            None => metrics.record_duration(self.method, route, status, total),
+        }
         metrics.body_outcomes.inc(outcome.as_str());
         metrics.request_finished();
 
-        if let Some(pending) = self.evidence.take() {
+        if let Some(pending) = pending {
             let route = match self.route.as_ref().or_else(|| self.route_slot.get()) {
                 Some(RouteLabel::Template(template)) => Some(Arc::clone(template)),
                 _ => None,

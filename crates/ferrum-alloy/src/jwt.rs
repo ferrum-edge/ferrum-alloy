@@ -52,9 +52,12 @@ use tokio::sync::watch;
 use tower_layer::Layer;
 use tower_service::Service;
 
-use crate::config::{JwtSettings, MAX_JWKS_LIFETIME_MS};
+use crate::config::{
+    JwtSettings, MAX_JWKS_LIFETIME_MS, MAX_JWKS_MAX_BYTES, MAX_JWKS_TIMEOUT_MS,
+    MAX_JWT_LEEWAY_SECONDS,
+};
 use crate::error::AlloyError;
-use crate::problem::{Problem, ProblemKind};
+use crate::problem::{Problem, ProblemKind, sanitize_detail};
 
 /// A verified caller.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,7 +109,9 @@ pub enum AuthError {
 
 /// Application authorization policy, evaluated after authentication.
 pub trait Authorize: Send + Sync + 'static {
-    /// `Err(detail)` denies with `403`. Keep `detail` free of secrets.
+    /// `Err(detail)` denies with `403`. The detail reaches the client
+    /// sanitized like framework problem details (control characters
+    /// blanked, length bounded); keep it free of secrets regardless.
     fn authorize(&self, principal: &Principal, request: &Parts) -> Result<(), String>;
 }
 
@@ -362,6 +367,23 @@ impl JwtVerifier {
                 "auth.jwt.jwks_min_refresh_interval_ms must not exceed auth.jwt.jwks_max_age_ms"
                     .into(),
             ));
+        }
+        if settings.jwks_timeout_ms == 0 || settings.jwks_timeout_ms > MAX_JWKS_TIMEOUT_MS {
+            return Err(AlloyError::Integration(format!(
+                "auth.jwt.jwks_timeout_ms must be within 1..={MAX_JWKS_TIMEOUT_MS}"
+            )));
+        }
+        if settings.jwks_max_bytes == 0 || settings.jwks_max_bytes > MAX_JWKS_MAX_BYTES {
+            return Err(AlloyError::Integration(format!(
+                "auth.jwt.jwks_max_bytes must be within 1..={MAX_JWKS_MAX_BYTES}"
+            )));
+        }
+        // The validation library adds and subtracts the leeway from the
+        // current epoch time in `u64`; an unbounded leeway underflows it.
+        if settings.leeway_seconds > MAX_JWT_LEEWAY_SECONDS {
+            return Err(AlloyError::Integration(format!(
+                "auth.jwt.leeway_seconds must not exceed {MAX_JWT_LEEWAY_SECONDS}"
+            )));
         }
         let algorithms = settings
             .algorithms
@@ -697,11 +719,44 @@ impl JwtVerifier {
     }
 
     /// Verifies a compact JWS and returns the principal.
+    ///
+    /// Only plain JWTs are accepted: a header carrying `crit`, `enc`,
+    /// `zip`, or `cty` (with any value, `null` included), or an explicit
+    /// `typ` other than `JWT` or `at+jwt` in their bare or
+    /// `application/`-prefixed spellings (case-insensitive), is rejected
+    /// before any key is fetched.
     pub async fn verify(&self, token: &str) -> Result<Principal, AuthError> {
         if token.len() > 16 * 1024 {
             return Err(AuthError::Invalid("token too large"));
         }
+        // Typed header fields are `Option`s, so an explicit
+        // `"crit": null` deserializes exactly like an absent member;
+        // presence of these members is judged on the raw header.
+        if raw_header_carries_unsupported_member(token) {
+            return Err(AuthError::Invalid("unsupported token header"));
+        }
         let header = decode_header(token).map_err(|_| AuthError::Invalid("malformed token"))?;
+        // This verifier understands no `crit` extension, and `enc`/`zip`/
+        // `cty` mark encrypted, compressed, or nested tokens rather than
+        // the plain JWTs accepted here (RFC 7515 §4.2, RFC 8725 §3.11).
+        // `jku`/`x5u`/`jwk` stay ignored: keys come only from the JWKS.
+        if header.crit.is_some()
+            || header.enc.is_some()
+            || header.zip.is_some()
+            || header.cty.is_some()
+        {
+            return Err(AuthError::Invalid("unsupported token header"));
+        }
+        if let Some(typ) = &header.typ {
+            // Only the `application/` prefix may be present or omitted
+            // (RFC 7515 §4.1.9); other prefixes are different types.
+            let accepted = ["jwt", "at+jwt", "application/jwt", "application/at+jwt"]
+                .iter()
+                .any(|accepted| typ.eq_ignore_ascii_case(accepted));
+            if !accepted {
+                return Err(AuthError::Invalid("unsupported token type"));
+            }
+        }
         if !self.inner.algorithms.contains(&header.alg) {
             return Err(AuthError::Invalid("algorithm not allowed"));
         }
@@ -753,6 +808,12 @@ impl JwtVerifier {
         let data = decode::<Map<String, Value>>(token, key, &validation)
             .map_err(|_| AuthError::Invalid("signature or claims rejected"))?;
         let claims = data.claims;
+        // The validation library also accepts an `iss` array containing
+        // the configured issuer; `iss` is a single StringOrURI (RFC 7519
+        // §4.1.1), and `Principal.issuer` must be what the token carries.
+        if claims.get("iss").and_then(Value::as_str) != Some(self.inner.issuer.as_str()) {
+            return Err(AuthError::Invalid("signature or claims rejected"));
+        }
         let audiences = match claims.get("aud") {
             Some(Value::String(aud)) => vec![aud.clone()],
             Some(Value::Array(items)) => items
@@ -789,6 +850,62 @@ impl JwtVerifier {
             authorizer: None,
         }
     }
+}
+
+/// Whether the token's raw JOSE header carries a `crit`, `enc`, `zip`,
+/// or `cty` member (any value, `null` included) or a non-string `typ`.
+/// Typed deserialization cannot distinguish an explicit `null` from an
+/// absent member, so presence is judged on the decoded header object.
+/// Anything undecodable is left for `decode_header` to reject as
+/// malformed.
+fn raw_header_carries_unsupported_member(token: &str) -> bool {
+    let Some(segment) = token.split('.').next() else {
+        return false;
+    };
+    let Some(bytes) = decode_base64url(segment) else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<Map<String, Value>>(&bytes) else {
+        return false;
+    };
+    ["crit", "enc", "zip", "cty"]
+        .iter()
+        .any(|member| header.contains_key(*member))
+        || matches!(header.get("typ"), Some(value) if !value.is_string())
+}
+
+/// Decodes one base64url segment (unpadded, as JWS uses; trailing
+/// padding is tolerated). Returns `None` on anything malformed.
+fn decode_base64url(segment: &str) -> Option<Vec<u8>> {
+    fn symbol(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some(u32::from(byte - b'A')),
+            b'a'..=b'z' => Some(u32::from(byte - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(byte - b'0') + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let segment = segment.trim_end_matches('=');
+    if segment.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(segment.len() * 3 / 4);
+    let mut accumulator: u32 = 0;
+    let mut held = 0u32;
+    for byte in segment.bytes() {
+        accumulator = (accumulator << 6) | symbol(byte)?;
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            out.push((accumulator >> held) as u8);
+            // Keep only the not-yet-emitted bits, so the accumulator
+            // never grows across the segment.
+            accumulator &= (1 << held) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// Whether a refresh completed and failed.
@@ -903,7 +1020,7 @@ where
                 && let Err(detail) = authorizer.authorize(&principal, &parts)
             {
                 return Ok(Problem::new(ProblemKind::Forbidden)
-                    .with_detail(detail)
+                    .with_detail(sanitize_detail(&detail))
                     .into_response());
             }
             parts.extensions.insert(principal);
