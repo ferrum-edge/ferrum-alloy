@@ -100,7 +100,8 @@ pub(crate) fn report_url(base: &str, request_id: &str, has_token: bool) -> Resul
     }
     if RequestId::parse(request_id).is_none() {
         return Err(CliError::Invalid(
-            "--request-id must be 1 to 256 characters of [A-Za-z0-9._-]".into(),
+            "--request-id must be 1 to 256 characters of [A-Za-z0-9._-], and not `.` or `..`"
+                .into(),
         ));
     }
     let base_path = url.path().trim_end_matches('/').to_owned();
@@ -232,7 +233,16 @@ mod tests {
         assert!(url("ftp://127.0.0.1", false).is_err());
         assert!(url("http://127.0.0.1:9090/?a=b", false).is_err());
         assert!(url("not a url", false).is_err());
-        let bad_id = report_url("http://127.0.0.1:9090", "../metrics", false);
-        assert!(bad_id.is_err());
+        for bad_id in ["../metrics", ".", ".."] {
+            assert!(
+                report_url("http://127.0.0.1:9090", bad_id, false).is_err(),
+                "{bad_id}"
+            );
+        }
+        // Other dotted ids are ordinary path segments and stay addressable.
+        for id in ["...", ".a", "a..b"] {
+            let url = report_url("http://127.0.0.1:9090", id, false).unwrap();
+            assert_eq!(url.path(), format!("/diagnostics/v1/requests/{id}"));
+        }
     }
 }

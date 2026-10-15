@@ -294,7 +294,13 @@ proptest! {
         "[A-Za-z0-9._ /:+-]{0,40}",
     ]) {
         let accepted = RequestId::parse(&value);
-        prop_assert_eq!(accepted.is_some(), edge_accepts_correlation_id(&value));
+        // Alloy also refuses the URL dot segments `.` and `..` (see the
+        // `request_id` module documentation).
+        let dot_segment = value == "." || value == "..";
+        prop_assert_eq!(
+            accepted.is_some(),
+            edge_accepts_correlation_id(&value) && !dot_segment
+        );
         prop_assert!(value.len() <= MAX_REQUEST_ID_BYTES || accepted.is_none());
         if let Some(id) = accepted {
             prop_assert_eq!(id.as_str(), value.as_str());

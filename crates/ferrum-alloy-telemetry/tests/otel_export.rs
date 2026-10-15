@@ -400,6 +400,48 @@ impl SpanExporter for FailingExporter {
     }
 }
 
+/// Exports, but fails its own flush and shutdown.
+#[derive(Debug)]
+struct FailingControlExporter;
+impl SpanExporter for FailingControlExporter {
+    fn export(
+        &self,
+        _batch: Vec<SpanData>,
+    ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+        async { Ok(()) }
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        Err(OTelSdkError::InternalFailure("flush failed".into()))
+    }
+
+    fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+        Err(OTelSdkError::InternalFailure("shutdown failed".into()))
+    }
+}
+
+/// The pipeline reports an exporter's failed flush or shutdown instead of
+/// acknowledging it as done; a well-behaved exporter still reports success.
+#[test]
+fn exporter_flush_and_shutdown_failures_reach_the_caller() {
+    let metrics = Arc::new(Metrics::default());
+    let failing = OtelPipeline::with_exporter(&resource(), &config(), Arc::clone(&metrics), || {
+        Ok(FailingControlExporter)
+    })
+    .unwrap();
+    let error = failing.force_flush().unwrap_err().to_string();
+    assert!(error.contains("flush failed"), "{error}");
+    let error = failing
+        .shutdown(Duration::from_secs(2))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("shutdown failed"), "{error}");
+
+    let (healthy, _exporter, _metrics) = memory_pipeline(&config());
+    healthy.force_flush().unwrap();
+    healthy.shutdown(Duration::from_secs(2)).unwrap();
+}
+
 #[derive(Debug)]
 struct SlowExporter(Duration);
 impl SpanExporter for SlowExporter {

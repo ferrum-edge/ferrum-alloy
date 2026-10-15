@@ -503,3 +503,23 @@ fn yaml_strings_cannot_change_type_or_inject_structure() {
         "{text}"
     );
 }
+
+/// A sequence nested in a sequence continues its parent's `- ` line, and its
+/// later items line up under its first, as YAML requires.
+#[test]
+fn yaml_nested_sequences_are_valid_block_sequences() {
+    for (value, expected) in [
+        (json!([[1, 2]]), "- - 1\n  - 2\n"),
+        (json!([[1, [2, 3]], 4]), "- - 1\n  - - 2\n    - 3\n- 4\n"),
+        (
+            json!([[{ "a": 1, "b": [true] }], []]),
+            "- - a: 1\n    b:\n      - true\n- []\n",
+        ),
+        (
+            json!({ "k": [["x"], { "y": [[null]] }] }),
+            "k:\n  - - \"x\"\n  - y:\n      - - null\n",
+        ),
+    ] {
+        assert_eq!(yaml::to_string(&value), expected, "{value}");
+    }
+}

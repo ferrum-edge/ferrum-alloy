@@ -416,8 +416,23 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 enum Message {
     Span(Box<SpanData>, usize),
     Resource(Resource),
-    Flush(SyncSender<()>),
-    Shutdown(SyncSender<()>),
+    /// Answered with the exporter's own `force_flush` result.
+    Flush(SyncSender<OTelSdkResult>),
+    /// Answered with the exporter's own `shutdown` result.
+    Shutdown(SyncSender<OTelSdkResult>),
+}
+
+/// A copy of an exporter control result for one more caller
+/// (`OTelSdkError` is not `Clone`).
+fn copy_result(result: &OTelSdkResult) -> OTelSdkResult {
+    match result {
+        Ok(()) => Ok(()),
+        Err(OTelSdkError::AlreadyShutdown) => Err(OTelSdkError::AlreadyShutdown),
+        Err(OTelSdkError::Timeout(timeout)) => Err(OTelSdkError::Timeout(*timeout)),
+        Err(OTelSdkError::InternalFailure(reason)) => {
+            Err(OTelSdkError::InternalFailure(reason.clone()))
+        }
+    }
 }
 
 /// A span processor with bounded memory and exact loss accounting.
@@ -598,7 +613,15 @@ impl BoundedSpanProcessor {
         }
     }
 
-    fn control(&self, make: fn(SyncSender<()>) -> Message, timeout: Duration) -> OTelSdkResult {
+    /// Sends a control message and waits for the worker's answer. `Ok`
+    /// carries the exporter's own result once the worker answered; `Err`
+    /// means it did not answer (no queue space or no answer in time, or the
+    /// worker is gone).
+    fn control(
+        &self,
+        make: fn(SyncSender<OTelSdkResult>) -> Message,
+        timeout: Duration,
+    ) -> Result<OTelSdkResult, OTelSdkError> {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         let deadline = Instant::now() + timeout;
         // Control messages wait for queue space, bounded by the timeout.
@@ -606,7 +629,7 @@ impl BoundedSpanProcessor {
         self.controls_queued.fetch_add(1, Ordering::SeqCst);
         let remaining = deadline.saturating_duration_since(Instant::now());
         match ack_rx.recv_timeout(remaining) {
-            Ok(()) => Ok(()),
+            Ok(result) => Ok(result),
             Err(RecvTimeoutError::Timeout) => Err(OTelSdkError::Timeout(timeout)),
             // The worker exited without answering: the pipeline is shut down.
             Err(RecvTimeoutError::Disconnected) => Err(OTelSdkError::AlreadyShutdown),
@@ -673,11 +696,12 @@ impl SpanProcessor for BoundedSpanProcessor {
     }
 
     fn force_flush(&self) -> OTelSdkResult {
-        self.control(Message::Flush, CONTROL_TIMEOUT)
+        // An exporter that failed its own flush fails this one.
+        self.control(Message::Flush, CONTROL_TIMEOUT)?
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        let result = self.control(Message::Shutdown, timeout);
+        let answer = self.control(Message::Shutdown, timeout);
         // The worker owns terminal accounting for every span it accepted:
         // each is counted exported or export-failed, and whatever is left
         // when the worker ends (normally or by unwinding from an exporter
@@ -686,13 +710,15 @@ impl SpanProcessor for BoundedSpanProcessor {
         // shutdown) or gone (the queue or acknowledgement disconnected), so
         // its accounting is complete when this returns. On a timeout the
         // worker still owns its spans and counts them when it resumes.
-        if matches!(result, Ok(()) | Err(OTelSdkError::AlreadyShutdown))
+        // An answer carrying the exporter's failure still means the worker
+        // finished.
+        if matches!(answer, Ok(_) | Err(OTelSdkError::AlreadyShutdown))
             && let Ok(mut worker) = self.worker.lock()
             && let Some(handle) = worker.take()
         {
             let _ = handle.join();
         }
-        result
+        answer?
     }
 
     fn set_resource(&mut self, resource: &Resource) {
@@ -792,7 +818,7 @@ impl Worker {
         exporter: &mut E,
         batch: &mut Batch,
         message: Message,
-        shutdown_acks: &mut Vec<SyncSender<()>>,
+        shutdown_acks: &mut Vec<SyncSender<OTelSdkResult>>,
     ) -> bool {
         match message {
             Message::Span(span, size) => {
@@ -811,8 +837,7 @@ impl Worker {
             }
             Message::Flush(ack) => {
                 self.export(exporter, batch);
-                let _ = exporter.force_flush();
-                let _ = ack.send(());
+                let _ = ack.send(exporter.force_flush());
             }
             Message::Shutdown(ack) => shutdown_acks.push(ack),
         }
@@ -828,7 +853,7 @@ impl Worker {
         &self,
         exporter: &mut E,
         batch: &mut Batch,
-        mut shutdown_acks: Vec<SyncSender<()>>,
+        mut shutdown_acks: Vec<SyncSender<OTelSdkResult>>,
     ) {
         for _ in 0..self.capacity {
             let Ok(message) = self.receiver.try_recv() else {
@@ -837,9 +862,9 @@ impl Worker {
             self.dispatch(exporter, batch, message, &mut shutdown_acks);
         }
         self.export(exporter, batch);
-        let _ = exporter.shutdown();
+        let result = exporter.shutdown();
         for ack in shutdown_acks {
-            let _ = ack.send(());
+            let _ = ack.send(copy_result(&result));
         }
     }
 
@@ -970,7 +995,10 @@ mod tests {
         Message::Span(Box::new(span), size)
     }
 
-    fn ask(sender: &SyncSender<Message>, make: fn(SyncSender<()>) -> Message) -> Receiver<()> {
+    fn ask(
+        sender: &SyncSender<Message>,
+        make: fn(SyncSender<OTelSdkResult>) -> Message,
+    ) -> Receiver<OTelSdkResult> {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         sender.send(make(ack_tx)).unwrap();
         ack_rx
@@ -1015,7 +1043,7 @@ mod tests {
         let recorder = Recorder::default();
         let seen = recorder.clone();
         let handle = std::thread::spawn(move || worker.run(recorder));
-        flush.recv().unwrap();
+        flush.recv().unwrap().unwrap();
         drop(sender);
         handle.join().unwrap();
         assert_eq!(
@@ -1049,7 +1077,7 @@ mod tests {
         let recorder = Recorder::default();
         let seen = recorder.clone();
         let handle = std::thread::spawn(move || worker.run(recorder));
-        flush.recv().unwrap();
+        flush.recv().unwrap().unwrap();
         drop(sender);
         handle.join().unwrap();
         assert_eq!(
@@ -1130,7 +1158,7 @@ mod tests {
             "the first chunk's bytes are released before the second export runs"
         );
         release_tx.send(()).unwrap();
-        flush.recv().unwrap();
+        flush.recv().unwrap().unwrap();
         drop(sender);
         handle.join().unwrap();
         assert_eq!(queued_bytes.load(Ordering::Relaxed), 0);
@@ -1188,7 +1216,10 @@ mod tests {
             ("late flush", late_flush),
             ("second shutdown", second_shutdown),
         ] {
-            assert_eq!(ack.try_recv(), Ok(()), "{name} was not acknowledged");
+            assert!(
+                matches!(ack.try_recv(), Ok(Ok(()))),
+                "{name} was not acknowledged"
+            );
         }
         let exported = metrics.telemetry_spans_exported.load(Ordering::Relaxed);
         assert_eq!(exported, 3);
@@ -1260,11 +1291,14 @@ mod tests {
         worker.run(exporter);
 
         assert_eq!(recorder.events(), ["flush", "flush", "shutdown"]);
-        assert_eq!(shutdown.try_recv(), Ok(()));
-        assert_eq!(first.try_recv(), Ok(()));
-        assert_eq!(second.try_recv(), Ok(()));
+        for ack in [shutdown, first, second] {
+            assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        }
         // Dropped with the queue: its caller sees the disconnect at once.
-        assert_eq!(beyond.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        assert!(matches!(
+            beyond.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
         drop(sender);
     }
 }

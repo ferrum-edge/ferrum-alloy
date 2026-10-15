@@ -96,7 +96,38 @@ struct Reply {
     body: String,
 }
 
+/// Longest one request may take, from connect through the whole body.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long Edge has to route to a ready Alloy.
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Runs one complete request (connect, handshake, response head, and body)
+/// within `limit`, so a peer that accepts and then stalls fails the run
+/// with a named request instead of hanging until the CI job times out.
+async fn within<T>(
+    limit: Duration,
+    what: impl std::fmt::Display,
+    request: impl std::future::Future<Output = Result<T, Failure>>,
+) -> Result<T, Failure> {
+    tokio::time::timeout(limit, request)
+        .await
+        .map_err(|_| fail(format!("{what} did not complete within {limit:?}")))?
+}
+
 async fn plain_get(addr: SocketAddr, path: &str) -> Result<Reply, Failure> {
+    plain_get_within(addr, path, REQUEST_TIMEOUT).await
+}
+
+async fn plain_get_within(addr: SocketAddr, path: &str, limit: Duration) -> Result<Reply, Failure> {
+    within(
+        limit,
+        format_args!("GET {path} via {addr}"),
+        plain_get_unbounded(addr, path),
+    )
+    .await
+}
+
+async fn plain_get_unbounded(addr: SocketAddr, path: &str) -> Result<Reply, Failure> {
     let stream = tokio::net::TcpStream::connect(addr).await?;
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
@@ -116,6 +147,20 @@ async fn plain_get(addr: SocketAddr, path: &str) -> Result<Reply, Failure> {
 }
 
 async fn tls_get(
+    addr: SocketAddr,
+    ca_pem: &Path,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Result<Reply, Failure> {
+    within(
+        REQUEST_TIMEOUT,
+        format_args!("GET {path} via {addr} (TLS)"),
+        tls_get_unbounded(addr, ca_pem, path, headers),
+    )
+    .await
+}
+
+async fn tls_get_unbounded(
     addr: SocketAddr,
     ca_pem: &Path,
     path: &str,
@@ -161,6 +206,18 @@ async fn tls_get(
 /// connection: a client cancelling mid-body. Returns the response head and
 /// the number of body bytes read.
 async fn cancel_mid_body(addr: SocketAddr, path: &str) -> Result<(Reply, usize), Failure> {
+    within(
+        REQUEST_TIMEOUT,
+        format_args!("GET {path} via {addr} (cancelled mid-body)"),
+        cancel_mid_body_unbounded(addr, path),
+    )
+    .await
+}
+
+async fn cancel_mid_body_unbounded(
+    addr: SocketAddr,
+    path: &str,
+) -> Result<(Reply, usize), Failure> {
     let stream = tokio::net::TcpStream::connect(addr).await?;
     let (mut sender, connection) =
         hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
@@ -453,21 +510,27 @@ async fn main() -> Result<(), Failure> {
     let ca = args.out.join("ca.pem");
     compose(&args, &["cp", "alloy:/certs/ca.pem", &ca.to_string_lossy()])?;
 
-    // 1. Wait until Edge routes to a ready Alloy.
-    let started = Instant::now();
+    // 1. Wait until Edge routes to a ready Alloy. Each probe gets only what
+    // is left of the readiness budget, so a stalled probe cannot outlast it.
+    let deadline = Instant::now() + READY_TIMEOUT;
     loop {
-        match plain_get(args.edge, "/orders/hello").await {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let probe = plain_get_within(args.edge, "/orders/hello", remaining).await;
+        let expired = Instant::now() >= deadline;
+        match probe {
             Ok(reply) if reply.status == StatusCode::OK => break,
-            Ok(reply) if started.elapsed() > Duration::from_secs(90) => {
+            Ok(reply) if expired => {
                 return Err(fail(format!(
-                    "Edge never routed successfully: {} {}",
+                    "Edge never routed successfully within {READY_TIMEOUT:?}: {} {}",
                     reply.status, reply.body
                 )));
             }
-            Err(error) if started.elapsed() > Duration::from_secs(90) => {
-                return Err(fail(format!("Edge never became reachable: {error}")));
+            Err(error) if expired => {
+                return Err(fail(format!(
+                    "Edge never became reachable within {READY_TIMEOUT:?}: {error}"
+                )));
             }
-            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            _ => tokio::time::sleep(Duration::from_millis(500).min(remaining)).await,
         }
     }
 
@@ -1531,4 +1594,47 @@ fn report(args: &Args, check: &Check) -> Result<(), Failure> {
     }
     println!("all {} end-to-end checks passed", check.results.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A server that accepts and then never answers (or answers the head and
+    /// never finishes the body) fails a request within its limit, naming it.
+    #[tokio::test]
+    async fn a_stalled_peer_fails_the_request_within_its_limit() {
+        for respond_head in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                socket.readable().await.unwrap();
+                let mut buffer = [0u8; 1024];
+                let _ = socket.try_read(&mut buffer);
+                if respond_head {
+                    let head = "HTTP/1.1 200 OK\r\ncontent-length: 10\r\n\r\nabc";
+                    socket.writable().await.unwrap();
+                    socket.try_write(head.as_bytes()).unwrap();
+                }
+                // Hold the connection open without finishing.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                drop(socket);
+            });
+            let started = Instant::now();
+            let error = plain_get_within(addr, "/stalled", Duration::from_millis(200))
+                .await
+                .err()
+                .expect("a stalled response fails");
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let message = error.to_string();
+            assert!(
+                message.contains("GET /stalled") && message.contains("did not complete within"),
+                "{message}"
+            );
+            server.abort();
+        }
+    }
 }

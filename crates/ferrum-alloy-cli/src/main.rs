@@ -161,7 +161,7 @@ fn version(format: Format) -> Result<(), CliError> {
             ferrum_alloy_diagnostics::model::SCHEMA_MAJOR,
             ferrum_alloy_diagnostics::model::SCHEMA_MINOR
         ),
-        "service_manifest_schema": format!("{} {}.x (PROPOSED)", ferrum_alloy_edge::manifest::MANIFEST_SCHEMA, ferrum_alloy_edge::manifest::MANIFEST_MAJOR),
+        "service_manifest_schema": format!("{} {}.x", ferrum_alloy_edge::manifest::MANIFEST_SCHEMA, ferrum_alloy_edge::manifest::MANIFEST_MAJOR),
         "edge_contract": {
             "release": ferrum_alloy_edge::contract::EDGE_RELEASE,
             "source_commit": ferrum_alloy_edge::contract::EDGE_SOURCE_COMMIT,

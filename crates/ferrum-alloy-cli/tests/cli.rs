@@ -58,6 +58,66 @@ fn version_reports_contract_versions() {
     );
 }
 
+/// `ferrum.service_manifest` v1 (with `[agents]`) is the shared,
+/// implemented contract; current output and new starters say so.
+#[test]
+fn current_output_does_not_call_the_manifest_proposed() {
+    let output = run(&["version", "--format", "json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let schema = json["service_manifest_schema"].as_str().unwrap();
+    assert_eq!(schema, "ferrum.service_manifest 1.x");
+    let help = run(&["edge", "export", "--help"]);
+    assert_eq!(code(&help), 0, "{}", stderr(&help));
+    assert!(stdout(&help).contains("ferrum.service_manifest"));
+    assert!(!stdout(&help).contains("PROPOSED"), "{}", stdout(&help));
+
+    let dir = tempfile::tempdir().unwrap();
+    for (name, with) in [("plain", None), ("tools", Some("openapi"))] {
+        let target = dir.path().join(name);
+        let mut args = vec![
+            "new".to_owned(),
+            name.to_owned(),
+            "--path".to_owned(),
+            target.to_string_lossy().into_owned(),
+            "--alloy-path".to_owned(),
+            repo()
+                .join("crates/ferrum-alloy")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        if let Some(with) = with {
+            args.extend(["--with".to_owned(), with.to_owned()]);
+        }
+        let output = bin().args(&args).output().unwrap();
+        assert_eq!(code(&output), 0, "{name}: {}", stderr(&output));
+        let manifest = std::fs::read_to_string(target.join("ferrum-service.toml")).unwrap();
+        assert!(!manifest.contains("PROPOSED"), "{name}:\n{manifest}");
+        assert!(manifest.contains("shared"), "{name}:\n{manifest}");
+    }
+}
+
+/// `--features full` is the umbrella crate's union of every integration.
+#[test]
+fn check_accepts_the_full_feature() {
+    let output = run(&[
+        "check",
+        "--no-env",
+        "--features",
+        "full",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let human = run(&["check", "--no-env", "--features", "full"]);
+    assert_eq!(code(&human), 0, "{}", stderr(&human));
+    assert!(
+        stdout(&human).contains("features assumed: otel, edge, tls, postgres"),
+        "{}",
+        stdout(&human)
+    );
+    assert_eq!(code(&run(&["check", "--no-env", "--features", "fulll"])), 3);
+}
+
 #[test]
 fn usage_errors_exit_2() {
     assert_eq!(code(&run(&["no-such-command"])), 2);
