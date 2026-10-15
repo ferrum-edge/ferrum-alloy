@@ -3,7 +3,11 @@
 //! The accepted alphabet and length match the Ferrum Edge `correlation_id`
 //! plugin (v0.9.9 and v0.9.8): at most 256 bytes of `[A-Za-z0-9._-]`. An id accepted by
 //! Edge is therefore preserved by Alloy, and an id Alloy generates is one Edge
-//! would accept. A request id is a correlation aid, never a credential.
+//! would accept, with one exception: `.` and `..` are refused (and replaced),
+//! because as a URL path segment they are dot segments that URL
+//! normalization removes, so a diagnostic report retained under either id
+//! could not be requested by URL (`/diagnostics/v1/requests/{request_id}`).
+//! A request id is a correlation aid, never a credential.
 
 use std::fmt;
 
@@ -76,6 +80,8 @@ impl fmt::Display for RequestId {
 
 fn valid(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
         && value.len() <= MAX_REQUEST_ID_BYTES
         && value
             .bytes()

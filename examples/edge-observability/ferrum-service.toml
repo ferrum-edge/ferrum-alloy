@@ -1,5 +1,6 @@
-# Service manifest (PROPOSED contract) used to generate the demo's Ferrum
-# Edge configuration with `ferrum-alloy edge export`.
+# Service manifest (shared contract ferrum.service_manifest v1) used to
+# generate the demo's Ferrum Edge configuration with
+# `ferrum-alloy edge export`.
 schema = "ferrum.service_manifest"
 schema_version = "1.0"
 

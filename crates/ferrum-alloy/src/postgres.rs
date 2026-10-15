@@ -184,6 +184,18 @@ fn is_local(options: &PgConnectOptions) -> bool {
 }
 
 /// Acquires a connection and records the wait on the current operation span.
+/// Call it inside the future given to [`query`]'s `run`/`run_result`, so the
+/// wait lands on that operation; outside an operation span nothing is
+/// recorded.
+///
+/// ```ignore
+/// let row = postgres::query("orders.fetch", "SELECT", "SELECT orders by id")
+///     .run_result(async {
+///         let mut connection = postgres::acquire(&pool).await?;
+///         sqlx::query("SELECT 1").execute(&mut *connection).await
+///     })
+///     .await?;
+/// ```
 pub async fn acquire(pool: &PgPool) -> Result<PoolConnection<Postgres>, sqlx::Error> {
     let started = Instant::now();
     let connection = pool.acquire().await;

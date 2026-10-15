@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- Fixes from the 2026-10-15 audit:
+  - `OtelPipeline::force_flush()` and `shutdown()` return the exporter's
+    own flush or shutdown failure instead of `Ok(())` (#220).
+  - Request ids `.` and `..` are refused (and replaced like other invalid
+    ids): as URL dot segments they could not address a retained diagnostic
+    report, and `diagnose --url --request-id` refuses them too (#221).
+  - `ferrum-alloy check --features` resolves features as Cargo does: `full`
+    means every integration, and `openapi-ui`/`jwt` bring `openapi`/
+    `http-client` (#222).
+  - The PostgreSQL starter and `examples/postgres-api` acquire their
+    connection inside the operation span, so `alloy.db.pool_wait_ms` is
+    recorded (#223).
+  - The Edge end-to-end runner bounds every request, connect through body,
+    and each readiness probe by the remaining 90 s budget (#225).
+  - `version`, `edge export --help`, and new starters no longer call the
+    implemented `ferrum.service_manifest` v1 and its `[agents]` section
+    PROPOSED (#226).
+  - `yaml::to_string` emits valid YAML for sequences nested in sequences
+    (#227).
+  - Getting started names v0.9.17 as the demo's contract baseline (#228).
 - Follow-ups from independent review of #202, #204, #209, and #212:
   the request-body stall sampler reads the waiting count and its epoch as
   one atomic word, so a request that starts waiting just as the previous

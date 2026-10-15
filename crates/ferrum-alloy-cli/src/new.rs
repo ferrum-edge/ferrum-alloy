@@ -209,7 +209,7 @@ const POSTGRES_STARTER: Starter = Starter {
     module: "db",
     files: POSTGRES,
     dependencies: include_str!("../templates/postgres/fragments/dependencies.toml.tmpl"),
-    dev_dependencies: "",
+    dev_dependencies: include_str!("../templates/postgres/fragments/dev-dependencies.toml.tmpl"),
     main_doc: include_str!("../templates/postgres/fragments/main_doc.rs.tmpl"),
     main_use: "use ferrum_alloy::postgres;\n",
     main_resources: include_str!("../templates/postgres/fragments/main_resources.rs.tmpl"),
@@ -341,6 +341,7 @@ const RESERVED: &[&str] = &[
     "utoipa-axum",
     "sqlx",
     "tracing",
+    "tracing-subscriber",
     "jsonwebtoken",
     "rcgen",
 ];

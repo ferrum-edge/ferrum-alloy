@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use tracing_subscriber::layer::SubscriberExt;
 
 #[tokio::test]
 async fn documented_paths_match_routes() {
@@ -18,6 +19,39 @@ async fn documented_paths_match_routes() {
     let mut paths: Vec<&str> = document.paths.paths.keys().map(String::as_str).collect();
     paths.sort_unstable();
     assert_eq!(paths, vec!["/orders", "/orders/{id}"]);
+}
+
+/// Captures the last `alloy.db.pool_wait_ms` recorded on any span.
+#[derive(Clone, Default)]
+struct PoolWait(std::sync::Arc<std::sync::Mutex<Option<f64>>>);
+
+impl PoolWait {
+    fn get(&self) -> Option<f64> {
+        *self.0.lock().expect("pool wait lock")
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PoolWait {
+    fn on_record(
+        &self,
+        _span: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        values.record(&mut PoolWaitVisitor(self));
+    }
+}
+
+struct PoolWaitVisitor<'a>(&'a PoolWait);
+
+impl tracing::field::Visit for PoolWaitVisitor<'_> {
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        if field.name() == "alloy.db.pool_wait_ms" {
+            *self.0.0.lock().expect("pool wait lock") = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
 }
 
 async fn call(router: &axum::Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -47,6 +81,47 @@ async fn crud_round_trip() {
         .await
         .unwrap();
     let (router, _) = example_postgres_api::api(pool);
+
+    // With the only connection held, creating an order waits for it, and the
+    // wait is recorded on the insert's operation span.
+    {
+        let wait = PoolWait::default();
+        let _subscriber =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(wait.clone()));
+        let single = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let held = single.acquire().await.unwrap();
+        let (contended, _) = example_postgres_api::api(single);
+        let release = async move {
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            drop(held);
+        };
+        let request = Request::post("/orders")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"item":"wait","quantity":1}"#))
+            .unwrap();
+        let ((), (status, waited)) = tokio::join!(release, call(&contended, request));
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            wait.get().is_some(),
+            "the insert records alloy.db.pool_wait_ms"
+        );
+        // Remove it so the listing below sees only this test's order.
+        let id = waited["id"].as_i64().unwrap();
+        let (status, _) = call(
+            &router,
+            Request::delete(format!("/orders/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
 
     let (status, created) = call(
         &router,

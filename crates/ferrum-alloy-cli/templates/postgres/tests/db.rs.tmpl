@@ -10,6 +10,7 @@ use ferrum_alloy::postgres;
 use http_body_util::BodyExt;
 use sqlx::PgPool;
 use tower::ServiceExt;
+use tracing_subscriber::layer::SubscriberExt;
 
 use {{crate_name}}::db;
 
@@ -32,6 +33,39 @@ async fn call(pool: &PgPool, request: Request<Body>) -> (StatusCode, serde_json:
     let body = response.into_body().collect().await.expect("body");
     let json = serde_json::from_slice(&body.to_bytes()).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+/// Captures the last `alloy.db.pool_wait_ms` recorded on any span.
+#[derive(Clone, Default)]
+struct PoolWait(std::sync::Arc<std::sync::Mutex<Option<f64>>>);
+
+impl PoolWait {
+    fn get(&self) -> Option<f64> {
+        *self.0.lock().expect("pool wait lock")
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PoolWait {
+    fn on_record(
+        &self,
+        _span: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        values.record(&mut PoolWaitVisitor(self));
+    }
+}
+
+struct PoolWaitVisitor<'a>(&'a PoolWait);
+
+impl tracing::field::Visit for PoolWaitVisitor<'_> {
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        if field.name() == "alloy.db.pool_wait_ms" {
+            *self.0.0.lock().expect("pool wait lock") = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
 }
 
 fn post_note(json: &'static str) -> Request<Body> {
@@ -77,6 +111,29 @@ async fn notes_round_trip_through_postgres() {
     let (status, fetched) = call(&pool, request.expect("request")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["body"], "hello");
+
+    // With the only connection held, creating a note waits for it, and the
+    // wait is recorded on the insert's operation span.
+    let wait = PoolWait::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(wait.clone()));
+    let mut settings = DatabaseSettings::default();
+    settings.url = Some(Secret::new(url.as_str()));
+    settings.max_connections = 1;
+    let single = postgres::connect(&settings, env!("CARGO_PKG_NAME")).expect("pool");
+    let held = single.acquire().await.expect("connection");
+    let release = async move {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        drop(held);
+    };
+    let ((), (status, _)) = tokio::join!(release, call(&single, post_note(r#"{"body":"wait"}"#)));
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        wait.get().is_some(),
+        "the insert records alloy.db.pool_wait_ms"
+    );
 
     let request = Request::get("/notes/0").body(Body::empty());
     let (status, _) = call(&pool, request.expect("request")).await;
