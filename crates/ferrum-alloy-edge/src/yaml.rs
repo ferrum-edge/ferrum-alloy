@@ -84,13 +84,20 @@ fn emit(value: &Value, indent: usize, out: &mut String, inline_first: bool) {
             }
         }
         Value::Array(items) if !items.is_empty() => {
-            for item in items {
+            for (index, item) in items.iter().enumerate() {
+                // Like a mapping's first key, the first item of a sequence
+                // nested in a sequence continues the parent's `- ` line.
+                let prefix = if index == 0 && inline_first {
+                    ""
+                } else {
+                    pad.as_str()
+                };
                 match scalar(item) {
                     Some(s) => {
-                        let _ = writeln!(out, "{pad}- {s}");
+                        let _ = writeln!(out, "{prefix}- {s}");
                     }
                     None => {
-                        let _ = write!(out, "{pad}- ");
+                        let _ = write!(out, "{prefix}- ");
                         emit(item, indent + 2, out, true);
                     }
                 }

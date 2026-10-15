@@ -66,16 +66,16 @@ async fn create(
     State(pool): State<PgPool>,
     ValidJson(note): ValidJson<NewNote>,
 ) -> Result<(StatusCode, Json<Note>), Problem> {
-    // `acquire` measures the pool wait separately from the query.
-    let mut connection = postgres::acquire(&pool)
-        .await
-        .map_err(|e| database_error(&e))?;
+    // `acquire` runs inside the operation span, where it records the pool
+    // wait (`alloy.db.pool_wait_ms`) separately from the query.
     let created = postgres::query("notes.insert", "INSERT", "INSERT notes")
-        .run_result(
+        .run_result(async {
+            let mut connection = postgres::acquire(&pool).await?;
             sqlx::query_as::<_, Note>(INSERT_NOTE)
                 .bind(&note.body)
-                .fetch_one(&mut *connection),
-        )
+                .fetch_one(&mut *connection)
+                .await
+        })
         .await
         .map_err(|e| database_error(&e))?;
     Ok((StatusCode::CREATED, Json(created)))

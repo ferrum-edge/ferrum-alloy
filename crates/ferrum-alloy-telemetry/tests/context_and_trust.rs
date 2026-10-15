@@ -279,7 +279,15 @@ async fn valid_request_ids_are_kept_and_echoed() {
 #[tokio::test]
 async fn invalid_or_oversized_request_ids_are_replaced() {
     let long = "a".repeat(257);
-    for value in ["has space", "semi;colon", long.as_str(), "ünicode"] {
+    // `.` and `..` are Edge-valid but are URL dot segments (`request_id`).
+    for value in [
+        "has space",
+        "semi;colon",
+        long.as_str(),
+        "ünicode",
+        ".",
+        "..",
+    ] {
         let mut request = request_from("203.0.113.9:1", None, &[]);
         request.headers_mut().insert(
             "x-request-id",

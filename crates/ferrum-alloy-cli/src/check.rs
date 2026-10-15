@@ -18,8 +18,10 @@ pub(crate) struct CheckArgs {
     /// Configuration file.
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Cargo features compiled into the application (comma-separated).
-    /// Defaults to every feature, so only feature-independent problems fail.
+    /// Cargo features compiled into the application (comma-separated), as
+    /// in Cargo: `full` means every integration, and a feature brings the
+    /// ones it enables. Defaults to every feature, so only
+    /// feature-independent problems fail.
     #[arg(long, value_delimiter = ',')]
     features: Option<Vec<String>>,
     /// Ignore `FERRUM_ALLOY_*` variables in the current environment.
@@ -46,6 +48,44 @@ const ALL_FEATURES: &[&str] = &[
     "cors",
     "diagnostics",
 ];
+
+/// The umbrella crate's `default` features (`crates/ferrum-alloy/Cargo.toml`).
+const DEFAULT_FEATURES: &[&str] = &[];
+
+/// Features another feature turns on (`crates/ferrum-alloy/Cargo.toml`).
+/// `full` turns on every one of [`ALL_FEATURES`], and `default` the ones in
+/// [`DEFAULT_FEATURES`].
+const IMPLIED_FEATURES: &[(&str, &str)] = &[("openapi-ui", "openapi"), ("jwt", "http-client")];
+
+/// The features a `--features` list compiles in, the way Cargo resolves
+/// them, in [`ALL_FEATURES`] order.
+fn assumed_features(requested: &[String]) -> Result<Vec<&'static str>, CliError> {
+    let mut enabled = std::collections::BTreeSet::new();
+    for feature in requested {
+        if feature == "full" {
+            enabled.extend(ALL_FEATURES.iter().copied());
+            continue;
+        }
+        if feature == "default" {
+            enabled.extend(DEFAULT_FEATURES.iter().copied());
+            continue;
+        }
+        let Some(known) = ALL_FEATURES.iter().copied().find(|known| known == feature) else {
+            return Err(CliError::Invalid(format!("unknown feature {feature:?}")));
+        };
+        enabled.insert(known);
+        for (feature, implied) in IMPLIED_FEATURES {
+            if *feature == known {
+                enabled.insert(*implied);
+            }
+        }
+    }
+    Ok(ALL_FEATURES
+        .iter()
+        .copied()
+        .filter(|feature| enabled.contains(feature))
+        .collect())
+}
 
 fn capabilities(config: &AlloyConfig) -> Vec<(&'static str, bool, &'static str)> {
     vec![
@@ -117,14 +157,9 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
         }
     };
     let features: Vec<&str> = match &args.features {
-        Some(list) => list.iter().map(String::as_str).collect(),
+        Some(list) => assumed_features(list)?,
         None => ALL_FEATURES.to_vec(),
     };
-    for feature in &features {
-        if !ALL_FEATURES.contains(feature) {
-            return Err(CliError::Invalid(format!("unknown feature {feature:?}")));
-        }
-    }
     let issues = config.check(&features);
     let errors: Vec<&str> = issues
         .iter()
@@ -213,4 +248,70 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
     } else {
         ExitCode::from(INVALID)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn requested(features: &[&str]) -> Vec<String> {
+        features.iter().map(|f| (*f).to_owned()).collect()
+    }
+
+    #[test]
+    fn features_resolve_like_cargo() {
+        assert_eq!(
+            assumed_features(&requested(&["full"])).unwrap(),
+            ALL_FEATURES
+        );
+        assert_eq!(
+            assumed_features(&requested(&["jwt", "openapi-ui"])).unwrap(),
+            ["openapi", "openapi-ui", "jwt", "http-client"]
+        );
+        assert_eq!(assumed_features(&requested(&["otel"])).unwrap(), ["otel"]);
+        assert!(
+            assumed_features(&requested(&["default"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(assumed_features(&requested(&["fulll"])).is_err());
+    }
+
+    /// The lists here follow the umbrella crate's `[features]`.
+    #[test]
+    fn features_match_the_umbrella_crate() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../ferrum-alloy/Cargo.toml");
+        let manifest: toml::Table = std::fs::read_to_string(path).unwrap().parse().unwrap();
+        let features = manifest["features"].as_table().unwrap();
+        let list = |name: &str| -> Vec<&str> {
+            features[name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect()
+        };
+        let mut full = list("full");
+        full.sort_unstable();
+        let mut all = ALL_FEATURES.to_vec();
+        all.sort_unstable();
+        assert_eq!(full, all, "`full` and ALL_FEATURES differ");
+        assert_eq!(list("default"), DEFAULT_FEATURES, "`default` differs");
+        for (feature, implied) in IMPLIED_FEATURES {
+            assert!(list(feature).contains(implied), "{feature} -> {implied}");
+        }
+        // Every feature that turns on another integration is listed.
+        for feature in ALL_FEATURES {
+            for enabled in list(feature) {
+                if ALL_FEATURES.contains(&enabled) {
+                    assert!(
+                        IMPLIED_FEATURES.contains(&(*feature, enabled)),
+                        "{feature} enables {enabled}"
+                    );
+                }
+            }
+        }
+    }
 }
