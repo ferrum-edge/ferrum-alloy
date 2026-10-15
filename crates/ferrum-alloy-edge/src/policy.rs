@@ -3,7 +3,7 @@
 //! Separate concerns stay separate:
 //!
 //! * *Transport trust* (is the direct peer the gateway?) comes only from the
-//!   shared [`TrustClassifier`]: a verified mTLS identity or a configured
+//!   shared [`TrustClassifier`](ferrum_alloy_telemetry::peer::TrustClassifier): a verified mTLS identity or a configured
 //!   network boundary.
 //! * *Gateway-asserted identity* (`X-Consumer-Username`) is accepted only
 //!   from a verified mTLS identity, never from network trust, and only when

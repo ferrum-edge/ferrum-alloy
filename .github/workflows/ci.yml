@@ -164,7 +164,10 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo doc --workspace --all-features --no-deps --locked
+      # The CLI's binary is also named `ferrum-alloy`; documenting it next to
+      # the library collides on the output path, and a binary has no public
+      # API to document.
+      - run: cargo doc --workspace --exclude ferrum-alloy-cli --all-features --no-deps --locked
 
   generator:
     name: Generated projects
