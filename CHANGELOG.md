@@ -2,12 +2,10 @@
 
 ## [Unreleased]
 
-- **Breaking:** `postgres::connect` rejects `database.url` query
-  parameters SQLx does not recognize, naming the parameter and never its
-  value. SQLx previously logged each one with its value (libpq's
-  `sslpassword` is a secret) and silently ignored it, so a typo such as
-  `sslmod=verify-full` quietly dropped the requested verification (#197).
-
+- Updated `rustls` in the lockfile to 0.23.46, clearing
+  RUSTSEC-2026-0346 through RUSTSEC-2026-0349 (ECH fallback data
+  exposure and certificate-decompression allocation bounds);
+  `cargo deny check` passes again.
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
@@ -15,6 +13,11 @@
   directly, never through an environment proxy (`HTTP_PROXY`). `ferrum-alloy diagnose --url`
   likewise sends its credential over plain `http` only to a literal loopback
   address, no longer to `localhost`.
+- **Breaking:** `postgres::connect` rejects `database.url` query
+  parameters SQLx does not recognize, naming the parameter and never its
+  value. SQLx previously logged each one with its value (libpq's
+  `sslpassword` is a secret) and silently ignored it, so a typo such as
+  `sslmod=verify-full` quietly dropped the requested verification (#197).
 - **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
   when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
   not local (a Unix socket or a literal loopback address; `localhost` and
