@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- `ferrum-alloy openapi export` bounds its work by the document: an
+  operation reached through several Path Item `$ref` aliases is parsed and
+  checked once (its problems name the first path), `$ref` chains are
+  followed once however many references share them, referenced Path Items
+  are de-duplicated with a set, and echoed `$ref` values in problems are
+  shortened. The written document is streamed into a 64 MiB budget instead
+  of an unbounded string and copy, and `--check` compares parsed JSON
+  without rendering. With `api.strip_public_path`, local `#/paths/...`
+  references now follow the renamed keys instead of pointing at removed
+  ones (#224).
 - CI hardening from the #197 audit: `cargo-deny` pinned to 0.20.2, checkouts
   no longer persist credentials, a weekly `Advisories` workflow re-checks
   `main`'s lockfiles, the per-feature job and the MSRV job now build the

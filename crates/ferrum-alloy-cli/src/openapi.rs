@@ -5,7 +5,12 @@
 //! `ferrum-alloy new --with openapi`), run with `cargo run --bin openapi`
 //! through an explicit argument list (no shell), or from `--input`. With
 //! `--manifest`, `servers` is set to the manifest's gateway-facing
-//! `public_path`, and stripped service base paths are removed from operations.
+//! `public_path`, and stripped service base paths are removed from operations
+//! (local `#/paths/...` references follow the renamed keys).
+//!
+//! The written document is held to `MAX_OUTPUT_BYTES`: pretty-printing can
+//! make it several times larger than its compact input, but not without
+//! bound. `--check` compares parsed documents and renders nothing.
 //!
 //! AI-agent tool metadata (`x-ferrum-mcp`, see
 //! [`ferrum_alloy_edge::agents`]): the manifest's `[agents]` section becomes
@@ -14,7 +19,8 @@
 //! could not use fails the export and `--check` with exit 3. A hand-written
 //! selection that publishes every `GET` operation is a warning.
 
-use std::io::Read;
+use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -56,6 +62,9 @@ pub(crate) struct ExportArgs {
 }
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Most bytes `openapi export` writes, and reads back for `--check`: four
+/// times the input limit, room for indentation a real document needs.
+const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 fn load(args: &ExportArgs) -> Result<Vec<u8>, CliError> {
     if let Some(input) = &args.input {
@@ -166,6 +175,7 @@ fn normalize_paths(
 
     let base_path = manifest.api.service_base_path.trim_end_matches('/');
     let mut normalized_paths = serde_json::Map::new();
+    let mut renamed = HashMap::new();
     for (path, operations) in std::mem::take(paths) {
         let normalized = if path == base_path {
             "/"
@@ -173,18 +183,141 @@ fn normalize_paths(
             suffix
         } else {
             &path
-        };
+        }
+        .to_owned();
         if normalized_paths
-            .insert(normalized.to_owned(), operations)
+            .insert(normalized.clone(), operations)
             .is_some()
         {
             return Err(CliError::Invalid(format!(
                 "OpenAPI paths collide after removing service_base_path {base_path:?}"
             )));
         }
+        if normalized != path {
+            renamed.insert(path, normalized);
+        }
     }
     *paths = normalized_paths;
+    if !renamed.is_empty() {
+        rewrite_path_refs(document, &renamed);
+    }
     Ok(())
+}
+
+/// Points every local `$ref` into a renamed `paths` key (`#/paths/<key>...`)
+/// at the key's new name, so an alias of a stripped path still resolves.
+fn rewrite_path_refs(value: &mut Value, renamed: &HashMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "$ref"
+                    && let Value::String(reference) = child
+                {
+                    if let Some(rewritten) = rewritten_path_ref(reference, renamed) {
+                        *reference = rewritten;
+                    }
+                    continue;
+                }
+                rewrite_path_refs(child, renamed);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_path_refs(item, renamed);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `reference` with its `paths` key renamed, or `None` when it does not
+/// point into a renamed key. The key is a JSON Pointer token in a URI
+/// fragment: percent-decoded, then `~1`/`~0` unescaped (RFC 6901 sections 4
+/// and 6). The new token keeps the original's percent-encoding style.
+fn rewritten_path_ref(reference: &str, renamed: &HashMap<String, String>) -> Option<String> {
+    let rest = reference.strip_prefix("#/paths/")?;
+    let (token, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let key = percent_decode(token)?.replace("~1", "/").replace("~0", "~");
+    let new = renamed.get(&key)?;
+    let escaped = new.replace('~', "~0").replace('/', "~1");
+    let escaped = if token.contains('%') {
+        percent_encode(&escaped)
+    } else {
+        escaped
+    };
+    Some(format!("#/paths/{escaped}{tail}"))
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Percent-encodes every byte a URI fragment may not hold literally.
+fn percent_encode(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/?".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// A `Vec` that refuses to grow past `limit` bytes.
+struct BoundedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for BoundedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("output limit reached"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The pretty-printed document and a final newline, at most `limit` bytes.
+fn render(document: &Value, limit: usize) -> Result<Vec<u8>, CliError> {
+    let mut out = BoundedBuffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    let rendered = serde_json::to_writer_pretty(&mut out, document)
+        .map_err(|e| e.to_string())
+        .and_then(|()| out.write_all(b"\n").map_err(|e| e.to_string()));
+    match rendered {
+        Ok(()) => Ok(out.bytes),
+        Err(_) if out.exceeded => Err(CliError::Invalid(format!(
+            "the exported document is larger than {limit} bytes once pretty-printed"
+        ))),
+        Err(e) => Err(CliError::Io(e)),
+    }
 }
 
 /// Runs an `openapi` subcommand.
@@ -212,14 +345,11 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
     for warning in warnings {
         crate::eprint(&format!("warning: {warning}\n"));
     }
-    let rendered = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&document).map_err(|e| CliError::Io(e.to_string()))?
-    );
     if args.check {
-        // The existing output may be laid out differently from `rendered`,
-        // which can exceed the input limit once pretty-printed.
-        let limit = MAX_DOCUMENT_BYTES.max(u64::try_from(rendered.len()).unwrap_or(u64::MAX));
+        // Compared as parsed JSON, so nothing is rendered. The existing
+        // output may be laid out differently and is held to the output
+        // limit, which exceeds the input limit for pretty-printed text.
+        let limit = u64::try_from(MAX_OUTPUT_BYTES).unwrap_or(u64::MAX);
         let existing = match read_regular_file_bounded(&args.output, limit) {
             Ok(existing) => existing,
             Err(ReadError::Io(e)) => {
@@ -241,11 +371,56 @@ pub(crate) fn run(command: OpenapiCommand) -> Result<ExitCode, CliError> {
         crate::print(&format!("{} is up to date\n", args.output.display()))?;
         return Ok(ExitCode::SUCCESS);
     }
-    crate::fsout::write_atomically(
-        &args.output,
-        rendered.as_bytes(),
-        crate::fsout::NewFileMode::Umask,
-    )?;
+    let rendered = render(&document, MAX_OUTPUT_BYTES)?;
+    crate::fsout::write_atomically(&args.output, &rendered, crate::fsout::NewFileMode::Umask)?;
     crate::eprint(&format!("wrote {}\n", args.output.display()));
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn rendering_stops_at_the_output_limit() {
+        let document = serde_json::json!({ "a": [[[[1, 2, 3]]]] });
+        let full = render(&document, MAX_OUTPUT_BYTES).unwrap();
+        assert_eq!(full.last(), Some(&b'\n'));
+        assert_eq!(render(&document, full.len()).unwrap(), full);
+        let error = render(&document, full.len() - 1).unwrap_err();
+        assert!(
+            matches!(&error, CliError::Invalid(message) if message.contains("larger than")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn path_references_follow_renamed_keys() {
+        let renamed = HashMap::from([
+            ("/internal/items".to_owned(), "/items".to_owned()),
+            ("/internal/{id}".to_owned(), "/{id}".to_owned()),
+            ("/internal".to_owned(), "/".to_owned()),
+        ]);
+        for (reference, expected) in [
+            ("#/paths/~1internal~1items", Some("#/paths/~1items")),
+            ("#/paths/~1internal~1items/get", Some("#/paths/~1items/get")),
+            ("#/paths/~1internal", Some("#/paths/~1")),
+            ("#/paths/~1internal~1{id}", Some("#/paths/~1{id}")),
+            (
+                "#/paths/%7E1internal%7E1%7Bid%7D",
+                Some("#/paths/~1%7Bid%7D"),
+            ),
+            ("#/paths/~1other", None),
+            ("#/paths/%zz", None),
+            ("#/components/pathItems/x", None),
+        ] {
+            assert_eq!(
+                rewritten_path_ref(reference, &renamed).as_deref(),
+                expected,
+                "{reference}"
+            );
+        }
+    }
 }

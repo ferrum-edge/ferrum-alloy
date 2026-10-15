@@ -1358,6 +1358,67 @@ fn openapi_export_maps_service_base_path_when_the_gateway_strips_it() {
     }
 }
 
+/// Renaming a stripped path also renames local references to it, with or
+/// without agent metadata to check them.
+#[test]
+fn openapi_export_rewrites_references_to_stripped_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(
+        dir.path(),
+        "raw.json",
+        r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{
+            "/internal/items":{"get":{"operationId":"items","summary":"Items.","responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/paths/~1internal~1items/get/responses/200/x-schema"}}}}}}},
+            "/alias":{"$ref":"#/paths/~1internal~1items"},
+            "/elsewhere":{"$ref":"#/components/pathItems/Other"}
+        },"components":{"pathItems":{"Other":{}}}}"##,
+    );
+    for (name, agents) in [("plain", ""), ("agents", "[agents]\nenabled = false\n")] {
+        let manifest = write(
+            dir.path(),
+            &format!("{name}.toml"),
+            &format!(
+                "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"/internal/\"\nstrip_public_path = true\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n{agents}"
+            ),
+        );
+        let out = dir.path().join(format!("{name}.json"));
+        let output = run(&[
+            "openapi",
+            "export",
+            "--input",
+            &input,
+            "--manifest",
+            &manifest,
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        assert_eq!(code(&output), 0, "{name}: {}", stderr(&output));
+        let written = read_json(&out);
+        let paths = &written["paths"];
+        assert!(paths.get("/internal/items").is_none(), "{name}");
+        assert_eq!(paths["/alias"]["$ref"], "#/paths/~1items", "{name}");
+        assert_eq!(
+            paths["/elsewhere"]["$ref"], "#/components/pathItems/Other",
+            "{name}"
+        );
+        let schema = &paths["/items"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+            ["$ref"];
+        assert_eq!(
+            schema, "#/paths/~1items/get/responses/200/x-schema",
+            "{name}"
+        );
+        // The rewritten alias resolves.
+        let target = written
+            .pointer(
+                paths["/alias"]["$ref"]
+                    .as_str()
+                    .unwrap()
+                    .trim_start_matches('#'),
+            )
+            .unwrap();
+        assert!(target.get("get").is_some(), "{name}");
+    }
+}
+
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }

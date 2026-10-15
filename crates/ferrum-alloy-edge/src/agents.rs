@@ -22,7 +22,7 @@
 //!
 //! Nothing here contacts a gateway.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
@@ -78,6 +78,8 @@ const MUTATING_METHODS: &[&str] = &["post", "put", "patch", "delete"];
 pub const MAX_TEXT_BYTES: usize = 8 * 1024;
 /// `$ref` hops followed before giving up.
 const MAX_REF_HOPS: usize = 16;
+/// Most characters of a `$ref` value echoed in a problem.
+const MAX_REF_EXCERPT_CHARS: usize = 80;
 
 /// Invalid or unsafe AI-agent tool metadata. Every problem is listed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -132,7 +134,7 @@ pub fn warnings(document: &Value) -> Vec<String> {
     if !extension.include_operations.is_empty() || !extension.include_tags.is_empty() {
         return Vec::new();
     }
-    let undeclared: Vec<String> = operations(document)
+    let undeclared: Vec<String> = operations(&mut Resolver::new(document))
         .into_iter()
         .filter(|(_, method, operation)| *method == "get" && explicit_expose(operation).is_none())
         .map(|(path, method, _)| format!("paths.{path}.{method}"))
@@ -165,8 +167,12 @@ pub fn stamp(document: &mut Value, manifest: &ServiceManifest) -> Result<(), Age
         )]));
     }
     let extension = if agents.enabled {
-        let exposed: BTreeSet<String> = operations(document)
+        // Path Items shared by several paths are visited once, so the work
+        // does not grow with the number of aliases.
+        let mut seen = HashSet::new();
+        let exposed: BTreeSet<String> = operations(&mut Resolver::new(document))
             .into_iter()
+            .filter(|(_, _, operation)| seen.insert(std::ptr::from_ref(*operation)))
             .filter(|(_, _, operation)| explicit_expose(operation) == Some(true))
             .filter_map(|(_, _, operation)| operation_id(operation).map(str::to_owned))
             .collect();
@@ -207,16 +213,7 @@ pub fn fill_default_annotations(document: &mut Value) {
     // items and every referenced target. A shared target is filled once;
     // filling is idempotent and never replaces an explicit hint. Unresolvable
     // references are left for [`lint`] to report.
-    let mut targets: Vec<String> = Vec::new();
-    if let Some(paths) = document.get("paths").and_then(Value::as_object) {
-        for item in paths.values() {
-            if let Some(pointer) = ref_target_pointer(document, item)
-                && !targets.contains(&pointer)
-            {
-                targets.push(pointer);
-            }
-        }
-    }
+    let targets = referenced_path_items(document);
     if let Some(paths) = document.get_mut("paths").and_then(Value::as_object_mut) {
         for item in paths.values_mut() {
             if let Some(item) = item.as_object_mut() {
@@ -234,23 +231,28 @@ pub fn fill_default_annotations(document: &mut Value) {
     }
 }
 
-/// The JSON Pointer of the object a Path Item's local `$ref` chain ends at,
-/// or `None` for inline items and references [`resolve`] cannot follow.
-fn ref_target_pointer(document: &Value, item: &Value) -> Option<String> {
-    let mut current = item;
-    let mut target = None;
-    for _ in 0..MAX_REF_HOPS {
-        let Some(pointer) = current
-            .get("$ref")
-            .and_then(Value::as_str)
-            .and_then(|r| r.strip_prefix('#'))
-        else {
-            break;
-        };
-        current = document.pointer(pointer)?;
-        target = Some(pointer.to_owned());
+/// The distinct JSON Pointers that the local `$ref` chains of `paths` end
+/// at, each once. Inline items and references that cannot be followed are
+/// skipped. Aliases sharing a chain share its final `$ref` string, so they
+/// are told apart by address before any string is hashed or copied.
+fn referenced_path_items(document: &Value) -> Vec<String> {
+    let Some(paths) = document.get("paths").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut resolver = Resolver::new(document);
+    let mut seen = HashSet::new();
+    let mut targets = BTreeSet::new();
+    for item in paths.values() {
+        if let Ok(Resolved {
+            pointer: Some(pointer),
+            ..
+        }) = resolver.resolve(item)
+            && seen.insert((pointer.as_ptr(), pointer.len()))
+        {
+            targets.insert(pointer);
+        }
     }
-    target
+    targets.into_iter().map(str::to_owned).collect()
 }
 
 fn fill_item_annotations(item: &mut Map<String, Value>) {
@@ -302,19 +304,30 @@ fn fill_item_annotations(item: &mut Map<String, Value>) {
 /// With `public_path` (the manifest's `api.public_path`, which a publisher
 /// uses as the proxy's `listen_path`), the MCP endpoint must sit under it and
 /// must not overlap a selected operation's path.
+///
+/// An operation reached through several paths (Path Item `$ref` aliases) is
+/// parsed and checked once, and its problems name the first such path; only
+/// the per-path checks (the selection count, tool-name uniqueness, and the
+/// endpoint overlap) run for every path. The work therefore grows with the
+/// document, not with the number of aliases times the size of what they
+/// share.
 pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     let mut problems = Vec::new();
     let extension = document_extension(document.get(X_FERRUM_MCP), &mut problems);
-    let mut parsed = Vec::new();
-    for (path, method, operation) in operations(document) {
-        let location = format!("paths.{path}.{method}");
-        let operation_extension = operation_extension(operation, &location, &mut problems);
-        parsed.push((path, method, operation, location, operation_extension));
+    let mut resolver = Resolver::new(document);
+    let found = operations(&mut resolver);
+    let mut parsed: HashMap<*const Map<String, Value>, OperationExtension<'_>> = HashMap::new();
+    for &(path, method, operation) in &found {
+        parsed
+            .entry(std::ptr::from_ref(operation))
+            .or_insert_with(|| {
+                operation_extension(operation, &format!("paths.{path}.{method}"), &mut problems)
+            });
     }
     let Some(extension) = extension else {
         return problems;
     };
-    problems.extend(path_item_problems(document));
+    problems.extend(path_item_problems(&mut resolver));
     if document
         .get("x-ferrum-validate")
         .is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)))
@@ -327,60 +340,42 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     let mut selected = 0usize;
     let mut tool_names: BTreeMap<String, String> = BTreeMap::new();
     let mut public_paths = Vec::new();
-    for (path, method, operation, location, operation_extension) in &parsed {
-        if !extension.selects(operation, operation_extension, method) {
-            continue;
-        }
-        let id = operation_id(operation);
-        let named = id.is_some_and(|id| extension.include_operations.contains(id));
-        let explicit = operation_extension.expose == Some(true) || named;
-        if UNBRIDGED_METHODS.contains(method) {
-            problems.push(format!(
-                "{location} cannot be exposed to agents: Edge bridges only GET, POST, PUT, PATCH, and DELETE operations"
-            ));
-            continue;
-        }
-        selected += 1;
-        if MUTATING_METHODS.contains(method) && !explicit {
-            problems.push(format!(
-                "{location} changes state and is selected only by tag; set `expose: true` on it (`AgentTool::expose()`) or name its operationId in `include` to publish it to agents"
-            ));
-        }
-        problems.extend(understated_risk(method, operation_extension, location));
-        match id {
-            None => problems.push(format!(
-                "{location} is exposed to agents but has no operationId"
-            )),
-            Some(id) => {
-                let name = operation_extension
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| tool_name_slug(id));
-                if !is_valid_tool_name(&name) {
-                    problems.push(format!(
-                        "{location} does not yield a valid tool name; set `{X_FERRUM_MCP}.name`"
-                    ));
-                } else if let Some(other) = tool_names.insert(name.clone(), location.clone()) {
-                    problems.push(format!(
-                        "{location} and {other} both produce the tool name {name:?}; set `{X_FERRUM_MCP}.name` on one of them"
-                    ));
-                }
+    // Per operation: `None` when Edge would not publish it, otherwise its
+    // valid tool name, if it has one.
+    let mut tools: HashMap<*const Map<String, Value>, Option<Option<String>>> = HashMap::new();
+    for &(path, method, operation) in &found {
+        let location = format!("paths.{path}.{method}");
+        let key = std::ptr::from_ref(operation);
+        let tool = match tools.get(&key) {
+            Some(tool) => tool.clone(),
+            None => {
+                let tool = parsed.get(&key).and_then(|operation_extension| {
+                    check_selected(
+                        &extension,
+                        &mut resolver,
+                        method,
+                        operation,
+                        operation_extension,
+                        &location,
+                        &mut problems,
+                    )
+                });
+                tools.insert(key, tool.clone());
+                tool
             }
-        }
-        let description = operation_extension
-            .description
-            .as_deref()
-            .or_else(|| operation.get("description").and_then(Value::as_str))
-            .or_else(|| operation.get("summary").and_then(Value::as_str));
-        if description.is_none_or(|text| text.trim().is_empty()) {
+        };
+        let Some(name) = tool else {
+            continue;
+        };
+        selected += 1;
+        if let Some(name) = name
+            && let Some(other) = tool_names.insert(name.clone(), location.clone())
+        {
             problems.push(format!(
-                "{location} is exposed to agents but has no description; agents choose tools by it (set `{X_FERRUM_MCP}.description`, or document the handler)"
+                "{location} and {other} both produce the tool name {name:?}; set `{X_FERRUM_MCP}.name` on one of them"
             ));
         }
-        if let Some(problem) = request_body_problem(document, operation, location) {
-            problems.push(problem);
-        }
-        public_paths.push((path.as_str(), location.as_str()));
+        public_paths.push((path, location));
     }
     if selected == 0 {
         problems.push(format!(
@@ -395,6 +390,69 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
         endpoint_problems(&extension, public_path, &public_paths, &mut problems);
     }
     problems
+}
+
+/// The checks of one operation Edge's selection would consider, run once per
+/// operation however many paths reach it. Returns `None` when Edge would not
+/// publish it, otherwise its valid tool name, if it has one.
+fn check_selected<'a>(
+    extension: &DocumentExtension,
+    resolver: &mut Resolver<'a>,
+    method: &str,
+    operation: &'a Map<String, Value>,
+    operation_extension: &OperationExtension<'_>,
+    location: &str,
+    problems: &mut Vec<String>,
+) -> Option<Option<String>> {
+    if !extension.selects(operation, operation_extension, method) {
+        return None;
+    }
+    if UNBRIDGED_METHODS.contains(&method) {
+        problems.push(format!(
+            "{location} cannot be exposed to agents: Edge bridges only GET, POST, PUT, PATCH, and DELETE operations"
+        ));
+        return None;
+    }
+    let id = operation_id(operation);
+    let named = id.is_some_and(|id| extension.include_operations.contains(id));
+    let explicit = operation_extension.expose == Some(true) || named;
+    if MUTATING_METHODS.contains(&method) && !explicit {
+        problems.push(format!(
+            "{location} changes state and is selected only by tag; set `expose: true` on it (`AgentTool::expose()`) or name its operationId in `include` to publish it to agents"
+        ));
+    }
+    problems.extend(understated_risk(method, operation_extension, location));
+    let mut tool_name = None;
+    match id {
+        None => problems.push(format!(
+            "{location} is exposed to agents but has no operationId"
+        )),
+        Some(id) => {
+            let name = operation_extension
+                .name
+                .map_or_else(|| tool_name_slug(id), str::to_owned);
+            if is_valid_tool_name(&name) {
+                tool_name = Some(name);
+            } else {
+                problems.push(format!(
+                    "{location} does not yield a valid tool name; set `{X_FERRUM_MCP}.name`"
+                ));
+            }
+        }
+    }
+    let description = operation_extension
+        .description
+        .or_else(|| operation.get("description").and_then(Value::as_str))
+        .or_else(|| operation.get("summary").and_then(Value::as_str));
+    if description.is_none_or(|text| text.trim().is_empty()) {
+        problems.push(format!(
+            "{location} is exposed to agents but has no description; agents choose tools by it (set `{X_FERRUM_MCP}.description`, or document the handler)"
+        ));
+    }
+    if let Some(problem) = request_body_problem(resolver, operation, location) {
+        problems.push(problem);
+    }
+    Some(tool_name)
 }
 
 /// The parsed, enabled document-level extension.
@@ -414,7 +472,7 @@ impl DocumentExtension {
     fn selects(
         &self,
         operation: &Map<String, Value>,
-        extension: &OperationExtension,
+        extension: &OperationExtension<'_>,
         method: &str,
     ) -> bool {
         if let Some(expose) = extension.expose {
@@ -439,23 +497,34 @@ impl DocumentExtension {
     }
 }
 
-/// A parsed per-operation extension.
+/// A parsed per-operation extension. Text is borrowed from the document.
 #[derive(Default)]
-struct OperationExtension {
+struct OperationExtension<'a> {
     expose: Option<bool>,
-    name: Option<String>,
-    description: Option<String>,
-    /// Boolean hints the operation sets.
-    hints: Map<String, Value>,
+    name: Option<&'a str>,
+    description: Option<&'a str>,
+    /// The operation's `annotations` object, when it is one.
+    annotations: Option<&'a Map<String, Value>>,
+}
+
+impl OperationExtension<'_> {
+    /// A boolean hint the operation sets.
+    fn hint(&self, key: &str) -> Option<bool> {
+        self.annotations?.get(key)?.as_bool()
+    }
 }
 
 /// Hints may only state more risk than the method's default: a state-changing
 /// operation must not claim `readOnlyHint: true`, and a `DELETE` must not
 /// claim `destructiveHint: false`. An agent may skip asking its user before
 /// calling a tool whose hints understate what it does.
-fn understated_risk(method: &str, extension: &OperationExtension, location: &str) -> Vec<String> {
+fn understated_risk(
+    method: &str,
+    extension: &OperationExtension<'_>,
+    location: &str,
+) -> Vec<String> {
     let mut problems = Vec::new();
-    let hint = |key: &str| extension.hints.get(key).and_then(Value::as_bool);
+    let hint = |key: &str| extension.hint(key);
     if MUTATING_METHODS.contains(&method) && hint("readOnlyHint") == Some(true) {
         problems.push(format!(
             "{location} changes state but claims `readOnlyHint: true`; annotations may only state more risk than the method's default"
@@ -470,19 +539,27 @@ fn understated_risk(method: &str, extension: &OperationExtension, location: &str
 }
 
 /// Every `(path, method, operation)` of the document, with Path Item `$ref`s
-/// in the same document resolved.
-fn operations(document: &Value) -> Vec<(String, &'static str, &Map<String, Value>)> {
+/// in the same document resolved. Paths that alias one Path Item yield the
+/// same operation objects.
+fn operations<'a>(
+    resolver: &mut Resolver<'a>,
+) -> Vec<(&'a str, &'static str, &'a Map<String, Value>)> {
     let mut found = Vec::new();
+    let document = resolver.document;
     let Some(paths) = document.get("paths").and_then(Value::as_object) else {
         return found;
     };
     for (path, item) in paths {
-        let Some(item) = resolve(document, item).ok().and_then(Value::as_object) else {
+        let Some(item) = resolver
+            .resolve(item)
+            .ok()
+            .and_then(|resolved| resolved.value.as_object())
+        else {
             continue;
         };
         for method in HTTP_METHODS {
             if let Some(operation) = item.get(*method).and_then(Value::as_object) {
-                found.push((path.clone(), *method, operation));
+                found.push((path.as_str(), *method, operation));
             }
         }
     }
@@ -490,14 +567,16 @@ fn operations(document: &Value) -> Vec<(String, &'static str, &Map<String, Value
 }
 
 /// Path Items whose `$ref` cannot be followed.
-fn path_item_problems(document: &Value) -> Vec<String> {
+fn path_item_problems(resolver: &mut Resolver<'_>) -> Vec<String> {
+    let document = resolver.document;
     let Some(paths) = document.get("paths").and_then(Value::as_object) else {
         return Vec::new();
     };
     paths
         .iter()
         .filter_map(|(path, item)| {
-            resolve(document, item)
+            resolver
+                .resolve(item)
                 .err()
                 .map(|problem| format!("paths.{path}: {problem}"))
         })
@@ -521,23 +600,126 @@ fn explicit_expose(operation: &Map<String, Value>) -> Option<bool> {
     }
 }
 
-/// Follows local `$ref`s (`#/...` JSON Pointers) from `value`.
-fn resolve<'a>(document: &'a Value, value: &'a Value) -> Result<&'a Value, String> {
-    let mut current = value;
-    for _ in 0..MAX_REF_HOPS {
-        let Some(reference) = current.get("$ref") else {
-            return Ok(current);
-        };
-        let Some(pointer) = reference.as_str().and_then(|r| r.strip_prefix('#')) else {
-            return Err(format!(
-                "uses the non-local $ref {reference}, which this check cannot follow"
-            ));
-        };
-        current = document
-            .pointer(pointer)
-            .ok_or_else(|| format!("$ref {reference} does not resolve"))?;
+/// Where a local `$ref` chain ends.
+#[derive(Clone, Copy)]
+struct Resolved<'a> {
+    /// The value the chain ends at (the value itself when it has no `$ref`).
+    value: &'a Value,
+    /// The JSON Pointer of the chain's last hop; `None` without a `$ref`.
+    pointer: Option<&'a str>,
+    /// `$ref` hops followed.
+    hops: usize,
+}
+
+/// Follows local `$ref`s (`#/...` JSON Pointers), remembering the outcome for
+/// every value with a `$ref` it passes. Many references to one shared chain
+/// (or to one long `$ref` string) therefore cost one walk of it in total,
+/// not one per reference.
+struct Resolver<'a> {
+    document: &'a Value,
+    /// Keyed by the address of a value that has a `$ref`.
+    memo: HashMap<*const Value, Result<Resolved<'a>, String>>,
+}
+
+impl<'a> Resolver<'a> {
+    fn new(document: &'a Value) -> Self {
+        Self {
+            document,
+            memo: HashMap::new(),
+        }
     }
-    Err(format!("has a $ref chain longer than {MAX_REF_HOPS} hops"))
+
+    /// Follows the `$ref` chain from `value`; a chain of [`MAX_REF_HOPS`] or
+    /// more hops, or one that never ends, is a problem.
+    fn resolve(&mut self, value: &'a Value) -> Result<Resolved<'a>, String> {
+        // The values with a `$ref` passed on this walk, in order, and the
+        // pointer each one names.
+        let mut chain: Vec<(&'a Value, &'a str)> = Vec::new();
+        let mut on_chain = HashSet::new();
+        let mut current = value;
+        let tail = loop {
+            let Some(reference) = current.get("$ref") else {
+                break Ok(Resolved {
+                    value: current,
+                    pointer: None,
+                    hops: 0,
+                });
+            };
+            let key = std::ptr::from_ref(current);
+            if let Some(known) = self.memo.get(&key) {
+                break known.clone();
+            }
+            if !on_chain.insert(key) {
+                // A cycle: no chain through it ever ends.
+                break Err(chain_too_long());
+            }
+            let Some(pointer) = reference.as_str().and_then(|r| r.strip_prefix('#')) else {
+                break Err(format!(
+                    "uses the non-local $ref {}, which this check cannot follow",
+                    excerpt(reference)
+                ));
+            };
+            chain.push((current, pointer));
+            match self.document.pointer(pointer) {
+                Some(next) => current = next,
+                None => break Err(format!("$ref {} does not resolve", excerpt(reference))),
+            }
+        };
+        // Record the outcome for every link of the walk, each measured from
+        // that link, so a later walk reaching any of them stops there. The
+        // tail is measured from where the walk stopped, one hop past the
+        // last link.
+        let last_pointer = chain.last().map(|(_, pointer)| *pointer);
+        let length = chain.len();
+        let mut outcome = tail;
+        for (index, (link, _)) in chain.into_iter().enumerate().rev() {
+            let result = match &outcome {
+                Err(problem) => Err(problem.clone()),
+                Ok(end) => {
+                    let hops = length - index + end.hops;
+                    // As before memoization: the walk gave up after taking
+                    // its MAX_REF_HOPS-th hop.
+                    if hops >= MAX_REF_HOPS {
+                        Err(chain_too_long())
+                    } else {
+                        Ok(Resolved {
+                            value: end.value,
+                            pointer: end.pointer.or(last_pointer),
+                            hops,
+                        })
+                    }
+                }
+            };
+            self.memo.insert(std::ptr::from_ref(link), result.clone());
+            if index == 0 {
+                outcome = result;
+            }
+        }
+        outcome
+    }
+}
+
+fn chain_too_long() -> String {
+    format!("has a $ref chain longer than {MAX_REF_HOPS} hops")
+}
+
+/// A `$ref` value for a problem message, shortened so that a huge reference
+/// shared by many paths is not copied into every message.
+fn excerpt(reference: &Value) -> String {
+    match reference {
+        Value::String(text) => {
+            // Never walks more of the string than it echoes.
+            let mut chars = text.chars();
+            let mut head: String = chars.by_ref().take(MAX_REF_EXCERPT_CHARS).collect();
+            if chars.next().is_some() {
+                head.push('…');
+            }
+            Value::String(head).to_string()
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => reference.to_string(),
+        Value::Array(_) => "(an array)".to_owned(),
+        Value::Object(_) => "(an object)".to_owned(),
+    }
 }
 
 /// The JSON media types the bridge sends (Edge `media_type_is_json`).
@@ -554,14 +736,14 @@ fn is_json_media_type(media_type: &str) -> bool {
 /// A request body the bridge cannot send. Edge refuses a required one at
 /// import and silently drops an optional one; both are reported, because an
 /// agent could not send either.
-fn request_body_problem(
-    document: &Value,
-    operation: &Map<String, Value>,
+fn request_body_problem<'a>(
+    resolver: &mut Resolver<'a>,
+    operation: &'a Map<String, Value>,
     location: &str,
 ) -> Option<String> {
     let body = operation.get("requestBody")?;
-    let body = match resolve(document, body) {
-        Ok(body) => body,
+    let body = match resolver.resolve(body) {
+        Ok(resolved) => resolved.value,
         Err(problem) => return Some(format!("{location} request body: {problem}")),
     };
     let json = body
@@ -752,15 +934,15 @@ fn document_extension(
     })
 }
 
-fn optional_text(
-    object: &Map<String, Value>,
+fn optional_text<'a>(
+    object: &'a Map<String, Value>,
     key: &str,
     at: &str,
     problems: &mut Vec<String>,
-) -> Option<String> {
+) -> Option<&'a str> {
     match object.get(key) {
         None | Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::String(text)) => Some(text),
         Some(_) => {
             problems.push(format!("`{at}.{key}` must be a string"));
             None
@@ -770,11 +952,11 @@ fn optional_text(
 
 /// Parses a per-operation extension (Edge `parse_operation_mcp_extension`,
 /// plus the annotation rules the generated plugin applies at load).
-fn operation_extension(
-    operation: &Map<String, Value>,
+fn operation_extension<'a>(
+    operation: &'a Map<String, Value>,
     location: &str,
     problems: &mut Vec<String>,
-) -> OperationExtension {
+) -> OperationExtension<'a> {
     let object = match operation.get(X_FERRUM_MCP) {
         None | Some(Value::Null) => return OperationExtension::default(),
         Some(Value::Bool(expose)) => {
@@ -802,7 +984,7 @@ fn operation_extension(
         }
     };
     let name = optional_text(object, "name", &at, problems);
-    if let Some(name) = &name
+    if let Some(name) = name
         && !is_valid_tool_name(name)
     {
         problems.push(format!(
@@ -811,10 +993,11 @@ fn operation_extension(
     }
     let _title = optional_text(object, "title", &at, problems);
     let description = optional_text(object, "description", &at, problems);
-    let mut hints = Map::new();
+    let mut hints = None;
     match object.get("annotations") {
         None | Some(Value::Null) => {}
         Some(Value::Object(annotations)) => {
+            hints = Some(annotations);
             let at = format!("{at}.annotations");
             unknown_keys(annotations, ANNOTATION_KEYS, &at, problems);
             for (key, value) in annotations {
@@ -829,8 +1012,6 @@ fn operation_extension(
                     problems.push(format!(
                         "`{at}.{key}` has the wrong type or is longer than {MAX_TEXT_BYTES} bytes"
                     ));
-                } else if value.is_boolean() {
-                    hints.insert(key.clone(), value.clone());
                 }
             }
         }
@@ -840,7 +1021,7 @@ fn operation_extension(
         expose,
         name: name.filter(|name| is_valid_tool_name(name)),
         description,
-        hints,
+        annotations: hints,
     }
 }
 
@@ -851,7 +1032,7 @@ fn operation_extension(
 fn endpoint_problems(
     extension: &DocumentExtension,
     public_path: &str,
-    selected: &[(&str, &str)],
+    selected: &[(&str, String)],
     problems: &mut Vec<String>,
 ) {
     let prefix = public_path.trim_end_matches('/');
@@ -865,13 +1046,14 @@ fn endpoint_problems(
         ));
     }
     let scope = endpoint.trim_end_matches('/');
+    let scope_subtree = format!("{scope}/");
     for (path, location) in selected {
         let public = if !prefix.is_empty() && *path == "/" {
             prefix.to_owned()
         } else {
             format!("{prefix}{path}")
         };
-        if public == scope || public.starts_with(&format!("{scope}/")) {
+        if public == scope || public.starts_with(&scope_subtree) {
             problems.push(format!(
                 "{location} is served at {public:?}, inside the MCP endpoint {endpoint:?}; move the endpoint ([agents] endpoint_path)"
             ));
