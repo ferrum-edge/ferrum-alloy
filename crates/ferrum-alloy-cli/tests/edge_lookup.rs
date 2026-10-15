@@ -378,6 +378,39 @@ fn a_trickle_held_past_the_bound_fails_even_if_the_fixture_stalls_later() {
     ));
 }
 
+/// A proven overrun also fails when the fixture then misses its completion
+/// notice or is cancelled, instead of becoming a retry.
+#[test]
+fn a_proven_trickle_overrun_fails_even_if_the_fixture_finishes_late() {
+    use trickle::{TRICKLE_INTERVAL, Verdict, verdict};
+    let started = Instant::now();
+    let at = |ms: u64| started + Duration::from_millis(ms);
+    // Continuous writes through 2.2 s and a disconnect at 2.3 s.
+    let mut overrun: Vec<_> = (1..=22).map(|n| started + TRICKLE_INTERVAL * n).collect();
+    overrun.push(at(2300));
+    assert!(matches!(
+        verdict(Some(started), &overrun, false),
+        Verdict::Overrun(_)
+    ));
+    assert!(matches!(
+        verdict(Some(started), &overrun, true),
+        Verdict::Overrun(_)
+    ));
+    // Without a proven overrun, a late fixture proves nothing.
+    let live = [at(100), at(200), at(300), at(400), at(500), at(610)];
+    assert!(matches!(
+        verdict(Some(started), &live, false),
+        Verdict::Retry(_)
+    ));
+    assert!(matches!(verdict(None, &[], false), Verdict::Retry(_)));
+    assert_eq!(verdict(Some(started), &live, true), Verdict::Proceed);
+    let stalled = [at(100), at(900)];
+    assert!(matches!(
+        verdict(Some(started), &stalled, true),
+        Verdict::Retry(_)
+    ));
+}
+
 #[test]
 fn malformed_inputs_are_redacted_before_any_lookup_can_succeed() {
     let trap = TcpListener::bind("127.0.0.1:0").unwrap();

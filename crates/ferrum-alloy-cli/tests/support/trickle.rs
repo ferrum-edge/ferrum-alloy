@@ -68,6 +68,37 @@ pub(crate) fn liveness(started: Instant, events: &[Instant]) -> Liveness {
     Liveness::Live
 }
 
+/// What one attempt's fixture evidence allows.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Check the attempt's remaining assertions.
+    Proceed,
+    /// The fixture stalled or did not finish; nothing was proven either way.
+    Retry(String),
+    /// The client accepted body bytes this long after the head while the
+    /// fixture was continuously live: fail, never retry.
+    Overrun(Duration),
+}
+
+/// Decides an attempt from the fixture's latched timeline. `started` is when
+/// the head was written (if it was), `events` the trickled writes and any
+/// observed disconnect, `completed` whether the fixture finished in time.
+/// A proven overrun wins over every retry reason, including a fixture that
+/// was cancelled or descheduled after recording it.
+pub(crate) fn verdict(started: Option<Instant>, events: &[Instant], completed: bool) -> Verdict {
+    let live = started.map(|started| liveness(started, events));
+    if let Some(Liveness::HeldPastBound(held)) = live {
+        return Verdict::Overrun(held);
+    }
+    if !completed {
+        return Verdict::Retry("fixture did not finish within one second of CLI return".into());
+    }
+    if let Some(Liveness::Stalled(gap)) = live {
+        return Verdict::Retry(format!("fixture stalled for {gap:?}"));
+    }
+    Verdict::Proceed
+}
+
 /// The client's request and the CLI's output from the proving attempt.
 pub(crate) struct TrickleProof {
     /// The fixture's URL, which the CLI's error must not disclose.
@@ -102,13 +133,21 @@ enum Disconnect {
     Failed(std::io::Error, &'static str),
 }
 
-struct TrickleFixture {
-    request: String,
+/// The fixture's evidence, latched as it happens so that it survives a
+/// fixture error, cancellation, or a late completion notice.
+#[derive(Default)]
+struct Timeline {
     /// When the complete response head had been written.
-    started: Instant,
+    started: Option<Instant>,
     write_times: Vec<Instant>,
     /// The client's disconnect and when the fixture observed it.
     disconnect: Option<(Disconnect, Instant)>,
+}
+
+/// The fixture's own cancellation or lifetime expiry, as opposed to a
+/// client disconnect.
+fn fixture_ended(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::TimedOut)
 }
 
 /// One attempt. Returns `Err` only when the fixture itself stalled; every
@@ -125,6 +164,7 @@ fn trickle_attempt(
     let cancelled = Arc::new(AtomicBool::new(false));
     let stop = Arc::clone(&cancelled);
     let server = std::thread::spawn(move || {
+        let mut timeline = Timeline::default();
         let result = (|| -> std::io::Result<_> {
             let deadline = Instant::now() + Duration::from_secs(20);
             let (mut stream, _) = trickle_io(&stop, deadline, || listener.accept())?;
@@ -156,38 +196,39 @@ fn trickle_attempt(
                 body.len() + TRICKLE_WRITES,
             );
             trickle_write(&mut stream, head.as_bytes(), &stop, deadline)?;
-            let started = Instant::now();
-            let mut write_times = Vec::new();
-            let mut disconnect = None;
+            timeline.started = Some(Instant::now());
             for _ in 0..TRICKLE_WRITES {
-                if let Err(error) = trickle_write(&mut stream, b" ", &stop, deadline) {
-                    disconnect = Some((Disconnect::Failed(error, "trickle"), Instant::now()));
-                    break;
+                match trickle_write(&mut stream, b" ", &stop, deadline) {
+                    Err(error) if fixture_ended(&error) => return Err(error),
+                    Err(error) => {
+                        let seen = Disconnect::Failed(error, "trickle");
+                        timeline.disconnect = Some((seen, Instant::now()));
+                        return Ok(request);
+                    }
+                    Ok(()) => {}
                 }
                 let written_at = Instant::now();
-                write_times.push(written_at);
+                timeline.write_times.push(written_at);
                 let next = written_at + TRICKLE_INTERVAL;
                 if let Some(seen) = watch_for_disconnect(&mut stream, next, &stop, deadline)? {
-                    disconnect = Some((seen, Instant::now()));
-                    break;
+                    timeline.disconnect = Some((seen, Instant::now()));
+                    return Ok(request);
                 }
             }
-            if disconnect.is_none() {
-                disconnect = trickle_write(&mut stream, body.as_bytes(), &stop, deadline)
-                    .err()
-                    .map(|error| (Disconnect::Failed(error, "final body"), Instant::now()));
+            match trickle_write(&mut stream, body.as_bytes(), &stop, deadline) {
+                Err(error) if fixture_ended(&error) => return Err(error),
+                Err(error) => {
+                    let seen = Disconnect::Failed(error, "final body");
+                    timeline.disconnect = Some((seen, Instant::now()));
+                }
+                Ok(()) => {}
             }
-            Ok(TrickleFixture {
-                request,
-                started,
-                write_times,
-                disconnect,
-            })
+            Ok(request)
         })();
         // The socket has been dropped before completion is recorded, including
         // every I/O error path. A panic closes the channel and is reported at join.
         let _ = completed_tx.send(());
-        result
+        (result, timeline)
     });
     // Keep ownership of the fixture outside all fallible client work so even
     // a helper panic or a channel failure cannot bypass cancellation/join.
@@ -200,7 +241,7 @@ fn trickle_attempt(
         (output, returned_at, completed)
     }));
     cancelled.store(true, Ordering::Relaxed);
-    let server_result = match server.join() {
+    let (server_result, timeline) = match server.join() {
         Ok(result) => result,
         Err(panic) => std::panic::resume_unwind(panic),
     };
@@ -208,40 +249,40 @@ fn trickle_attempt(
         Ok(proof) => proof,
         Err(panic) => std::panic::resume_unwind(panic),
     };
-    if !completed {
-        return Err(format!(
-            "fixture did not finish within one second of CLI return: {:?}",
-            server_result.err()
-        ));
-    }
-    let fixture = server_result.unwrap();
-    let writes = fixture.write_times.len();
-    let returned = returned_at.duration_since(fixture.started);
-    let events: Vec<_> = fixture
+    let writes = timeline.write_times.len();
+    let since_head = |at: Instant| timeline.started.map(|started| at.duration_since(started));
+    let events: Vec<_> = timeline
         .write_times
         .iter()
         .copied()
-        .chain(fixture.disconnect.iter().map(|(_, at)| *at))
+        .chain(timeline.disconnect.iter().map(|(_, at)| *at))
         .collect();
     let timing = format!(
-        "{writes} writes, disconnect {:?} after the head, CLI returned after {returned:?}",
-        fixture
+        "{writes} writes, disconnect {:?} and CLI return {:?} after the head",
+        timeline
             .disconnect
             .as_ref()
-            .map(|(_, at)| at.duration_since(fixture.started)),
+            .and_then(|(_, at)| since_head(*at)),
+        since_head(returned_at),
     );
-    // A violation while the fixture was live fails even if it stalled later.
-    match liveness(fixture.started, &events) {
-        Liveness::Live => {}
-        Liveness::Stalled(gap) => {
-            return Err(format!("fixture stalled for {gap:?}: {timing}"));
+    // A violation while the fixture was live fails even if it stalled,
+    // errored or finished late afterwards.
+    match verdict(timeline.started, &events, completed) {
+        Verdict::Proceed => {}
+        Verdict::Retry(reason) => {
+            return Err(format!(
+                "{reason}: {timing}; fixture result {:?}",
+                server_result.err()
+            ));
         }
-        Liveness::HeldPastBound(held) => {
+        Verdict::Overrun(held) => {
             panic!("client kept accepting the trickle {held:?} after the head: {timing}");
         }
     }
+    let request = server_result.unwrap();
+    let returned = since_head(returned_at).expect("a live attempt wrote the head");
     // Live implies the disconnect, if any, came within the connection bound.
-    let (disconnect, _) = fixture
+    let (disconnect, _) = timeline
         .disconnect
         .unwrap_or_else(|| panic!("client read the complete trickling response: {timing}"));
     if let Disconnect::Failed(error, operation) = &disconnect {
@@ -267,7 +308,7 @@ fn trickle_attempt(
     );
     Ok(TrickleProof {
         url,
-        request: fixture.request,
+        request,
         output,
     })
 }
