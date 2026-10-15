@@ -418,8 +418,12 @@ where
         shared.metrics.trace_decisions.inc(trace.decision.as_str());
         if trace.accepted.is_none() {
             // Do not let application code forward rejected context.
+            // `baggage` goes too: outbound policy never forwards it, and a
+            // handler copying headers by hand must not propagate baggage
+            // from a re-rooted (untrusted) request.
             request.headers_mut().remove(TRACEPARENT);
             request.headers_mut().remove(TRACESTATE);
+            request.headers_mut().remove("baggage");
         }
 
         let method = method_label(request.method());
