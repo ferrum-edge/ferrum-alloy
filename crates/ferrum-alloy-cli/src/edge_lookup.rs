@@ -14,6 +14,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use crate::error::CliError;
 
 const TOKEN_ENV: &str = ferrum_alloy::config::EDGE_DIAGNOSTICS_TOKEN_ENV;
+const SERVICE_TOKEN_ENV: &str = ferrum_alloy::config::DIAGNOSTICS_TOKEN_ENV;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -49,28 +50,65 @@ pub(crate) struct CredentialRedactor {
 }
 
 impl CredentialRedactor {
+    /// Every credential this command may send: the Edge admin token and the
+    /// service diagnostics token. A credential read from `--token-file` is
+    /// added with [`Self::add_credential`] once resolved.
     pub(crate) fn from_env() -> Self {
-        let raw = std::env::var_os(TOKEN_ENV).unwrap_or_default();
-        Self::new(&raw.to_string_lossy())
+        let mut redactor = Self {
+            credentials: Vec::new(),
+        };
+        for name in [TOKEN_ENV, SERVICE_TOKEN_ENV] {
+            let raw = std::env::var_os(name).unwrap_or_default();
+            redactor.add_credential(&raw.to_string_lossy());
+        }
+        redactor
     }
 
+    #[cfg(test)]
     fn new(raw: &str) -> Self {
-        let mut credentials = Vec::new();
+        let mut redactor = Self {
+            credentials: Vec::new(),
+        };
+        redactor.add_credential(raw);
+        redactor
+    }
+
+    /// Adds one credential (and the forms errors may reflect it in).
+    pub(crate) fn add_credential(&mut self, raw: &str) {
         for token in [raw, raw.trim()] {
             if !token.is_empty() {
-                credentials.push(token.to_owned());
+                self.credentials.push(token.to_owned());
                 // Parser errors may Debug-format even an invalid credential.
                 let quoted = format!("{token:?}");
-                credentials.push(quoted[1..quoted.len() - 1].to_owned());
+                self.credentials
+                    .push(quoted[1..quoted.len() - 1].to_owned());
             }
         }
-        credentials.sort_by_key(|token| std::cmp::Reverse(token.len()));
-        credentials.dedup();
-        Self { credentials }
+        self.credentials
+            .sort_by_key(|token| std::cmp::Reverse(token.len()));
+        self.credentials.dedup();
     }
 
     fn contains_credential(&self, text: &str) -> bool {
         self.credentials.iter().any(|token| text.contains(token))
+    }
+
+    /// Whether a JSON number carries a credential: its text contains
+    /// one, or it equals a credential read as a number (a reflection
+    /// may drop leading zeros or use exponent form, so text alone is
+    /// not enough for numeric credentials).
+    fn credential_matches_number(&self, number: &serde_json::Number) -> bool {
+        if self.contains_credential(&number.to_string()) {
+            return true;
+        }
+        let Some(value) = number.as_f64() else {
+            return false;
+        };
+        self.credentials.iter().any(|token| {
+            token
+                .parse::<f64>()
+                .is_ok_and(|parsed| parsed.is_finite() && parsed == value)
+        })
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -107,6 +145,15 @@ impl CredentialRedactor {
     pub(crate) fn redact_json(&self, value: &mut serde_json::Value) {
         match value {
             serde_json::Value::String(text) => *text = self.redact(text),
+            // An all-digit credential can be reflected as a JSON number
+            // instead of a string; replace the number rather than
+            // retyping it, so the output stays valid JSON of the same
+            // shape.
+            serde_json::Value::Number(number) => {
+                if self.credential_matches_number(number) {
+                    *number = serde_json::Number::from(0);
+                }
+            }
             serde_json::Value::Array(values) => {
                 for value in values {
                     self.redact_json(value);
@@ -301,6 +348,37 @@ mod tests {
         redactor.redact_json(&mut value);
         assert_eq!(value["boolean"], true);
         assert_eq!(value["string"], "[REDACTED]");
+    }
+
+    /// An all-digit credential reflected as a JSON number (not a
+    /// string) is redacted too, including exponent spellings, while
+    /// unrelated numbers keep their value and type.
+    #[test]
+    fn numeric_credentials_are_redacted_from_json_numbers() {
+        let redactor = CredentialRedactor::new("738492615073849261");
+        let mut value: serde_json::Value = serde_json::from_str(
+            r#"{"exact":738492615073849261,"exponent":7.38492615073849261e17,"safe":42,"nested":[738492615073849261]}"#,
+        )
+        .unwrap();
+        redactor.redact_json(&mut value);
+        assert_eq!(value["exact"], 0);
+        assert_eq!(value["exponent"], 0);
+        assert_eq!(value["safe"], 42);
+        assert_eq!(value["nested"][0], 0);
+        assert!(!value.to_string().contains("738492615073849261"));
+    }
+
+    #[test]
+    fn added_credentials_are_redacted_like_env_credentials() {
+        let mut redactor = CredentialRedactor::new("edge-secret");
+        redactor.add_credential("service-secret\n");
+        assert_eq!(
+            redactor.redact("edge-secret then service-secret"),
+            "[REDACTED] then [REDACTED]"
+        );
+        let mut value = serde_json::json!({ "reflected": "service-secret" });
+        redactor.redact_json(&mut value);
+        assert_eq!(value["reflected"], "[REDACTED]");
     }
 
     #[test]
