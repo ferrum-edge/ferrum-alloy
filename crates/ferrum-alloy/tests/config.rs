@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use ferrum_alloy::config::{
     AlloyConfig, CLI_ENV_VARS, ClientAuth, ConfigError, CrlDepth, CrlExpiration, CrlUnknownStatus,
     DIAGNOSTICS_TOKEN_ENV, ENV_VARS, EdgeMode, JwtSettings, MAX_CONFIG_FILE_BYTES,
-    MAX_SECRET_FILE_BYTES, Overrides, Secret, TlsSettings, load_from,
+    MAX_SECRET_FILE_BYTES, MAX_TIMEOUT_MS, Overrides, Secret, TlsSettings, load_from,
 };
 
 fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
@@ -259,6 +259,184 @@ fn write_stall_timeout_defaults_to_a_minute_reads_the_environment_and_rejects_ze
     let error = config.validate(NO_FEATURES).unwrap_err().to_string();
     assert!(
         error.contains("server.write_stall_timeout_ms must be greater than zero"),
+        "{error}"
+    );
+}
+
+fn validation_error(config: &AlloyConfig) -> String {
+    config.validate(NO_FEATURES).unwrap_err().to_string()
+}
+
+/// A zero handshake timeout used to pass `check` and then fail every TLS
+/// handshake at runtime.
+#[test]
+fn handshake_timeout_of_zero_is_rejected() {
+    let mut config = AlloyConfig::default();
+    let mut tls = TlsSettings::new("server.pem", "server.key");
+    tls.handshake_timeout_ms = 0;
+    config.server.tls = Some(tls);
+    let error = validation_error(&config);
+    assert!(
+        error.contains("server.tls.handshake_timeout_ms must be greater than zero"),
+        "{error}"
+    );
+}
+
+#[test]
+fn timeouts_and_sizes_above_their_caps_are_rejected() {
+    for (mutate, message) in [
+        (
+            (|config: &mut AlloyConfig| {
+                config.server.idle_timeout_ms = MAX_TIMEOUT_MS + 1;
+            }) as fn(&mut AlloyConfig),
+            "server.idle_timeout_ms must not exceed 24 hours",
+        ),
+        (
+            |config: &mut AlloyConfig| config.server.max_header_bytes = usize::MAX,
+            "server.max_header_bytes must not exceed",
+        ),
+        (
+            |config: &mut AlloyConfig| config.server.request_body_limit_bytes = u64::MAX,
+            "server.request_body_limit_bytes must not exceed",
+        ),
+        (
+            |config: &mut AlloyConfig| config.server.http2_max_concurrent_streams = u32::MAX,
+            "server.http2_max_concurrent_streams must not exceed",
+        ),
+        (
+            |config: &mut AlloyConfig| config.server.max_header_count = usize::MAX,
+            "server.max_header_count must not exceed",
+        ),
+    ] {
+        let mut config = AlloyConfig::default();
+        mutate(&mut config);
+        let error = validation_error(&config);
+        assert!(error.contains(message), "{error}");
+    }
+    // The caps themselves are accepted.
+    let mut config = AlloyConfig::default();
+    config.server.idle_timeout_ms = MAX_TIMEOUT_MS;
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn jwt_fetch_bounds_and_leeway_are_validated() {
+    let mut jwt = JwtSettings::new("https://issuer.test", vec!["orders-api".into()]);
+    jwt.jwks_url = Some("https://issuer.test/jwks".into());
+    for (mutate, message) in [
+        (
+            (|jwt: &mut JwtSettings| jwt.leeway_seconds = 3_601) as fn(&mut JwtSettings),
+            "auth.jwt.leeway_seconds must not exceed 3600",
+        ),
+        (
+            |jwt: &mut JwtSettings| jwt.jwks_max_bytes = 0,
+            "auth.jwt.jwks_max_bytes must be within",
+        ),
+        (
+            |jwt: &mut JwtSettings| jwt.jwks_max_bytes = usize::MAX,
+            "auth.jwt.jwks_max_bytes must be within",
+        ),
+        (
+            |jwt: &mut JwtSettings| jwt.jwks_timeout_ms = 0,
+            "auth.jwt.jwks_timeout_ms must be within",
+        ),
+    ] {
+        let mut jwt = jwt.clone();
+        mutate(&mut jwt);
+        let mut config = AlloyConfig::default();
+        config.auth.jwt = Some(jwt);
+        let error = validation_error(&config);
+        assert!(error.contains(message), "{error}");
+    }
+}
+
+#[test]
+fn http_client_and_database_timeouts_must_be_positive_and_host_rules_valid() {
+    for (mutate, message) in [
+        (
+            (|config: &mut AlloyConfig| config.http_client.connect_timeout_ms = 0)
+                as fn(&mut AlloyConfig),
+            "http_client.connect_timeout_ms must be greater than zero",
+        ),
+        (
+            |config: &mut AlloyConfig| config.http_client.request_timeout_ms = 0,
+            "http_client.request_timeout_ms must be greater than zero",
+        ),
+        (
+            |config: &mut AlloyConfig| config.database.acquire_timeout_ms = 0,
+            "database.acquire_timeout_ms must be greater than zero",
+        ),
+        (
+            |config: &mut AlloyConfig| {
+                config.http_client.propagate_trace_context_to = vec!["https://api.test".into()];
+            },
+            "invalid host rule",
+        ),
+    ] {
+        let mut config = AlloyConfig::default();
+        mutate(&mut config);
+        let error = validation_error(&config);
+        assert!(error.contains(message), "{error}");
+    }
+    let mut config = AlloyConfig::default();
+    config.http_client.propagate_trace_context_to =
+        vec!["api.test".into(), ".internal.test".into()];
+    config.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
+fn jwks_url_credentials_are_never_printed() {
+    let mut jwt = JwtSettings::new("https://issuer.test", vec!["orders-api".into()]);
+    jwt.jwks_url = Some("https://user:hunter2@idp.example.com/jwks?key=querysecret".into());
+    let mut config = AlloyConfig::default();
+    config.auth.jwt = Some(jwt);
+    let rendered = config.redacted_toml();
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(!rendered.contains("querysecret"), "{rendered}");
+    let debug = format!("{config:?}");
+    assert!(
+        !debug.contains("hunter2") && !debug.contains("querysecret"),
+        "{debug}"
+    );
+    assert!(debug.contains("<configured>"), "{debug}");
+    // Redaction is display-only; the configuration itself is unchanged.
+    assert_eq!(
+        config.auth.jwt.as_ref().unwrap().jwks_url.as_deref(),
+        Some("https://user:hunter2@idp.example.com/jwks?key=querysecret")
+    );
+    // Noncanonical forms the URL parser still reads as carrying that
+    // authority must not slip the password past the redactor either.
+    config.auth.jwt.as_mut().unwrap().jwks_url =
+        Some("https:////user:hunter2@idp.example.com/jwks".into());
+    let rendered = config.redacted_toml();
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    assert!(rendered.contains("idp.example.com"), "{rendered}");
+}
+
+#[test]
+fn body_read_stall_timeout_defaults_to_a_minute_reads_the_environment_and_rejects_zero() {
+    let (config, _) = load_from(None, env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.server.body_read_stall_timeout_ms, 60_000);
+
+    let (config, sources) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS", "2500")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    assert_eq!(config.server.body_read_stall_timeout_ms, 2_500);
+    assert_eq!(sources.env, vec!["FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS"]);
+    config.validate(NO_FEATURES).unwrap();
+
+    let (config, _) = load_from(
+        None,
+        env(&[("FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS", "0")]),
+        &Overrides::default(),
+    )
+    .unwrap();
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("server.body_read_stall_timeout_ms must be greater than zero"),
         "{error}"
     );
 }
@@ -575,6 +753,31 @@ fn lists_and_secret_files_are_supported() {
             &Overrides::default()
         )
         .is_err()
+    );
+}
+
+/// The management listener has no TLS, so a non-loopback bind with a
+/// token is valid but warns that the token travels in cleartext.
+#[test]
+fn a_non_loopback_management_bind_warns_about_cleartext() {
+    let mut config = AlloyConfig::default();
+    config.management.bind = "0.0.0.0:9090".parse().unwrap();
+    config.management.token = Some(Secret::new("x".repeat(32)));
+    let warnings = config.validate(NO_FEATURES).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|issue| issue.message.contains("management.bind")
+                && issue.message.contains("cleartext")),
+        "{warnings:?}"
+    );
+
+    let warnings = AlloyConfig::default().validate(NO_FEATURES).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|issue| !issue.message.contains("cleartext")),
+        "{warnings:?}"
     );
 }
 

@@ -24,6 +24,12 @@
 //! `verify-full` (with `sslrootcert` for a private CA) to authenticate the
 //! server too. Plaintext to a remote host needs an explicit `sslmode=disable`
 //! or `allow`, and logs a warning when the pool is built.
+//!
+//! URL query parameters SQLx does not recognize are rejected before SQLx
+//! parses the URL: SQLx would log each one with its value (a libpq
+//! `sslpassword` is a secret) and silently ignore it (a typo such as
+//! `sslmod=verify-full` would not apply). The error names the parameter,
+//! never its value.
 
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -53,6 +59,7 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
                 .into(),
         ));
     }
+    reject_unrecognized_parameters(text)?;
     if tokio::runtime::Handle::try_current().is_err() {
         return Err(AlloyError::Integration(
             "ferrum_alloy::postgres::connect must be called inside a Tokio runtime".into(),
@@ -85,6 +92,76 @@ pub fn connect(settings: &DatabaseSettings, application_name: &str) -> Result<Pg
         .test_before_acquire(true)
         .connect_lazy_with(options);
     Ok(pool)
+}
+
+/// Query parameters SQLx 0.9 recognizes in a connection URL (its
+/// `options/parse.rs`), besides the `options[<name>]` form handled below.
+const RECOGNIZED_PARAMETERS: &[&str] = &[
+    "sslmode",
+    "ssl-mode",
+    "sslrootcert",
+    "ssl-root-cert",
+    "ssl-ca",
+    "sslcert",
+    "ssl-cert",
+    "sslkey",
+    "ssl-key",
+    "statement-cache-capacity",
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "application_name",
+    "options",
+];
+
+/// Rejects URL query parameters SQLx does not recognize, before SQLx sees
+/// the URL. SQLx logs every unrecognized parameter *with its value* and
+/// then ignores it, so a libpq parameter it does not know (for example
+/// `sslpassword`, a secret) would reach the logs, and a typo in a security
+/// parameter (for example `sslmod=verify-full`) would silently not apply.
+/// The URL is parsed with the same parser SQLx uses, so normalization
+/// (tab/newline stripping, percent-decoding) cannot split a name past
+/// this check. The error names the parameter, never its value, and only
+/// when the name is a plain parameter-shaped token: anything else could
+/// be a fragment of a malformed URL's credential, so it is withheld.
+fn reject_unrecognized_parameters(text: &str) -> Result<(), AlloyError> {
+    let url = url::Url::parse(text).map_err(|_| {
+        AlloyError::Integration("database.url is not a valid PostgreSQL URL".into())
+    })?;
+    for (key, _value) in url.query_pairs() {
+        let key = key.as_ref();
+        let options_entry = key
+            .strip_prefix("options[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|name| !name.is_empty());
+        if !RECOGNIZED_PARAMETERS.contains(&key) && !options_entry {
+            let named = if is_plain_parameter_name(key) {
+                format!(" {key:?}")
+            } else {
+                String::new()
+            };
+            return Err(AlloyError::Integration(format!(
+                "database.url: unrecognized connection parameter{named} \
+                 (SQLx ignores parameters it does not recognize)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a parameter name is safe to repeat in an error: short and
+/// made only of the characters real parameter names use. Anything else
+/// (an `@`, a `/`, whitespace) is more likely a piece of a malformed
+/// URL's userinfo than a parameter name.
+fn is_plain_parameter_name(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'[' | b']'))
 }
 
 /// Whether the connection stays on this host: a Unix socket or a literal

@@ -145,7 +145,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         name: ALLOY_DB_POOL_WAIT,
         start: "alloy.pool_acquire_start",
         end: "alloy.pool_acquire_end",
-        meaning: "Time waiting to acquire a pooled database connection.",
+        meaning: "Time waiting to acquire a pooled database connection. Repeated acquires in one operation record repeated values; the last value present is used, never a sum.",
     },
     CatalogEntry {
         name: ALLOY_ADMISSION_WAIT,
