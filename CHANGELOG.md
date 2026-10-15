@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- `diagnose --otlp` keeps an operation linked to its server when ordinary
+  Alloy spans (with no Alloy measurement) sit between them: the importer
+  records the nearest observed ancestor as `lineage.parent_span_id`, and
+  diagnosis follows it, so `alloy.service.operation_dominates` no longer
+  disappears behind a wrapper span (#219).
 - CI hardening from the #197 audit: `cargo-deny` pinned to 0.20.2, checkouts
   no longer persist credentials, a weekly `Advisories` workflow re-checks
   `main`'s lockfiles, the per-feature job and the MSRV job now build the

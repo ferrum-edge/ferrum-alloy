@@ -38,7 +38,7 @@
 //! exceed those limits fails with [`ImportError::ReportRejected`]; evidence
 //! is never dropped to make it fit.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -268,6 +268,7 @@ pub fn import(
             report.subject.route = Some(route.as_string());
         }
     }
+    link_through_unobserved_alloy_spans(&spans, &mut report);
     report.subject.service = single_service(&report.observations);
     parse::check_report(&report, &limits.report).map_err(rejection)?;
     Ok(report)
@@ -1016,6 +1017,68 @@ fn edge_attempt_observation(span: &RawSpan, report: &mut DiagnosticReport) {
                 .insert("attempt".to_owned(), number.to_string());
         }
         report.observations.push(connection);
+    }
+}
+
+/// Most ordinary Alloy spans skipped between an observation and its nearest
+/// observed ancestor; the walk also stops at a repeated span, so a parent
+/// cycle in hostile input cannot loop.
+const MAX_LINEAGE_HOPS: usize = 64;
+
+/// Ordinary Alloy spans (a `tracing` span around a handler step, for
+/// example) carry no Alloy measurement, so they yield no observation and
+/// the report does not contain them. An observation under one would lose
+/// its path to the server it belongs to. Each Alloy observation whose
+/// parent is such a span gets [`catalog::LINEAGE_PARENT_SPAN_ID`]: the
+/// nearest ancestor, past only such spans, that the report does contain or
+/// that another producer exported (a gateway attempt, for example). Nothing
+/// is set when the walk ends at an unobserved Alloy root, a missing span,
+/// or the hop limit.
+fn link_through_unobserved_alloy_spans(spans: &[RawSpan], report: &mut DiagnosticReport) {
+    let alloy_parents: HashMap<&str, Option<&str>> = spans
+        .iter()
+        .filter(|span| span.producer.kind == ProducerKind::Alloy)
+        .map(|span| (span.span_id.as_str(), span.parent_span_id.as_deref()))
+        .collect();
+    let exported: HashSet<&str> = spans.iter().map(|span| span.span_id.as_str()).collect();
+    let observed: HashSet<String> = report
+        .observations
+        .iter()
+        .filter_map(|o| o.span.as_ref().map(|span| span.span_id.clone()))
+        .collect();
+    let unobserved_alloy = |id: &str| alloy_parents.contains_key(id) && !observed.contains(id);
+    for observation in &mut report.observations {
+        if observation.producer.kind != ProducerKind::Alloy {
+            continue;
+        }
+        let Some(mut current) = observation
+            .span
+            .as_ref()
+            .and_then(|span| span.parent_span_id.as_deref())
+        else {
+            continue;
+        };
+        if !unobserved_alloy(current) {
+            continue;
+        }
+        let mut visited = HashSet::new();
+        let ancestor = loop {
+            if !unobserved_alloy(current) {
+                break exported.contains(current).then(|| current.to_owned());
+            }
+            if visited.len() == MAX_LINEAGE_HOPS || !visited.insert(current) {
+                break None;
+            }
+            match alloy_parents.get(current).copied().flatten() {
+                Some(parent) => current = parent,
+                None => break None,
+            }
+        };
+        if let Some(ancestor) = ancestor {
+            observation
+                .attributes
+                .insert(catalog::LINEAGE_PARENT_SPAN_ID.to_owned(), ancestor);
+        }
     }
 }
 
