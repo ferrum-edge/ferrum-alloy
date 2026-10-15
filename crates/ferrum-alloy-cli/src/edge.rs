@@ -31,7 +31,7 @@ pub(crate) enum EdgeCommand {
 /// Arguments for `edge export`.
 #[derive(Debug, Args)]
 pub(crate) struct ExportArgs {
-    /// Service manifest (PROPOSED `ferrum.service_manifest` v1).
+    /// Service manifest (shared `ferrum.service_manifest` v1).
     #[arg(long, default_value = "ferrum-service.toml")]
     manifest: PathBuf,
     /// Output kind.
