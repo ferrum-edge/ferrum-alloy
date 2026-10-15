@@ -371,7 +371,7 @@ The management UI, its assets, and the document require `Authorization: Bearer <
 
 | Key | Default | Meaning |
 |---|---|---|
-| `url` | none | Secret connection URL. For a host that is not local (a Unix socket or a literal loopback address such as `127.0.0.1` or `[::1]`; DNS names, `localhost` included, are not), an unset `sslmode` or `sslmode=prefer` (which would fall back to plaintext) is raised to `require`. Prefer `sslmode=verify-full` (with `sslrootcert` for a private CA) so the server is authenticated as well. Plaintext to a remote host needs an explicit `sslmode=disable` or `allow` and logs a warning when the pool is built. A local server without TLS is therefore reached as `127.0.0.1`, not `localhost`. |
+| `url` | none | Secret connection URL. For a host that is not local (a Unix socket or a literal loopback address such as `127.0.0.1` or `[::1]`; DNS names, `localhost` included, are not), an unset `sslmode` or `sslmode=prefer` (which would fall back to plaintext) is raised to `require`. Prefer `sslmode=verify-full` (with `sslrootcert` for a private CA) so the server is authenticated as well. Plaintext to a remote host needs an explicit `sslmode=disable` or `allow` and logs a warning when the pool is built. A local server without TLS is therefore reached as `127.0.0.1`, not `localhost`. Query parameters SQLx does not recognize (for example libpq's `sslpassword`, or a typo such as `sslmod`) are rejected at startup, naming the parameter and never its value. |
 | `max_connections` / `min_connections` | `10` / `0` | Pool size |
 | `acquire_timeout_ms` | `5000` | Pool wait bound (measured as `alloy.db.pool_wait_ms`) |
 | `idle_timeout_ms` / `max_lifetime_ms` | `600000` / `1800000` | Connection recycling |

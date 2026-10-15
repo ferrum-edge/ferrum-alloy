@@ -27,6 +27,11 @@
   directly, never through an environment proxy (`HTTP_PROXY`). `ferrum-alloy diagnose --url`
   likewise sends its credential over plain `http` only to a literal loopback
   address, no longer to `localhost`.
+- **Breaking:** `postgres::connect` rejects `database.url` query
+  parameters SQLx does not recognize, naming the parameter and never its
+  value. SQLx previously logged each one with its value (libpq's
+  `sslpassword` is a secret) and silently ignored it, so a typo such as
+  `sslmod=verify-full` quietly dropped the requested verification (#197).
 - **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
   when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
   not local (a Unix socket or a literal loopback address; `localhost` and
