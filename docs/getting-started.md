@@ -173,8 +173,8 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    from operation paths that start with that prefix; paths already written relative to the
    service base remain unchanged. With stripping disabled, operation paths are preserved.
 
-   To let AI agents call selected operations through Edge's OpenAPI to MCP bridge (Edge
-   v0.9.15 and v0.9.14), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
+   To let AI agents call selected operations through Edge's OpenAPI to MCP bridge (supported Edge
+   v0.9.17 and v0.9.15), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
    manifest. The export then writes the `x-ferrum-mcp` extension and refuses metadata Edge
    would reject. Read [AI-agent tools](agent-tools.md) for what is safe to expose first.
 

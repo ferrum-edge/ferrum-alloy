@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- `SECURITY.md` vulnerability-reporting policy and supported-version statement
+  (landed earlier; recorded here).
+- Documentation refresh: the supported Ferrum Edge window is stated as
+  v0.9.17/v0.9.15 throughout the living docs and crate tours, the umbrella
+  crate tour names the battery modules, and the README CLI table lists
+  `ferrum-alloy version`. Historical audit, ADR, and changelog text is
+  unchanged.
 - Diagnostic report parsing bounds its output as well as its input:
   echoed `schema`/`schema_version` values are truncated in errors,
   validation errors and warnings are capped at 100 plus a suppression

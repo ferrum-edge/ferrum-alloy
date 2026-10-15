@@ -8,6 +8,14 @@
 //! Optional integrations are Cargo features and are off by default:
 //! `otel`, `edge`, `tls`, `postgres`, `openapi`, `openapi-ui`, `jwt`,
 //! `http-client`, `compression`, `cors`, `diagnostics` (`full` enables all).
+//!
+//! The always-on surface is [`config`], [`error`], [`extract`],
+//! [`files`], [`health`], [`lifecycle`], [`limits`], [`normalize`],
+//! and [`problem`]. Batteries live behind their features: `jwt`
+//! (JWT/JWKS verification), `postgres` (pool-backed probes and
+//! latency evidence), `http_client` (bounded outbound HTTP), `tls`
+//! (server TLS), `agents` (AI-agent tools, with `openapi`), and
+//! `diagnostics` (request evidence).
 
 pub mod config;
 pub mod error;
