@@ -111,16 +111,32 @@ impl SigningKey {
         jwk
     }
 
-    fn sign(&self, claims: &Value, kid: Option<&str>) -> String {
-        let mut header = Header::new(self.alg);
-        header.kid = kid.map(str::to_owned);
+    fn encoding_key(&self) -> EncodingKey {
         let der = self.pair.serialize_der();
-        let key = if self.alg == Algorithm::EdDSA {
+        if self.alg == Algorithm::EdDSA {
             EncodingKey::from_ed_der(&der)
         } else {
             EncodingKey::from_ec_der(&der)
-        };
-        encode(&header, claims, &key).unwrap()
+        }
+    }
+
+    fn sign(&self, claims: &Value, kid: Option<&str>) -> String {
+        let mut header = Header::new(self.alg);
+        header.kid = kid.map(str::to_owned);
+        encode(&header, claims, &self.encoding_key()).unwrap()
+    }
+
+    /// Signs with a header adjusted by `mutate`, for header-policy tests.
+    fn sign_with_header(
+        &self,
+        claims: &Value,
+        kid: Option<&str>,
+        mutate: impl FnOnce(&mut Header),
+    ) -> String {
+        let mut header = Header::new(self.alg);
+        header.kid = kid.map(str::to_owned);
+        mutate(&mut header);
+        encode(&header, claims, &self.encoding_key()).unwrap()
     }
 }
 
@@ -1039,6 +1055,194 @@ async fn the_authorizer_decides_after_authentication() {
         call(&router, Some(&key.sign(&write, Some("k1")))).await.0,
         200
     );
+}
+
+/// Only plain JWTs verify: `crit` extensions this verifier does not
+/// understand, JWE/compression markers, nested-JWT `cty`, and non-access
+/// `typ` values are rejected even on an otherwise valid token, while the
+/// access-token types keep working.
+#[tokio::test]
+async fn non_plain_jwt_headers_are_rejected() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let router = protected(&verifier);
+    let claims = claims();
+    for (name, token) in [
+        (
+            "crit",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.crit = Some(vec!["exp".into()]);
+            }),
+        ),
+        // `Enc`/`Zip` are not nameable outside `jsonwebtoken`; those two
+        // headers are built by deserializing the whole header instead.
+        (
+            "enc",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                *h = serde_json::from_value(json!({
+                    "alg": "ES256", "kid": "k1", "enc": "A256GCM",
+                }))
+                .unwrap();
+            }),
+        ),
+        (
+            "zip",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                *h = serde_json::from_value(json!({
+                    "alg": "ES256", "kid": "k1", "zip": "DEF",
+                }))
+                .unwrap();
+            }),
+        ),
+        (
+            "cty",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.cty = Some("JWT".into());
+            }),
+        ),
+        (
+            "typ logout+jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("logout+jwt".into());
+            }),
+        ),
+        // Only the `application/` prefix may be present or omitted;
+        // any other prefix is a different type.
+        (
+            "typ text/jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("text/jwt".into());
+            }),
+        ),
+        (
+            "typ application/unrelated/jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("application/unrelated/jwt".into());
+            }),
+        ),
+    ] {
+        let (status, _, _) = call(&router, Some(&token)).await;
+        assert_eq!(status, 401, "{name} must be rejected");
+    }
+    for (name, token) in [
+        (
+            "typ at+jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("at+jwt".into());
+            }),
+        ),
+        (
+            "typ application/AT+JWT",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("application/AT+JWT".into());
+            }),
+        ),
+        (
+            "typ application/jwt",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = Some("application/jwt".into());
+            }),
+        ),
+        (
+            "no typ",
+            key.sign_with_header(&claims, Some("k1"), |h| {
+                h.typ = None;
+            }),
+        ),
+    ] {
+        let (status, _, _) = call(&router, Some(&token)).await;
+        assert_eq!(status, 200, "{name} must verify");
+    }
+}
+
+/// Header members present with a `null` value are still present: typed
+/// deserialization maps them to `None`, so the verifier judges presence
+/// on the raw header. These tokens are signed by hand (Ed25519, whose
+/// signatures need no reformatting) because the typed signing helper
+/// cannot emit a `null` member.
+#[tokio::test]
+async fn explicitly_null_header_members_are_rejected() {
+    let key = SigningKey::ed25519("ed");
+    let jwks = jwks_server(&[&key]).await;
+    let mut config = settings(jwks.addr, 60_000);
+    config.algorithms = vec!["EdDSA".into()];
+    let verifier = JwtVerifier::new(&config).unwrap();
+    let router = protected(&verifier);
+    let sign_raw = |header: &Value| -> String {
+        let input = format!(
+            "{}.{}",
+            b64url(header.to_string().as_bytes()),
+            b64url(claims().to_string().as_bytes())
+        );
+        let signature = rcgen::SigningKey::sign(&key.pair, input.as_bytes()).unwrap();
+        format!("{input}.{}", b64url(&signature))
+    };
+    // The control token verifies, so the signature itself is sound.
+    let (status, _, _) = call(
+        &router,
+        Some(&sign_raw(
+            &json!({"alg": "EdDSA", "kid": "ed", "typ": "JWT"}),
+        )),
+    )
+    .await;
+    assert_eq!(status, 200, "hand-signed control token must verify");
+    for (name, header) in [
+        (
+            "crit null",
+            json!({"alg": "EdDSA", "kid": "ed", "crit": null}),
+        ),
+        (
+            "enc null",
+            json!({"alg": "EdDSA", "kid": "ed", "enc": null}),
+        ),
+        (
+            "typ null",
+            json!({"alg": "EdDSA", "kid": "ed", "typ": null}),
+        ),
+    ] {
+        let (status, _, _) = call(&router, Some(&sign_raw(&header))).await;
+        assert_eq!(status, 401, "{name} must be rejected");
+    }
+}
+
+/// `iss` is one string: an array that merely contains the configured
+/// issuer does not verify, even though the validation library allows it.
+#[tokio::test]
+async fn an_issuer_array_is_rejected() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let router = protected(&verifier);
+    let mut array_iss = claims();
+    array_iss["iss"] = json!(["https://other.test", "https://issuer.test"]);
+    let (status, _, _) = call(&router, Some(&key.sign(&array_iss, Some("k1")))).await;
+    assert_eq!(status, 401);
+}
+
+/// The authorizer's denial detail is sanitized like other framework
+/// problem details before it reaches the client.
+#[tokio::test]
+async fn authorizer_denial_detail_is_sanitized() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let router = Router::new()
+        .route(
+            "/me",
+            get(|principal: Principal| async move { principal.subject.unwrap_or_default() }),
+        )
+        .route_layer(verifier.layer().with_authorizer(
+            |_: &Principal, _: &http::request::Parts| {
+                Err(format!("denied\u{1b}[31m {}", "x".repeat(1_000)))
+            },
+        ));
+    let (status, body, _) = call(&router, Some(&key.sign(&claims(), Some("k1")))).await;
+    assert_eq!(status, 403);
+    assert!(!body.contains('\u{1b}'), "{body}");
+    assert!(body.contains("denied [31m"), "{body}");
+    assert!(body.contains('…'), "bounded with an ellipsis: {body}");
+    assert!(body.len() < 600, "detail is bounded: {} bytes", body.len());
 }
 
 /// Configuration validation and verifier construction apply one policy to
