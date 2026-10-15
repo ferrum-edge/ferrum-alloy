@@ -797,3 +797,23 @@ fn a_long_public_path_is_compared_once() {
     assert_problem(&problems, "paths./mcp/x.get is served at");
     assert!(problems.iter().all(|problem| problem.len() < 2048));
 }
+
+/// Many paths sharing one unresolvable reference keep only the listed
+/// problems, each bounded.
+#[test]
+fn unresolved_aliases_are_reported_within_the_cap() {
+    let missing = format!("#/{}", "m".repeat(1024));
+    let mut paths = serde_json::Map::new();
+    for index in 0..100_000 {
+        paths.insert(format!("/a{index}"), json!({ "$ref": missing }));
+    }
+    let document = json!({ X_FERRUM_MCP: true, "paths": paths });
+    let problems = lint(&document, None);
+    assert!(problems.len() <= MAX_PROBLEMS + 2, "{}", problems.len());
+    assert!(problems.iter().all(|problem| problem.len() < 1024));
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.ends_with("further problems not listed"))
+    );
+}

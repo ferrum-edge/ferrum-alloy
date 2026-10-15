@@ -105,6 +105,15 @@ impl Problems {
         }
     }
 
+    /// Like [`Problems::push`], formatting the problem only when it is kept.
+    fn push_with(&mut self, problem: impl FnOnce() -> String) {
+        if self.list.len() < MAX_PROBLEMS {
+            self.list.push(problem());
+        } else {
+            self.suppressed += 1;
+        }
+    }
+
     /// Keeps a document-wide problem even past the limit; called a fixed
     /// number of times per document.
     fn push_summary(&mut self, problem: String) {
@@ -300,28 +309,31 @@ pub fn fill_default_annotations(document: &mut Value) {
     }
 }
 
-/// The distinct JSON Pointers that the local `$ref` chains of `paths` end
-/// at, each once. Inline items and references that cannot be followed are
-/// skipped. Aliases sharing a chain share its final `$ref` string, so they
-/// are told apart by address before any string is hashed or copied.
+/// One JSON Pointer for each distinct Path Item the local `$ref` chains of
+/// `paths` end at. Targets are told apart by the address of the value they
+/// resolve to, so pointers spelled differently for one target (JSON Pointer
+/// escapes allow several spellings) still yield it once, and no string is
+/// hashed or copied per alias. Inline items and references that cannot be
+/// followed are skipped.
 fn referenced_path_items(document: &Value) -> Vec<String> {
     let Some(paths) = document.get("paths").and_then(Value::as_object) else {
         return Vec::new();
     };
     let mut resolver = Resolver::new(document);
     let mut seen = HashSet::new();
-    let mut targets = BTreeSet::new();
+    let mut targets = Vec::new();
     for item in paths.values() {
         if let Ok(Resolved {
+            value,
             pointer: Some(pointer),
             ..
         }) = resolver.resolve(item)
-            && seen.insert((pointer.as_ptr(), pointer.len()))
+            && seen.insert(std::ptr::from_ref(value))
         {
-            targets.insert(pointer);
+            targets.push(pointer.to_owned());
         }
     }
-    targets.into_iter().map(str::to_owned).collect()
+    targets
 }
 
 fn fill_item_annotations(item: &mut Map<String, Value>) {
@@ -396,7 +408,7 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     let Some(extension) = extension else {
         return problems.into_list();
     };
-    problems.extend(path_item_problems(&mut resolver));
+    path_item_problems(&mut resolver, &mut problems);
     if document
         .get("x-ferrum-validate")
         .is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)))
@@ -636,20 +648,16 @@ fn operations<'a>(
 }
 
 /// Path Items whose `$ref` cannot be followed.
-fn path_item_problems(resolver: &mut Resolver<'_>) -> Vec<String> {
+fn path_item_problems(resolver: &mut Resolver<'_>, problems: &mut Problems) {
     let document = resolver.document;
     let Some(paths) = document.get("paths").and_then(Value::as_object) else {
-        return Vec::new();
+        return;
     };
-    paths
-        .iter()
-        .filter_map(|(path, item)| {
-            resolver
-                .resolve(item)
-                .err()
-                .map(|problem| format!("paths.{}: {problem}", excerpt_text(path)))
-        })
-        .collect()
+    for (path, item) in paths {
+        if let Err(problem) = resolver.resolve(item) {
+            problems.push_with(|| format!("paths.{}: {problem}", excerpt_text(path)));
+        }
+    }
 }
 
 fn operation_id(operation: &Map<String, Value>) -> Option<&str> {
@@ -1155,5 +1163,25 @@ fn endpoint_problems(
                 excerpt_text(suffix)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pointers spelled differently for one Path Item (`~2` is no escape, so
+    /// `~02` reads back as the same key) yield that item once.
+    #[test]
+    fn referenced_path_items_are_distinct_targets() {
+        let document = json!({
+            "paths": {
+                "/a": { "$ref": "#/x-item~2" },
+                "/b": { "$ref": "#/x-item~02" },
+                "/c": { "$ref": "#/x-item~2" }
+            },
+            "x-item~2": { "get": {} }
+        });
+        assert_eq!(referenced_path_items(&document), ["/x-item~2"]);
     }
 }
