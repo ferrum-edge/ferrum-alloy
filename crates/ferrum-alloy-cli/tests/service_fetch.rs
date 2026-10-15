@@ -9,6 +9,9 @@ use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/trickle.rs"]
+mod trickle;
+
 const TOKEN_ENV: &str = "FERRUM_ALLOY_DIAGNOSTICS_TOKEN";
 const TOKEN: &str = "private-service-lookup-credential";
 
@@ -46,20 +49,11 @@ fn diagnose(url: &str, timeout_ms: &str) -> Output {
         .unwrap()
 }
 
-/// Serve a report, optionally trickling a valid whitespace prefix before it.
-/// The channel marks when response headers are sent, for deadline measurement.
-fn serve(
-    body: String,
-    trickle: bool,
-) -> (
-    String,
-    std::sync::mpsc::Receiver<Instant>,
-    thread::JoinHandle<String>,
-) {
+/// Serve a report and record the request.
+fn serve(body: String) -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
@@ -88,41 +82,18 @@ fn serve(
             assert!(request.len() < 32 * 1024);
         }
         assert!(request.ends_with(b"\r\n\r\n"));
-        let prefix_bytes = if trickle { 40 } else { 0 };
-        let response_body_bytes = body.len() + prefix_bytes;
+        let response_body_bytes = body.len();
         let head = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
              content-length: {response_body_bytes}\r\nconnection: close\r\n\r\n"
         );
         stream.write_all(head.as_bytes()).unwrap();
-        started_tx.send(Instant::now()).unwrap();
-        if trickle {
-            for _ in 0..prefix_bytes {
-                if let Err(error) = stream.write_all(b" ") {
-                    assert_client_disconnect(&error);
-                    return String::from_utf8(request).unwrap();
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-        }
         if let Err(error) = stream.write_all(body.as_bytes()) {
-            assert_client_disconnect(&error);
+            trickle::assert_client_disconnect(&error, "body write");
         }
         String::from_utf8(request).unwrap()
     });
-    (url, started_rx, server)
-}
-
-fn assert_client_disconnect(error: &std::io::Error) {
-    assert!(
-        matches!(
-            error.kind(),
-            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
-        ) || matches!(error.raw_os_error(), Some(10053 | 10054)),
-        "unexpected client disconnect: kind={:?}, raw_os_error={:?}",
-        error.kind(),
-        error.raw_os_error()
-    );
+    (url, server)
 }
 
 fn assert_private(output: &Output) {
@@ -137,7 +108,7 @@ fn assert_private(output: &Output) {
 #[test]
 fn an_ordinary_service_report_is_fetched_successfully() {
     let body = report();
-    let (url, _started_rx, server) = serve(body, false);
+    let (url, server) = serve(body);
     let output = diagnose(&url, "1000");
     let request = server.join().unwrap();
     assert!(
@@ -160,7 +131,7 @@ fn an_ordinary_service_report_is_fetched_successfully() {
 #[test]
 fn a_reflected_service_credential_is_redacted_from_output() {
     let body = report().replace("orders-1", TOKEN);
-    let (url, _started_rx, server) = serve(body, false);
+    let (url, server) = serve(body);
     let output = diagnose(&url, "1000");
     server.join().unwrap();
     assert!(
@@ -182,7 +153,7 @@ fn a_reflected_token_file_credential_is_redacted_everywhere() {
     std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
     let saved = dir.path().join("report.json");
     let body = report().replace("orders-1", TOKEN);
-    let (url, _started_rx, server) = serve(body, false);
+    let (url, server) = serve(body);
     let output = bin()
         .env_remove(TOKEN_ENV)
         .args([
@@ -214,21 +185,23 @@ fn a_reflected_token_file_credential_is_redacted_everywhere() {
 
 #[test]
 fn a_trickling_service_body_cannot_extend_the_whole_operation_deadline() {
-    let (url, started_rx, server) = serve(report(), true);
-    let output = diagnose(&url, "600");
-    let elapsed = started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .unwrap()
-        .elapsed();
-    let request = server.join().unwrap();
-    assert!(request.starts_with("GET /diagnostics/v1/requests/req-1 HTTP/1.1\r\n"));
-    assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
-    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-    assert_eq!(output.status.code(), Some(1));
+    let proof = trickle::prove_trickle_deadline(&report(), diagnose);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("reading the report failed"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        proof
+            .request
+            .starts_with("GET /diagnostics/v1/requests/req-1 HTTP/1.1\r\n")
     );
+    assert!(
+        proof
+            .request
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {TOKEN}"))
+    );
+    let output = proof.output;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("reading the report failed"), "{error}");
+    assert!(!error.contains(&proof.url), "{error}");
     assert_private(&output);
 }
