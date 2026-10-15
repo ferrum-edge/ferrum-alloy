@@ -2,6 +2,8 @@
 
 Hosted CI (`.github/workflows/ci.yml`) is the source of truth. This page covers the fuzz and property tests for untrusted input, and the browser smoke test of the OpenAPI documentation UI. The example-based tests are listed in [implementation-status.md](implementation-status.md).
 
+Beyond the test suites, CI checks the `ferrum-alloy` library and then every target (tests included) with each optional integration alone, builds every target and test at the MSRV with all and with default features and checks each library crate on its own there, and fails on any rustdoc warning (`RUSTDOCFLAGS=-D warnings cargo doc --workspace --exclude ferrum-alloy-cli --all-features --no-deps`). Runner images and `cargo-deny` are pinned to exact versions. `.github/workflows/advisories.yml` re-runs the `cargo deny` advisory check on `main`'s lockfiles weekly, so an advisory published against an unchanged lockfile is not missed until the next change.
+
 ## Property tests
 
 The property tests use [`proptest`](https://crates.io/crates/proptest) (a dev-dependency only, with the `std` feature and no process forking). They run with the ordinary `cargo test` in the `test` job on Linux, macOS, and Windows.
