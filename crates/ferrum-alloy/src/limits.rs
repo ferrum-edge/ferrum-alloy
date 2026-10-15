@@ -8,12 +8,16 @@
 //!   bodies do not hold it.
 //! * [`HeadersDeadlineLayer`]: bounds the time to produce response headers.
 //!   It never applies to response body streaming (SSE) or upgraded sessions.
+//!   In the composed application it sits inside admission control, so its
+//!   clock starts once a request is admitted: time waiting for an admission
+//!   permit is not counted (measured `time_to_headers` includes that wait).
 //!
 //! Request-head read time is bounded separately by the server
 //! (`server.header_read_timeout_ms`), idle connections by
 //! `server.idle_timeout_ms`, responses the peer does not take by
-//! `server.write_stall_timeout_ms`, open connections, upgraded ones included,
-//! by `server.max_connections`, and shutdown drain by
+//! `server.write_stall_timeout_ms`, request bodies the peer does not send
+//! by `server.body_read_stall_timeout_ms`, open connections, upgraded ones
+//! included, by `server.max_connections`, and shutdown drain by
 //! `shutdown.drain_timeout_ms`.
 
 use std::sync::Arc;

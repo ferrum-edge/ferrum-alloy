@@ -73,22 +73,26 @@ impl SpanId {
 
 impl fmt::Debug for TraceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TraceId({})", self.to_hex())
+        f.write_str("TraceId(")?;
+        write_hex(f, &self.0)?;
+        f.write_str(")")
     }
 }
 impl fmt::Display for TraceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
+        write_hex(f, &self.0)
     }
 }
 impl fmt::Debug for SpanId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SpanId({})", self.to_hex())
+        f.write_str("SpanId(")?;
+        write_hex(f, &self.0)?;
+        f.write_str(")")
     }
 }
 impl fmt::Display for SpanId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
+        write_hex(f, &self.0)
     }
 }
 
@@ -123,13 +127,32 @@ pub(crate) fn fill_random(bytes: &mut [u8]) {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
+    push_hex(&mut out, bytes);
+    out
+}
+
+/// Appends lowercase hex for `bytes` to `out` (one table lookup per
+/// nibble, no formatting machinery).
+pub(crate) fn push_hex(out: &mut String, bytes: &[u8]) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     for byte in bytes {
         out.push(DIGITS[(byte >> 4) as usize] as char);
         out.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
-    out
+}
+
+/// Writes lowercase hex for `bytes` to a formatter from a stack buffer,
+/// without allocating (for `Display`/`Debug` of the id types).
+fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 32];
+    for (i, byte) in bytes.iter().enumerate() {
+        buf[i * 2] = DIGITS[(byte >> 4) as usize];
+        buf[i * 2 + 1] = DIGITS[(byte & 0x0f) as usize];
+    }
+    // Digits are ASCII by construction.
+    f.write_str(core::str::from_utf8(&buf[..bytes.len() * 2]).unwrap_or(""))
 }
 
 fn parse_hex<const N: usize>(input: &str) -> Option<[u8; N]> {

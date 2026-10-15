@@ -20,7 +20,7 @@ default = []
 otel = ["ferrum-alloy-telemetry/otel"]
 edge = ["dep:ferrum-alloy-edge", "ferrum-alloy-edge/axum"]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types", "dep:x509-parser", "ferrum-alloy-telemetry/x509"]
-postgres = ["dep:sqlx"]
+postgres = ["dep:sqlx", "dep:url"]
 openapi = ["dep:utoipa", "dep:utoipa-axum"]
 # The OpenAPI documentation UI: Swagger UI from embedded assets (Apache-2.0,
 # assets/swagger-ui/). No dependency beyond `openapi`.

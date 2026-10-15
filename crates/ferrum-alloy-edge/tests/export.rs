@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-use ferrum_alloy_edge::export::{file_mode_document, file_mode_yaml, gitforgeops_files, resources};
+use ferrum_alloy_edge::export::{
+    export_warnings, file_mode_document, file_mode_yaml, gitforgeops_files, resources,
+};
 use ferrum_alloy_edge::manifest::{EDGE_RESOURCE_ID_MAX_LENGTH, ServiceManifest};
 use ferrum_alloy_edge::yaml;
 use serde_json::{Value, json};
@@ -345,18 +347,25 @@ fn direct_proxy_id_can_use_the_full_edge_limit_without_derived_resources() {
     );
 }
 
-/// Literal paths Ferrum Edge refuses as a `listen_path`: a `;` path parameter
-/// (v0.9.9 without `allow_path_parameters`, which export never sets), and on
-/// both supported releases a `.` segment, a percent-escape, or a backslash.
+/// Literal paths outside Alloy's canonical subset. The first four are
+/// ones Ferrum Edge itself refuses as a `listen_path`: a `;` path
+/// parameter (v0.9.9 without `allow_path_parameters`, which export
+/// never sets), a `.` segment, a percent-escape, and a backslash. The
+/// rest Edge's `policy_path` admits, but export only writes plain
+/// ASCII `pchar` paths, so they are refused here instead.
 const REFUSED_PATHS: &[&str] = &[
     "/orders;v=1",
     "/orders/./items",
     "/orders%2Fitems",
     "/orders\\items",
+    "/orders items",
+    "/orders|items",
+    "/orders\"items",
+    "/ordérs",
 ];
 
 #[test]
-fn paths_edge_would_refuse_are_rejected() {
+fn paths_outside_the_canonical_subset_are_rejected() {
     let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
     for path in REFUSED_PATHS {
         let line = format!("public_path = {path:?}");
@@ -364,6 +373,67 @@ fn paths_edge_would_refuse_are_rejected() {
         assert_ne!(text, fixture);
         let error = ServiceManifest::from_toml(&text).unwrap_err().to_string();
         assert!(error.contains("api.public_path"), "{path}: {error}");
+    }
+}
+
+#[test]
+fn ordinary_pchar_paths_are_accepted() {
+    let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
+    for path in ["/orders-v2/items.json", "/items~draft", "/a:b@c"] {
+        let text = fixture.replace(
+            "public_path = \"/orders\"",
+            &format!("public_path = {path:?}"),
+        );
+        assert_ne!(text, fixture);
+        assert!(
+            ServiceManifest::from_toml(&text).is_ok(),
+            "{path} must be accepted"
+        );
+    }
+}
+
+/// `gateway` auth is accepted by the manifest schema but export cannot
+/// generate the Edge authentication plugin yet; that must be loud, not a
+/// silently unauthenticated proxy.
+#[test]
+fn gateway_auth_produces_an_export_warning() {
+    assert!(export_warnings(&manifest()).is_empty());
+    let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
+    let text = fixture.replace("mode = \"service\"", "mode = \"gateway\"");
+    assert_ne!(text, fixture);
+    let manifest = ServiceManifest::from_toml(&text).unwrap();
+    let warnings = export_warnings(&manifest);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("gateway"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("does not authenticate"),
+        "{warnings:?}"
+    );
+}
+
+/// Keys YAML would read back as a bool, null, or number are quoted, in
+/// any letter case; plain identifiers stay bare.
+#[test]
+fn yaml_keys_that_would_change_type_are_quoted() {
+    let out = yaml::to_string(&json!({
+        "True": 1,
+        "NULL": 2,
+        "Off": 3,
+        "-123": 4,
+        "-0xFF": 5,
+        "-1e3": 6,
+        "plain_key": 7,
+    }));
+    for expected in [
+        "\"True\": 1",
+        "\"NULL\": 2",
+        "\"Off\": 3",
+        "\"-123\": 4",
+        "\"-0xFF\": 5",
+        "\"-1e3\": 6",
+        "plain_key: 7",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
     }
 }
 
