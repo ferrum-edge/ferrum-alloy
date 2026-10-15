@@ -211,7 +211,10 @@ impl Default for ManifestGateway {
 #[serde(deny_unknown_fields, default)]
 pub struct ManifestAuth {
     /// `none`, `gateway` (Edge authenticates), or `service` (the service
-    /// verifies tokens itself).
+    /// verifies tokens itself). Export does not generate an Edge
+    /// authentication plugin yet: with `gateway`, `edge export` warns
+    /// that the generated configuration authenticates nobody until
+    /// authentication is configured in Edge.
     pub mode: Option<String>,
 }
 
@@ -250,18 +253,44 @@ fn valid_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// A literal absolute path with no template, query, fragment, `;`, `%`, `\`,
-/// `//`, or `.`/`..` segment.
+/// A literal absolute path: RFC 3986 `pchar`s and `/` only, minus `;` and
+/// `%`, with no `//` or `.`/`..` segment. Anything else — control or
+/// non-ASCII bytes, spaces, query/fragment delimiters, templates — is
+/// refused by construction, not by enumerating bad characters.
 ///
-/// For `api.public_path`, exported as the `listen_path`, this is what Ferrum
-/// Edge admits as written (`policy_path` canonical form): v0.9.9 refuses a `;`
-/// path parameter unless the proxy sets `allow_path_parameters`, which export
-/// never does, and both supported releases refuse percent-escapes,
-/// backslashes, and dot segments. `api.service_base_path` and `health.path`
-/// use the same rule for simplicity; it is stricter than Edge requires there.
+/// For `api.public_path`, exported as the `listen_path`, this is Alloy's
+/// canonical subset of what Ferrum Edge admits as written (`policy_path`
+/// accepts more, including non-ASCII bytes and `|`): v0.9.9 refuses a `;`
+/// path parameter unless the proxy sets `allow_path_parameters`, which
+/// export never does, and both supported releases refuse percent-escapes,
+/// backslashes, and dot segments. Export writes only plain ASCII `pchar`
+/// paths, which every supported release admits unambiguously.
+/// `api.service_base_path` and `health.path` use the same rule for
+/// simplicity; it is stricter than Edge requires there.
 fn valid_path(value: &str) -> bool {
     value.starts_with('/')
-        && !value.contains(['{', '}', '*', '~', ' ', '?', '#', ';', '%', '\\'])
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'-' | b'.'
+                        | b'_'
+                        | b'~'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b'='
+                        | b':'
+                        | b'@'
+                        | b'/'
+                )
+        })
         && !value.contains("//")
         && !value.split('/').any(|s| matches!(s, "." | ".."))
 }

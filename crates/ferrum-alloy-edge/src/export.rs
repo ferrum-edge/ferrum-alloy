@@ -46,6 +46,23 @@ pub struct ResourceFile {
     pub content: String,
 }
 
+/// Things the generated configuration does not do, although the manifest
+/// asks for them. Export stays possible, but the operator must hear about
+/// every gap instead of discovering it in production.
+pub fn export_warnings(manifest: &ServiceManifest) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if manifest.auth.mode.as_deref() == Some("gateway") {
+        warnings.push(
+            "auth.mode is \"gateway\" but no Edge authentication plugin is exported yet; \
+             the generated configuration does not authenticate requests. Configure \
+             authentication in Edge (or set auth.mode to \"service\" or \"none\") \
+             before applying it."
+                .to_owned(),
+        );
+    }
+    warnings
+}
+
 fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<&String>) {
     if let Some(value) = value {
         map.insert(key.to_owned(), Value::String(value.clone()));

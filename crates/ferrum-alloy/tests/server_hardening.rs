@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
-use axum::routing::get;
+use axum::routing::{get, post};
 use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
 use ferrum_alloy::config::AlloyConfig;
@@ -35,6 +35,7 @@ use tokio::sync::Notify;
 const HEADER_READ_TIMEOUT: Duration = Duration::from_millis(300);
 const IDLE_TIMEOUT: Duration = Duration::from_millis(500);
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_millis(600);
+const BODY_READ_STALL_TIMEOUT: Duration = Duration::from_millis(300);
 /// Upper bound for the server to act on a timer or shutdown. Generous, so
 /// slow CI hosts do not flake; the defects it catches never resolve at all.
 const WITHIN: Duration = Duration::from_secs(5);
@@ -106,6 +107,20 @@ fn router() -> Router {
         .route("/big", get(big))
         .route("/burst", get(burst))
         .route("/once", get(once))
+        .route(
+            "/echo",
+            post(|body: Bytes| async move { body.len().to_string() }),
+        )
+        .route(
+            "/slowread",
+            post(|body: Body| async move {
+                // The handler does other work before it starts reading:
+                // that time is not the peer stalling.
+                tokio::time::sleep(BODY_READ_STALL_TIMEOUT * 3).await;
+                let collected = body.collect().await.unwrap().to_bytes();
+                collected.len().to_string()
+            }),
+        )
 }
 
 /// A response of [`BIG_BODY`] bytes in one chunk.
@@ -205,6 +220,16 @@ fn idle_limited() -> AlloyConfig {
 fn write_stall_limited() -> AlloyConfig {
     let mut config = hardened();
     config.server.write_stall_timeout_ms = WRITE_STALL_TIMEOUT.as_millis() as u64;
+    config
+}
+
+fn body_stall_limited() -> AlloyConfig {
+    let mut config = hardened();
+    config.server.body_read_stall_timeout_ms = BODY_READ_STALL_TIMEOUT.as_millis() as u64;
+    // The headers deadline would also bound these uploads; disable it so
+    // only the body read stall timeout can close the connection.
+    config.server.request_timeout_ms = 0;
+    config.server.idle_timeout_ms = 60_000;
     config
 }
 
@@ -1923,4 +1948,119 @@ mod tls {
         let response = sender.send_request(request("/hello")).await.ok()?;
         Some(response.status())
     }
+}
+
+/// Reads until the server closes or `WITHIN` passes, returning what
+/// arrived. The response head and body of these tests are tiny.
+async fn read_response(stream: &mut TcpStream) -> String {
+    let mut received = Vec::new();
+    let mut buf = [0u8; 1024];
+    let read_all = async {
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => received.extend_from_slice(&buf[..n]),
+            }
+        }
+    };
+    let _ = tokio::time::timeout(WITHIN, read_all).await;
+    String::from_utf8_lossy(&received).into_owned()
+}
+
+/// A peer that sends a request head and then stops sending the body its
+/// handler is reading loses the connection at the body read stall
+/// timeout, although the headers deadline is disabled and nothing else
+/// bounds the wait.
+#[tokio::test]
+async fn a_body_the_peer_stops_sending_is_closed_by_the_body_read_stall_timeout() {
+    let server = support::start(
+        AlloyApp::new("hardening").router(router()),
+        body_stall_limited(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    stream
+        .write_all(b"POST /echo HTTP/1.1\r\nhost: t\r\ncontent-length: 100\r\n\r\nx")
+        .await
+        .unwrap();
+    assert!(
+        closed_by_server(&mut stream).await,
+        "the stalled upload connection is closed"
+    );
+    counted(&server.stats.body_read_stall_timeouts).await;
+    assert_eq!(
+        server
+            .stats
+            .body_read_stall_timeouts
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(server.stats.idle_timeouts.load(Ordering::Relaxed), 0);
+    assert_eq!(server.stats.write_stall_timeouts.load(Ordering::Relaxed), 0);
+    drop(stream);
+    server.shutdown().await.unwrap();
+}
+
+/// The body read stall timeout is not a minimum transfer rate: a peer
+/// that keeps sending, however slowly, completes its upload.
+#[tokio::test]
+async fn a_slow_sender_that_keeps_sending_completes_its_upload() {
+    let server = support::start(
+        AlloyApp::new("hardening").router(router()),
+        body_stall_limited(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    stream
+        .write_all(
+            b"POST /echo HTTP/1.1\r\nhost: t\r\ncontent-length: 10\r\nconnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        stream.write_all(b"x").await.unwrap();
+        stream.flush().await.unwrap();
+        tokio::time::sleep(BODY_READ_STALL_TIMEOUT / 3).await;
+    }
+    let response = read_response(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("10"), "{response}");
+    assert_eq!(
+        server
+            .stats
+            .body_read_stall_timeouts
+            .load(Ordering::Relaxed),
+        0
+    );
+    drop(stream);
+    server.shutdown().await.unwrap();
+}
+
+/// Time a handler spends before it starts reading the body is not a
+/// stall: the whole body is already with the server, and the read
+/// completes several stall timeouts after the head arrived.
+#[tokio::test]
+async fn a_handler_that_reads_late_is_not_a_body_stall() {
+    let server = support::start(
+        AlloyApp::new("hardening").router(router()),
+        body_stall_limited(),
+    )
+    .await;
+    let mut stream = TcpStream::connect(server.addr).await.unwrap();
+    stream
+        .write_all(b"POST /slowread HTTP/1.1\r\nhost: t\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello")
+        .await
+        .unwrap();
+    let response = read_response(&mut stream).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with('5'), "{response}");
+    assert_eq!(
+        server
+            .stats
+            .body_read_stall_timeouts
+            .load(Ordering::Relaxed),
+        0
+    );
+    drop(stream);
+    server.shutdown().await.unwrap();
 }

@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use bytes::Bytes;
 use ferrum_alloy::AlloyApp;
 use ferrum_alloy::extract::{Json, ValidJson, Validate, ValidationErrors};
-use ferrum_alloy::health::CheckError;
+use ferrum_alloy::health::{CheckError, HealthCheck, Readiness};
 use ferrum_alloy::telemetry::RequestContext;
 use http::Request;
 use http_body_util::{BodyExt, Full};
@@ -495,6 +495,94 @@ async fn readiness_checks_are_cached_and_single_flight() {
     server.shutdown().await.unwrap();
 }
 
+/// A caller that stops waiting must not cancel the refresh: with a probe
+/// timeout shorter than the check, the cache still fills — once — and the
+/// next caller is served from it.
+#[tokio::test]
+async fn a_cancelled_readiness_caller_does_not_starve_the_cache() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let check: Arc<dyn HealthCheck> = Arc::new(move || {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<(), CheckError>(())
+        }
+    });
+    let readiness = Readiness::new(
+        vec![("slow-db".to_owned(), check)],
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+    );
+    // The first caller gives up long before the check completes.
+    let first = tokio::time::timeout(Duration::from_millis(30), readiness.snapshot()).await;
+    assert!(first.is_err(), "the first caller times out waiting");
+    // The detached refresh still lands, and serves the next caller.
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), readiness.snapshot())
+        .await
+        .expect("the refresh completes without its first caller");
+    assert!(snapshot.ready, "{snapshot:?}");
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the cancelled caller did not cancel or duplicate the refresh"
+    );
+}
+
+/// The caller that starts a refresh after the TTL expires awaits the
+/// new result: a dependency that failed during the TTL is reported by
+/// that very probe, not one probe later from the expired snapshot.
+#[tokio::test]
+async fn the_refresh_starter_awaits_the_new_result_after_ttl_expiry() {
+    use std::sync::atomic::AtomicBool;
+    let healthy = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&healthy);
+    let check: Arc<dyn HealthCheck> = Arc::new(move || {
+        let flag = Arc::clone(&flag);
+        async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            if flag.load(Ordering::Relaxed) {
+                Ok::<(), CheckError>(())
+            } else {
+                Err(CheckError::new("connection refused"))
+            }
+        }
+    });
+    let readiness = Readiness::new(
+        vec![("db".to_owned(), check)],
+        Duration::from_millis(60),
+        Duration::from_secs(5),
+    );
+    assert!(readiness.snapshot().await.ready, "starts healthy");
+    healthy.store(false, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(90)).await;
+    let snapshot = readiness.snapshot().await;
+    assert!(
+        !snapshot.ready,
+        "the probe that starts the refresh reports the failure: {snapshot:?}"
+    );
+}
+
+/// A failed `prepare()` keeps the explicit configuration: retrying
+/// reports the same validation error instead of loading a file or the
+/// environment.
+#[test]
+fn a_failed_prepare_keeps_the_explicit_configuration() {
+    let mut cfg = config();
+    cfg.server.idle_timeout_ms = 0;
+    let mut app = AlloyApp::new("core-test")
+        .config_file("/nonexistent/ferrum-alloy-test.toml")
+        .config(cfg);
+    let first = app.prepare().unwrap_err().to_string();
+    let second = app.prepare().unwrap_err().to_string();
+    assert!(
+        first.contains("server.idle_timeout_ms must be greater than zero"),
+        "{first}"
+    );
+    assert_eq!(first, second, "a retry uses the explicit configuration");
+}
+
 #[tokio::test]
 async fn failing_checks_time_out_instead_of_hanging() {
     let app = AlloyApp::new("core-test")
@@ -876,4 +964,44 @@ async fn missing_router_is_an_error() {
         .into_parts()
         .unwrap_err();
     assert!(matches!(error, ferrum_alloy::AlloyError::MissingRouter));
+}
+
+/// Counts classifications; trusts nobody.
+#[derive(Debug)]
+struct CountingClassifier(Arc<AtomicUsize>);
+
+impl ferrum_alloy::telemetry::peer::TrustClassifier for CountingClassifier {
+    fn classify(&self, _extensions: &http::Extensions) -> ferrum_alloy::telemetry::peer::PeerTrust {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        ferrum_alloy::telemetry::peer::PeerTrust::Untrusted
+    }
+}
+
+/// Management connections never invoke the application trust classifier
+/// (nothing there consumes a classification); application connections
+/// classify once as they are served.
+#[tokio::test]
+async fn management_connections_do_not_invoke_the_trust_classifier() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = AlloyApp::new("core-test")
+        .router(router())
+        .trust_classifier(Arc::new(CountingClassifier(Arc::clone(&calls))));
+    let server = start(app, config()).await;
+
+    let live = fetch(&server.management_url("/livez")).await;
+    assert_eq!(live.status, 200);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "management traffic must not classify"
+    );
+
+    let reply = fetch(&server.url("/hello")).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "one application connection classifies once"
+    );
+    server.shutdown().await.unwrap();
 }

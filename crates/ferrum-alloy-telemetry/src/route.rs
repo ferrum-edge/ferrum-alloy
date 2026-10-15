@@ -6,7 +6,11 @@
 //! route matching (including for the fallback) and writes the matched template
 //! into a per-request slot the telemetry layer reads when headers are produced.
 
+#[cfg(feature = "axum")]
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
+#[cfg(feature = "axum")]
+use std::sync::{LazyLock, RwLock};
 use std::task::{Context, Poll};
 
 use http::Request;
@@ -60,12 +64,42 @@ impl RouteSlot {
 pub fn matched_route<B>(request: &Request<B>) -> Option<RouteLabel> {
     #[cfg(feature = "axum")]
     if let Some(path) = request.extensions().get::<axum::extract::MatchedPath>() {
-        return Some(RouteLabel::Template(Arc::from(path.as_str())));
+        return Some(RouteLabel::Template(intern_template(path.as_str())));
     }
     request
         .extensions()
         .get::<ExplicitRoute>()
         .map(|r| RouteLabel::Template(Arc::clone(&r.0)))
+}
+
+/// Route templates are drawn from the application's route table, a small
+/// closed set, so each distinct template is allocated once and shared.
+/// axum's `MatchedPath` does not expose its inner `Arc<str>`, hence this
+/// cache. The cap only guards against a caller stuffing unbounded values
+/// where templates belong; past it, templates are allocated per request
+/// as before.
+#[cfg(feature = "axum")]
+const MAX_INTERNED_TEMPLATES: usize = 4_096;
+
+#[cfg(feature = "axum")]
+fn intern_template(template: &str) -> Arc<str> {
+    static INTERNED: LazyLock<RwLock<HashSet<Arc<str>>>> =
+        LazyLock::new(|| RwLock::new(HashSet::new()));
+    if let Ok(set) = INTERNED.read()
+        && let Some(hit) = set.get(template)
+    {
+        return Arc::clone(hit);
+    }
+    let owned: Arc<str> = Arc::from(template);
+    if let Ok(mut set) = INTERNED.write() {
+        if let Some(hit) = set.get(template) {
+            return Arc::clone(hit);
+        }
+        if set.len() < MAX_INTERNED_TEMPLATES {
+            set.insert(Arc::clone(&owned));
+        }
+    }
+    owned
 }
 
 /// A route template set by non-axum routers or by Alloy's own built-in
@@ -108,5 +142,22 @@ where
             slot.set(matched_route(&request).unwrap_or(RouteLabel::Unmatched));
         }
         self.inner.call(request)
+    }
+}
+
+#[cfg(all(test, feature = "axum"))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn templates_are_interned_to_one_allocation() {
+        let first = intern_template("/orders/{id}/items");
+        let second = intern_template("/orders/{id}/items");
+        assert_eq!(&*first, "/orders/{id}/items");
+        assert!(Arc::ptr_eq(&first, &second));
+        let other = intern_template("/orders/{id}");
+        assert!(!Arc::ptr_eq(&first, &other));
     }
 }

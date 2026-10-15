@@ -12,7 +12,9 @@ use axum::body::Body;
 use ferrum_alloy_edge::{
     DeploymentMode, EdgeLayer, EdgePolicy, EdgePolicyConfig, GatewayContext, GatewayVerification,
 };
-use ferrum_alloy_telemetry::peer::{PeerInfo, TlsPeer, TrustedPeers, TrustedPeersConfig};
+use ferrum_alloy_telemetry::peer::{
+    ClassifiedPeer, PeerInfo, PeerTrust, TlsPeer, TrustClassifier, TrustedPeers, TrustedPeersConfig,
+};
 use http::{Request, Response};
 use http_body_util::BodyExt;
 use tower::{Layer, ServiceExt, service_fn};
@@ -242,5 +244,64 @@ async fn unverified_certificates_and_ambiguous_values_are_not_identity() {
     assert_eq!(
         context.consumer_custom_id, None,
         "oversized values are rejected"
+    );
+}
+
+/// Counts classifications while delegating to the real peers policy.
+#[derive(Debug)]
+struct CountingClassifier {
+    peers: TrustedPeers,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl TrustClassifier for CountingClassifier {
+    fn classify(&self, extensions: &http::Extensions) -> PeerTrust {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.peers.classify(extensions)
+    }
+}
+
+/// A transport-provided per-connection classification is reused, not
+/// recomputed: the classifier runs only when no `ClassifiedPeer` is
+/// present, so Edge and telemetry judge by one classification.
+#[tokio::test]
+async fn a_preclassified_peer_skips_the_edge_classifier() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut trust = TrustedPeersConfig::default();
+    trust.identities = vec![GATEWAY.into()];
+    let counting = CountingClassifier {
+        peers: TrustedPeers::new(&trust).unwrap(),
+        calls: Arc::clone(&calls),
+    };
+    let mut config = EdgePolicyConfig::default();
+    config.mode = DeploymentMode::GatewayRequired;
+    config.accept_consumer_identity = true;
+    let policy = EdgePolicy::new(config, Arc::new(counting));
+
+    // The peer is untrusted on its own, but the transport already
+    // classified the connection as the verified gateway.
+    let mut preclassified = request("/x", untrusted(), IDENTITY);
+    preclassified
+        .extensions_mut()
+        .insert(ClassifiedPeer(Arc::new(PeerTrust::VerifiedIdentity(
+            GATEWAY.into(),
+        ))));
+    let (status, seen, _) = run(policy.clone(), preclassified).await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert!(seen.unwrap().context.is_some(), "identity was accepted");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the classifier must not run when a classification is present"
+    );
+
+    // Without one, the classifier runs and the same peer is refused.
+    let (status, _, _) = run(policy, request("/x", untrusted(), IDENTITY)).await;
+    assert_eq!(status, http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the fallback classification runs exactly once"
     );
 }

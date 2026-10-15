@@ -19,7 +19,14 @@ Hyper's write buffer. On HTTP/1.1, a blocked transport write keeps that connecti
 from being idle; the write stall timeout bounds the wait instead. On HTTP/2,
 only response DATA writes count as progress; blocked control writes, including
 PING and SETTINGS acknowledgements, do not defer idle closure after the response
-body has ended.
+body has ended. Request bodies have the symmetric boundary: a frame delivered
+to a handler that is waiting to read counts as progress for the body read stall
+timeout, and time before the handler starts reading does not. Waiting is
+observed at body reads: once a read has pended, the body counts as waiting
+until a frame is delivered or the body is dropped, including any time the
+handler spends on other work in between. Delivered to the handler means the
+body yielded the frame; it says nothing about when the peer sent it, and data
+still held in transport buffers is not progress.
 
 A completed transport write means the transport accepted those bytes, which can
 still be buffered in the kernel or on the client. Once the body has ended and
@@ -29,6 +36,18 @@ counter alone therefore does not prove truncation. Compare the body actually
 received with its declared length, and distinguish time spent with a blocked
 server write from time spent reading data the server has already written. These
 boundaries do not add a client-delivery timing to Alloy's measurements.
+
+## Management health fields
+
+Detailed health (`GET /health` on the management listener) exposes three
+timings that are not diagnostic observations and are never read by diagnosis
+rules or the catalog:
+
+| Field | Start | End | Notes |
+|---|---|---|---|
+| `readiness.checks[].latency_ms` | The check is invoked | It returns, fails, times out (`health.check_timeout_ms`), or panics | Local monotonic clock, fractional milliseconds. A timeout reports at least the timeout. |
+| `readiness.age_ms` | The evaluation completed (all checks finished and the snapshot was taken) | The response is served | Whole milliseconds at serving time. `0` for a just-completed evaluation; grows while the cached snapshot is served. It can exceed `health.cache_ttl_ms` while a refresh is running, because callers that did not start the refresh keep serving the previous snapshot. |
+| `uptime_seconds` | The application's `Lifecycle` was created during startup composition | The response is served | Whole seconds on the local monotonic clock. Not process start, and not when serving began. |
 
 ## Availability states
 
@@ -92,7 +111,7 @@ Every request finalizes **exactly once**, with one of these outcomes:
 | Name | Start | End | Notes |
 |---|---|---|---|
 | `alloy.operation.duration` | First poll of the wrapped future | Its completion, or drop (`outcome=cancelled`) | Created with `ferrum_alloy_telemetry::operation::Operation`. A database operation's duration is **application-observed call time**: pool wait, network, driver, and server work. It is **not** database server execution time. |
-| `alloy.db.pool_wait` | `pool.acquire()` called | Connection obtained or failed | Recorded by `ferrum_alloy::postgres::acquire` on the current operation span. Separate from the query. |
+| `alloy.db.pool_wait` | `pool.acquire()` called | Connection obtained or failed | Recorded by `ferrum_alloy::postgres::acquire` on the current operation span. Separate from the query. When one operation acquires more than once, each wait is recorded and export may carry repeated values; import and diagnosis use the **last** value present, never a sum. Under an exporter's span attribute limit later values can be dropped, so with very many acquires the last value present may not be the last wait. |
 | Outbound HTTP (`http.client.request` span, `alloy.operation.duration_ms`) | Request sent | Response **headers** received | Reading the response body happens afterwards and is outside the span. |
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.

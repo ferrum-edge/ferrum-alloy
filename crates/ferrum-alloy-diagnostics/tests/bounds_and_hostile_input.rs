@@ -598,3 +598,142 @@ fn mutated_fixtures_never_panic() {
         }
     }
 }
+
+#[test]
+fn an_oversized_schema_value_is_truncated_in_the_error() {
+    let mut report = base();
+    report["schema"] = json!("x".repeat(100_000));
+    let error = parse(&report).unwrap_err().to_string();
+    assert!(
+        error.len() < 400,
+        "error must not echo the whole value ({} bytes)",
+        error.len()
+    );
+    assert!(error.contains("100000 bytes"), "{error}");
+    assert!(
+        !error.contains(&"x".repeat(64)),
+        "no prefix of the oversized value is echoed: {error}"
+    );
+}
+
+/// Warnings are bounded in bytes, not only in count: hundreds of long
+/// unrecognized keys produce a short preview, not a message sized by
+/// the input.
+#[test]
+fn warnings_bound_bytes_as_well_as_count() {
+    let mut report = base();
+    for i in 0..300 {
+        report[format!("x-key-{i:03}-{}", "k".repeat(1_000))] = json!(0);
+    }
+    let parsed = parse(&report).unwrap();
+    let total: usize = parsed
+        .warnings
+        .iter()
+        .map(|issue| issue.path.len() + issue.message.len())
+        .sum();
+    assert!(
+        total < 4_096,
+        "warnings must not scale with key count/length ({total} bytes)"
+    );
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|issue| issue.message.contains("and 292 more")),
+        "{:?}",
+        parsed.warnings
+    );
+}
+
+#[test]
+fn max_depth_above_the_parser_limit_is_clamped() {
+    let limits = Limits {
+        max_depth: 10_000,
+        ..Limits::default()
+    };
+    let mut input = String::from("{\"schema\":");
+    input.push_str(&"[".repeat(200));
+    input.push_str(&"]".repeat(200));
+    input.push('}');
+    let error = parse_offline(input.as_bytes(), &limits).unwrap_err();
+    assert!(
+        error.to_string().contains("nesting depth exceeds 127"),
+        "{error}"
+    );
+}
+
+/// The clamp is the deepest nesting the JSON parser itself accepts:
+/// a report nested exactly to it parses, and one level more is the
+/// parser's own nesting error, not a raw parser failure.
+#[test]
+fn nesting_at_the_parser_boundary_is_accepted_and_beyond_it_rejected_cleanly() {
+    let limits = Limits {
+        max_depth: 10_000,
+        ..Limits::default()
+    };
+    let nested = |arrays: usize| -> Vec<u8> {
+        let mut report = base();
+        let mut value = json!(0);
+        for _ in 0..arrays {
+            value = json!([value]);
+        }
+        report["x-nested"] = value;
+        serde_json::to_vec(&report).unwrap()
+    };
+    // Root object (1) + 126 arrays = depth 127: accepted.
+    assert!(parse_offline(&nested(126), &limits).is_ok());
+    // Depth 128 and 129: the nesting error, never InvalidJson.
+    for arrays in [127, 128] {
+        let error = parse_offline(&nested(arrays), &limits).unwrap_err();
+        assert!(
+            matches!(error, ReportError::TooLarge(_)),
+            "{arrays} arrays: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn validation_errors_are_capped_with_a_suppression_marker() {
+    let mut report = base();
+    // 200 observations that each fail validation (measured, no unit).
+    let observations: Vec<Value> = (0..200)
+        .map(|i| {
+            let mut obs = observation(&format!("obs-{i}"));
+            obs.as_object_mut().unwrap().remove("unit");
+            obs
+        })
+        .collect();
+    report["observations"] = json!(observations);
+    let messages = validation_messages(parse(&report).unwrap_err());
+    assert_eq!(messages.len(), 101, "100 errors plus the marker");
+    assert!(
+        messages.last().unwrap().contains("suppressed"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn warnings_are_capped_with_a_suppression_marker() {
+    let mut report = base();
+    // 200 observations with unknown names: valid, but each warns.
+    let observations: Vec<Value> = (0..200)
+        .map(|i| {
+            let mut obs = observation(&format!("obs-{i}"));
+            obs["name"] = json!("custom.unknown_thing");
+            obs
+        })
+        .collect();
+    report["observations"] = json!(observations);
+    let parsed = parse(&report).unwrap();
+    assert_eq!(parsed.warnings.len(), 101, "100 warnings plus the marker");
+    assert!(
+        parsed
+            .warnings
+            .last()
+            .unwrap()
+            .message
+            .contains("suppressed"),
+        "{:?}",
+        parsed.warnings.last()
+    );
+}
