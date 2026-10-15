@@ -5,8 +5,10 @@
 //! so a paused tokio clock cannot drive it. The timing proof is instead taken
 //! at the server, where the trickle is either still being accepted or not.
 //! That connection lifetime excludes process teardown and the test thread's
-//! own scheduling, which together once added more than 2.5 s on a hosted
-//! Windows runner after the client had already given up.
+//! own scheduling. A hosted Windows runner once measured 3.13 s from head to
+//! CLI return with a 600 ms deadline; the old test recorded no disconnect
+//! time, so teardown or scheduling is the suspected (not proven) cause. In
+//! another run the trickle had stopped over 600 ms before the CLI returned.
 
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
