@@ -184,7 +184,7 @@ Each section below shows a key, its default, and its meaning.
 |---|---|---|
 | `readiness_grace_ms` | `0` | After SIGTERM, keep accepting while readiness reports `draining`, so load balancers stop routing first. A second signal skips the grace. |
 | `drain_timeout_ms` | `30000` | After accepting stops: budget for requests, response streams, and upgrades. At the budget, all remaining accepted TCP connections are shut down through owned handles, including TLS and upgrades the application never polls; connection/HTTP2 tasks end before return. An additional wait of at most one second lets applications drop upgrades. Their permits/counts and handles remain until drop, even after TCP shutdown. At most 86400000. |
-| `telemetry_flush_timeout_ms` | `5000` | One budget for the end of shutdown, in order: the final span flush, then the final lifecycle events (`shutdown complete`) are logged, then the non-blocking log queue (`logging.non_blocking_queue_lines`) drains with whatever time the flush left. Lines still queued when it runs out are lost and counted by `ferrum_alloy_telemetry::json::dropped_log_lines`. |
+| `telemetry_flush_timeout_ms` | `5000` | One budget for the end of shutdown, in order: the final span flush, then the final lifecycle events (`shutdown complete`) are logged, then the non-blocking log queue (`logging.non_blocking_queue_lines`) drains with whatever time the flush left. When it runs out, lines still queued stay pending: the writer thread still writes them if stdout recovers before the process exits, and lines it never writes are counted by `ferrum_alloy_telemetry::json::dropped_log_lines` when discarded. |
 
 ### `[management]`
 
