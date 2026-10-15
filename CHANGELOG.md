@@ -2,13 +2,10 @@
 
 ## [Unreleased]
 
-- **Breaking:** JWT verification accepts only plain JWTs. Tokens whose
-  header carries `crit`, `enc`, `zip`, or `cty`, an explicit `typ` other
-  than `JWT` or `at+jwt`, or an `iss` array instead of the single issuer
-  string are now rejected with `401` (RFC 7515 §4.2, RFC 7519 §4.1.1,
-  RFC 8725 §3.11). An `Authorize` denial detail is sanitized like other
-  framework problem details before it reaches the client (#197).
-
+- Updated `rustls` in the lockfile to 0.23.46, clearing
+  RUSTSEC-2026-0346 through RUSTSEC-2026-0349 (ECH fallback data
+  exposure and certificate-decompression allocation bounds);
+  `cargo deny check` passes again.
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
@@ -27,6 +24,12 @@
   more, the export closes the pipe, kills the process it spawned (on Windows
   Cargo, not necessarily its child), and fails with exit 3 instead of
   buffering without bound (#183).
+- **Breaking:** JWT verification accepts only plain JWTs. Tokens whose
+  header carries `crit`, `enc`, `zip`, or `cty`, an explicit `typ` other
+  than `JWT` or `at+jwt`, or an `iss` array instead of the single issuer
+  string are now rejected with `401` (RFC 7515 §4.2, RFC 7519 §4.1.1,
+  RFC 8725 §3.11). An `Authorize` denial detail is sanitized like other
+  framework problem details before it reaches the client (#197).
 - `config::Secret` holds its value in `Zeroizing<String>`: the value is
   zeroized when a `Secret` or any clone of it is dropped, and `Secret`
   implements `ZeroizeOnDrop`. `FERRUM_ALLOY_*_FILE` secret files and the TLS
