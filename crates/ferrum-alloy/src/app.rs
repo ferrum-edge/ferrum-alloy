@@ -174,7 +174,9 @@ impl AlloyApp {
         self
     }
 
-    /// Replaces the peer trust classifier built from `[trust]`.
+    /// Replaces the peer trust classifier built from `[trust]`. The
+    /// classifier is invoked once per connection with the connection's
+    /// `PeerInfo` only (see `TrustClassifier::classify`).
     pub fn trust_classifier(mut self, classifier: SharedClassifier) -> Self {
         self.classifier = Some(classifier);
         self
@@ -502,6 +504,7 @@ impl AlloyApp {
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
             app_stats,
+            classifier,
             management_token,
             #[cfg(feature = "diagnostics")]
             diagnostics_retrieval,
@@ -568,6 +571,9 @@ pub struct AlloyParts {
     service_name: String,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     app_stats: Arc<ServerStats>,
+    /// The classifier the telemetry layer uses, kept so Alloy's server
+    /// can classify each connection once instead of per request.
+    classifier: SharedClassifier,
     /// Whether the management router was built with a token.
     management_token: bool,
     /// Whether the management router serves diagnostic retrieval.
@@ -691,6 +697,7 @@ impl AlloyParts {
         let config = &self.config;
         let options = ServeOptions {
             name: "application",
+            classifier: Some(Arc::clone(&self.classifier)),
             max_connections: config.server.max_connections,
             max_header_count: config.server.max_header_count,
             max_header_bytes: config.server.max_header_bytes,
@@ -698,6 +705,9 @@ impl AlloyParts {
             header_read_timeout: Duration::from_millis(config.server.header_read_timeout_ms),
             idle_timeout: Duration::from_millis(config.server.idle_timeout_ms),
             write_stall_timeout: Duration::from_millis(config.server.write_stall_timeout_ms),
+            body_read_stall_timeout: Duration::from_millis(
+                config.server.body_read_stall_timeout_ms,
+            ),
             drain_timeout: Duration::from_millis(config.shutdown.drain_timeout_ms),
             #[cfg(feature = "tls")]
             tls: self.tls.clone(),
@@ -738,6 +748,10 @@ impl AlloyParts {
                 ServeOptions {
                     name: "management",
                     max_connections: 64,
+                    // The management router has no telemetry layer to
+                    // consume a classification; never invoke the
+                    // application classifier for its connections.
+                    classifier: None,
                     #[cfg(feature = "tls")]
                     tls: None,
                     ..options
@@ -882,11 +896,20 @@ impl TelemetryGuard {
     /// Flushes and stops export, waiting at most `timeout`.
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), String> {
         #[cfg(feature = "otel")]
-        if let Some(pipeline) = self.pipeline.take() {
-            return pipeline.shutdown(timeout).map_err(|e| e.to_string());
+        let result = match self.pipeline.take() {
+            Some(pipeline) => pipeline.shutdown(timeout).map_err(|e| e.to_string()),
+            None => Ok(()),
+        };
+        #[cfg(not(feature = "otel"))]
+        let result = Ok(());
+        // Drain the non-blocking log queue last, so shutdown's own
+        // final events are flushed with everything before them. Only
+        // Alloy-installed logging is owned here; an application's own
+        // subscriber keeps its own lifecycle.
+        if self.mode == "alloy" {
+            ferrum_alloy_telemetry::json::shutdown_nonblocking_stdout(timeout);
         }
-        let _ = timeout;
-        Ok(())
+        result
     }
 }
 

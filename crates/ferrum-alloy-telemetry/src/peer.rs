@@ -77,8 +77,26 @@ impl PeerTrust {
 /// Classifies the peer of a request.
 pub trait TrustClassifier: Send + Sync + fmt::Debug + 'static {
     /// Decides trust from request extensions (never from headers).
+    ///
+    /// Implementations must decide from the connection's transport
+    /// identity ([`PeerInfo`]) alone: a connection's peer cannot change
+    /// between its requests, and Alloy's own server invokes this once
+    /// per connection with extensions holding only [`PeerInfo`], then
+    /// reuses the result ([`ClassifiedPeer`]) for every request on that
+    /// connection.
     fn classify(&self, extensions: &Extensions) -> PeerTrust;
 }
+
+/// A trust classification computed once per connection by the transport
+/// (Alloy's own server does this), inserted into request extensions next
+/// to [`PeerInfo`]. When present, the telemetry layer uses it instead of
+/// classifying again for every request on the connection.
+///
+/// Only transport code that owns the connection may insert this — it is
+/// believed exactly like [`PeerInfo`] itself. Never derive it from
+/// headers.
+#[derive(Debug, Clone)]
+pub struct ClassifiedPeer(pub Arc<PeerTrust>);
 
 /// Trusts nobody. The default.
 #[derive(Debug, Clone, Copy, Default)]
@@ -101,7 +119,9 @@ pub struct TrustedPeersConfig {
     pub identities: Vec<String>,
     /// Source networks treated as a trusted termination boundary. Use only
     /// when the network path is isolated (for example loopback from a
-    /// sidecar) and direct access is prevented.
+    /// sidecar) and direct access is prevented. IPv4-mapped IPv6 networks
+    /// (`::ffff:127.0.0.0/120`) are rejected; use the IPv4 network, which
+    /// mapped peer addresses are canonicalized to before matching.
     #[serde(default)]
     pub networks: Vec<IpNet>,
 }
@@ -115,6 +135,10 @@ pub enum TrustedPeersError {
     /// A network would trust every address.
     #[error("trusted network {0} would trust every address; list specific networks")]
     TooBroad(IpNet),
+    /// An IPv4-mapped IPv6 network, which the canonicalized peer address
+    /// can never match; the IPv4 form is meant.
+    #[error("trusted network {0} is IPv4-mapped IPv6; use the IPv4 network instead")]
+    MappedNetwork(IpNet),
 }
 
 /// Matches verified identities and trusted networks.
@@ -147,6 +171,16 @@ impl TrustedPeers {
         for network in &config.networks {
             if network.prefix_len() == 0 {
                 return Err(TrustedPeersError::TooBroad(*network));
+            }
+            // Classification canonicalizes IPv4-mapped peer addresses to
+            // IPv4 and `IpNet::contains` never matches across families, so
+            // a mapped network would silently never match (the same rule
+            // as rate-limit exempt networks).
+            if let IpNet::V6(v6) = network
+                && v6.prefix_len() >= 96
+                && v6.addr().to_ipv4_mapped().is_some()
+            {
+                return Err(TrustedPeersError::MappedNetwork(*network));
             }
             peers.networks.push(network.trunc());
         }

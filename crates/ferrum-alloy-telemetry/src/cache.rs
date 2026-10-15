@@ -29,16 +29,11 @@ pub fn is_shared_cacheable(
     status: StatusCode,
     response_headers: &HeaderMap,
 ) -> bool {
-    let directives = cache_directives(response_headers);
-    let has = |name: &str| {
-        directives
-            .iter()
-            .any(|d| d == name || d.starts_with(&format!("{name}=")))
-    };
+    let has = |name: &str| directives(response_headers).any(|d| directive_is(d, name));
 
     // A qualified `private="field"` still lets a shared cache store the rest
     // of the response (RFC 9111 §5.2.2.7), so only the bare form prohibits it.
-    if has("no-store") || directives.iter().any(|d| d == "private") {
+    if has("no-store") || directives(response_headers).any(|d| d.eq_ignore_ascii_case("private")) {
         return false;
     }
     let explicit_shared_freshness = has("public") || has("s-maxage");
@@ -63,13 +58,24 @@ pub fn is_shared_cacheable(
     }
 }
 
-fn cache_directives(headers: &HeaderMap) -> Vec<String> {
+/// Trimmed response `Cache-Control` directives, borrowed from the header
+/// values (no lowercasing copies; comparisons are ASCII-insensitive).
+fn directives(headers: &HeaderMap) -> impl Iterator<Item = &str> {
     headers
         .get_all(CACHE_CONTROL)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .map(|d| d.trim().to_ascii_lowercase())
+        .map(|d| d.trim())
         .filter(|d| !d.is_empty())
-        .collect()
+}
+
+/// Whether `directive` is `name` or its `name=value` form. `name` is an
+/// ASCII constant, so byte comparisons need no case folding copies.
+fn directive_is(directive: &str, name: &str) -> bool {
+    let d = directive.as_bytes();
+    let n = name.as_bytes();
+    d.len() >= n.len()
+        && d[..n.len()].eq_ignore_ascii_case(n)
+        && (d.len() == n.len() || d[n.len()] == b'=')
 }

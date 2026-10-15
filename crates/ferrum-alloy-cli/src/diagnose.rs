@@ -102,11 +102,28 @@ fn report_bytes(report: &impl serde::Serialize, limits: &Limits) -> Result<Vec<u
 
 /// Runs `diagnose`.
 pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
-    let redactor = CredentialRedactor::from_env();
-    run_redacted(args, &redactor).map_err(|error| redactor.redact_error(error))
+    let mut redactor = CredentialRedactor::from_env();
+    // Resolve the service credential before any fetch or output so the
+    // redactor covers it, including when it comes from `--token-file`.
+    let service_token = if args.url.is_some() {
+        match crate::live::token(args.token_file.as_deref()) {
+            Ok(token) => token,
+            Err(error) => return Err(redactor.redact_error(error)),
+        }
+    } else {
+        None
+    };
+    if let Some(token) = &service_token {
+        redactor.add_credential(token);
+    }
+    run_redacted(args, &redactor, service_token).map_err(|error| redactor.redact_error(error))
 }
 
-fn run_redacted(args: DiagnoseArgs, redactor: &CredentialRedactor) -> Result<ExitCode, CliError> {
+fn run_redacted(
+    args: DiagnoseArgs,
+    redactor: &CredentialRedactor,
+    service_token: Option<String>,
+) -> Result<ExitCode, CliError> {
     let limits = Limits::default();
     if !(1..=120_000).contains(&args.timeout_ms) {
         return Err(CliError::Invalid(
@@ -167,7 +184,7 @@ fn run_redacted(args: DiagnoseArgs, redactor: &CredentialRedactor) -> Result<Exi
         let Some(request_id) = args.request_id.as_deref() else {
             return Err(CliError::Invalid("--url requires --request-id".into()));
         };
-        let token = crate::live::token(args.token_file.as_deref())?;
+        let token = &service_token;
         let url = crate::live::report_url(base, request_id, token.is_some())?;
         let timeout = Duration::from_millis(args.timeout_ms);
         let bytes = crate::live::fetch(url, token.as_deref(), timeout, limits.max_bytes)?;

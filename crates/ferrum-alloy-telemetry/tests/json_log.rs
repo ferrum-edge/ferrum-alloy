@@ -504,3 +504,125 @@ fn close(left: &Value, right: &Value) -> bool {
         _ => left == right,
     }
 }
+
+/// A writer whose first write blocks until released, so queue behavior
+/// is deterministic.
+struct GatedWriter {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+    sink: Arc<Mutex<Vec<u8>>>,
+    first: bool,
+}
+
+impl io::Write for GatedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.first {
+            self.first = false;
+            let _ = self.started.send(());
+            let _ = self.release.recv();
+        }
+        self.sink.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The non-blocking writer never blocks its caller: past the bounded
+/// queue, lines are dropped and counted; queued lines are written in
+/// order once the consumer drains, and dropping the guard flushes.
+#[test]
+fn non_blocking_writer_drops_and_counts_instead_of_blocking() {
+    use ferrum_alloy_telemetry::json::non_blocking;
+    use std::io::Write as _;
+
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let gated = GatedWriter {
+        started: started_tx,
+        release: release_rx,
+        sink: Arc::clone(&sink),
+        first: true,
+    };
+    let (make_writer, guard) = non_blocking(gated, 1).unwrap();
+    let mut writer = make_writer.make_writer();
+    writer.write_all(b"one\n").unwrap();
+    // The worker holds "one" inside its blocked write.
+    started_rx.recv().unwrap();
+    writer.write_all(b"two\n").unwrap();
+    writer.write_all(b"three\n").unwrap();
+    assert_eq!(make_writer.dropped_lines(), 1, "the third line is dropped");
+    release_tx.send(()).unwrap();
+    drop(writer);
+    drop(guard);
+    assert_eq!(
+        String::from_utf8(sink.lock().unwrap().clone()).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
+/// A line queued behind the guard's shutdown message is never
+/// written, and counts as dropped just like a queue-full refusal.
+#[test]
+fn lines_queued_behind_shutdown_are_counted_as_dropped() {
+    use ferrum_alloy_telemetry::json::non_blocking;
+    use std::io::Write as _;
+
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let gated = GatedWriter {
+        started: started_tx,
+        release: release_rx,
+        sink: Arc::clone(&sink),
+        first: true,
+    };
+    let (make_writer, guard) = non_blocking(gated, 4).unwrap();
+    let mut writer = make_writer.make_writer();
+    writer.write_all(b"one\n").unwrap();
+    // The worker holds "one" inside its blocked write.
+    started_rx.recv().unwrap();
+    writer.write_all(b"two\n").unwrap();
+    // Dropping the guard queues Shutdown behind "two", then blocks in
+    // join until the worker drains.
+    let guard_thread = std::thread::spawn(move || drop(guard));
+    // Let the shutdown message reach the queue, then queue behind it.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    writer.write_all(b"three\n").unwrap();
+    release_tx.send(()).unwrap();
+    guard_thread.join().unwrap();
+    assert_eq!(
+        String::from_utf8(sink.lock().unwrap().clone()).unwrap(),
+        "one\ntwo\n"
+    );
+    assert_eq!(
+        make_writer.dropped_lines(),
+        1,
+        "the line behind shutdown is counted as dropped"
+    );
+}
+
+/// Through the JSON layer, the non-blocking writer produces the same
+/// line as the blocking writer.
+#[test]
+fn non_blocking_writer_carries_json_lines_unchanged() {
+    use ferrum_alloy_telemetry::json::non_blocking;
+
+    let capture = Capture::default();
+    let (make_writer, guard) = non_blocking(CaptureWriter(Arc::clone(&capture.0)), 16).unwrap();
+    let layer = JsonLayer::new()
+        .with_timer(FixedTime)
+        .with_writer(make_writer);
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(target: "t", answer = 42, "hello");
+    });
+    drop(guard);
+    let text = capture.text();
+    assert!(text.contains("\"answer\":42"), "{text}");
+    assert!(text.contains("\"hello\""), "{text}");
+    assert!(text.ends_with('\n'), "{text}");
+}
