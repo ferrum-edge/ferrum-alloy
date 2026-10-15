@@ -647,6 +647,9 @@ pub struct LogWorkerGuard {
     /// as soon as it has written what is already queued, even if the
     /// shutdown message never fit in the queue.
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the worker thread as its last act, so any number of callers
+    /// can wait for it without owning the join handle.
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LogWorkerGuard {
@@ -668,26 +671,53 @@ impl LogWorkerGuard {
     /// Stops the worker and waits for it until `deadline`. On a timeout
     /// the handle stays in the guard, so a later call can wait again.
     fn finish_by(&mut self, deadline: std::time::Instant) -> bool {
-        const POLL: std::time::Duration = std::time::Duration::from_millis(1);
+        self.signal_stop();
+        let finished = wait_until_done(std::slice::from_ref(&self.done), deadline);
+        if finished {
+            self.reap();
+        }
+        finished
+    }
+
+    /// Stops accepting lines and wakes an idle worker, without waiting.
+    fn signal_stop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(sender) = self.sender.take() {
-            // Wake an idle worker. If the queue is full the worker is
-            // busy and sees the stop signal after its current write.
+            // If the queue is full the worker is busy and sees the stop
+            // signal after its current write.
             let _ = sender.try_send(LogMessage::Shutdown);
         }
-        let Some(worker) = self.worker.as_ref() else {
-            return true;
-        };
-        while !worker.is_finished() {
-            if std::time::Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(POLL);
-        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Joins a worker that has finished (immediate).
+    fn reap(&mut self) {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        true
+    }
+}
+
+/// Waits until every flag is set or `deadline` passes.
+fn wait_until_done(
+    done: &[std::sync::Arc<std::sync::atomic::AtomicBool>],
+    deadline: std::time::Instant,
+) -> bool {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(1);
+    loop {
+        if done
+            .iter()
+            .all(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -736,6 +766,8 @@ where
     let (sender, receiver) = std::sync::mpsc::sync_channel(capacity_lines.max(1));
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopping = std::sync::Arc::clone(&stop);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = std::sync::Arc::clone(&done);
     let worker = std::thread::Builder::new()
         .name("ferrum-alloy-log-writer".into())
         .spawn(move || {
@@ -769,6 +801,8 @@ where
                 }
             }
             let _ = writer.flush();
+            drop(writer);
+            finished.store(true, std::sync::atomic::Ordering::Release);
         })?;
     let make_writer = NonBlockingMakeWriter {
         sender: sender.clone(),
@@ -781,6 +815,7 @@ where
             sender: Some(sender),
             worker: Some(worker),
             stop,
+            done,
         },
     ))
 }
@@ -797,9 +832,59 @@ fn stdout_dropped_counter() -> std::sync::Arc<std::sync::atomic::AtomicU64> {
     )
 }
 
+/// Workers whose guards are held until a shutdown sees them finish. A
+/// shutdown keeps every worker it is waiting for registered, so a
+/// concurrent shutdown waits for the same workers (within its own
+/// deadline) instead of finding nothing and reporting success.
+struct WorkerRegistry(std::sync::Mutex<Vec<LogWorkerGuard>>);
+
+impl WorkerRegistry {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(Vec::new()))
+    }
+
+    fn guards(&self) -> std::sync::MutexGuard<'_, Vec<LogWorkerGuard>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn register(&self, guard: LogWorkerGuard) {
+        self.guards().push(guard);
+    }
+
+    /// Stops every registered worker and waits for all of them until
+    /// `timeout`. Finished workers are joined and removed; unfinished
+    /// ones stay registered.
+    fn shutdown(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let flags: Vec<_> = {
+            let mut guards = self.guards();
+            for guard in guards.iter_mut() {
+                guard.signal_stop();
+            }
+            guards
+                .iter()
+                .map(|guard| std::sync::Arc::clone(&guard.done))
+                .collect()
+        };
+        let drained = wait_until_done(&flags, deadline);
+        let mut guards = self.guards();
+        let (mut finished, unfinished): (Vec<_>, Vec<_>) = std::mem::take(&mut *guards)
+            .into_iter()
+            .partition(LogWorkerGuard::is_done);
+        *guards = unfinished;
+        drop(guards);
+        for guard in &mut finished {
+            guard.reap();
+        }
+        drained
+    }
+}
+
 /// Guards of stdout workers started through [`non_blocking_stdout`],
-/// held until [`shutdown_nonblocking_stdout`] flushes them.
-static STDOUT_GUARDS: std::sync::Mutex<Vec<LogWorkerGuard>> = std::sync::Mutex::new(Vec::new());
+/// held until [`shutdown_nonblocking_stdout`] sees them finish.
+static STDOUT_WORKERS: WorkerRegistry = WorkerRegistry::new();
 
 /// Starts a bounded non-blocking writer to standard output. Its worker
 /// guard is held process-wide (the subscriber it feeds is global);
@@ -813,48 +898,23 @@ static STDOUT_GUARDS: std::sync::Mutex<Vec<LogWorkerGuard>> = std::sync::Mutex::
 pub fn non_blocking_stdout(capacity_lines: usize) -> io::Result<NonBlockingMakeWriter> {
     let (make_writer, guard) =
         non_blocking_with_counter(io::stdout(), capacity_lines, stdout_dropped_counter())?;
-    match STDOUT_GUARDS.lock() {
-        Ok(mut guards) => guards.push(guard),
-        // A poisoned registry must not lose the only handle that can
-        // stop the worker; keep it for the process instead.
-        Err(_) => std::mem::forget(guard),
-    }
+    STDOUT_WORKERS.register(guard);
     Ok(make_writer)
 }
 
 /// Flushes and stops every stdout log worker started through
 /// [`non_blocking_stdout`] (and so by [`crate::init::fmt_layer`],
 /// [`crate::init::init_logging`], and `init_logging_and_otel` when
-/// `logging.non_blocking_queue_lines` is set), waiting at most `timeout`
-/// in total. Call it last on exit, after the final events are logged:
-/// lines logged afterwards are dropped and counted. Returns whether every
-/// queue drained in time; on a timeout the workers are left to finish in
-/// the background (a stalled sink cannot hold shutdown forever, and this
-/// never blocks past `timeout`) and lines they never write count as
-/// dropped.
+/// `logging.non_blocking_queue_lines` is set), waiting at most `timeout`.
+/// Call it last on exit, after the final events are logged: lines logged
+/// afterwards are dropped and counted. Returns whether every worker
+/// finished in time, also when another call is shutting them down
+/// concurrently; on a timeout the workers are left to finish in the
+/// background (a stalled sink cannot hold shutdown forever, and this
+/// never blocks past `timeout`), stay registered so a later call can wait
+/// again, and lines they never write count as dropped.
 pub fn shutdown_nonblocking_stdout(timeout: std::time::Duration) -> bool {
-    let guards = match STDOUT_GUARDS.lock() {
-        Ok(mut guards) => std::mem::take(&mut *guards),
-        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-    };
-    let deadline = std::time::Instant::now() + timeout;
-    let mut unfinished = Vec::new();
-    for mut guard in guards {
-        if !guard.finish_by(deadline) {
-            unfinished.push(guard);
-        }
-    }
-    let drained = unfinished.is_empty();
-    // Keep unfinished workers registered (never dropped, so never joined
-    // without a deadline): a later call waits for them again instead of
-    // reporting success.
-    if !drained {
-        match STDOUT_GUARDS.lock() {
-            Ok(mut guards) => guards.extend(unfinished),
-            Err(poisoned) => poisoned.into_inner().extend(unfinished),
-        }
-    }
-    drained
+    STDOUT_WORKERS.shutdown(timeout)
 }
 
 /// Lines dropped by the process-wide non-blocking stdout writers
@@ -1050,6 +1110,40 @@ mod tests {
         assert!(guard.shutdown_timeout(std::time::Duration::from_secs(5)));
         assert_eq!(sink.lock().unwrap().as_slice(), b"a\nb\n");
         assert_eq!(make_writer.dropped_lines(), 0);
+    }
+
+    /// A shutdown that runs while another is still waiting for a stalled
+    /// worker waits for the same worker and reports failure by its own
+    /// deadline; it never finds an empty registry and reports success.
+    #[test]
+    fn concurrent_shutdowns_both_wait_for_in_progress_workers() {
+        use std::io::Write as _;
+
+        let (writer, started, release, sink) = gated();
+        let (make_writer, guard) = non_blocking(writer, 4).unwrap();
+        let registry = std::sync::Arc::new(WorkerRegistry::new());
+        registry.register(guard);
+        let mut log = make_writer.make_writer();
+        log.write_all(b"one\n").unwrap();
+        started.recv().unwrap();
+        log.write_all(b"two\n").unwrap();
+
+        let first = {
+            let registry = std::sync::Arc::clone(&registry);
+            std::thread::spawn(move || registry.shutdown(std::time::Duration::from_secs(5)))
+        };
+        // The first shutdown is now waiting (or about to); either way the
+        // worker is stalled, so a second one must report failure.
+        assert!(!registry.shutdown(std::time::Duration::from_millis(50)));
+        assert_eq!(registry.guards().len(), 1, "the worker stays registered");
+        release.send(()).unwrap();
+        assert!(first.join().unwrap(), "the first shutdown saw it finish");
+        assert!(registry.guards().is_empty());
+        assert!(registry.shutdown(std::time::Duration::ZERO));
+        assert_eq!(
+            String::from_utf8(sink.lock().unwrap().clone()).unwrap(),
+            "one\ntwo\n"
+        );
     }
 
     /// The process-wide stdout workers shut down within the timeout and

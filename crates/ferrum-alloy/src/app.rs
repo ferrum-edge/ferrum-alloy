@@ -871,6 +871,10 @@ pub struct TelemetryGuard {
     pipeline: Option<ferrum_alloy_telemetry::otel::OtelPipeline>,
     /// How telemetry was set up (`alloy`, `application`, `existing`).
     pub mode: &'static str,
+    /// Whether log shutdown was already attempted explicitly. Dropping the
+    /// guard then does not start another wait: a stalled log sink would
+    /// otherwise hold the process past the shutdown budget it was given.
+    logging_stopped: bool,
 }
 
 impl std::fmt::Debug for TelemetryGuard {
@@ -938,6 +942,7 @@ impl TelemetryGuard {
             return Ok(Self {
                 pipeline: Some(pipeline),
                 mode: "alloy",
+                logging_stopped: false,
             });
         }
         init::init_logging(&config.logging).map_err(|e| AlloyError::Telemetry(e.to_string()))?;
@@ -949,6 +954,7 @@ impl TelemetryGuard {
             #[cfg(feature = "otel")]
             pipeline: None,
             mode,
+            logging_stopped: false,
         }
     }
 
@@ -984,6 +990,7 @@ impl TelemetryGuard {
     /// Alloy-installed logging is owned here; an application's own
     /// subscriber keeps its own lifecycle.
     pub fn shutdown_logging(&mut self, timeout: Duration) -> Result<(), String> {
+        self.logging_stopped = true;
         if self.mode == "alloy"
             && !ferrum_alloy_telemetry::json::shutdown_nonblocking_stdout(timeout)
         {
@@ -998,6 +1005,29 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        let _ = self.shutdown(Duration::from_secs(1));
+        let _ = self.shutdown_export(Duration::from_secs(1));
+        // After an explicit log shutdown (finished or timed out), dropping
+        // does not wait again; explicit calls can still retry.
+        if !self.logging_stopped {
+            let _ = self.shutdown_logging(Duration::from_secs(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod telemetry_guard_tests {
+    use super::*;
+
+    /// Once log shutdown was attempted explicitly, dropping the guard
+    /// does not start another wait.
+    #[test]
+    fn drop_does_not_wait_for_logging_again_after_an_explicit_attempt() {
+        let mut guard = TelemetryGuard::external("existing");
+        assert!(!guard.logging_stopped);
+        assert!(guard.shutdown_logging(Duration::ZERO).is_ok());
+        assert!(guard.logging_stopped, "the attempt is recorded");
+        // Explicit retries remain possible.
+        assert!(guard.shutdown_logging(Duration::ZERO).is_ok());
+        assert!(guard.logging_stopped);
     }
 }
