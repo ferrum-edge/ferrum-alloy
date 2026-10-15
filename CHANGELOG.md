@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- JSON logging gained an opt-in bounded non-blocking writer:
+  `logging.non_blocking_queue_lines` (`FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES`)
+  sends lines through a dedicated writer thread so a slow stdout
+  consumer cannot block request threads; lines past the queue are
+  dropped and counted by `ferrum_alloy_telemetry::json::dropped_log_lines`.
+  The default stays synchronous and lossless. Span-field rendering now
+  reuses a per-thread scratch instead of allocating per `record` call
+  (#197).
 - OTLP export requests are now chunked by estimated bytes
   (`max_request_bytes`) as well as by span count, so a batch of large
   spans no longer sails past the exporter's request-body cap by span

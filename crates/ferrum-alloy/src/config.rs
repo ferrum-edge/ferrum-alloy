@@ -1153,6 +1153,7 @@ env_vars! {
     "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => ["management", "rate_limit", "exempt_networks"]: List,
     "FERRUM_ALLOY_LOG_FORMAT" => ["logging", "format"]: Str,
     "FERRUM_ALLOY_LOG_FILTER" => ["logging", "filter"]: Str,
+    "FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES" => ["logging", "non_blocking_queue_lines"]: Uint,
     "FERRUM_ALLOY_OTLP_ENABLED" => ["otlp", "enabled"]: Bool,
     "FERRUM_ALLOY_OTLP_ENDPOINT" => ["otlp", "endpoint"]: Str,
     "FERRUM_ALLOY_OTLP_SAMPLING_RATIO" => ["otlp", "sampling_ratio"]: Float,
@@ -1887,6 +1888,9 @@ impl AlloyConfig {
             }
         }
 
+        if self.logging.non_blocking_queue_lines > 1_000_000 {
+            error("logging.non_blocking_queue_lines must not exceed 1000000".into());
+        }
         if self.otlp.enabled && !has("otel") {
             error("otlp.enabled is true but the `otel` feature is not enabled".into());
         }
@@ -2059,6 +2063,14 @@ impl AlloyConfig {
                 "server.bind {} accepts non-loopback connections",
                 server.bind
             ));
+        }
+        if self.logging.non_blocking_queue_lines > 0
+            && self.logging.format != ferrum_alloy_telemetry::init::LogFormat::Json
+        {
+            warn(
+                "logging.non_blocking_queue_lines applies only to the json format and is ignored"
+                    .into(),
+            );
         }
         if management.enabled && !management.bind.ip().is_loopback() {
             warn(format!(

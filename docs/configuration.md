@@ -83,6 +83,7 @@ The management listener binds to loopback by default, but loopback does not auth
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS` | `management.rate_limit.exempt_networks` | comma list of CIDRs (empty for none) |
 | `FERRUM_ALLOY_LOG_FORMAT` | `logging.format` | `json` / `pretty` / `compact` |
 | `FERRUM_ALLOY_LOG_FILTER` | `logging.filter` | `EnvFilter` directives |
+| `FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES` | `logging.non_blocking_queue_lines` | integer |
 | `FERRUM_ALLOY_OTLP_ENABLED` | `otlp.enabled` | bool |
 | `FERRUM_ALLOY_OTLP_ENDPOINT` | `otlp.endpoint` | URL |
 | `FERRUM_ALLOY_OTLP_SAMPLING_RATIO` | `otlp.sampling_ratio` | float |
@@ -269,6 +270,7 @@ axum cannot list a router's routes, so `AlloyApp` asks your router instead. At s
 | `format` | `json` | `json`, `pretty`, or `compact` |
 | `filter` | `RUST_LOG`, else `info` | `EnvFilter` directives |
 | `ansi` | `false` | Colors for text formats |
+| `non_blocking_queue_lines` | `0` | When greater than zero (`json` only), lines are written by a dedicated thread through a queue of this many lines, so a slow stdout consumer never blocks request threads; lines beyond the queue are dropped (counted by `ferrum_alloy_telemetry::json::dropped_log_lines`). `0` writes synchronously. At most 1000000. |
 
 With `json`, each event is one line:
 
