@@ -367,3 +367,18 @@ fn invalid_host_rules_are_rejected() {
         assert!(AlloyClient::new(&settings).is_err(), "{rule}");
     }
 }
+
+/// The constructor applies the same guards as configuration validation,
+/// so building a client from unchecked settings cannot skip them.
+#[test]
+fn zero_timeouts_are_rejected_by_the_constructor() {
+    let mut settings = HttpClientSettings::default();
+    settings.connect_timeout_ms = 0;
+    let error = AlloyClient::new(&settings).unwrap_err().to_string();
+    assert!(error.contains("connect_timeout_ms"), "{error}");
+
+    let mut settings = HttpClientSettings::default();
+    settings.request_timeout_ms = 0;
+    let error = AlloyClient::new(&settings).unwrap_err().to_string();
+    assert!(error.contains("request_timeout_ms"), "{error}");
+}

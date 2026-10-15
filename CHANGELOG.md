@@ -10,7 +10,48 @@
   The default stays synchronous and lossless. Span-field rendering now
   reuses a per-thread scratch instead of allocating per `record` call
   (#197).
-
+- OTLP export requests are now chunked by estimated bytes
+  (`max_request_bytes`) as well as by span count, so a batch of large
+  spans no longer sails past the exporter's request-body cap by span
+  size alone and gets rejected whole. The estimate is the queue
+  budget's (resource and instrumentation-scope encoding are not in
+  it), so staying within the cap is best-effort, not guaranteed; a
+  single span larger than the budget is sent alone.
+  `OtelPipeline::queued_spans()` and `queued_bytes()` expose the
+  export queue depth (#197).
+- **Breaking:** Alloy's server now classifies each connection's peer
+  once and passes the result to the telemetry layer as the new
+  `ClassifiedPeer` extension, instead of classifying on every request;
+  a custom `TrustClassifier` is therefore invoked once per connection
+  with extensions holding only `PeerInfo` and must decide from the
+  transport identity alone. Applications serving the router themselves
+  keep per-request classification.
+  Matched route templates are interned, so each distinct template is
+  allocated once process-wide instead of per request (#197).
+- Request-path overhead reduced with identical output: histograms now
+  record into a single bucket (integer bucket assignment) and sum to
+  cumulative counts only when rendered, the metrics series and route
+  label are resolved once per request instead of twice, label escaping
+  borrows unless escaping is needed, request/trace/span ids are
+  hex-encoded from a table without formatting calls, and shared-cache
+  classification compares `Cache-Control` directives in place instead
+  of allocating lowercased copies (#197).
+- **Breaking:** `trust.networks` rejects IPv4-mapped IPv6 CIDRs, which
+  could never match a canonicalized peer address; use the IPv4 network
+  (the same rule rate-limit exempt networks already applied). A
+  non-loopback `management.bind` now also warns in `check` output that
+  the management listener has no TLS and its token crosses the network
+  in cleartext (#197).
+- Updated `rustls` in the lockfile to 0.23.46, clearing
+  RUSTSEC-2026-0346 through RUSTSEC-2026-0349 (ECH fallback data
+  exposure and certificate-decompression allocation bounds);
+  `cargo deny check` passes again.
+- `ferrum-alloy diagnose` redacts the service diagnostics credential
+  (`FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or `--token-file`) from every output,
+  as it already did the Edge admin credential. Previously only the Edge
+  credential was redacted, so a service reflecting the credential it was
+  sent into its report leaked it to the terminal and to `--write-report`
+  files (#197).
 - **Breaking:** `auth.jwt.jwks_url` accepts plain `http` only to the literal
   loopback addresses `127.0.0.1` and `[::1]`; `http://localhost` is refused by
   `check` and `JwtVerifier::new`, because the resolver decides where a DNS name
@@ -18,17 +59,42 @@
   directly, never through an environment proxy (`HTTP_PROXY`). `ferrum-alloy diagnose --url`
   likewise sends its credential over plain `http` only to a literal loopback
   address, no longer to `localhost`.
+- **Breaking:** `postgres::connect` rejects `database.url` query
+  parameters SQLx does not recognize, naming the parameter and never its
+  value. SQLx previously logged each one with its value (libpq's
+  `sslpassword` is a secret) and silently ignored it, so a typo such as
+  `sslmod=verify-full` quietly dropped the requested verification (#197).
 - **Breaking:** `postgres::connect` raises `sslmode=prefer` (also the default
   when neither the URL nor `PGSSLMODE` sets one) to `require` for a host that is
   not local (a Unix socket or a literal loopback address; `localhost` and
   other DNS names are not), so a remote
   database never silently falls back to plaintext (#182). An explicit
   `sslmode=disable` or `allow` to a remote host is kept and logs a warning.
+- **Breaking:** operation spans are now created at the wrapped
+  future's first poll instead of when `Operation::run` is called, so a
+  stored-then-awaited operation's span interval starts when its work
+  starts and a future dropped unpolled exports no span. The span's
+  parent is the span current at first poll, not at construction: a
+  future built under one span and first polled under another (or in an
+  uninstrumented spawned task, where it becomes a root) changes
+  parentage; instrument deferred or spawned futures with their
+  intended parent. Rejected trace context now also strips the
+  `baggage` header before application code runs. `alloy.db.pool_wait`
+  documentation now states that repeated acquires record repeated
+  values and the last value present is used, never a sum, and the
+  detailed-health `latency_ms`, `age_ms`, and `uptime_seconds` fields
+  are defined in `docs/measurement-semantics.md` (#197).
 - `ferrum-alloy openapi export` without `--input` reads at most 16 MiB of the
   project binary's standard output, the `--input` limit. When a binary prints
   more, the export closes the pipe, kills the process it spawned (on Windows
   Cargo, not necessarily its child), and fails with exit 3 instead of
   buffering without bound (#183).
+- **Breaking:** JWT verification accepts only plain JWTs. Tokens whose
+  header carries `crit`, `enc`, `zip`, or `cty`, an explicit `typ` other
+  than `JWT` or `at+jwt`, or an `iss` array instead of the single issuer
+  string are now rejected with `401` (RFC 7515 §4.2, RFC 7519 §4.1.1,
+  RFC 8725 §3.11). An `Authorize` denial detail is sanitized like other
+  framework problem details before it reaches the client (#197).
 - `config::Secret` holds its value in `Zeroizing<String>`: the value is
   zeroized when a `Secret` or any clone of it is dropped, and `Secret`
   implements `ZeroizeOnDrop`. `FERRUM_ALLOY_*_FILE` secret files and the TLS
@@ -36,6 +102,17 @@
   whose buffer is zeroizing and fully reserved before the read, so no
   reallocation or refused read leaves a plaintext copy. `zeroize` is now a non-optional
   dependency of `ferrum-alloy` (#184).
+- **Breaking:** configuration validation now rejects tuning values that
+  could only disable or negate a protection: `server.tls.handshake_timeout_ms`
+  of `0` (which failed every TLS handshake at runtime), connection timeouts
+  above 24 hours, `server.max_header_bytes` above 16 MiB, oversized body,
+  header-count, and HTTP/2 stream limits, zero `http_client` timeouts and
+  `database.acquire_timeout_ms`, invalid
+  `http_client.propagate_trace_context_to` host rules, and out-of-range
+  `auth.jwt.jwks_timeout_ms`, `jwks_max_bytes`, and `leeway_seconds`
+  (mirrored in `JwtVerifier::new` and `AlloyClient::new`). Credentialed
+  `auth.jwt.jwks_url` values are redacted in `redacted_toml()` and never
+  printed by `JwtSettings`' `Debug` (#197).
 
 - Complete the 2026-10 audit fixes after independent review of #177 (#166,
   #167, #171, #172). The parser-free JWKS URL check (CLI `check`) also refuses

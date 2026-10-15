@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
-use ferrum_alloy_telemetry::peer::{PeerTrust, SharedClassifier};
+use ferrum_alloy_telemetry::peer::{ClassifiedPeer, PeerTrust, SharedClassifier};
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{HeaderMap, Request, Response, StatusCode};
 use tower_layer::Layer;
@@ -246,7 +246,13 @@ where
 
     fn call(&mut self, mut request: Request<ReqBody>) -> Self::Future {
         let policy = &self.policy;
-        let trust = policy.classifier.classify(request.extensions());
+        // Reuse the transport's per-connection classification when it
+        // computed one, exactly like the telemetry layer, so both judge
+        // the request by the same single classification.
+        let trust = match request.extensions().get::<ClassifiedPeer>() {
+            Some(classified) => (*classified.0).clone(),
+            None => policy.classifier.classify(request.extensions()),
+        };
         let verification = match &trust {
             PeerTrust::VerifiedIdentity(identity) => GatewayVerification::Verified {
                 identity: identity.clone(),
