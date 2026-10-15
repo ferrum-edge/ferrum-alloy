@@ -1655,7 +1655,7 @@ fn openapi_export_refuses_unsafe_agent_tool_metadata() {
 }
 
 /// `openapi export --check` reads the existing output only up to the
-/// document limit; a larger file is drift.
+/// output limit (64 MiB); a larger file is drift.
 #[test]
 fn openapi_check_refuses_oversized_outputs_with_exit_4() {
     let dir = tempfile::tempdir().unwrap();
@@ -1665,7 +1665,7 @@ fn openapi_check_refuses_oversized_outputs_with_exit_4() {
         r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{}}"#,
     );
     let oversized = dir.path().join("openapi.json");
-    std::fs::write(&oversized, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
+    std::fs::write(&oversized, vec![b' '; 64 * 1024 * 1024 + 1]).unwrap();
     let output = run(&[
         "openapi",
         "export",
@@ -1676,7 +1676,7 @@ fn openapi_check_refuses_oversized_outputs_with_exit_4() {
         "--check",
     ]);
     assert_eq!(code(&output), 4, "{}", stderr(&output));
-    assert!(stderr(&output).contains("is larger than 16777216 bytes"));
+    assert!(stderr(&output).contains("is larger than 67108864 bytes"));
 }
 
 /// Devices and FIFOs report a length of `0`; reading one would never end.
