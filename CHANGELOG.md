@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
+  no Edge authentication plugin is exported yet, so the generated
+  configuration authenticates nobody until authentication is configured
+  in Edge. Also in this batch: atomic CLI writes create the temporary
+  file with its final mode (replaced private files are never briefly
+  world-readable), `--alloy-git` is URL-parsed and credentialed URLs
+  are refused instead of being baked into the generated `Cargo.toml`,
+  template substitution no longer re-expands operator values, Windows
+  device names are refused as project names, printed follow-up commands
+  shell-quote their paths for the platform shell, manifest paths use an
+  RFC 3986 allowlist, and YAML keys YAML would type as bool/null/number
+  are quoted in any letter case (#197).
+- **Breaking:** manifest literal paths must now be plain ASCII
+  RFC 3986 `pchar` paths. Paths previously accepted with non-ASCII
+  bytes or characters such as `|` are refused; Edge itself admits some
+  of them, so this is Alloy's narrower canonical subset for generated
+  configuration, not an Edge limit.
 - JSON logging gained an opt-in bounded non-blocking writer:
   `logging.non_blocking_queue_lines` (`FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES`)
   sends lines through a dedicated writer thread so a slow stdout

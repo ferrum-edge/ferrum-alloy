@@ -235,19 +235,28 @@ impl OutputDir {
         #[cfg(not(unix))]
         let _ = new_file_mode;
         #[cfg(unix)]
-        let permissions = self
+        let preserved_mode = self
             .root
             .symlink_metadata(name)
             .ok()
             .filter(|metadata| metadata.file_type().is_file())
-            .map(|metadata| Permissions::from_mode(metadata.permissions().mode() & 0o777));
+            .map(|metadata| metadata.permissions().mode() & 0o777);
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
-        options.mode(match new_file_mode {
-            NewFileMode::Umask => 0o666,
-            NewFileMode::Private => 0o600,
-        });
+        {
+            // Create the temporary file with the mode it will finally
+            // have, so replaced bytes are never briefly readable under a
+            // wider mode than the file they replace. The umask may
+            // narrow the created mode further; the exact preserved mode
+            // is restored below, before the rename.
+            let create_mode = match (preserved_mode, new_file_mode) {
+                (Some(preserved), _) => preserved,
+                (None, NewFileMode::Umask) => 0o666,
+                (None, NewFileMode::Private) => 0o600,
+            };
+            options.mode(create_mode);
+        }
         let mut attempts = 1;
         let (temp, mut file) = loop {
             let mut temp = OsString::from(".");
@@ -263,10 +272,12 @@ impl OutputDir {
                 Err(error) => return Err(error),
             }
         };
+        #[cfg(test)]
+        tests::checkpoint("temporary-created", &self.path.join(&temp));
         let written = file.write_all(bytes);
         #[cfg(unix)]
-        let written = written.and_then(|()| match permissions {
-            Some(permissions) => file.set_permissions(permissions),
+        let written = written.and_then(|()| match preserved_mode {
+            Some(mode) => file.set_permissions(Permissions::from_mode(mode)),
             None => Ok(()),
         });
         let written = written.and_then(|()| file.sync_all());
@@ -310,6 +321,8 @@ pub(crate) enum NewFileMode {
     /// Respect the process umask, as for ordinary generated artifacts.
     Umask,
     /// Restrict the file to its owner, for potentially sensitive reports.
+    /// Unix only: on Windows the file gets the default ACL of its
+    /// directory, like the token-file permission requirement.
     Private,
 }
 
