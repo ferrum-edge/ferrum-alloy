@@ -253,8 +253,10 @@ pub struct ServerConfig {
     /// data counts only once it is delivered to the handler, not when
     /// the peer sent it into transport buffers.
     pub body_read_stall_timeout_ms: u64,
-    /// Deadline for producing response *headers*. Never applied to response
-    /// body streaming (SSE) or upgraded connections. `0` disables it.
+    /// Deadline for producing response *headers* once a request is
+    /// admitted; time waiting for an admission permit is not counted.
+    /// Never applied to response body streaming (SSE) or upgraded
+    /// connections. `0` disables it.
     pub request_timeout_ms: u64,
     /// Maximum requests executing handlers at once; `0` means unlimited.
     pub max_in_flight_requests: usize,

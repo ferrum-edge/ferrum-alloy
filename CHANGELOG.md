@@ -28,6 +28,17 @@
   keep per-request classification.
   Matched route templates are interned, so each distinct template is
   allocated once process-wide instead of per request (#197).
+- Readiness refreshes now run in a detached task, so a probe client that
+  disconnects cannot cancel the refresh and starve the cache (with a
+  probe timeout shorter than a slow check, readiness could never become
+  ready). A failed `AlloyApp::prepare()` keeps the explicit
+  configuration, so a retry reports the same error instead of silently
+  loading a file or the environment. A listener task that ends on its
+  own now begins shutdown instead of leaving the process reporting
+  ready, and a panicked TLS reload task is now logged (reloads stop;
+  serving continues on the previous material) instead of stopping
+  silently. `server.request_timeout_ms` documentation now
+  states that admission wait is not counted (#197).
 - **Breaking:** new `server.body_read_stall_timeout_ms` (default
   `60000`, `FERRUM_ALLOY_BODY_READ_STALL_TIMEOUT_MS`): a connection
   whose handler is waiting to read a request body and receives no body
