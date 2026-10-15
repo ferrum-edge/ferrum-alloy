@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use crate::trace_context::fill_random;
+use crate::trace_context::{fill_random, push_hex};
 
 /// Default request id header, matching Ferrum Edge's `correlation_id` default.
 pub const DEFAULT_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -30,15 +30,24 @@ impl RequestId {
         fill_random(&mut bytes);
         bytes[6] = (bytes[6] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        Self(format!(
-            "{}-{}-{}-{}-{}",
-            &hex[0..8],
-            &hex[8..12],
-            &hex[12..16],
-            &hex[16..20],
-            &hex[20..32]
-        ))
+        // One allocation, table-driven hex (was 17 formatting calls).
+        let mut out = String::with_capacity(36);
+        for (index, chunk) in [
+            &bytes[0..4],
+            &bytes[4..6],
+            &bytes[6..8],
+            &bytes[8..10],
+            &bytes[10..16],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                out.push('-');
+            }
+            push_hex(&mut out, chunk);
+        }
+        Self(out)
     }
 
     /// The id.
