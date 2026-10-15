@@ -306,7 +306,7 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 | `max_queue_spans` | `2048` | Queue bound. Excess spans are dropped and counted (`queue_full`). |
 | `max_queue_bytes` | `8388608` | Estimated byte budget. Excess spans are dropped and counted (`byte_budget`). |
 | `max_export_batch` | `512` | Spans per request. |
-| `max_request_bytes` | `4194304` | Encoded bytes per export request. |
+| `max_request_bytes` | `4194304` | Encoded bytes per export request. Batches are split by the processor's size estimate (the queue budget's estimate; resource and instrumentation-scope encoding are not in it) to stay within this budget on a best-effort basis; a single span larger than it is sent alone. |
 | `scheduled_delay_ms` | `1000` | Export interval. |
 
 ### `[trust]`
