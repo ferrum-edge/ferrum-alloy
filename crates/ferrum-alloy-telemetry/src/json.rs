@@ -624,6 +624,7 @@ enum LogMessage {
 pub struct NonBlockingMakeWriter {
     sender: std::sync::mpsc::SyncSender<LogMessage>,
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NonBlockingMakeWriter {
@@ -641,58 +642,58 @@ impl NonBlockingMakeWriter {
 pub struct LogWorkerGuard {
     sender: Option<std::sync::mpsc::SyncSender<LogMessage>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// The terminal stop signal, independent of queue capacity: once set,
+    /// writers refuse new lines (counted as dropped) and the worker exits
+    /// as soon as it has written what is already queued, even if the
+    /// shutdown message never fit in the queue.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LogWorkerGuard {
     /// Flushes queued lines and stops the worker, waiting at most
-    /// `timeout`. Returns whether the worker finished in time. On a
-    /// timeout (a sink that stopped taking writes) the worker is left
-    /// running detached: it ends once its sink takes the queued lines or
-    /// the process exits, and lines it never writes count as dropped.
-    /// Unlike dropping the guard, this never blocks past `timeout`.
+    /// `timeout`. Returns whether the worker finished in time. Either way
+    /// the writers stop accepting lines (later ones are counted as
+    /// dropped). On a timeout (a sink that stopped taking writes) the
+    /// worker is left running detached: it writes what is already queued
+    /// if its sink recovers and then exits, and lines it never writes
+    /// count as dropped. Unlike dropping the guard, this never blocks past
+    /// `timeout`.
     pub fn shutdown_timeout(mut self, timeout: std::time::Duration) -> bool {
-        self.finish_by(std::time::Instant::now() + timeout)
+        let finished = self.finish_by(std::time::Instant::now() + timeout);
+        // Dropping an unfinished handle detaches the thread.
+        drop(self.worker.take());
+        finished
     }
 
+    /// Stops the worker and waits for it until `deadline`. On a timeout
+    /// the handle stays in the guard, so a later call can wait again.
     fn finish_by(&mut self, deadline: std::time::Instant) -> bool {
         const POLL: std::time::Duration = std::time::Duration::from_millis(1);
-        let mut stopping = true;
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(sender) = self.sender.take() {
-            // The queue is bounded: wait for room for the shutdown
-            // message, but never past the deadline.
-            loop {
-                match sender.try_send(LogMessage::Shutdown) {
-                    Ok(()) | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
-                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                        if std::time::Instant::now() >= deadline {
-                            stopping = false;
-                            break;
-                        }
-                        std::thread::sleep(POLL);
-                    }
-                }
-            }
+            // Wake an idle worker. If the queue is full the worker is
+            // busy and sees the stop signal after its current write.
+            let _ = sender.try_send(LogMessage::Shutdown);
         }
-        let Some(worker) = self.worker.take() else {
-            return stopping;
+        let Some(worker) = self.worker.as_ref() else {
+            return true;
         };
-        if !stopping {
-            return false;
-        }
         while !worker.is_finished() {
             if std::time::Instant::now() >= deadline {
-                // Dropping the handle detaches the thread.
                 return false;
             }
             std::thread::sleep(POLL);
         }
-        let _ = worker.join();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
         true
     }
 }
 
 impl Drop for LogWorkerGuard {
     fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(sender) = self.sender.take() {
             let _ = sender.send(LogMessage::Shutdown);
         }
@@ -733,21 +734,38 @@ where
     W: io::Write + Send + 'static,
 {
     let (sender, receiver) = std::sync::mpsc::sync_channel(capacity_lines.max(1));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = std::sync::Arc::clone(&stop);
     let worker = std::thread::Builder::new()
         .name("ferrum-alloy-log-writer".into())
         .spawn(move || {
             // Nothing the writer does may create telemetry about itself.
             let _no_tracing = tracing::dispatcher::set_default(&tracing::Dispatch::none());
+            let mut write = |message: LogMessage| match message {
+                LogMessage::Line(mut line) => {
+                    if writer.write_all(&line.bytes).is_ok() {
+                        line.written = true;
+                    }
+                    true
+                }
+                // Lines still queued behind the shutdown are dropped
+                // with the channel and count themselves.
+                LogMessage::Shutdown => false,
+            };
             while let Ok(message) = receiver.recv() {
-                match message {
-                    LogMessage::Line(mut line) => {
-                        if writer.write_all(&line.bytes).is_ok() {
-                            line.written = true;
+                if !write(message) {
+                    break;
+                }
+                // Stopped while this write was in progress (the shutdown
+                // message may not have fit in the queue): write what is
+                // already queued, then end without waiting for more.
+                if stopping.load(std::sync::atomic::Ordering::Acquire) {
+                    while let Ok(message) = receiver.try_recv() {
+                        if !write(message) {
+                            break;
                         }
                     }
-                    // Lines still queued behind the shutdown are
-                    // dropped with the channel and count themselves.
-                    LogMessage::Shutdown => break,
+                    break;
                 }
             }
             let _ = writer.flush();
@@ -755,12 +773,14 @@ where
     let make_writer = NonBlockingMakeWriter {
         sender: sender.clone(),
         dropped,
+        stop: std::sync::Arc::clone(&stop),
     };
     Ok((
         make_writer,
         LogWorkerGuard {
             sender: Some(sender),
             worker: Some(worker),
+            stop,
         },
     ))
 }
@@ -818,9 +838,21 @@ pub fn shutdown_nonblocking_stdout(timeout: std::time::Duration) -> bool {
         Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
     };
     let deadline = std::time::Instant::now() + timeout;
-    let mut drained = true;
+    let mut unfinished = Vec::new();
     for mut guard in guards {
-        drained &= guard.finish_by(deadline);
+        if !guard.finish_by(deadline) {
+            unfinished.push(guard);
+        }
+    }
+    let drained = unfinished.is_empty();
+    // Keep unfinished workers registered (never dropped, so never joined
+    // without a deadline): a later call waits for them again instead of
+    // reporting success.
+    if !drained {
+        match STDOUT_GUARDS.lock() {
+            Ok(mut guards) => guards.extend(unfinished),
+            Err(poisoned) => poisoned.into_inner().extend(unfinished),
+        }
     }
     drained
 }
@@ -841,6 +873,7 @@ pub fn dropped_log_lines() -> u64 {
 pub struct NonBlockingWriter {
     sender: std::sync::mpsc::SyncSender<LogMessage>,
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl io::Write for NonBlockingWriter {
@@ -852,7 +885,9 @@ impl io::Write for NonBlockingWriter {
         };
         // Full or stopped: the refused line counts itself on drop,
         // rather than blocking the caller or erroring per event.
-        let _ = self.sender.try_send(LogMessage::Line(line));
+        if !self.stop.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = self.sender.try_send(LogMessage::Line(line));
+        }
         Ok(buf.len())
     }
 
@@ -868,6 +903,7 @@ impl<'w> MakeWriter<'w> for NonBlockingMakeWriter {
         NonBlockingWriter {
             sender: self.sender.clone(),
             dropped: std::sync::Arc::clone(&self.dropped),
+            stop: std::sync::Arc::clone(&self.stop),
         }
     }
 }
@@ -962,7 +998,7 @@ mod tests {
     fn shutdown_with_a_stalled_sink_returns_by_its_timeout() {
         use std::io::Write as _;
 
-        let (writer, started, release, _sink) = gated();
+        let (writer, started, release, sink) = gated();
         let (make_writer, guard) = non_blocking(writer, 1).unwrap();
         let mut log = make_writer.make_writer();
         log.write_all(b"one\n").unwrap();
@@ -970,13 +1006,25 @@ mod tests {
         // The queue (one line) is full behind the stalled write.
         log.write_all(b"two\n").unwrap();
         let begun = std::time::Instant::now();
-        assert!(!guard.shutdown_timeout(std::time::Duration::from_millis(100)));
+        let mut guard = guard;
+        assert!(!guard.finish_by(begun + std::time::Duration::from_millis(100)));
         assert!(
             begun.elapsed() < std::time::Duration::from_secs(2),
             "shutdown returned by its timeout"
         );
-        // Let the detached worker finish.
+        // Lines after the stop are refused and counted, not queued.
+        log.write_all(b"late\n").unwrap();
+        assert_eq!(make_writer.dropped_lines(), 1);
+        // Once the sink recovers, the worker writes what was queued and
+        // ends, although the writers (and so the channel) are still alive.
         release.send(()).unwrap();
+        assert!(guard.finish_by(std::time::Instant::now() + std::time::Duration::from_secs(5)));
+        assert_eq!(
+            String::from_utf8(sink.lock().unwrap().clone()).unwrap(),
+            "one\ntwo\n"
+        );
+        drop(log);
+        drop(make_writer);
     }
 
     /// With the sink taking writes, a timed shutdown drains and reports it.

@@ -618,8 +618,9 @@ impl AcceptState {
 ///
 /// The same holds if the accept loop itself panics: the panic is caught
 /// while this listener's connections, sockets, and stream tasks are still
-/// reachable, they are drained and force-closed exactly as at shutdown, and
-/// only then does the panic resume, so the caller's supervisor sees it.
+/// reachable, process shutdown is triggered at once, they are drained and
+/// force-closed exactly as at shutdown, and only then does the panic
+/// resume, so the caller's supervisor sees it.
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -709,6 +710,11 @@ async fn serve_with_state(
     let accept_panic = futures_util::FutureExt::catch_unwind(accepting).await.err();
     if accept_panic.is_some() {
         tracing::error!(target: "ferrum_alloy::server", listener = options.name, "accept loop panicked; closing its connections");
+        // Begin process shutdown now, not when the panic finally surfaces
+        // after the drain: readiness reports draining at once, and
+        // sessions that follow the shutdown token get the drain budget to
+        // close gracefully before anything is forced.
+        lifecycle.trigger_shutdown();
     }
     drop(listener);
     lifecycle.drain_connections().cancel();

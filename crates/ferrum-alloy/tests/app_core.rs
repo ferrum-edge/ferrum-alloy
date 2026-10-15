@@ -602,25 +602,27 @@ async fn a_zero_ttl_returns_the_awaited_refresh() {
     assert!(snapshot.ready);
 }
 
-/// A waiter that resumes after its refresh has already expired (here: the
-/// TTL is shorter than the check) is served that refresh's result.
-#[tokio::test]
-async fn a_waiter_resumed_after_expiry_gets_its_refresh() {
+/// Concurrent waiters that all resume after their refresh has expired
+/// (a zero TTL makes every resumption late) share that one refresh and
+/// return its result; none of them starts another.
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_waiters_resumed_after_expiry_share_their_refresh() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
     let check: Arc<dyn HealthCheck> = Arc::new(move || {
         let counter = Arc::clone(&counter);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_millis(50)).await;
             Ok::<(), CheckError>(())
         }
     });
     let readiness = Arc::new(Readiness::new(
         vec![("db".to_owned(), check)],
-        Duration::from_millis(1),
+        Duration::ZERO,
         Duration::from_secs(5),
     ));
+    // On this single thread every waiter registers before the refresh
+    // task first runs, and resumes only after it has completed.
     let waiters: Vec<_> = (0..4)
         .map(|_| {
             let readiness = Arc::clone(&readiness);
@@ -637,7 +639,7 @@ async fn a_waiter_resumed_after_expiry_gets_its_refresh() {
     assert_eq!(
         calls.load(Ordering::Relaxed),
         1,
-        "concurrent waiters share one refresh and return its result"
+        "the waiters returned their shared refresh instead of refreshing again"
     );
 }
 

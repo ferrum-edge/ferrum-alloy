@@ -1042,11 +1042,11 @@ async fn an_accept_loop_panic_closes_upgrades_and_cancels_stream_tasks() {
         idle_timeout: WITHIN,
         write_stall_timeout: WITHIN,
         body_read_stall_timeout: WITHIN,
-        drain_timeout: Duration::from_millis(200),
+        drain_timeout: Duration::from_millis(500),
         #[cfg(feature = "tls")]
         tls: None,
     };
-    let task = tokio::spawn(serve_with_state(
+    let mut task = tokio::spawn(serve_with_state(
         listener,
         routes,
         options,
@@ -1086,7 +1086,18 @@ async fn an_accept_loop_panic_closes_upgrades_and_cancels_stream_tasks() {
     // The next accept panics.
     accept_panic.store(true, Ordering::Relaxed);
     let _trigger = TcpStream::connect(addr).await.unwrap();
-    let joined = tokio::time::timeout(WITHIN, task).await.unwrap();
+    // Shutdown is signalled as soon as the panic is caught, while the
+    // pending handler and the upgrade still hold the drain open.
+    let shutdown = lifecycle.shutdown_token();
+    tokio::time::timeout(WITHIN, shutdown.cancelled())
+        .await
+        .expect("the panic triggers process shutdown");
+    assert!(lifecycle.is_draining(), "readiness reports draining");
+    assert!(
+        !handler_dropped.load(Ordering::Relaxed),
+        "shutdown was signalled before cleanup finished"
+    );
+    let joined = tokio::time::timeout(WITHIN, &mut task).await.unwrap();
     assert!(
         joined.as_ref().err().is_some_and(JoinError::is_panic),
         "the panic still reaches the supervisor"
