@@ -32,9 +32,13 @@ pub const GATEWAY_UPSTREAM_STATUS: &str = "x-gateway-upstream-status";
 /// rule `alloy.r007`) but does not resolve it.
 pub const DIAGNOSTIC_REF: &str = "x-ferrum-diagnostic-ref";
 
-/// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`), the same in Edge
-/// v0.9.9 and v0.9.8. v0.9.8 added `request_timeout`; older releases send
-/// only the first seven.
+/// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`): nine tokens in
+/// Edge v0.9.17, eight in v0.9.15 (the same eight as v0.9.9 and v0.9.8).
+/// v0.9.8 added `request_timeout`, and older releases send only the first
+/// seven. v0.9.17 added `loop_detected`, the pre-routing `X-Ferrum-Hops`
+/// hop-limit refusal (HTTP 508, no backend contacted); an outer gateway
+/// relaying that 508 reports `backend_error`, so the token alone does not
+/// prove which hop refused.
 pub const GATEWAY_ERROR_TOKENS: &[&str] = &[
     "connection_failure",
     "backend_timeout",

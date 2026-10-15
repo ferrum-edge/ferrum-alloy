@@ -701,22 +701,31 @@ impl SpanProcessor for BoundedSpanProcessor {
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        let deadline = Instant::now() + timeout;
         let answer = self.control(Message::Shutdown, timeout);
         // The worker owns terminal accounting for every span it accepted:
         // each is counted exported or export-failed, and whatever is left
         // when the worker ends (normally or by unwinding from an exporter
         // panic) is counted as a shutdown loss by `Worker`'s `Drop`. Here we
-        // only wait for a worker that is finished (it acknowledged the
-        // shutdown) or gone (the queue or acknowledgement disconnected), so
-        // its accounting is complete when this returns. On a timeout the
-        // worker still owns its spans and counts them when it resumes.
-        // An answer carrying the exporter's failure still means the worker
-        // finished.
+        // wait for a worker that acknowledged the shutdown or is gone (the
+        // queue or acknowledgement disconnected) to return from its thread
+        // function, after which its accounting is complete, but only until
+        // the deadline: the exporter is dropped after the acknowledgement,
+        // and a destructor that blocks must not hold shutdown. The handle is
+        // then let go, not joined, because a join also waits for
+        // thread-local destructors. On a timeout the worker still owns its
+        // spans and counts them when it resumes. An acknowledgement carrying
+        // the exporter's own failure still means the worker finished.
         if matches!(answer, Ok(_) | Err(OTelSdkError::AlreadyShutdown))
             && let Ok(mut worker) = self.worker.lock()
             && let Some(handle) = worker.take()
         {
-            let _ = handle.join();
+            while !handle.is_finished() {
+                if Instant::now() >= deadline {
+                    return Err(OTelSdkError::Timeout(timeout));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
         }
         answer?
     }
