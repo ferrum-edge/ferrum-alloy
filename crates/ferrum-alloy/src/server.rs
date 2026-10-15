@@ -549,6 +549,8 @@ struct AcceptState {
     #[cfg(test)]
     accept_error: Arc<Mutex<Option<io::ErrorKind>>>,
     #[cfg(test)]
+    accept_panic: Arc<AtomicBool>,
+    #[cfg(test)]
     retrying: Option<tokio::sync::mpsc::UnboundedSender<Duration>>,
 }
 
@@ -560,6 +562,8 @@ impl AcceptState {
             backoff: Duration::from_millis(5),
             #[cfg(test)]
             accept_error: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            accept_panic: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             retrying: None,
         }
@@ -574,6 +578,11 @@ impl AcceptState {
             .take()
         {
             return Err(io::Error::from(kind));
+        }
+        #[cfg(test)]
+        #[allow(clippy::panic)]
+        if self.accept_panic.load(Ordering::Relaxed) {
+            panic!("injected accept loop panic");
         }
         listener.accept().await
     }
@@ -606,6 +615,11 @@ impl AcceptState {
 /// still running are cancelled and counted in `force_closed_streams`. An
 /// application-held upgrade retains its permit/count until drop, but cannot
 /// keep the accepted TCP connection open, even if it never polls its I/O.
+///
+/// The same holds if the accept loop itself panics: the panic is caught
+/// while this listener's connections, sockets, and stream tasks are still
+/// reachable, they are drained and force-closed exactly as at shutdown, and
+/// only then does the panic resume, so the caller's supervisor sees it.
 pub(crate) async fn serve(
     listener: TcpListener,
     app: Router,
@@ -630,64 +644,71 @@ async fn serve_with_state(
     // it or Hyper has handed it over to the application for an upgrade.
     let sockets = TaskTracker::new();
     let mut connections = JoinSet::new();
-    loop {
-        let accepted = tokio::select! {
-            biased;
-            () = lifecycle.stop_accepting().cancelled() => break,
-            // Reap finished connection tasks so the set stays small.
-            Some(joined) = connections.join_next(), if !connections.is_empty() => {
-                if let Some(error) = joined.err().filter(JoinError::is_panic) {
-                    tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "connection task panicked");
+    let accepting = std::panic::AssertUnwindSafe(async {
+        loop {
+            let accepted = tokio::select! {
+                biased;
+                () = lifecycle.stop_accepting().cancelled() => break,
+                // Reap finished connection tasks so the set stays small.
+                Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(error) = joined.err().filter(JoinError::is_panic) {
+                        tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "connection task panicked");
+                    }
+                    continue;
                 }
-                continue;
-            }
-            accepted = state.accept(&listener) => accepted,
-        };
-        let (stream, remote) = match accepted {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                // Resource exhaustion (EMFILE) and similar: back off instead
-                // of spinning.
-                tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "accept failed");
-                if !state.back_off(&lifecycle).await {
-                    break;
+                accepted = state.accept(&listener) => accepted,
+            };
+            let (stream, remote) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    // Resource exhaustion (EMFILE) and similar: back off instead
+                    // of spinning.
+                    tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "accept failed");
+                    if !state.back_off(&lifecycle).await {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
-        let Ok(permit) = Arc::clone(&state.permits).try_acquire_owned() else {
-            stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
-            drop(stream);
-            continue;
-        };
-        let _ = stream.set_nodelay(true);
-        let registration = match state.shutdown.register(&stream) {
-            Ok(registration) => registration,
-            Err(error) => {
-                tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "cannot prepare socket shutdown; refusing connection");
+            };
+            let Ok(permit) = Arc::clone(&state.permits).try_acquire_owned() else {
+                stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
                 drop(stream);
-                drop(permit);
-                if !state.back_off(&lifecycle).await {
-                    break;
-                }
                 continue;
-            }
-        };
-        // Only full admission (including the owned shutdown handle) ends a
-        // failure streak. Connection-limit refusals do not reset it either.
-        state.backoff = Duration::from_millis(5);
-        let close = streams.connection();
-        let executor = streams.executor(&close);
-        let socket = sockets.token();
-        let app = app.clone();
-        let lifecycle = lifecycle.clone();
-        let stats = Arc::clone(&stats);
-        let options = options.clone();
-        connections.spawn(async move {
-            let active = ActiveConnection::open(stats, close, permit, socket, Some(registration));
-            let builder = builder(&options, executor);
-            handle(stream, remote, active, builder, app, &options, &lifecycle).await;
-        });
+            };
+            let _ = stream.set_nodelay(true);
+            let registration = match state.shutdown.register(&stream) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    tracing::warn!(target: "ferrum_alloy::server", listener = options.name, %error, "cannot prepare socket shutdown; refusing connection");
+                    drop(stream);
+                    drop(permit);
+                    if !state.back_off(&lifecycle).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            // Only full admission (including the owned shutdown handle) ends a
+            // failure streak. Connection-limit refusals do not reset it either.
+            state.backoff = Duration::from_millis(5);
+            let close = streams.connection();
+            let executor = streams.executor(&close);
+            let socket = sockets.token();
+            let app = app.clone();
+            let lifecycle = lifecycle.clone();
+            let stats = Arc::clone(&stats);
+            let options = options.clone();
+            connections.spawn(async move {
+                let active =
+                    ActiveConnection::open(stats, close, permit, socket, Some(registration));
+                let builder = builder(&options, executor);
+                handle(stream, remote, active, builder, app, &options, &lifecycle).await;
+            });
+        }
+    });
+    let accept_panic = futures_util::FutureExt::catch_unwind(accepting).await.err();
+    if accept_panic.is_some() {
+        tracing::error!(target: "ferrum_alloy::server", listener = options.name, "accept loop panicked; closing its connections");
     }
     drop(listener);
     lifecycle.drain_connections().cancel();
@@ -751,6 +772,9 @@ async fn serve_with_state(
                 "upgraded transports still held by the application after TCP shutdown attempts"
             );
         }
+    }
+    if let Some(panic) = accept_panic {
+        std::panic::resume_unwind(panic);
     }
     match shutdown_error {
         Some(error) => Err(error),
@@ -841,15 +865,62 @@ struct Activity {
     /// shows the held data.
     held: AtomicU64,
     /// Request bodies whose handler is waiting for the peer to send more
-    /// body data (their last `poll_frame` returned `Pending`).
-    body_waiting: AtomicUsize,
+    /// body data (their last `poll_frame` returned `Pending`), in the low
+    /// 32 bits, and the body epoch in the high 32 bits: bumped, in the same
+    /// atomic update, whenever the last waiting body stops waiting, so the
+    /// stall sampler cannot credit one request's stall history to the next
+    /// request that starts waiting between samples. One word, because a
+    /// separate epoch could be bumped only after the count reached zero,
+    /// and a request starting to wait in between would inherit the old
+    /// history ([`BodyWaitState`]).
+    body_waiting: AtomicU64,
     /// Request-body data bytes delivered to handlers so far, plus one per
     /// trailers frame: any frame is progress.
     body_read: AtomicU64,
-    /// Bumped whenever the last waiting body stops waiting, so the stall
-    /// sampler cannot credit one request's stall history to the next
-    /// request that starts waiting between samples.
-    body_epoch: AtomicU64,
+}
+
+/// One consistent reading of [`Activity`]'s `body_waiting` word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyWaitState {
+    /// Bodies waiting for the peer.
+    waiting: u32,
+    /// Advances each time the waiting count drops to zero.
+    epoch: u32,
+}
+
+impl BodyWaitState {
+    fn unpack(word: u64) -> Self {
+        Self {
+            waiting: word as u32,
+            epoch: (word >> 32) as u32,
+        }
+    }
+
+    fn pack(self) -> u64 {
+        (u64::from(self.epoch) << 32) | u64::from(self.waiting)
+    }
+
+    /// The state after one body starts waiting.
+    fn joined(self) -> Self {
+        Self {
+            waiting: self.waiting.saturating_add(1),
+            ..self
+        }
+    }
+
+    /// The state after one waiting body stops waiting: the last one
+    /// leaving starts a new epoch in the same transition.
+    fn left(self) -> Self {
+        let waiting = self.waiting.saturating_sub(1);
+        Self {
+            waiting,
+            epoch: if waiting == 0 {
+                self.epoch.wrapping_add(1)
+            } else {
+                self.epoch
+            },
+        }
+    }
 }
 
 impl Activity {
@@ -894,15 +965,20 @@ impl Activity {
         self.body_read.load(Ordering::Relaxed)
     }
 
-    fn body_epoch(&self) -> u64 {
-        self.body_epoch.load(Ordering::Relaxed)
+    /// The waiting count and the body epoch, read together. A handler is
+    /// waiting for the peer to send more request-body data when the count is
+    /// positive; a body its handler has not started reading, or has finished
+    /// with, is not waiting, however long the handler takes otherwise.
+    fn body_wait_state(&self) -> BodyWaitState {
+        BodyWaitState::unpack(self.body_waiting.load(Ordering::Relaxed))
     }
 
-    /// Whether a handler is waiting for the peer to send more request-body
-    /// data. A body its handler has not started reading, or has finished
-    /// with, is not waiting, however long the handler takes otherwise.
-    fn body_pending(&self) -> bool {
-        self.body_waiting.load(Ordering::Relaxed) > 0
+    fn update_body_waiting(&self, change: fn(BodyWaitState) -> BodyWaitState) {
+        let _ = self
+            .body_waiting
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+                Some(change(BodyWaitState::unpack(word)).pack())
+            });
     }
 }
 
@@ -1150,14 +1226,15 @@ impl BodyWaiting {
     fn set(&mut self, waiting: bool) {
         if self.counted != waiting {
             self.counted = waiting;
-            if waiting {
-                self.activity.body_waiting.fetch_add(1, Ordering::Relaxed);
-            } else if self.activity.body_waiting.fetch_sub(1, Ordering::Relaxed) == 1 {
-                // The last waiter left: a later waiter starts a fresh
-                // stall history, even if the sampler never observes the
-                // connection with nobody waiting.
-                self.activity.body_epoch.fetch_add(1, Ordering::Relaxed);
-            }
+            // The last waiter leaving advances the epoch in the same
+            // atomic update, so a later waiter starts a fresh stall
+            // history even if the sampler never observes the connection
+            // with nobody waiting.
+            self.activity.update_body_waiting(if waiting {
+                BodyWaitState::joined
+            } else {
+                BodyWaitState::left
+            });
         }
     }
 }
@@ -1852,9 +1929,9 @@ async fn serve_io<I>(
             }
             () = body_stall_timer.as_mut(), if phase == Phase::Open => {
                 let read = activity.body_read();
-                let epoch = activity.body_epoch();
+                let BodyWaitState { waiting, epoch } = activity.body_wait_state();
                 body_stalled = match body_stalled {
-                    _ if !activity.body_pending() => None,
+                    _ if waiting == 0 => None,
                     Some((seen_epoch, mark, checks)) if seen_epoch == epoch && mark == read => {
                         Some((seen_epoch, mark, checks + 1))
                     }

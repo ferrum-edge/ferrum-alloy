@@ -564,6 +564,83 @@ async fn the_refresh_starter_awaits_the_new_result_after_ttl_expiry() {
     );
 }
 
+/// A zero TTL caches nothing, yet every caller still returns the refresh
+/// it waited for instead of starting another one in a loop, including on
+/// a current-thread runtime where the waiter resumes after its refresh's
+/// result is already older than the TTL.
+#[tokio::test(flavor = "current_thread")]
+async fn a_zero_ttl_returns_the_awaited_refresh() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let check: Arc<dyn HealthCheck> = Arc::new(move || {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok::<(), CheckError>(())
+        }
+    });
+    let readiness = Readiness::new(
+        vec![("db".to_owned(), check)],
+        Duration::ZERO,
+        Duration::from_secs(5),
+    );
+    for round in 1..=3 {
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), readiness.snapshot())
+            .await
+            .expect("a zero TTL must not refresh forever");
+        assert!(snapshot.ready, "{snapshot:?}");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            round,
+            "one refresh per caller, not a loop"
+        );
+    }
+    let empty = Readiness::new(Vec::new(), Duration::ZERO, Duration::from_secs(5));
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), empty.snapshot())
+        .await
+        .expect("no checks and a zero TTL still return");
+    assert!(snapshot.ready);
+}
+
+/// A waiter that resumes after its refresh has already expired (here: the
+/// TTL is shorter than the check) is served that refresh's result.
+#[tokio::test]
+async fn a_waiter_resumed_after_expiry_gets_its_refresh() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let check: Arc<dyn HealthCheck> = Arc::new(move || {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<(), CheckError>(())
+        }
+    });
+    let readiness = Arc::new(Readiness::new(
+        vec![("db".to_owned(), check)],
+        Duration::from_millis(1),
+        Duration::from_secs(5),
+    ));
+    let waiters: Vec<_> = (0..4)
+        .map(|_| {
+            let readiness = Arc::clone(&readiness);
+            tokio::spawn(async move { readiness.snapshot().await })
+        })
+        .collect();
+    for waiter in waiters {
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("every waiter returns")
+            .unwrap();
+        assert!(snapshot.ready);
+    }
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "concurrent waiters share one refresh and return its result"
+    );
+}
+
 /// A failed `prepare()` keeps the explicit configuration: retrying
 /// reports the same validation error instead of loading a file or the
 /// environment.

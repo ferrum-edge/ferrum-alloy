@@ -95,7 +95,9 @@ pub struct Readiness {
     checks: Checks,
     ttl: Duration,
     timeout: Duration,
-    cache: Arc<Mutex<Option<Snapshot>>>,
+    /// The latest snapshot and the refresh generation that produced it
+    /// (0: none yet).
+    cache: Arc<Mutex<(u64, Option<Snapshot>)>>,
     refresh: Arc<tokio::sync::Mutex<()>>,
     refreshed: Arc<tokio::sync::Notify>,
 }
@@ -119,7 +121,7 @@ impl Readiness {
             checks,
             ttl,
             timeout,
-            cache: Arc::new(Mutex::new(None)),
+            cache: Arc::new(Mutex::new((0, None))),
             refresh: Arc::new(tokio::sync::Mutex::new(())),
             refreshed: Arc::new(tokio::sync::Notify::new()),
         }
@@ -136,7 +138,11 @@ impl Readiness {
     }
 
     fn cached(&self) -> Option<Snapshot> {
-        self.cache.lock().ok().and_then(|c| c.clone())
+        self.cache.lock().ok().and_then(|c| c.1.clone())
+    }
+
+    fn generation(&self) -> u64 {
+        self.cache.lock().map_or(0, |c| c.0)
     }
 
     fn fresh(&self) -> Option<Snapshot> {
@@ -145,6 +151,11 @@ impl Readiness {
     }
 
     /// Returns the current readiness, running checks at most once per TTL.
+    ///
+    /// A caller that waits for a refresh returns that refresh's result even
+    /// if it is already older than the TTL by the time the caller resumes (a
+    /// zero TTL, or a scheduling delay longer than the TTL): it never starts
+    /// another refresh in a loop.
     pub async fn snapshot(&self) -> Snapshot {
         loop {
             if let Some(snapshot) = self.fresh() {
@@ -155,6 +166,7 @@ impl Readiness {
             let refreshed = self.refreshed.notified();
             tokio::pin!(refreshed);
             let _ = refreshed.as_mut().enable();
+            let waited_from = self.generation();
             let mut spawned = false;
             if let Ok(guard) = Arc::clone(&self.refresh).try_lock_owned() {
                 // Refresh in a detached task: this caller's future may be
@@ -171,7 +183,7 @@ impl Readiness {
                     let _guard = guard;
                     let snapshot = run_checks(&checks, timeout).await;
                     if let Ok(mut cache) = cache.lock() {
-                        *cache = Some(snapshot);
+                        *cache = (cache.0.wrapping_add(1).max(1), Some(snapshot));
                     }
                     refreshed.notify_waiters();
                 });
@@ -190,6 +202,14 @@ impl Readiness {
                 return with_age(snapshot);
             }
             refreshed.await;
+            // Serve the refresh this caller waited for, however old it is
+            // by now. Only when no newer result landed (a spurious wake)
+            // does it go round again.
+            if self.generation() != waited_from
+                && let Some(snapshot) = self.cached()
+            {
+                return with_age(snapshot);
+            }
         }
     }
 }

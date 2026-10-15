@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- Follow-ups from independent review of #202, #204, #209, and #212:
+  the request-body stall sampler reads the waiting count and its epoch as
+  one atomic word, so a request that starts waiting just as the previous
+  waiter leaves can no longer inherit its stall history and be closed
+  early (#202); a readiness caller returns the refresh it waited for even
+  if it is already older than the TTL, so a zero TTL no longer refreshes
+  in a loop (#204); a panic in a listener's accept loop now drains and
+  force-closes that listener's connections, upgrades, and HTTP/2 stream
+  tasks before the panic reaches the supervisor (#204); Alloy logs
+  `shutdown complete` before draining the non-blocking log queue,
+  `TelemetryGuard::shutdown` reports a log queue that did not drain and
+  shares one budget between span export and logging (new
+  `shutdown_export`/`shutdown_logging`), log-queue shutdown never blocks
+  past its timeout (`LogWorkerGuard::shutdown_timeout`), and the logging
+  helpers document the drain call (#209); the contract docs list the
+  ninth `X-Gateway-Error` token, `loop_detected`, and record the hosted
+  qualification of the v0.9.17/v0.9.15 pairing (#212).
 - `SECURITY.md` vulnerability-reporting policy and supported-version statement
   (landed earlier; recorded here).
 - Documentation refresh: the supported Ferrum Edge window is stated as

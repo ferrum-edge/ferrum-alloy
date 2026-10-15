@@ -846,11 +846,21 @@ impl AlloyParts {
                 }
             }
         }
+        // One budget for both: span export first, then the final
+        // lifecycle events are logged, then the log queue drains last so
+        // those events are written too.
         let flush = Duration::from_millis(self.config.shutdown.telemetry_flush_timeout_ms);
-        if let Err(error) = self.telemetry.shutdown(flush) {
+        let flush_started = std::time::Instant::now();
+        if let Err(error) = self.telemetry.shutdown_export(flush) {
             tracing::warn!(target: "ferrum_alloy::lifecycle", %error, "telemetry flush incomplete");
         }
         tracing::info!(target: "ferrum_alloy::lifecycle", "shutdown complete");
+        // Nothing is left to log a failure to: lines the queue could not
+        // write in time are counted by
+        // `ferrum_alloy_telemetry::json::dropped_log_lines`.
+        let _ = self
+            .telemetry
+            .shutdown_logging(flush.saturating_sub(flush_started.elapsed()));
         result
     }
 }
@@ -942,23 +952,47 @@ impl TelemetryGuard {
         }
     }
 
-    /// Flushes and stops export, waiting at most `timeout`.
+    /// Flushes and stops span export, then drains the non-blocking log
+    /// queue, waiting at most `timeout` in total. Returns an error when
+    /// either did not finish in time.
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), String> {
-        #[cfg(feature = "otel")]
-        let result = match self.pipeline.take() {
-            Some(pipeline) => pipeline.shutdown(timeout).map_err(|e| e.to_string()),
-            None => Ok(()),
-        };
-        #[cfg(not(feature = "otel"))]
-        let result = Ok(());
-        // Drain the non-blocking log queue last, so shutdown's own
-        // final events are flushed with everything before them. Only
-        // Alloy-installed logging is owned here; an application's own
-        // subscriber keeps its own lifecycle.
-        if self.mode == "alloy" {
-            ferrum_alloy_telemetry::json::shutdown_nonblocking_stdout(timeout);
+        let started = std::time::Instant::now();
+        let export = self.shutdown_export(timeout);
+        let logging = self.shutdown_logging(timeout.saturating_sub(started.elapsed()));
+        match (export, logging) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(export), Err(logging)) => Err(format!("{export}; {logging}")),
         }
-        result
+    }
+
+    /// Flushes and stops span export only, waiting at most `timeout`.
+    /// Logging keeps working, so the caller can still log the outcome
+    /// before [`TelemetryGuard::shutdown_logging`].
+    pub fn shutdown_export(&mut self, timeout: Duration) -> Result<(), String> {
+        #[cfg(feature = "otel")]
+        if let Some(pipeline) = self.pipeline.take() {
+            return pipeline.shutdown(timeout).map_err(|e| e.to_string());
+        }
+        let _ = timeout;
+        Ok(())
+    }
+
+    /// Drains and stops Alloy's non-blocking log writer
+    /// (`logging.non_blocking_queue_lines`), waiting at most `timeout`.
+    /// Call it last: lines logged afterwards are dropped and counted. Only
+    /// Alloy-installed logging is owned here; an application's own
+    /// subscriber keeps its own lifecycle.
+    pub fn shutdown_logging(&mut self, timeout: Duration) -> Result<(), String> {
+        if self.mode == "alloy"
+            && !ferrum_alloy_telemetry::json::shutdown_nonblocking_stdout(timeout)
+        {
+            return Err(format!(
+                "the log queue did not drain within {} ms; unwritten lines are counted as dropped",
+                timeout.as_millis()
+            ));
+        }
+        Ok(())
     }
 }
 
