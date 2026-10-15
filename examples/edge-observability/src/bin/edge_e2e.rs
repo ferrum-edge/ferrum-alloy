@@ -106,7 +106,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// with a named request instead of hanging until the CI job times out.
 async fn within<T>(
     limit: Duration,
-    what: impl std::fmt::Display,
+    what: String,
     request: impl std::future::Future<Output = Result<T, Failure>>,
 ) -> Result<T, Failure> {
     tokio::time::timeout(limit, request)
@@ -121,7 +121,7 @@ async fn plain_get(addr: SocketAddr, path: &str) -> Result<Reply, Failure> {
 async fn plain_get_within(addr: SocketAddr, path: &str, limit: Duration) -> Result<Reply, Failure> {
     within(
         limit,
-        format_args!("GET {path} via {addr}"),
+        format!("GET {path} via {addr}"),
         plain_get_unbounded(addr, path),
     )
     .await
@@ -154,7 +154,7 @@ async fn tls_get(
 ) -> Result<Reply, Failure> {
     within(
         REQUEST_TIMEOUT,
-        format_args!("GET {path} via {addr} (TLS)"),
+        format!("GET {path} via {addr} (TLS)"),
         tls_get_unbounded(addr, ca_pem, path, headers),
     )
     .await
@@ -208,7 +208,7 @@ async fn tls_get_unbounded(
 async fn cancel_mid_body(addr: SocketAddr, path: &str) -> Result<(Reply, usize), Failure> {
     within(
         REQUEST_TIMEOUT,
-        format_args!("GET {path} via {addr} (cancelled mid-body)"),
+        format!("GET {path} via {addr} (cancelled mid-body)"),
         cancel_mid_body_unbounded(addr, path),
     )
     .await

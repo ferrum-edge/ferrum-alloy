@@ -516,8 +516,8 @@ fn yaml_nested_sequences_are_valid_block_sequences() {
             "- - a: 1\n    b:\n      - true\n- []\n",
         ),
         (
-            json!({ "k": [["x"], { "y": [[null]] }] }),
-            "k:\n  - - \"x\"\n  - y:\n      - - null\n",
+            json!({ "k": [["x"], { "z": [[null]] }] }),
+            "k:\n  - - \"x\"\n  - z:\n      - - null\n",
         ),
     ] {
         assert_eq!(yaml::to_string(&value), expected, "{value}");
