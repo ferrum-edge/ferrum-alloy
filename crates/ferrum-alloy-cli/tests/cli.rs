@@ -116,6 +116,27 @@ fn check_accepts_the_full_feature() {
         stdout(&human)
     );
     assert_eq!(code(&run(&["check", "--no-env", "--features", "fulll"])), 3);
+
+    // `default` is the umbrella crate's default set: no integrations.
+    let dir = tempfile::tempdir().unwrap();
+    let plain = write(
+        dir.path(),
+        "plain.toml",
+        "[server]\nbind = \"127.0.0.1:8080\"\n",
+    );
+    let otlp = write(dir.path(), "otlp.toml", "[otlp]\nenabled = true\n");
+    let default = |config: &str| {
+        code(&run(&[
+            "check",
+            "--no-env",
+            "--config",
+            config,
+            "--features",
+            "default",
+        ]))
+    };
+    assert_eq!(default(&plain), 0);
+    assert_eq!(default(&otlp), 3, "OTLP export needs the `otel` feature");
 }
 
 #[test]

@@ -49,8 +49,12 @@ const ALL_FEATURES: &[&str] = &[
     "diagnostics",
 ];
 
+/// The umbrella crate's `default` features (`crates/ferrum-alloy/Cargo.toml`).
+const DEFAULT_FEATURES: &[&str] = &[];
+
 /// Features another feature turns on (`crates/ferrum-alloy/Cargo.toml`).
-/// `full` turns on every one of [`ALL_FEATURES`].
+/// `full` turns on every one of [`ALL_FEATURES`], and `default` the ones in
+/// [`DEFAULT_FEATURES`].
 const IMPLIED_FEATURES: &[(&str, &str)] = &[("openapi-ui", "openapi"), ("jwt", "http-client")];
 
 /// The features a `--features` list compiles in, the way Cargo resolves
@@ -60,6 +64,10 @@ fn assumed_features(requested: &[String]) -> Result<Vec<&'static str>, CliError>
     for feature in requested {
         if feature == "full" {
             enabled.extend(ALL_FEATURES.iter().copied());
+            continue;
+        }
+        if feature == "default" {
+            enabled.extend(DEFAULT_FEATURES.iter().copied());
             continue;
         }
         let Some(known) = ALL_FEATURES.iter().copied().find(|known| known == feature) else {
@@ -263,6 +271,11 @@ mod tests {
             ["openapi", "openapi-ui", "jwt", "http-client"]
         );
         assert_eq!(assumed_features(&requested(&["otel"])).unwrap(), ["otel"]);
+        assert!(
+            assumed_features(&requested(&["default"]))
+                .unwrap()
+                .is_empty()
+        );
         assert!(assumed_features(&requested(&["fulll"])).is_err());
     }
 
@@ -285,6 +298,7 @@ mod tests {
         let mut all = ALL_FEATURES.to_vec();
         all.sort_unstable();
         assert_eq!(full, all, "`full` and ALL_FEATURES differ");
+        assert_eq!(list("default"), DEFAULT_FEATURES, "`default` differs");
         for (feature, implied) in IMPLIED_FEATURES {
             assert!(list(feature).contains(implied), "{feature} -> {implied}");
         }
