@@ -1378,10 +1378,36 @@ fn unsafe_jwt_settings_are_rejected() {
     day.jwks_max_age_ms = day_ms;
     day.jwks_max_stale_ms = day_ms;
     assert!(JwtVerifier::new(&day).is_ok(), "24 hours is allowed");
-    let mut inverted = base;
+    let mut inverted = base.clone();
     inverted.jwks_max_age_ms = 500;
     assert!(
         JwtVerifier::new(&inverted).is_err(),
         "the max age cannot be shorter than the refresh interval"
     );
+    // The fetch bounds and leeway cap are constructor guards too, not
+    // only configuration validation, at and beyond their boundaries.
+    let mut leeway = base.clone();
+    leeway.leeway_seconds = 3_600;
+    assert!(
+        JwtVerifier::new(&leeway).is_ok(),
+        "the leeway cap is allowed"
+    );
+    leeway.leeway_seconds = 3_601;
+    assert!(JwtVerifier::new(&leeway).is_err());
+    let mut fetch = base.clone();
+    fetch.jwks_timeout_ms = 60_000;
+    fetch.jwks_max_bytes = 16 * 1024 * 1024;
+    assert!(
+        JwtVerifier::new(&fetch).is_ok(),
+        "the fetch caps are allowed"
+    );
+    fetch.jwks_timeout_ms = 60_001;
+    assert!(JwtVerifier::new(&fetch).is_err());
+    fetch.jwks_timeout_ms = 0;
+    assert!(JwtVerifier::new(&fetch).is_err());
+    let mut bytes = base;
+    bytes.jwks_max_bytes = 0;
+    assert!(JwtVerifier::new(&bytes).is_err());
+    bytes.jwks_max_bytes = 16 * 1024 * 1024 + 1;
+    assert!(JwtVerifier::new(&bytes).is_err());
 }

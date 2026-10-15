@@ -70,6 +70,17 @@
   whose buffer is zeroizing and fully reserved before the read, so no
   reallocation or refused read leaves a plaintext copy. `zeroize` is now a non-optional
   dependency of `ferrum-alloy` (#184).
+- **Breaking:** configuration validation now rejects tuning values that
+  could only disable or negate a protection: `server.tls.handshake_timeout_ms`
+  of `0` (which failed every TLS handshake at runtime), connection timeouts
+  above 24 hours, `server.max_header_bytes` above 16 MiB, oversized body,
+  header-count, and HTTP/2 stream limits, zero `http_client` timeouts and
+  `database.acquire_timeout_ms`, invalid
+  `http_client.propagate_trace_context_to` host rules, and out-of-range
+  `auth.jwt.jwks_timeout_ms`, `jwks_max_bytes`, and `leeway_seconds`
+  (mirrored in `JwtVerifier::new` and `AlloyClient::new`). Credentialed
+  `auth.jwt.jwks_url` values are redacted in `redacted_toml()` and never
+  printed by `JwtSettings`' `Debug` (#197).
 
 - Complete the 2026-10 audit fixes after independent review of #177 (#166,
   #167, #171, #172). The parser-free JWKS URL check (CLI `check`) also refuses
