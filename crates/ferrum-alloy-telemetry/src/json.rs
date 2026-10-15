@@ -674,7 +674,7 @@ impl LogWorkerGuard {
         self.signal_stop();
         let finished = wait_until_done(std::slice::from_ref(&self.done), deadline);
         if finished {
-            self.reap();
+            self.detach();
         }
         finished
     }
@@ -693,11 +693,11 @@ impl LogWorkerGuard {
         self.done.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Joins a worker that has finished (immediate).
-    fn reap(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+    /// Lets go of a worker that has finished its work. Not joined: a
+    /// join also waits for the thread's thread-local destructors (a sink
+    /// may own some), which a timed shutdown must not wait for.
+    fn detach(&mut self) {
+        drop(self.worker.take());
     }
 }
 
@@ -836,15 +836,24 @@ fn stdout_dropped_counter() -> std::sync::Arc<std::sync::atomic::AtomicU64> {
 /// shutdown keeps every worker it is waiting for registered, so a
 /// concurrent shutdown waits for the same workers (within its own
 /// deadline) instead of finding nothing and reporting success.
-struct WorkerRegistry(std::sync::Mutex<Vec<LogWorkerGuard>>);
+struct WorkerRegistry {
+    guards: std::sync::Mutex<Vec<LogWorkerGuard>>,
+    /// Told once a shutdown has signalled its workers and is waiting.
+    #[cfg(test)]
+    waiting: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+}
 
 impl WorkerRegistry {
     const fn new() -> Self {
-        Self(std::sync::Mutex::new(Vec::new()))
+        Self {
+            guards: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            waiting: std::sync::Mutex::new(None),
+        }
     }
 
     fn guards(&self) -> std::sync::MutexGuard<'_, Vec<LogWorkerGuard>> {
-        self.0
+        self.guards
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -868,6 +877,15 @@ impl WorkerRegistry {
                 .map(|guard| std::sync::Arc::clone(&guard.done))
                 .collect()
         };
+        #[cfg(test)]
+        if let Some(waiting) = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = waiting.send(());
+        }
         let drained = wait_until_done(&flags, deadline);
         let mut guards = self.guards();
         let (mut finished, unfinished): (Vec<_>, Vec<_>) = std::mem::take(&mut *guards)
@@ -876,7 +894,7 @@ impl WorkerRegistry {
         *guards = unfinished;
         drop(guards);
         for guard in &mut finished {
-            guard.reap();
+            guard.detach();
         }
         drained
     }
@@ -1112,6 +1130,46 @@ mod tests {
         assert_eq!(make_writer.dropped_lines(), 0);
     }
 
+    /// A timed shutdown returns once the worker has written everything,
+    /// without waiting for the thread's thread-local destructors (which a
+    /// join would): a sink may own one that blocks.
+    #[test]
+    fn timed_shutdown_does_not_wait_for_thread_local_destructors() {
+        use std::io::Write as _;
+
+        struct BlocksOnDrop(std::sync::mpsc::Receiver<()>);
+        impl Drop for BlocksOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.recv();
+            }
+        }
+        thread_local! {
+            static HELD: RefCell<Option<BlocksOnDrop>> = const { RefCell::new(None) };
+        }
+        struct Sink(Option<std::sync::mpsc::Receiver<()>>);
+        impl io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if let Some(release) = self.0.take() {
+                    HELD.with(|held| *held.borrow_mut() = Some(BlocksOnDrop(release)));
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (release_tx, release) = std::sync::mpsc::sync_channel(1);
+        let (make_writer, guard) = non_blocking(Sink(Some(release)), 4).unwrap();
+        make_writer.make_writer().write_all(b"line\n").unwrap();
+        let begun = std::time::Instant::now();
+        assert!(guard.shutdown_timeout(std::time::Duration::from_secs(5)));
+        assert!(
+            begun.elapsed() < std::time::Duration::from_secs(2),
+            "shutdown did not wait for the thread-local destructor"
+        );
+        let _ = release_tx.send(());
+    }
+
     /// A shutdown that runs while another is still waiting for a stalled
     /// worker waits for the same worker and reports failure by its own
     /// deadline; it never finds an empty registry and reports success.
@@ -1128,12 +1186,17 @@ mod tests {
         started.recv().unwrap();
         log.write_all(b"two\n").unwrap();
 
+        let (waiting_tx, waiting) = std::sync::mpsc::sync_channel(1);
+        *registry.waiting.lock().unwrap() = Some(waiting_tx);
         let first = {
             let registry = std::sync::Arc::clone(&registry);
             std::thread::spawn(move || registry.shutdown(std::time::Duration::from_secs(5)))
         };
-        // The first shutdown is now waiting (or about to); either way the
-        // worker is stalled, so a second one must report failure.
+        // The first shutdown has signalled the worker and is waiting for
+        // it; the worker is stalled, so a second one must report failure
+        // (had the first taken the worker out of the registry while it
+        // waited, the second would find nothing and report success).
+        waiting.recv().unwrap();
         assert!(!registry.shutdown(std::time::Duration::from_millis(50)));
         assert_eq!(registry.guards().len(), 1, "the worker stays registered");
         release.send(()).unwrap();
@@ -1151,9 +1214,8 @@ mod tests {
     #[test]
     fn stdout_workers_shut_down_through_the_registry() {
         let _writer = non_blocking_stdout(4).unwrap();
-        assert!(shutdown_nonblocking_stdout(std::time::Duration::from_secs(
-            5
-        )));
+        let timeout = std::time::Duration::from_secs(5);
+        assert!(shutdown_nonblocking_stdout(timeout));
         assert!(shutdown_nonblocking_stdout(std::time::Duration::ZERO));
     }
 
