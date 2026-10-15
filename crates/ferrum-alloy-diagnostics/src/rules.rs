@@ -260,7 +260,12 @@ impl<'a> Index<'a> {
             let Some(span) = view.span else {
                 continue;
             };
-            let Some(parent) = span.parent_span_id.as_deref() else {
+            // The effective Alloy parent: past any ordinary wrapper span.
+            let parent = match alloy_parents.get(service_key) {
+                Some(parent) => *parent,
+                None => span.parent_span_id.as_deref(),
+            };
+            let Some(parent) = parent else {
                 continue;
             };
             let trace = span.trace_id.as_str();
@@ -334,7 +339,7 @@ impl<'a> Index<'a> {
         edge_span: &SpanRef,
     ) -> Option<&RequestView<'a>> {
         let span = service.span?;
-        let parent = span.parent_span_id.as_deref()?;
+        let parent = self.parent_of(span)?;
         let attempt = self.attempts.get(&(span.trace_id.as_str(), parent))?;
         let gateway = attempt.span?.parent_span_id.as_deref();
         if span.trace_id != edge_span.trace_id || gateway != Some(edge_span.span_id.as_str()) {

@@ -1927,3 +1927,62 @@ fn lineage_does_not_cross_into_another_process() {
     let operation = operation_observation(&report);
     assert_eq!(operation.attributes.get("lineage.parent_span_id"), None);
 }
+
+/// Inserts an ordinary span (no Alloy measurement) of the Alloy service's
+/// own resource and scope between `child` and its parent.
+fn wrap_span(otlp: &str, child: &str, wrapper: &str) -> String {
+    otlp.lines()
+        .map(|line| {
+            let mut request: Value = serde_json::from_str(line).unwrap();
+            for resource in request["resourceSpans"].as_array_mut().unwrap() {
+                for scope in resource["scopeSpans"].as_array_mut().unwrap() {
+                    let spans = scope["spans"].as_array_mut().unwrap();
+                    let Some(index) = spans.iter().position(|s| s["spanId"] == child) else {
+                        continue;
+                    };
+                    let mut ordinary = spans[index].clone();
+                    ordinary["spanId"] = json!(wrapper);
+                    ordinary["name"] = json!("handler step");
+                    ordinary["kind"] = json!(1);
+                    ordinary["attributes"] = json!([str_attr("code.function", "route")]);
+                    spans[index]["parentSpanId"] = json!(wrapper);
+                    spans.push(ordinary);
+                }
+            }
+            request.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A wrapper between the service SERVER span and the gateway (its SERVER
+/// span, or its backend attempt) keeps the service linked to the gateway
+/// request, so the gateway/service comparison survives, also after a
+/// report round trip.
+#[test]
+fn services_under_ordinary_spans_stay_linked_to_the_gateway() {
+    for (fixture, service, wrapper) in [
+        (input(), "b7ad6b7169203331", "0000000000000abc"),
+        (
+            otlp_fixture("edge-attempt-spans.jsonl"),
+            "c3c3c3c3c3c3c3c3",
+            "0000000000000abd",
+        ),
+    ] {
+        let wrapped = wrap_span(&fixture, service, wrapper);
+        let trace = (fixture == input()).then_some(OK_TRACE);
+        let report = import(&wrapped, trace, collector(), &ImportLimits::default()).unwrap();
+        for report in [report.clone(), round_trip(&report)] {
+            let findings = analyze(&report, &Thresholds::default());
+            let found = codes(&findings);
+            assert!(
+                found.contains(&"alloy.gateway.unattributed_interval"),
+                "{service}: {found:?}"
+            );
+            assert!(
+                !found.contains(&"alloy.telemetry.service_span_missing"),
+                "{service}: {found:?}"
+            );
+        }
+    }
+}
