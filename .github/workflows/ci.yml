@@ -113,14 +113,20 @@ jobs:
           cargo clippy --locked -p ferrum-alloy-edge --all-targets --no-default-features -- -D warnings
           cargo test --locked -p ferrum-alloy-edge --no-default-features
       - name: Each optional integration alone
-        # --all-targets compiles the tests, examples, and benches too, so a
-        # feature-gated test that only builds with every feature on fails here.
+        # The library alone first: building tests also enables
+        # dev-dependency features (tokio "full", for one), which would hide
+        # a library that relies on a dependency feature it does not request.
+        # Then --all-targets, so a feature-gated test, example, or bench that
+        # only builds with every feature on fails here too.
         run: |
           set -euxo pipefail
+          cargo check --locked -p ferrum-alloy --no-default-features
           cargo check --locked -p ferrum-alloy --all-targets --no-default-features
           for feature in otel edge tls postgres openapi openapi-ui jwt http-client compression cors diagnostics; do
+            cargo check --locked -p ferrum-alloy --no-default-features --features "$feature"
             cargo check --locked -p ferrum-alloy --all-targets --no-default-features --features "$feature"
           done
+          cargo check --locked -p ferrum-alloy --features full
           cargo check --locked -p ferrum-alloy --all-targets --features full
       - name: Minimal build has no optional batteries
         run: |
@@ -149,6 +155,15 @@ jobs:
         run: cargo +1.94.0 test --workspace --all-targets --all-features --locked --no-run
       - name: Build every target and the tests (default features)
         run: cargo +1.94.0 test --workspace --all-targets --locked --no-run
+      - name: Each library alone with its default features
+        # Workspace builds unify features across members (the examples turn
+        # most of Alloy's integrations on), so check each library on its own,
+        # as a downstream consumer with default features builds it.
+        run: |
+          set -euxo pipefail
+          for crate in ferrum-alloy-diagnostics ferrum-alloy-telemetry ferrum-alloy-edge ferrum-alloy ferrum-alloy-cli; do
+            cargo +1.94.0 check --locked -p "$crate"
+          done
 
   rustdoc:
     name: Rustdoc
