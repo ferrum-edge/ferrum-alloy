@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `diagnose --otlp` keeps an operation linked to its server when ordinary
+  spans of the same service instance (with no Alloy measurement, under
+  Alloy's or the application's instrumentation scope) sit between them: the importer
+  records the nearest observed ancestor as `lineage.parent_span_id`, and
+  diagnosis follows it, so `alloy.service.operation_dominates` no longer
+  disappears behind a wrapper span (#219).
 - `ferrum-alloy openapi export` bounds its work by the document: an
   operation reached through several Path Item `$ref` aliases is parsed and
   checked once (its problems name the first path), `$ref` chains are

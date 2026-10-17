@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use ferrum_alloy_diagnostics::catalog;
 use ferrum_alloy_diagnostics::model::{
-    Availability, CollectionMethod, Confidence, DiagnosticReport, Finding, Interval, Producer,
-    ProducerKind, Severity, Trust, Verification,
+    Availability, CollectionMethod, Confidence, DiagnosticReport, Finding, Interval, Observation,
+    Producer, ProducerKind, Severity, Trust, Verification,
 };
 use ferrum_alloy_diagnostics::otlp::{ImportError, ImportLimits, import, trace_ids};
 use ferrum_alloy_diagnostics::parse::{Limits, parse_offline};
@@ -444,6 +444,12 @@ struct PhaseCase {
     op_len_ms: u64,
     op_recorded_ms: f64,
     instance: Option<&'static str>,
+    /// Ordinary Alloy spans (no Alloy measurement) between the server and
+    /// the operation, outermost first; their parents are given explicitly
+    /// so hostile lineage can be built too.
+    wrappers: Vec<(&'static str, &'static str)>,
+    /// The instrumentation scope every span is exported under.
+    scope: &'static str,
 }
 
 impl PhaseCase {
@@ -455,6 +461,8 @@ impl PhaseCase {
             op_len_ms,
             op_recorded_ms: op_len_ms as f64,
             instance: Some("orders-1"),
+            wrappers: Vec::new(),
+            scope: "ferrum-alloy-telemetry",
         }
     }
 
@@ -478,10 +486,27 @@ impl PhaseCase {
             ],
         });
         let op_start = T0 + self.op_start_ms * MS;
+        let mut spans = vec![server];
+        for (span_id, parent) in &self.wrappers {
+            spans.push(json!({
+                "traceId": PHASE_TRACE,
+                "spanId": span_id,
+                "parentSpanId": parent,
+                "name": "handler step",
+                "kind": 1,
+                "startTimeUnixNano": T0.to_string(),
+                "endTimeUnixNano": (T0 + 100 * MS).to_string(),
+                "attributes": [str_attr("code.function", "load_rows")],
+            }));
+        }
+        let op_parent = self
+            .wrappers
+            .last()
+            .map_or("b7ad6b7169203331", |(id, _)| *id);
         let operation = json!({
             "traceId": PHASE_TRACE,
             "spanId": "c1d2e3f405060708",
-            "parentSpanId": "b7ad6b7169203331",
+            "parentSpanId": op_parent,
             "name": "orders.rows",
             "kind": 3,
             "startTimeUnixNano": op_start.to_string(),
@@ -492,21 +517,25 @@ impl PhaseCase {
                 str_attr("alloy.operation.kind", "db"),
             ],
         });
+        spans.push(operation);
         json!({
             "resourceSpans": [{
                 "resource": { "attributes": resource },
                 "scopeSpans": [{
-                    "scope": { "name": "ferrum-alloy-telemetry" },
-                    "spans": [server, operation],
+                    "scope": { "name": self.scope },
+                    "spans": spans,
                 }],
             }],
         })
         .to_string()
     }
 
+    fn report(&self) -> DiagnosticReport {
+        import(&self.otlp(), None, collector(), &ImportLimits::default()).unwrap()
+    }
+
     fn findings(&self) -> Vec<Finding> {
-        let report = import(&self.otlp(), None, collector(), &ImportLimits::default()).unwrap();
-        analyze(&report, &Thresholds::default())
+        analyze(&self.report(), &Thresholds::default())
     }
 }
 
@@ -1743,5 +1772,217 @@ proptest! {
         let clean = generated_otlp(&spans, true);
         let result = import(&clean, None, collector(), &ImportLimits::default());
         prop_assert!(result.is_ok(), "{:?}", result.err());
+    }
+}
+
+const PHASE_SERVER: &str = "b7ad6b7169203331";
+
+fn operation_observation(report: &DiagnosticReport) -> &Observation {
+    report
+        .observations
+        .iter()
+        .find(|o| o.name == "alloy.operation.duration")
+        .unwrap()
+}
+
+/// Ordinary Alloy spans between a server and its operation carry no
+/// measurement, so the report does not contain them; the operation still
+/// reaches its server through them (#219).
+#[test]
+fn an_operation_under_ordinary_spans_still_dominates_its_server() {
+    let direct = PhaseCase::op(10, 80);
+    let wrapped = PhaseCase {
+        wrappers: vec![
+            ("0000000000000002", PHASE_SERVER),
+            ("0000000000000004", "0000000000000002"),
+        ],
+        ..PhaseCase::op(10, 80)
+    };
+    // Alloy instrumentation exported through the application's own tracer:
+    // the wrappers are not recognized as Alloy spans, but are the same
+    // process's spans all the same.
+    let app_scope = |case: PhaseCase| PhaseCase {
+        scope: "orders-app",
+        ..case
+    };
+    let app_direct = app_scope(PhaseCase::op(10, 80));
+    let app_wrapped = app_scope(PhaseCase {
+        wrappers: wrapped.wrappers.clone(),
+        ..PhaseCase::op(10, 80)
+    });
+    for case in [direct, wrapped, app_direct, app_wrapped] {
+        let report = case.report();
+        // The wrappers are lineage only: they yield no observation.
+        for (span_id, _) in &case.wrappers {
+            assert!(
+                report
+                    .observations
+                    .iter()
+                    .all(|o| o.span.as_ref().is_none_or(|s| s.span_id != *span_id)),
+                "{span_id} must not become an observation"
+            );
+        }
+        let operation = operation_observation(&report);
+        let span = operation.span.as_ref().unwrap();
+        let lineage = operation.attributes.get("lineage.parent_span_id");
+        if let Some((parent, _)) = case.wrappers.last() {
+            assert_eq!(
+                span.parent_span_id.as_deref(),
+                Some(*parent),
+                "real parent kept"
+            );
+            assert_eq!(lineage.map(String::as_str), Some(PHASE_SERVER));
+        } else {
+            assert_eq!(lineage, None, "a direct child needs no lineage hint");
+        }
+        for findings in [
+            analyze(&report, &Thresholds::default()),
+            analyze(&round_trip(&report), &Thresholds::default()),
+        ] {
+            let finding = by_code(&findings, "alloy.service.operation_dominates");
+            assert_eq!(finding.confidence, Confidence::Likely, "{finding:?}");
+        }
+    }
+}
+
+/// Lineage through ordinary spans is bounded: a parent cycle, or a chain
+/// ending at an unobserved root, adds no hint and finds nothing.
+#[test]
+fn ordinary_span_lineage_that_never_reaches_a_server_adds_nothing() {
+    let cycle = PhaseCase {
+        wrappers: vec![
+            ("0000000000000002", "0000000000000004"),
+            ("0000000000000004", "0000000000000002"),
+        ],
+        ..PhaseCase::op(10, 80)
+    };
+    let detached = PhaseCase {
+        wrappers: vec![("0000000000000002", "00000000000000ff")],
+        ..PhaseCase::op(10, 80)
+    };
+    for case in [cycle, detached] {
+        let report = case.report();
+        let operation = operation_observation(&report);
+        assert_eq!(operation.attributes.get("lineage.parent_span_id"), None);
+        let findings = analyze(&report, &Thresholds::default());
+        assert!(
+            !codes(&findings).contains(&"alloy.service.operation_dominates"),
+            "{:?}",
+            codes(&findings)
+        );
+    }
+}
+
+/// A malformed hint (here the all-zero span id, which is never a valid
+/// span) is ignored, and diagnosis follows the span's own parent.
+#[test]
+fn a_malformed_lineage_hint_is_ignored() {
+    let mut report = PhaseCase::op(10, 80).report();
+    let operation = report
+        .observations
+        .iter_mut()
+        .find(|o| o.name == "alloy.operation.duration")
+        .unwrap();
+    operation.attributes.insert(
+        "lineage.parent_span_id".to_owned(),
+        "0000000000000000".to_owned(),
+    );
+    let findings = analyze(&round_trip(&report), &Thresholds::default());
+    let finding = by_code(&findings, "alloy.service.operation_dominates");
+    assert_eq!(finding.confidence, Confidence::Likely, "{finding:?}");
+}
+
+/// Lineage never skips a span of another process: a wrapper exported by a
+/// different service instance ends the walk.
+#[test]
+fn lineage_does_not_cross_into_another_process() {
+    let case = PhaseCase {
+        wrappers: vec![("0000000000000002", PHASE_SERVER)],
+        ..PhaseCase::op(10, 80)
+    };
+    let mut otlp: Value = serde_json::from_str(&case.otlp()).unwrap();
+    // Move the wrapper into its own resource (another instance).
+    let spans = otlp["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        .as_array_mut()
+        .unwrap();
+    let wrapper_index = spans
+        .iter()
+        .position(|s| s["spanId"] == "0000000000000002")
+        .unwrap();
+    let wrapper = spans.remove(wrapper_index);
+    otlp["resourceSpans"].as_array_mut().unwrap().push(json!({
+        "resource": { "attributes": [
+            str_attr("service.name", "orders-api"),
+            str_attr("service.instance.id", "orders-2"),
+        ] },
+        "scopeSpans": [{ "scope": { "name": "other" }, "spans": [wrapper] }],
+    }));
+    let report = import(
+        &otlp.to_string(),
+        None,
+        collector(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let operation = operation_observation(&report);
+    assert_eq!(operation.attributes.get("lineage.parent_span_id"), None);
+}
+
+/// Inserts an ordinary span (no Alloy measurement) of the Alloy service's
+/// own resource and scope between `child` and its parent.
+fn wrap_span(otlp: &str, child: &str, wrapper: &str) -> String {
+    otlp.lines()
+        .map(|line| {
+            let mut request: Value = serde_json::from_str(line).unwrap();
+            for resource in request["resourceSpans"].as_array_mut().unwrap() {
+                for scope in resource["scopeSpans"].as_array_mut().unwrap() {
+                    let spans = scope["spans"].as_array_mut().unwrap();
+                    let Some(index) = spans.iter().position(|s| s["spanId"] == child) else {
+                        continue;
+                    };
+                    let mut ordinary = spans[index].clone();
+                    ordinary["spanId"] = json!(wrapper);
+                    ordinary["name"] = json!("handler step");
+                    ordinary["kind"] = json!(1);
+                    ordinary["attributes"] = json!([str_attr("code.function", "route")]);
+                    spans[index]["parentSpanId"] = json!(wrapper);
+                    spans.push(ordinary);
+                }
+            }
+            request.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A wrapper between the service SERVER span and the gateway (its SERVER
+/// span, or its backend attempt) keeps the service linked to the gateway
+/// request, so the gateway/service comparison survives, also after a
+/// report round trip.
+#[test]
+fn services_under_ordinary_spans_stay_linked_to_the_gateway() {
+    for (fixture, service, wrapper) in [
+        (input(), "b7ad6b7169203331", "0000000000000abc"),
+        (
+            otlp_fixture("edge-attempt-spans.jsonl"),
+            "c3c3c3c3c3c3c3c3",
+            "0000000000000abd",
+        ),
+    ] {
+        let wrapped = wrap_span(&fixture, service, wrapper);
+        let trace = (fixture == input()).then_some(OK_TRACE);
+        let report = import(&wrapped, trace, collector(), &ImportLimits::default()).unwrap();
+        for report in [report.clone(), round_trip(&report)] {
+            let findings = analyze(&report, &Thresholds::default());
+            let found = codes(&findings);
+            assert!(
+                found.contains(&"alloy.gateway.unattributed_interval"),
+                "{service}: {found:?}"
+            );
+            assert!(
+                !found.contains(&"alloy.telemetry.service_span_missing"),
+                "{service}: {found:?}"
+            );
+        }
     }
 }

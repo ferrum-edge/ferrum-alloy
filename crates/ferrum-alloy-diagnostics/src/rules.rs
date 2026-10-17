@@ -68,6 +68,25 @@ impl Default for Thresholds {
 /// bounded, so a parent cycle in hostile input cannot loop forever.
 const MAX_ANCESTOR_HOPS: usize = 64;
 
+/// The parent an Alloy observation's span is linked through: the importer's
+/// [`catalog::LINEAGE_PARENT_SPAN_ID`] when it is a well-formed span id (the
+/// real parent is an ordinary span the report does not contain), otherwise
+/// the span's own parent id.
+fn lineage_parent<'a>(observation: &'a Observation, span: &'a SpanRef) -> Option<&'a str> {
+    observation
+        .attributes
+        .get(catalog::LINEAGE_PARENT_SPAN_ID)
+        .map(String::as_str)
+        .filter(|id| {
+            id.len() == 16
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && id.bytes().any(|b| b != b'0')
+        })
+        .or(span.parent_span_id.as_deref())
+}
+
 /// Most unsampled, dropped, or unexported observations one finding cites.
 pub const MAX_DEGRADED_CITATIONS_PER_FINDING: usize = 32;
 
@@ -223,7 +242,7 @@ impl<'a> Index<'a> {
                     if let Some(span) = &observation.span {
                         alloy_parents
                             .entry(span_key(span))
-                            .or_insert(span.parent_span_id.as_deref());
+                            .or_insert(lineage_parent(observation, span));
                     }
                     if observation.name == catalog::ALLOY_OPERATION_DURATION {
                         operations.push(observation);
@@ -241,7 +260,12 @@ impl<'a> Index<'a> {
             let Some(span) = view.span else {
                 continue;
             };
-            let Some(parent) = span.parent_span_id.as_deref() else {
+            // The effective Alloy parent: past any ordinary wrapper span.
+            let parent = match alloy_parents.get(service_key) {
+                Some(parent) => *parent,
+                None => span.parent_span_id.as_deref(),
+            };
+            let Some(parent) = parent else {
                 continue;
             };
             let trace = span.trace_id.as_str();
@@ -315,7 +339,7 @@ impl<'a> Index<'a> {
         edge_span: &SpanRef,
     ) -> Option<&RequestView<'a>> {
         let span = service.span?;
-        let parent = span.parent_span_id.as_deref()?;
+        let parent = self.parent_of(span)?;
         let attempt = self.attempts.get(&(span.trace_id.as_str(), parent))?;
         let gateway = attempt.span?.parent_span_id.as_deref();
         if span.trace_id != edge_span.trace_id || gateway != Some(edge_span.span_id.as_str()) {
@@ -377,6 +401,19 @@ impl<'a> Index<'a> {
         operations_by_service
     }
 
+    /// The parent a lineage walk follows from `span`: its recorded Alloy
+    /// lineage parent when it is an Alloy span ([`lineage_parent`]),
+    /// otherwise its own parent id.
+    fn parent_of<'s>(&'s self, span: &'s SpanRef) -> Option<&'s str> {
+        match self
+            .alloy_parents
+            .get(&(span.trace_id.as_str(), span.span_id.as_str()))
+        {
+            Some(parent) => *parent,
+            None => span.parent_span_id.as_deref(),
+        }
+    }
+
     /// Returns the nearest span id in `span`'s lineage that `accept` matches:
     /// the span itself, its own parent, then its parent's Alloy ancestors and
     /// at most one gateway attempt. Every id is in `span`'s own trace, and the
@@ -395,7 +432,7 @@ impl<'a> Index<'a> {
             return Some(span.span_id.as_str());
         }
         let trace = span.trace_id.as_str();
-        let mut current: &'s str = span.parent_span_id.as_deref()?;
+        let mut current: &'s str = self.parent_of(span)?;
         if accept(current) {
             return Some(current);
         }
