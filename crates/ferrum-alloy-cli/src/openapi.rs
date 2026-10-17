@@ -173,6 +173,7 @@ fn normalize_paths(
 
     let base_path = manifest.api.service_base_path.trim_end_matches('/');
     let mut normalized_paths = serde_json::Map::new();
+    let mut renamed: Vec<(String, String)> = Vec::new();
     for (path, operations) in std::mem::take(paths) {
         let normalized = if path == base_path {
             "/"
@@ -181,6 +182,9 @@ fn normalize_paths(
         } else {
             &path
         };
+        if normalized != path {
+            renamed.push((path.clone(), normalized.to_owned()));
+        }
         if normalized_paths
             .insert(normalized.to_owned(), operations)
             .is_some()
@@ -191,6 +195,120 @@ fn normalize_paths(
         }
     }
     *paths = normalized_paths;
+    if renamed.is_empty() {
+        return Ok(());
+    }
+    // Keys moved, so local `#/paths/...` references to them broke (#224).
+    // Decision (a) there: rewrite Path Item `$ref`s sitting directly under
+    // `paths` — the reported alias case — and refuse the export when any
+    // other `$ref`/`$dynamicRef`/`operationRef` still names a stripped
+    // key, rather than writing a broken document. A false positive (a
+    // `$ref`-shaped string that is data) only refuses the export.
+    let targets: std::collections::BTreeMap<&str, &str> = renamed
+        .iter()
+        .map(|(old, new)| (old.as_str(), new.as_str()))
+        .collect();
+    for (key, item) in paths.iter_mut() {
+        // Extension data under `paths` is not a Path Item; a `$ref`-shaped
+        // string there is refused below, never rewritten.
+        if key.starts_with("x-") {
+            continue;
+        }
+        let Some(reference) = item.get_mut("$ref") else {
+            continue;
+        };
+        let Some(text) = reference.as_str() else {
+            continue;
+        };
+        if let Some((segment, rest)) = paths_reference(text)
+            && let Some(new) = targets.get(pointer_unescape(segment).as_str())
+        {
+            *reference = Value::String(format!("#/paths/{}{rest}", pointer_escape(new)));
+        }
+    }
+    // The walk below needs the whole document, beyond the `paths` borrow.
+    let stripped: Vec<String> = targets.keys().map(|old| (*old).to_owned()).collect();
+    refuse_stripped_references(document, &stripped)
+}
+
+/// The first pointer segment of a local `#/paths/...` reference and the
+/// remainder after it (including its leading `/`, or empty).
+fn paths_reference(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("#/paths/")?;
+    match rest.find('/') {
+        Some(at) => Some((&rest[..at], &rest[at..])),
+        None => Some((rest, "")),
+    }
+}
+
+/// JSON Pointer segment escaping (`~` then `/`, RFC 6901 §3).
+fn pointer_escape(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+/// The inverse, in the specified order (`~1` before `~0`, so `~01` is `~1`).
+fn pointer_unescape(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
+}
+
+/// Whether a reference names one of the stripped `paths` keys, after
+/// decoding the whole URI fragment (RFC 6901 §6): percent-encoded
+/// structural characters (`#/%70aths/...`, `...%2Fget`) decode before
+/// segmenting, so no spelling of a stripped key slips past refusal.
+/// Refusal matching is generous in this way, while rewriting above
+/// stays on plain pointer semantics.
+fn names_stripped_key(text: &str, stripped: &[String]) -> bool {
+    let decoded = percent_decode(text);
+    let Some((segment, _)) = paths_reference(&decoded) else {
+        return false;
+    };
+    stripped.iter().any(|old| pointer_unescape(segment) == *old)
+}
+
+/// Percent-decodes for comparison only (see [`names_stripped_key`]).
+fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if bytes[at] == b'%'
+            && let Some(hex) = bytes.get(at + 1..at + 3)
+            && let Ok(byte) = u8::from_str_radix(std::str::from_utf8(hex).unwrap_or_default(), 16)
+        {
+            decoded.push(byte);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Refuses when any `$ref`/`$dynamicRef`/`operationRef` string in the
+/// document still names one of the stripped `paths` keys (the rewritten
+/// Path Item references no longer do).
+fn refuse_stripped_references(document: &Value, stripped: &[String]) -> Result<(), CliError> {
+    let mut stack = vec![document];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    if matches!(key.as_str(), "$ref" | "$dynamicRef" | "operationRef")
+                        && let Some(text) = child.as_str()
+                        && names_stripped_key(text, stripped)
+                    {
+                        return Err(CliError::Invalid(format!(
+                            "OpenAPI reference {text:?} names a path removed by service_base_path stripping; repoint it at the stripped path key or remove it before exporting"
+                        )));
+                    }
+                    stack.push(child);
+                }
+            }
+            Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
     Ok(())
 }
 

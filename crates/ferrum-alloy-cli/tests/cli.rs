@@ -1439,6 +1439,70 @@ fn openapi_export_maps_service_base_path_when_the_gateway_strips_it() {
     }
 }
 
+#[test]
+fn openapi_export_rewrites_path_item_refs_when_stripping_and_refuses_other_stripped_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "strip.toml",
+        "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"/internal/\"\nstrip_public_path = true\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n",
+    );
+    let export = |name: &str, document: &str| {
+        let input = write(dir.path(), &format!("{name}.json"), document);
+        let out = dir.path().join(format!("{name}.out.json"));
+        let output = run(&[
+            "openapi",
+            "export",
+            "--input",
+            &input,
+            "--manifest",
+            &manifest,
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        (output, out)
+    };
+
+    // The alias Path Item $ref follows its key to the stripped spelling,
+    // with no agent metadata anywhere (#224).
+    let (output, out) = export(
+        "alias",
+        r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/internal/items":{"get":{"responses":{"200":{"description":"OK"}}}},"/alias":{"$ref":"#/paths/~1internal~1items"}}}"##,
+    );
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let written = read_json(&out);
+    assert_eq!(written["paths"]["/alias"]["$ref"], "#/paths/~1items");
+    assert!(written["paths"].get("/items").is_some());
+
+    // A stripped-key reference in any other position refuses the export
+    // (exit 3) and names the reference, instead of writing a broken doc.
+    let (output, out) = export(
+        "other",
+        r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/internal/items":{"get":{"responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/paths/~1internal~1items"}}}}}}}}}"##,
+    );
+    assert_eq!(code(&output), 3, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("#/paths/~1internal~1items"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!out.exists(), "no document is written on refusal");
+
+    // Percent-encoded spellings of the same reference refuse too: the
+    // fragment decodes before segmenting (RFC 6901 section 6).
+    for (name, reference) in [
+        ("encoded-paths", "#/%70aths/~1internal~1items"),
+        ("encoded-slash", "#/paths/~1internal~1items%2Fget"),
+    ] {
+        let document = format!(
+            r##"{{"openapi":"3.1.0","info":{{"title":"t","version":"1"}},"paths":{{"/internal/items":{{"get":{{"responses":{{"200":{{"description":"OK","content":{{"application/json":{{"schema":{{"$ref":"{reference}"}}}}}}}}}}}}}}}}"##
+        );
+        let (output, out) = export(name, &document);
+        assert_eq!(code(&output), 3, "{name}: {}", stderr(&output));
+        assert!(!out.exists(), "{name}: no document is written on refusal");
+    }
+}
+
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }

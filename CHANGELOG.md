@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `openapi export` with `strip_public_path` rewrites Path Item `$ref`s
+  directly under `paths` to the stripped key, and refuses the export
+  (exit 3, naming the reference) when any other `$ref`, `$dynamicRef`
+  or `operationRef` still names a stripped `#/paths/` key, instead of
+  writing a document whose local references no longer resolve (#224,
+  decision (a) there).
 - Agent-tool preparation refuses distinct operations that share one
   nonempty `operationId`, in both the manifest-stamped and
   hand-written-extension flows. Exposure is granted by operationId, so
