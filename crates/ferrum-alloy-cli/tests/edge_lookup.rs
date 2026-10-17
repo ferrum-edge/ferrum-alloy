@@ -4,14 +4,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{ErrorKind, Read as _, Write as _};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+#[path = "support/trickle.rs"]
+mod trickle;
 
 const TOKEN_ENV: &str = "FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN";
 const TOKEN: &str = "private-edge-lookup-credential";
@@ -44,67 +45,6 @@ fn bin() -> Command {
     }
     command.env(TOKEN_ENV, TOKEN);
     command
-}
-
-fn assert_client_disconnect(error: &std::io::Error, write: &str) {
-    assert!(
-        matches!(
-            error.kind(),
-            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
-        ) || matches!(error.raw_os_error(), Some(10053 | 10054)),
-        "unexpected {write} write error: kind={:?}, raw_os_error={:?}",
-        error.kind(),
-        error.raw_os_error()
-    );
-}
-
-/// Retry nonblocking fixture I/O within one absolute lifetime, checking
-/// cancellation even when the peer makes progress or interrupts a syscall.
-fn trickle_io<T>(
-    cancelled: &AtomicBool,
-    deadline: Instant,
-    mut operation: impl FnMut() -> std::io::Result<T>,
-) -> std::io::Result<T> {
-    loop {
-        if cancelled.load(Ordering::Relaxed) {
-            return Err(std::io::Error::new(
-                ErrorKind::Interrupted,
-                "trickle fixture cancelled",
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
-                ErrorKind::TimedOut,
-                "trickle fixture exceeded its lifetime",
-            ));
-        }
-        match operation() {
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            result => return result,
-        }
-    }
-}
-
-fn trickle_write(
-    stream: &mut TcpStream,
-    mut bytes: &[u8],
-    cancelled: &AtomicBool,
-    deadline: Instant,
-) -> std::io::Result<()> {
-    while !bytes.is_empty() {
-        let written = trickle_io(cancelled, deadline, || stream.write(bytes))?;
-        if written == 0 {
-            return Err(std::io::Error::new(
-                ErrorKind::WriteZero,
-                "trickle fixture could not write the response",
-            ));
-        }
-        bytes = &bytes[written..];
-    }
-    Ok(())
 }
 
 fn diagnose(url: &str, observation: &Value, extra: &[&str]) -> Output {
@@ -377,142 +317,98 @@ fn response_bounds_and_timeout_are_enforced() {
 fn a_trickling_body_cannot_extend_the_whole_operation_deadline() {
     let record = record();
     let observation = capture(&record);
-    let body = record.to_string();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
     let expected_request = format!(
         "GET /diagnostics/v1/refs/{} HTTP/1.1",
         record["ref"].as_str().unwrap()
     );
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let stop = Arc::clone(&cancelled);
-    let server = std::thread::spawn(move || {
-        let result = (|| -> std::io::Result<_> {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let (mut stream, _) = trickle_io(&stop, deadline, || listener.accept())?;
-            stream.set_nonblocking(true)?;
-            stream.set_nodelay(true)?;
-            let mut request = Vec::new();
-            let mut byte = [0; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                let read = trickle_io(&stop, deadline, || stream.read(&mut byte))?;
-                if read == 0 {
-                    return Err(std::io::Error::new(
-                        ErrorKind::UnexpectedEof,
-                        "trickling request ended before its headers",
-                    ));
-                }
-                request.push(byte[0]);
-                if request.len() >= 32 * 1024 {
-                    return Err(std::io::Error::new(
-                        ErrorKind::InvalidData,
-                        "trickling request headers exceeded the fixture limit",
-                    ));
-                }
-            }
-            let request = String::from_utf8(request)
-                .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len() + 40,
-            );
-            trickle_write(&mut stream, head.as_bytes(), &stop, deadline)?;
-            let _ = started_tx.send(Instant::now());
-            let mut write_times = Vec::new();
-            let mut disconnect = None;
-            // Every gap is below the 600 ms read timeout, but a complete response
-            // takes at least four seconds. Without a total deadline it succeeds.
-            for _ in 0..40 {
-                if let Err(error) = trickle_write(&mut stream, b" ", &stop, deadline) {
-                    disconnect = Some((error, "trickle"));
-                    break;
-                }
-                write_times.push(Instant::now());
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if disconnect.is_none() {
-                disconnect = trickle_write(&mut stream, body.as_bytes(), &stop, deadline)
-                    .err()
-                    .map(|error| (error, "final body"));
-            }
-            Ok((request, write_times, disconnect))
-        })();
-        // The socket has been dropped before completion is recorded, including
-        // every I/O error path. A panic closes the channel and is reported at join.
-        let _ = completed_tx.send(Instant::now());
-        result
+    let proof = trickle::prove_trickle_deadline(&record.to_string(), |url, timeout_ms| {
+        diagnose(url, &observation, &["--timeout-ms", timeout_ms])
     });
-    // Keep ownership of the fixture outside all fallible client/proof work so
-    // even a helper panic or a channel failure cannot bypass cancellation/join.
-    let proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let output = diagnose(&url, &observation, &["--timeout-ms", "600"]);
-        // Measure before cleanup; joining must not inflate the CLI return time.
-        let returned_at = Instant::now();
-        let completion_deadline = returned_at + Duration::from_secs(1);
-        let started = started_rx.recv_timeout(Duration::from_secs(1));
-        let completion_wait = completion_deadline.saturating_duration_since(Instant::now());
-        let completed = completed_rx.recv_timeout(completion_wait);
-        (output, returned_at, started, completed)
-    }));
-    cancelled.store(true, Ordering::Relaxed);
-    let server_result = match server.join() {
-        Ok(result) => result,
-        Err(panic) => std::panic::resume_unwind(panic),
-    };
-    let (output, returned_at, started, completed) = match proof {
-        Ok(proof) => proof,
-        Err(panic) => std::panic::resume_unwind(panic),
-    };
-    let started = started.unwrap();
-    let elapsed = returned_at.duration_since(started);
-    // The request deadline starts before connect/send, so time spent reaching
-    // this server has already consumed it. There is no minimum body-read time.
-    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-    // Require bounded cleanup after the CLI returns, including an observed
-    // disconnect rather than successful completion of the four-second body.
-    let completed_at = completed.unwrap();
-    assert!(
-        completed_at.duration_since(returned_at) < Duration::from_secs(1),
-        "fixture did not complete within one second of CLI return"
-    );
-    let (request, write_times, disconnect) = server_result.unwrap();
+    let request = proof.request;
     assert_eq!(request.lines().next().unwrap(), expected_request);
     assert!(
         request
             .to_ascii_lowercase()
             .contains(&format!("authorization: bearer {TOKEN}"))
     );
-    let (error, write) = disconnect.expect("client read the complete trickling response");
-    assert_client_disconnect(&error, write);
-    let writes: Vec<_> = write_times
-        .into_iter()
-        .filter(|written_at| *written_at <= returned_at)
-        .collect();
-    assert!(
-        writes.len() >= 3,
-        "fixture did not actively trickle before CLI returned: {}",
-        writes.len()
-    );
-    assert!(writes.len() < 40, "client outlasted the trickle");
-    assert!(
-        writes
-            .windows(2)
-            .all(|pair| pair[1].duration_since(pair[0]) < Duration::from_millis(600)),
-        "fixture stalled between body writes"
-    );
-    assert!(
-        returned_at.duration_since(*writes.last().unwrap()) < Duration::from_millis(600),
-        "fixture stalled before CLI returned"
-    );
+    let output = proof.output;
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let error = String::from_utf8_lossy(&output.stderr);
     assert_eq!(error, "error: Edge record read failed or timed out\n");
-    assert!(!error.contains(&url));
+    assert!(!error.contains(&proof.url));
     assert_private(&output);
+}
+
+/// A deadline violation proven while the fixture was live must fail, not be
+/// retried away because the fixture stalled afterwards.
+#[test]
+fn a_trickle_held_past_the_bound_fails_even_if_the_fixture_stalls_later() {
+    use trickle::{Liveness, TRICKLE_CONNECTION_BOUND, TRICKLE_INTERVAL, liveness};
+    let started = Instant::now();
+    let regular = |until: Duration| {
+        (1..)
+            .map(|n| started + TRICKLE_INTERVAL * n)
+            .take_while(move |at| at.duration_since(started) <= until)
+            .collect::<Vec<_>>()
+    };
+    // Regular writes to 2.2 s, then a 700 ms fixture stall before the
+    // disconnect is observed.
+    let mut held = regular(Duration::from_millis(2200));
+    held.push(*held.last().unwrap() + Duration::from_millis(700));
+    assert!(matches!(
+        liveness(started, &held),
+        Liveness::HeldPastBound(at) if at >= TRICKLE_CONNECTION_BOUND
+    ));
+    // The same stall before the bound proves nothing either way.
+    let mut stalled = regular(Duration::from_millis(400));
+    stalled.push(*stalled.last().unwrap() + Duration::from_millis(700));
+    assert_eq!(
+        liveness(started, &stalled),
+        Liveness::Stalled(Duration::from_millis(700))
+    );
+    // A disconnect at the deadline after regular writes is a valid proof.
+    let mut live = regular(Duration::from_millis(500));
+    live.push(started + Duration::from_millis(610));
+    assert_eq!(liveness(started, &live), Liveness::Live);
+    // A client that never disconnects keeps accepting regular writes.
+    assert!(matches!(
+        liveness(started, &regular(Duration::from_secs(8))),
+        Liveness::HeldPastBound(_)
+    ));
+}
+
+/// A proven overrun also fails when the fixture then misses its completion
+/// notice or is cancelled, instead of becoming a retry.
+#[test]
+fn a_proven_trickle_overrun_fails_even_if_the_fixture_finishes_late() {
+    use trickle::{TRICKLE_INTERVAL, Verdict, verdict};
+    let started = Instant::now();
+    let at = |ms: u64| started + Duration::from_millis(ms);
+    // Continuous writes through 2.2 s and a disconnect at 2.3 s.
+    let mut overrun: Vec<_> = (1..=22).map(|n| started + TRICKLE_INTERVAL * n).collect();
+    overrun.push(at(2300));
+    assert!(matches!(
+        verdict(Some(started), &overrun, false),
+        Verdict::Overrun(_)
+    ));
+    assert!(matches!(
+        verdict(Some(started), &overrun, true),
+        Verdict::Overrun(_)
+    ));
+    // Without a proven overrun, a late fixture proves nothing.
+    let live = [at(100), at(200), at(300), at(400), at(500), at(610)];
+    assert!(matches!(
+        verdict(Some(started), &live, false),
+        Verdict::Retry(_)
+    ));
+    assert!(matches!(verdict(None, &[], false), Verdict::Retry(_)));
+    assert_eq!(verdict(Some(started), &live, true), Verdict::Proceed);
+    let stalled = [at(100), at(900)];
+    assert!(matches!(
+        verdict(Some(started), &stalled, true),
+        Verdict::Retry(_)
+    ));
 }
 
 #[test]
