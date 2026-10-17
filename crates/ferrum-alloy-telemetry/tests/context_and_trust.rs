@@ -488,6 +488,9 @@ async fn quoted_commas_do_not_invent_cache_directives() {
         r#"ext="x\", private", public, max-age=60"#,
         // An unterminated quoted string is ambiguous: withhold.
         r#"ext="unterminated, private"#,
+        // Even attached to a prohibition-looking name: an ambiguous
+        // value must not be read as a prohibition on a guess.
+        r#"no-store="unterminated"#,
     ] {
         let headers = [("cache-control", directive)];
         assert!(

@@ -30,17 +30,19 @@ pub fn is_shared_cacheable(
     response_headers: &HeaderMap,
 ) -> bool {
     let (dirs, malformed) = directives(response_headers);
+    // An ambiguous value (an unterminated quoted string) is treated as
+    // storable, which only withholds Alloy's request-specific headers.
+    // This precedes the prohibition checks below: `no-store="unterminated`
+    // must not be read as a prohibition on a guess.
+    if malformed {
+        return true;
+    }
     let has = |name: &str| dirs.iter().any(|d| directive_is(d, name));
 
     // A qualified `private="field"` still lets a shared cache store the rest
     // of the response (RFC 9111 §5.2.2.7), so only the bare form prohibits it.
     if has("no-store") || dirs.iter().any(|d| d.eq_ignore_ascii_case("private")) {
         return false;
-    }
-    // An ambiguous value (an unterminated quoted string) is treated as
-    // storable, which only withholds Alloy's request-specific headers.
-    if malformed {
-        return true;
     }
     let explicit_shared_freshness = has("public") || has("s-maxage");
     let explicit_freshness =
