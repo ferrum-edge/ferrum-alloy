@@ -208,7 +208,12 @@ fn normalize_paths(
         .iter()
         .map(|(old, new)| (old.as_str(), new.as_str()))
         .collect();
-    for item in paths.values_mut() {
+    for (key, item) in paths.iter_mut() {
+        // Extension data under `paths` is not a Path Item; a `$ref`-shaped
+        // string there is refused below, never rewritten.
+        if key.starts_with("x-") {
+            continue;
+        }
         let Some(reference) = item.get_mut("$ref") else {
             continue;
         };
@@ -246,9 +251,23 @@ fn pointer_unescape(segment: &str) -> String {
     segment.replace("~1", "/").replace("~0", "~")
 }
 
-/// Percent-decodes a pointer segment for comparison only: refusal matching
-/// is generous (a percent-encoded spelling of a stripped key still
-/// refuses), while rewriting above stays on plain pointer semantics.
+/// Whether a reference names one of the stripped `paths` keys, after
+/// decoding the whole URI fragment (RFC 6901 §6): percent-encoded
+/// structural characters (`#/%70aths/...`, `...%2Fget`) decode before
+/// segmenting, so no spelling of a stripped key slips past refusal.
+/// Refusal matching is generous in this way, while rewriting above
+/// stays on plain pointer semantics.
+fn names_stripped_key(text: &str, stripped: &[String]) -> bool {
+    let decoded = percent_decode(text);
+    let Some((segment, _)) = paths_reference(&decoded) else {
+        return false;
+    };
+    stripped
+        .iter()
+        .any(|old| pointer_unescape(segment) == *old)
+}
+
+/// Percent-decodes for comparison only (see [`names_stripped_key`]).
 fn percent_decode(segment: &str) -> String {
     let bytes = segment.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -279,10 +298,7 @@ fn refuse_stripped_references(document: &Value, stripped: &[String]) -> Result<(
                 for (key, child) in object {
                     if matches!(key.as_str(), "$ref" | "$dynamicRef" | "operationRef")
                         && let Some(text) = child.as_str()
-                        && let Some((segment, _)) = paths_reference(text)
-                        && stripped
-                            .iter()
-                            .any(|old| pointer_unescape(&percent_decode(segment)) == *old)
+                        && names_stripped_key(text, stripped)
                     {
                         return Err(CliError::Invalid(format!(
                             "OpenAPI reference {text:?} names a path removed by service_base_path stripping; repoint it at the stripped path key or remove it before exporting"

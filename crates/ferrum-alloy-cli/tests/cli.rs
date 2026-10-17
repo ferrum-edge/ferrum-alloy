@@ -1487,6 +1487,20 @@ fn openapi_export_rewrites_path_item_refs_when_stripping_and_refuses_other_strip
         stderr(&output)
     );
     assert!(!out.exists(), "no document is written on refusal");
+
+    // Percent-encoded spellings of the same reference refuse too: the
+    // fragment decodes before segmenting (RFC 6901 section 6).
+    for (name, reference) in [
+        ("encoded-paths", "#/%70aths/~1internal~1items"),
+        ("encoded-slash", "#/paths/~1internal~1items%2Fget"),
+    ] {
+        let document = format!(
+            r##"{{"openapi":"3.1.0","info":{{"title":"t","version":"1"}},"paths":{{"/internal/items":{{"get":{{"responses":{{"200":{{"description":"OK","content":{{"application/json":{{"schema":{{"$ref":"{reference}"}}}}}}}}}}}}}}}}"##
+        );
+        let (output, out) = export(name, &document);
+        assert_eq!(code(&output), 3, "{name}: {}", stderr(&output));
+        assert!(!out.exists(), "{name}: no document is written on refusal");
+    }
 }
 
 fn read_json(path: &Path) -> serde_json::Value {
