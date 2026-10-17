@@ -199,6 +199,9 @@ const RESERVED_ID_HEADERS: &[&str] = &[
     "x-content-type-options",
     "x-frame-options",
     "referrer-policy",
+    "cross-origin-resource-policy",
+    "cross-origin-opener-policy",
+    "cross-origin-embedder-policy",
     // Also written by this layer as a request-specific response header.
     "server-timing",
 ];

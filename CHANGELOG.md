@@ -6,7 +6,8 @@
   headers (`cache-control`, `expires`, `etag`, `last-modified`, `vary`,
   `age`, `pragma`, `www-authenticate`, `strict-transport-security`,
   `content-security-policy`, `x-content-type-options`, `x-frame-options`,
-  `referrer-policy`, `server-timing`). Naming one let the request-id echo
+  `referrer-policy`, the `cross-origin-*-policy` trio, `server-timing`).
+  Naming one let the request-id echo
   replace the application's header after the cache-safety decision had
   read its original value, dropping a `private`/`no-store` prohibition
   (#215).

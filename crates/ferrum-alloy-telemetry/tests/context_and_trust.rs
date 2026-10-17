@@ -570,6 +570,9 @@ fn reserved_request_id_headers_are_rejected() {
         "strict-transport-security",
         "content-security-policy",
         "x-content-type-options",
+        "cross-origin-resource-policy",
+        "cross-origin-opener-policy",
+        "cross-origin-embedder-policy",
         "server-timing",
         "bad header",
     ] {
