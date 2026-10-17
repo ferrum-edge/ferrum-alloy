@@ -421,9 +421,15 @@ where
         request.extensions_mut().insert(Instrumented);
 
         // The transport may have classified this connection once already
-        // (Alloy's server does, for every connection it serves).
-        let peer_trust = match request.extensions().get::<ClassifiedPeer>() {
-            Some(classified) => (*classified.0).clone(),
+        // (Alloy's server does, for every connection it serves). Reuse it
+        // only when this layer's classifier produced it; a result from a
+        // different classifier is recomputed under this layer's rules.
+        let peer_trust = match request
+            .extensions()
+            .get::<ClassifiedPeer>()
+            .and_then(|classified| classified.trust_for(&shared.classifier))
+        {
+            Some(trust) => trust.clone(),
             None => shared.classifier.classify(request.extensions()),
         };
         let (request_id, id_source) = choose_request_id(

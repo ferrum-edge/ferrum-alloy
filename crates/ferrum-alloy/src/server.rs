@@ -1752,7 +1752,7 @@ async fn serve_io<I>(
     let classified = options.classifier.as_ref().map(|classifier| {
         let mut extensions = http::Extensions::new();
         extensions.insert(peer.clone());
-        ClassifiedPeer(Arc::new(classifier.classify(&extensions)))
+        ClassifiedPeer::new(Arc::clone(classifier), classifier.classify(&extensions))
     });
     let activity = Arc::new(Activity::default());
     let body_activity = Arc::clone(&activity);
