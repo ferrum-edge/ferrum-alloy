@@ -8,6 +8,16 @@
   records the nearest observed ancestor as `lineage.parent_span_id`, and
   diagnosis follows it, so `alloy.service.operation_dominates` no longer
   disappears behind a wrapper span (#219).
+- `ferrum-alloy openapi export` bounds its work by the document: an
+  operation reached through several Path Item `$ref` aliases is parsed and
+  checked once (its problems name the first path), `$ref` chains are
+  followed once however many references share them, referenced Path Items
+  are de-duplicated with a set, a request body shared by many operations
+  is checked once, and the MCP endpoint overlap check compares the public
+  path once. Problems echo shortened paths, keys, endpoints, and
+  references, and at most 100 are listed plus a count. The written
+  document is streamed into a 64 MiB budget instead of an unbounded string
+  and copy, and `--check` compares parsed JSON without rendering.
 - Fixes from the 2026-10-15 audit:
   - `OtelPipeline::force_flush()` and `shutdown()` return the exporter's
     own flush or shutdown failure instead of `Ok(())` (#220).
