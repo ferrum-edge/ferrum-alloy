@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- The shared-cache safety check splits `Cache-Control` on commas only
+  outside quoted strings (with quoted-pair handling). Splitting inside
+  `ext="x, private, y"` invented a bare `private` directive and admitted
+  request-specific headers onto a response shared caches may store; an
+  unterminated quoted string now withholds them instead (#217).
+
 - `diagnose --otlp` keeps an operation linked to its server when ordinary
   spans of the same service instance (with no Alloy measurement, under
   Alloy's or the application's instrumentation scope) sit between them: the importer

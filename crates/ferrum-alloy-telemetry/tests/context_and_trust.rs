@@ -477,6 +477,37 @@ async fn explicit_prohibitions_keep_request_specific_headers() {
 }
 
 #[tokio::test]
+async fn quoted_commas_do_not_invent_cache_directives() {
+    // A comma inside a quoted extension is not a directive separator, so
+    // none of these sends a bare `private`/`no-store`: the response stays
+    // shared-cacheable and request-specific headers are withheld (#217).
+    for directive in [
+        r#"ext="x, private, y", public, max-age=60"#,
+        r#"ext="x, no-store", public, max-age=60"#,
+        // The escaped quote does not end the quoted string.
+        r#"ext="x\", private", public, max-age=60"#,
+        // An unterminated quoted string is ambiguous: withhold.
+        r#"ext="unterminated, private"#,
+    ] {
+        let headers = [("cache-control", directive)];
+        assert!(
+            !adds_request_specific_headers(get_request(&[]), StatusCode::OK, &headers).await,
+            "{directive}"
+        );
+    }
+    // Controls: a bare prohibition after a quoted extension still counts.
+    for headers in [
+        &[("cache-control", r#"ext="x, y", private"#)][..],
+        &[("cache-control", r#"ext="x, y", no-store"#)][..],
+    ] {
+        assert!(
+            adds_request_specific_headers(get_request(&[]), StatusCode::OK, headers).await,
+            "{headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn statuses_and_methods_that_are_not_storable_keep_request_specific_headers() {
     for code in [201, 302, 400, 403, 500, 503] {
         let status = StatusCode::from_u16(code).unwrap();
