@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- `request_id.header` now also refuses caching and security-policy response
+  headers (`cache-control`, `expires`, `etag`, `last-modified`, `vary`,
+  `age`, `pragma`, `www-authenticate`, `strict-transport-security`,
+  `content-security-policy`, `x-content-type-options`, `x-frame-options`,
+  `referrer-policy`, `server-timing`). Naming one let the request-id echo
+  replace the application's header after the cache-safety decision had
+  read its original value, dropping a `private`/`no-store` prohibition
+  (#215).
+
 - `diagnose --otlp` keeps an operation linked to its server when ordinary
   spans of the same service instance (with no Alloy measurement, under
   Alloy's or the application's instrumentation scope) sit between them: the importer
