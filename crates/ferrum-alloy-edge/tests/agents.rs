@@ -249,14 +249,15 @@ fn duplicate_operation_ids_are_refused_before_grants_are_derived() {
     let error = prepare(&mut document, Some(&enabled)).unwrap_err();
     assert_problem(&error.0, "share operationId \"list_orders\"");
 
-    // The same operation reached through two aliased Path Items is one
-    // operation, not a duplicate.
+    // The same operation reached through an aliased Path Item is one
+    // operation, not a duplicate. (Two paths aliasing one exposed
+    // operation still collide on tool name, an existing separate check,
+    // so the control uses a single aliased path.)
     let mut document = json!({
         "openapi": "3.1.0",
         "info": { "title": "orders-api", "version": "1" },
         "paths": {
             "/orders": { "$ref": "#/components/pathItems/orders" },
-            "/shop/orders": { "$ref": "#/components/pathItems/orders" },
         },
         "components": {
             "pathItems": {

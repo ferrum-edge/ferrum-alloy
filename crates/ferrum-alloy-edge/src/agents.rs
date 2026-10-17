@@ -666,6 +666,11 @@ fn duplicate_operation_id_problems(
     problems: &mut Problems,
 ) {
     let mut first: BTreeMap<&str, (*const Map<String, Value>, String)> = BTreeMap::new();
+    // One problem per (operationId, duplicate operation) pair: the same
+    // duplicate target reached through many aliased paths reports once,
+    // and the id is excerpted like every other echoed text.
+    let mut reported: HashSet<(*const Map<String, Value>, *const Map<String, Value>)> =
+        HashSet::new();
     for &(path, method, operation) in found {
         let Some(id) = operation_id(operation) else {
             continue;
@@ -675,9 +680,10 @@ fn duplicate_operation_id_problems(
             None => {
                 first.insert(id, (key, location(path, method)));
             }
-            Some(&(seen, ref other)) if seen != key => {
+            Some(&(seen, ref other)) if seen != key && reported.insert((seen, key)) => {
                 let location = location(path, method);
                 let other = other.clone();
+                let id = excerpt_text(id).into_owned();
                 problems.push(format!(
                     "{location} and {other} share operationId {id:?}; operationIds must be unique, because agent exposure is granted by operationId"
                 ));
