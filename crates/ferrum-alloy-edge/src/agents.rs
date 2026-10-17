@@ -245,6 +245,14 @@ pub fn stamp(document: &mut Value, manifest: &ServiceManifest) -> Result<(), Age
         )]));
     }
     let extension = if agents.enabled {
+        // Grants below are keyed by operationId alone, so a second
+        // operation reusing an exposed id would inherit its grant (#216).
+        let mut problems = Problems::default();
+        duplicate_operation_id_problems(&operations(&mut Resolver::new(document)), &mut problems);
+        let problems = problems.into_list();
+        if !problems.is_empty() {
+            return Err(AgentToolError(problems));
+        }
         // Path Items shared by several paths are visited once, so the work
         // does not grow with the number of aliases.
         let mut seen = HashSet::new();
@@ -408,6 +416,7 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     let Some(extension) = extension else {
         return problems.into_list();
     };
+    duplicate_operation_id_problems(&found, &mut problems);
     path_item_problems(&mut resolver, &mut problems);
     if document
         .get("x-ferrum-validate")
@@ -645,6 +654,37 @@ fn operations<'a>(
         }
     }
     found
+}
+
+/// Distinct operations sharing one nonempty `operationId`. Selection and
+/// the stamped `include` name operations by id alone, so a duplicate would
+/// let one operation inherit another's exposure grant (#216); OpenAPI also
+/// requires operationIds to be unique. The same operation object reached
+/// through several aliased Path Items is one operation, not a duplicate.
+fn duplicate_operation_id_problems(
+    found: &[(&str, &'static str, &Map<String, Value>)],
+    problems: &mut Problems,
+) {
+    let mut first: BTreeMap<&str, (*const Map<String, Value>, String)> = BTreeMap::new();
+    for &(path, method, operation) in found {
+        let Some(id) = operation_id(operation) else {
+            continue;
+        };
+        let key = std::ptr::from_ref(operation);
+        match first.get(id) {
+            None => {
+                first.insert(id, (key, location(path, method)));
+            }
+            Some(&(seen, ref other)) if seen != key => {
+                let location = location(path, method);
+                let other = other.clone();
+                problems.push(format!(
+                    "{location} and {other} share operationId {id:?}; operationIds must be unique, because agent exposure is granted by operationId"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// Path Items whose `$ref` cannot be followed.
