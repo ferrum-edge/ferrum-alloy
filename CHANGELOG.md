@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- `ClassifiedPeer` is bound to the classifier that produced it
+  (`ClassifiedPeer::new`, `trust_for`): the telemetry layer and Edge
+  policy reuse a cached per-connection classification only when their
+  own classifier computed it, instead of accepting any transport-cached
+  result. A separately configured stricter Edge policy no longer
+  inherits a broader server classifier's trust to pass
+  `gateway_required` (#214). Transport code that inserted
+  `ClassifiedPeer(Arc<PeerTrust>)` now passes its classifier handle.
+
 - `diagnose --otlp` keeps an operation linked to its server when ordinary
   spans of the same service instance (with no Alloy measurement, under
   Alloy's or the application's instrumentation scope) sit between them: the importer

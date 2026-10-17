@@ -246,11 +246,19 @@ where
 
     fn call(&mut self, mut request: Request<ReqBody>) -> Self::Future {
         let policy = &self.policy;
-        // Reuse the transport's per-connection classification when it
-        // computed one, exactly like the telemetry layer, so both judge
-        // the request by the same single classification.
-        let trust = match request.extensions().get::<ClassifiedPeer>() {
-            Some(classified) => (*classified.0).clone(),
+        // Reuse the transport's per-connection classification when this
+        // policy's classifier computed it, exactly like the telemetry
+        // layer, so both judge the request by the same single
+        // classification. A classification from a different (possibly
+        // broader) classifier is recomputed under this policy's rules:
+        // cached trust must never bypass an independently configured
+        // policy (#214).
+        let trust = match request
+            .extensions()
+            .get::<ClassifiedPeer>()
+            .and_then(|classified| classified.trust_for(&policy.classifier))
+        {
+            Some(trust) => trust.clone(),
             None => policy.classifier.classify(request.extensions()),
         };
         let verification = match &trust {
