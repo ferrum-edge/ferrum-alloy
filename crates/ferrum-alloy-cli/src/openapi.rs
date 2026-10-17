@@ -262,9 +262,7 @@ fn names_stripped_key(text: &str, stripped: &[String]) -> bool {
     let Some((segment, _)) = paths_reference(&decoded) else {
         return false;
     };
-    stripped
-        .iter()
-        .any(|old| pointer_unescape(segment) == *old)
+    stripped.iter().any(|old| pointer_unescape(segment) == *old)
 }
 
 /// Percent-decodes for comparison only (see [`names_stripped_key`]).
