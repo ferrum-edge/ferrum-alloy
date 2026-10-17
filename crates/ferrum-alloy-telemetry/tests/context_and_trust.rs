@@ -593,6 +593,21 @@ fn reserved_request_id_headers_are_rejected() {
         "traceparent",
         "x-consumer-username",
         "x-authenticated-identity",
+        // Caching/security policy the echo would replace after the
+        // cache-safety decision read the original value (#215).
+        "cache-control",
+        "Cache-Control",
+        "expires",
+        "etag",
+        "last-modified",
+        "vary",
+        "strict-transport-security",
+        "content-security-policy",
+        "x-content-type-options",
+        "cross-origin-resource-policy",
+        "cross-origin-opener-policy",
+        "cross-origin-embedder-policy",
+        "server-timing",
         "bad header",
     ] {
         let mut config = TelemetryConfig::default();
@@ -601,17 +616,22 @@ fn reserved_request_id_headers_are_rejected() {
     }
 }
 
-/// A classification the transport computed for the connection is used
-/// as-is: the layer's own (trust-nobody) classifier is not consulted.
+/// A classification the transport computed for the connection with the
+/// layer's own classifier is used as-is: the layer does not classify
+/// again. One produced by a different classifier is recomputed under
+/// the layer's rules (#214).
 #[tokio::test]
 async fn a_preclassified_peer_is_used_without_classifying_again() {
-    let layer = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let classifier: ferrum_alloy_telemetry::peer::SharedClassifier =
+        Arc::new(ferrum_alloy_telemetry::peer::TrustNobody);
+    let layer = TelemetryLayer::new(TelemetryConfig::default())
+        .unwrap()
+        .with_classifier(Arc::clone(&classifier));
     let mut request = request_from("203.0.113.9:4000", None, &[("traceparent", INCOMING)]);
-    request
-        .extensions_mut()
-        .insert(ClassifiedPeer(Arc::new(PeerTrust::VerifiedIdentity(
-            "spiffe://ferrum.test/ns/edge/sa/gateway".into(),
-        ))));
+    request.extensions_mut().insert(ClassifiedPeer::new(
+        classifier,
+        PeerTrust::VerifiedIdentity("spiffe://ferrum.test/ns/edge/sa/gateway".into()),
+    ));
     let (seen, _) = run(layer, request, &[]).await;
     assert_eq!(seen.context.trace_decision, TraceDecision::AcceptedRemote);
     assert!(seen.context.peer_trust.is_verified_identity());
