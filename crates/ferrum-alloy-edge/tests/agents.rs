@@ -205,6 +205,70 @@ fn stamping_refuses_a_second_source_and_an_empty_selection() {
 }
 
 #[test]
+fn duplicate_operation_ids_are_refused_before_grants_are_derived() {
+    // An exposed GET and an unexposed DELETE sharing one operationId, with
+    // distinct tool names so the name-collision check cannot catch it: the
+    // DELETE would inherit the GET's grant through the stamped include.
+    let duplicate = || {
+        json!({
+            "openapi": "3.1.0",
+            "info": { "title": "orders-api", "version": "1" },
+            "paths": {
+                "/orders": {
+                    "get": operation("list_orders", json!({ "expose": true })),
+                },
+                "/orders/{id}": {
+                    "delete": operation(
+                        "list_orders",
+                        json!({ "name": "cancel_order_tool" }),
+                    ),
+                },
+            }
+        })
+    };
+    let enabled = manifest_with("[agents]\nenabled = true\n");
+    let mut document = duplicate();
+    let error = prepare(&mut document, Some(&enabled)).unwrap_err();
+    assert_problem(&error.0, "share operationId \"list_orders\"");
+
+    // The hand-written-extension path (no manifest) is refused by lint.
+    let mut document = duplicate();
+    document[X_FERRUM_MCP] = json!({
+        "enabled": true,
+        "include": { "operations": ["list_orders"] },
+        "namespace": "orders-api",
+    });
+    let problems = lint(&document, None);
+    assert_problem(&problems, "share operationId \"list_orders\"");
+
+    // An explicit hide on the second operation does not rescue the
+    // duplicate: the id itself is the grant key.
+    let mut document = duplicate();
+    document["paths"]["/orders/{id}"]["delete"][X_FERRUM_MCP] =
+        json!({ "expose": false, "name": "cancel_order_tool" });
+    let error = prepare(&mut document, Some(&enabled)).unwrap_err();
+    assert_problem(&error.0, "share operationId \"list_orders\"");
+
+    // The same operation reached through an aliased Path Item is one
+    // operation, not a duplicate. (Two paths aliasing one exposed
+    // operation still collide on tool name, an existing separate check,
+    // so the control uses a single aliased path.)
+    let mut document = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "orders-api", "version": "1" },
+        "paths": {
+            "/orders": { "$ref": "#/components/pathItems/orders" },
+        },
+        "components": {
+            "pathItems": {
+                "orders": { "get": operation("list_orders", json!({ "expose": true })) },
+            },
+        },
+    });
+    assert!(prepare(&mut document, Some(&enabled)).is_ok(), "{document}");
+}
+
+#[test]
 fn prepare_stamps_fills_and_reports_every_problem() {
     let mut document = orders();
     let enabled = manifest_with("[agents]\nenabled = true\n");

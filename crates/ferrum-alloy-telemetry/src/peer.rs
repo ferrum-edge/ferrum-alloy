@@ -92,11 +92,44 @@ pub trait TrustClassifier: Send + Sync + fmt::Debug + 'static {
 /// to [`PeerInfo`]. When present, the telemetry layer uses it instead of
 /// classifying again for every request on the connection.
 ///
+/// The result is bound to the classifier that produced it: a consumer
+/// (telemetry layer, Edge policy) reuses it only through
+/// [`trust_for`](Self::trust_for) with that same classifier, so a
+/// separately configured stricter policy never inherits a broader
+/// classifier's cached trust (#214).
+///
 /// Only transport code that owns the connection may insert this — it is
 /// believed exactly like [`PeerInfo`] itself. Never derive it from
 /// headers.
 #[derive(Debug, Clone)]
-pub struct ClassifiedPeer(pub Arc<PeerTrust>);
+pub struct ClassifiedPeer {
+    trust: Arc<PeerTrust>,
+    classifier: SharedClassifier,
+}
+
+impl ClassifiedPeer {
+    /// Records `classifier`'s classification of a connection's peer.
+    pub fn new(classifier: SharedClassifier, trust: PeerTrust) -> Self {
+        Self {
+            trust: Arc::new(trust),
+            classifier,
+        }
+    }
+
+    /// The recorded classification, whoever produced it. Prefer
+    /// [`trust_for`](Self::trust_for) for trust decisions.
+    pub fn trust(&self) -> &PeerTrust {
+        &self.trust
+    }
+
+    /// The recorded classification when `classifier` is the very
+    /// classifier that produced it (the same shared handle), so the
+    /// caller's own trust rules are the ones that were applied.
+    /// `None` means the caller must classify for itself.
+    pub fn trust_for(&self, classifier: &SharedClassifier) -> Option<&PeerTrust> {
+        Arc::ptr_eq(&self.classifier, classifier).then_some(&self.trust)
+    }
+}
 
 /// Trusts nobody. The default.
 #[derive(Debug, Clone, Copy, Default)]

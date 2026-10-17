@@ -29,11 +29,19 @@ pub fn is_shared_cacheable(
     status: StatusCode,
     response_headers: &HeaderMap,
 ) -> bool {
-    let has = |name: &str| directives(response_headers).any(|d| directive_is(d, name));
+    let (dirs, malformed) = directives(response_headers);
+    // An ambiguous value (an unterminated quoted string) is treated as
+    // storable, which only withholds Alloy's request-specific headers.
+    // This precedes the prohibition checks below: `no-store="unterminated`
+    // must not be read as a prohibition on a guess.
+    if malformed {
+        return true;
+    }
+    let has = |name: &str| dirs.iter().any(|d| directive_is(d, name));
 
     // A qualified `private="field"` still lets a shared cache store the rest
     // of the response (RFC 9111 §5.2.2.7), so only the bare form prohibits it.
-    if has("no-store") || directives(response_headers).any(|d| d.eq_ignore_ascii_case("private")) {
+    if has("no-store") || dirs.iter().any(|d| d.eq_ignore_ascii_case("private")) {
         return false;
     }
     let explicit_shared_freshness = has("public") || has("s-maxage");
@@ -59,15 +67,50 @@ pub fn is_shared_cacheable(
 }
 
 /// Trimmed response `Cache-Control` directives, borrowed from the header
-/// values (no lowercasing copies; comparisons are ASCII-insensitive).
-fn directives(headers: &HeaderMap) -> impl Iterator<Item = &str> {
-    headers
+/// values (no lowercasing copies; comparisons are ASCII-insensitive), and
+/// whether any value was malformed (an unterminated quoted string).
+///
+/// Commas separate directives only outside quoted strings (RFC 9110
+/// §5.6.4): splitting inside `ext="x, private, y"` would invent a bare
+/// `private` directive the sender never sent (#217). Quoted pairs (`\"`,
+/// `\\`) do not end the quoted string.
+fn directives(headers: &HeaderMap) -> (Vec<&str>, bool) {
+    let mut out = Vec::new();
+    let mut malformed = false;
+    for value in headers
         .get_all(CACHE_CONTROL)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .map(|d| d.trim())
-        .filter(|d| !d.is_empty())
+    {
+        let bytes = value.as_bytes();
+        let mut start = 0usize;
+        let mut at = 0usize;
+        let mut quoted = false;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\\' if quoted => at += 1, // skip the quoted pair's byte below
+                b'"' => quoted = !quoted,
+                b',' if !quoted => {
+                    push_directive(&mut out, &value[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        if quoted {
+            malformed = true;
+        }
+        push_directive(&mut out, &value[start..]);
+    }
+    (out, malformed)
+}
+
+fn push_directive<'v>(out: &mut Vec<&'v str>, raw: &'v str) {
+    let directive = raw.trim();
+    if !directive.is_empty() {
+        out.push(directive);
+    }
 }
 
 /// Whether `directive` is `name` or its `name=value` form. `name` is an

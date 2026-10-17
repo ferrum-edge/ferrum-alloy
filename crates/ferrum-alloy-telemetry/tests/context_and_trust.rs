@@ -477,6 +477,40 @@ async fn explicit_prohibitions_keep_request_specific_headers() {
 }
 
 #[tokio::test]
+async fn quoted_commas_do_not_invent_cache_directives() {
+    // A comma inside a quoted extension is not a directive separator, so
+    // none of these sends a bare `private`/`no-store`: the response stays
+    // shared-cacheable and request-specific headers are withheld (#217).
+    for directive in [
+        r#"ext="x, private, y", public, max-age=60"#,
+        r#"ext="x, no-store", public, max-age=60"#,
+        // The escaped quote does not end the quoted string.
+        r#"ext="x\", private", public, max-age=60"#,
+        // An unterminated quoted string is ambiguous: withhold.
+        r#"ext="unterminated, private"#,
+        // Even attached to a prohibition-looking name: an ambiguous
+        // value must not be read as a prohibition on a guess.
+        r#"no-store="unterminated"#,
+    ] {
+        let headers = [("cache-control", directive)];
+        assert!(
+            !adds_request_specific_headers(get_request(&[]), StatusCode::OK, &headers).await,
+            "{directive}"
+        );
+    }
+    // Controls: a bare prohibition after a quoted extension still counts.
+    for headers in [
+        &[("cache-control", r#"ext="x, y", private"#)][..],
+        &[("cache-control", r#"ext="x, y", no-store"#)][..],
+    ] {
+        assert!(
+            adds_request_specific_headers(get_request(&[]), StatusCode::OK, headers).await,
+            "{headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn statuses_and_methods_that_are_not_storable_keep_request_specific_headers() {
     for code in [201, 302, 400, 403, 500, 503] {
         let status = StatusCode::from_u16(code).unwrap();
@@ -559,6 +593,21 @@ fn reserved_request_id_headers_are_rejected() {
         "traceparent",
         "x-consumer-username",
         "x-authenticated-identity",
+        // Caching/security policy the echo would replace after the
+        // cache-safety decision read the original value (#215).
+        "cache-control",
+        "Cache-Control",
+        "expires",
+        "etag",
+        "last-modified",
+        "vary",
+        "strict-transport-security",
+        "content-security-policy",
+        "x-content-type-options",
+        "cross-origin-resource-policy",
+        "cross-origin-opener-policy",
+        "cross-origin-embedder-policy",
+        "server-timing",
         "bad header",
     ] {
         let mut config = TelemetryConfig::default();
@@ -567,17 +616,22 @@ fn reserved_request_id_headers_are_rejected() {
     }
 }
 
-/// A classification the transport computed for the connection is used
-/// as-is: the layer's own (trust-nobody) classifier is not consulted.
+/// A classification the transport computed for the connection with the
+/// layer's own classifier is used as-is: the layer does not classify
+/// again. One produced by a different classifier is recomputed under
+/// the layer's rules (#214).
 #[tokio::test]
 async fn a_preclassified_peer_is_used_without_classifying_again() {
-    let layer = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let classifier: ferrum_alloy_telemetry::peer::SharedClassifier =
+        Arc::new(ferrum_alloy_telemetry::peer::TrustNobody);
+    let layer = TelemetryLayer::new(TelemetryConfig::default())
+        .unwrap()
+        .with_classifier(Arc::clone(&classifier));
     let mut request = request_from("203.0.113.9:4000", None, &[("traceparent", INCOMING)]);
-    request
-        .extensions_mut()
-        .insert(ClassifiedPeer(Arc::new(PeerTrust::VerifiedIdentity(
-            "spiffe://ferrum.test/ns/edge/sa/gateway".into(),
-        ))));
+    request.extensions_mut().insert(ClassifiedPeer::new(
+        classifier,
+        PeerTrust::VerifiedIdentity("spiffe://ferrum.test/ns/edge/sa/gateway".into()),
+    ));
     let (seen, _) = run(layer, request, &[]).await;
     assert_eq!(seen.context.trace_decision, TraceDecision::AcceptedRemote);
     assert!(seen.context.peer_trust.is_verified_identity());
