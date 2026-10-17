@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Agent-tool preparation refuses distinct operations that share one
+  nonempty `operationId`, in both the manifest-stamped and
+  hand-written-extension flows. Exposure is granted by operationId, so
+  a duplicate let a second operation (including a state-changing one
+  with its own tool name) inherit the first operation's grant (#216).
+  The same operation aliased through several Path Items stays allowed.
 - The shared-cache safety check splits `Cache-Control` on commas only
   outside quoted strings (with quoted-pair handling). Splitting inside
   `ext="x, private, y"` invented a bare `private` directive and admitted
