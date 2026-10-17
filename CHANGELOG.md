@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- The shared-cache safety check splits `Cache-Control` on commas only
+  outside quoted strings (with quoted-pair handling). Splitting inside
+  `ext="x, private, y"` invented a bare `private` directive and admitted
+  request-specific headers onto a response shared caches may store; an
+  unterminated quoted string now withholds them instead (#217).
 - `request_id.header` now also refuses caching and security-policy response
   headers (`cache-control`, `expires`, `etag`, `last-modified`, `vary`,
   `age`, `pragma`, `www-authenticate`, `strict-transport-security`,
