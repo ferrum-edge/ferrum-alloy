@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- `request_id.header` now also refuses caching and security-policy response
+  headers (`cache-control`, `expires`, `etag`, `last-modified`, `vary`,
+  `age`, `pragma`, `www-authenticate`, `strict-transport-security`,
+  `content-security-policy`, `x-content-type-options`, `x-frame-options`,
+  `referrer-policy`, the `cross-origin-*-policy` trio, `server-timing`).
+  Naming one let the request-id echo
+  replace the application's header after the cache-safety decision had
+  read its original value, dropping a `private`/`no-store` prohibition
+  (#215).
 - `ClassifiedPeer` is bound to the classifier that produced it
   (`ClassifiedPeer::new`, `trust_for`): the telemetry layer and Edge
   policy reuse a cached per-connection classification only when their

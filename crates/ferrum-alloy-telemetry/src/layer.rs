@@ -162,6 +162,10 @@ pub enum TelemetryConfigError {
     RequestIdHeader(String, &'static str),
 }
 
+/// Header names the request id must never use: the response echo writes
+/// with `insert`, so naming any of these would replace the application's
+/// credential, tracing, consumer-identity, caching or security-policy
+/// header after any decision based on its original value (#215).
 const RESERVED_ID_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -179,6 +183,27 @@ const RESERVED_ID_HEADERS: &[&str] = &[
     "x-consumer-username",
     "x-consumer-custom-id",
     "x-authenticated-identity",
+    // Caching policy and validators: replacing one reclassifies storage.
+    "cache-control",
+    "expires",
+    "etag",
+    "last-modified",
+    "vary",
+    "age",
+    "pragma",
+    // Security policy the browser enforces from the response.
+    "www-authenticate",
+    "strict-transport-security",
+    "content-security-policy",
+    "content-security-policy-report-only",
+    "x-content-type-options",
+    "x-frame-options",
+    "referrer-policy",
+    "cross-origin-resource-policy",
+    "cross-origin-opener-policy",
+    "cross-origin-embedder-policy",
+    // Also written by this layer as a request-specific response header.
+    "server-timing",
 ];
 
 #[derive(Debug, Clone)]

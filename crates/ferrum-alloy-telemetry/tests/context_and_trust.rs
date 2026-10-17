@@ -559,6 +559,21 @@ fn reserved_request_id_headers_are_rejected() {
         "traceparent",
         "x-consumer-username",
         "x-authenticated-identity",
+        // Caching/security policy the echo would replace after the
+        // cache-safety decision read the original value (#215).
+        "cache-control",
+        "Cache-Control",
+        "expires",
+        "etag",
+        "last-modified",
+        "vary",
+        "strict-transport-security",
+        "content-security-policy",
+        "x-content-type-options",
+        "cross-origin-resource-policy",
+        "cross-origin-opener-policy",
+        "cross-origin-embedder-policy",
+        "server-timing",
         "bad header",
     ] {
         let mut config = TelemetryConfig::default();
