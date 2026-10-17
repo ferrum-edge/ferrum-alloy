@@ -669,8 +669,8 @@ fn duplicate_operation_id_problems(
     // One problem per (operationId, duplicate operation) pair: the same
     // duplicate target reached through many aliased paths reports once,
     // and the id is excerpted like every other echoed text.
-    let mut reported: HashSet<(*const Map<String, Value>, *const Map<String, Value>)> =
-        HashSet::new();
+    type OperationKey = *const Map<String, Value>;
+    let mut reported: HashSet<(OperationKey, OperationKey)> = HashSet::new();
     for &(path, method, operation) in found {
         let Some(id) = operation_id(operation) else {
             continue;
