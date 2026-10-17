@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- `openapi export` with `strip_public_path` rewrites Path Item `$ref`s
+  directly under `paths` to the stripped key, and refuses the export
+  (exit 3, naming the reference) when any other `$ref`, `$dynamicRef`
+  or `operationRef` still names a stripped `#/paths/` key, instead of
+  writing a document whose local references no longer resolve (#224,
+  decision (a) there).
+
 - `diagnose --otlp` keeps an operation linked to its server when ordinary
   spans of the same service instance (with no Alloy measurement, under
   Alloy's or the application's instrumentation scope) sit between them: the importer
