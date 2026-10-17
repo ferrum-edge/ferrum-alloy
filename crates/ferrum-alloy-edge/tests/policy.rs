@@ -277,16 +277,17 @@ async fn a_preclassified_peer_skips_the_edge_classifier() {
     let mut config = EdgePolicyConfig::default();
     config.mode = DeploymentMode::GatewayRequired;
     config.accept_consumer_identity = true;
-    let policy = EdgePolicy::new(config, Arc::new(counting));
+    let classifier: ferrum_alloy_telemetry::peer::SharedClassifier = Arc::new(counting);
+    let policy = EdgePolicy::new(config, Arc::clone(&classifier));
 
     // The peer is untrusted on its own, but the transport already
-    // classified the connection as the verified gateway.
+    // classified the connection as the verified gateway with the very
+    // classifier this policy holds.
     let mut preclassified = request("/x", untrusted(), IDENTITY);
-    preclassified
-        .extensions_mut()
-        .insert(ClassifiedPeer(Arc::new(PeerTrust::VerifiedIdentity(
-            GATEWAY.into(),
-        ))));
+    preclassified.extensions_mut().insert(ClassifiedPeer::new(
+        Arc::clone(&classifier),
+        PeerTrust::VerifiedIdentity(GATEWAY.into()),
+    ));
     let (status, seen, _) = run(policy.clone(), preclassified).await;
     assert_eq!(status, http::StatusCode::OK);
     assert!(seen.unwrap().context.is_some(), "identity was accepted");
@@ -303,5 +304,53 @@ async fn a_preclassified_peer_skips_the_edge_classifier() {
         calls.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "the fallback classification runs exactly once"
+    );
+}
+
+/// A cached classification from a *different, broader* classifier must
+/// not satisfy this policy: the server trusts gateway G and service S,
+/// this policy trusts only G, and S's cached `VerifiedIdentity` used to
+/// pass `gateway_required` without the policy's classifier running (#214).
+#[tokio::test]
+async fn cached_trust_from_another_classifier_does_not_satisfy_a_stricter_policy() {
+    const SERVICE: &str = "spiffe://ferrum.test/ns/shop/sa/orders";
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut trust = TrustedPeersConfig::default();
+    trust.identities = vec![GATEWAY.into()];
+    let counting = CountingClassifier {
+        peers: TrustedPeers::new(&trust).unwrap(),
+        calls: Arc::clone(&calls),
+    };
+    let mut config = EdgePolicyConfig::default();
+    config.mode = DeploymentMode::GatewayRequired;
+    config.accept_consumer_identity = true;
+    let policy = EdgePolicy::new(config, Arc::new(counting));
+
+    // The broader server classifier trusts the service identity too.
+    let mut broad_config = TrustedPeersConfig::default();
+    broad_config.identities = vec![GATEWAY.into(), SERVICE.into()];
+    let broader: ferrum_alloy_telemetry::peer::SharedClassifier =
+        Arc::new(TrustedPeers::new(&broad_config).unwrap());
+
+    let service_peer = PeerInfo {
+        remote_addr: Some("198.51.100.7:443".parse::<SocketAddr>().unwrap()),
+        tls: Some(TlsPeer {
+            client_cert_verified: true,
+            spiffe_id: Some(SERVICE.into()),
+            dns_names: vec![],
+        }),
+    };
+    let mut preclassified = request("/x", service_peer, IDENTITY);
+    preclassified.extensions_mut().insert(ClassifiedPeer::new(
+        broader,
+        PeerTrust::VerifiedIdentity(SERVICE.into()),
+    ));
+    let (status, seen, _) = run(policy, preclassified).await;
+    assert_eq!(status, http::StatusCode::FORBIDDEN);
+    assert!(seen.is_none(), "the handler never runs");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the policy's own classifier runs instead of trusting the cache"
     );
 }
