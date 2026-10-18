@@ -103,24 +103,21 @@ fn truncate_found(value: &str) -> String {
 /// Most bytes of one issue's path or message. Issue counts are capped
 /// by [`MAX_ISSUES`]; this bounds each issue too, so total reported
 /// output stays proportional to the caps rather than to the input
-/// (a warning joining thousands of long unrecognized keys, say).
+/// (a warning joining thousands of long unrecognized keys, say). Oversized
+/// text is omitted entirely: a retained prefix could split a credential
+/// before a downstream redactor has a chance to match it.
 const MAX_ISSUE_BYTES: usize = 512;
 
 fn bound_issue_text(text: String) -> String {
     if text.len() <= MAX_ISSUE_BYTES {
         return text;
     }
-    let suffix = format!("… ({} bytes)", text.len());
-    let mut end = MAX_ISSUE_BYTES.saturating_sub(suffix.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{suffix}", &text[..end])
+    format!("<{} bytes omitted>", text.len())
 }
 
-/// Names up to eight keys (each truncated) and counts the rest, for
-/// warnings listing unrecognized fields: naming every key in full
-/// would size the warning by the input.
+/// Names up to eight short keys and counts the rest. Long keys are
+/// omitted entirely, never shortened to a potentially credential-bearing
+/// prefix. Complete short keys remain available to downstream redactors.
 fn key_preview<'a>(keys: impl Iterator<Item = &'a String>) -> String {
     let mut shown: Vec<String> = Vec::new();
     let mut more = 0usize;
@@ -129,11 +126,7 @@ fn key_preview<'a>(keys: impl Iterator<Item = &'a String>) -> String {
             shown.push(if key.len() <= 64 {
                 key.clone()
             } else {
-                let mut end = 32;
-                while !key.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}…", &key[..end])
+                format!("<{}-byte key omitted>", key.len())
             });
         } else {
             more += 1;

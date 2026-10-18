@@ -253,6 +253,97 @@ fn diagnose_reads_otlp_exports() {
 }
 
 #[test]
+fn diagnose_otlp_bounds_do_not_disclose_credential_fragments() {
+    let token = "Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2";
+    for prefix in ["x".repeat(500), "界".repeat(166)] {
+        let value = format!("{prefix}{token}tail");
+        let document = serde_json::json!({ "resourceSpans": [{
+            "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "ordinary-service" } }] },
+            "scopeSpans": [{
+                "scope": { "name": "ferrum-alloy-telemetry" },
+                "spans": [{
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "spanId": "1111111111111111",
+                    "name": "server",
+                    "kind": 2,
+                    "startTimeUnixNano": "1000000000",
+                    "endTimeUnixNano": "1001000000",
+                    "attributes": [
+                        { "key": "alloy.request_id", "value": { "stringValue": value } },
+                        { "key": "http.route", "value": { "stringValue": value } },
+                        { "key": "alloy.server.time_to_headers_ms", "value": { "doubleValue": 1.0 } }
+                    ]
+                }, {
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "spanId": "2222222222222222",
+                    "parentSpanId": "1111111111111111",
+                    "name": value,
+                    "kind": 1,
+                    "startTimeUnixNano": "1000000000",
+                    "endTimeUnixNano": "1001000000",
+                    "attributes": [{ "key": "alloy.operation.duration_ms", "value": { "doubleValue": 1.0 } }]
+                }]
+            }]
+        }] });
+        for credential_env in [
+            "FERRUM_ALLOY_DIAGNOSTICS_TOKEN",
+            "FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN",
+        ] {
+            for format in ["human", "json"] {
+                // Plain and JSON-escaped (`\uXXXX`) spellings decode to the same
+                // credential; neither may leak a fragment.
+                for escaped in [false, true] {
+                    let raw = document.to_string();
+                    let raw = if escaped {
+                        let escaped_token: String = token
+                            .chars()
+                            .map(|c| format!("\\u{:04x}", c as u32))
+                            .collect();
+                        raw.replace(token, &escaped_token)
+                    } else {
+                        raw
+                    };
+                    let dir = tempfile::tempdir().unwrap();
+                    let input = write(dir.path(), "otlp.json", &raw);
+                    let saved = dir.path().join("report.json");
+                    let output = bin()
+                        .env(credential_env, token)
+                        .args([
+                            "diagnose",
+                            "--otlp",
+                            &input,
+                            "--format",
+                            format,
+                            "--write-report",
+                        ])
+                        .arg(&saved)
+                        .output()
+                        .unwrap();
+                    assert_eq!(code(&output), 0, "{}", stderr(&output));
+                    let text = format!("{}{}", stdout(&output), stderr(&output));
+                    assert!(!text.contains(&token[..8]), "{text}");
+                    let written = std::fs::read_to_string(&saved).unwrap();
+                    assert!(!written.contains(&token[..8]), "{written}");
+                    assert!(written.contains("ordinary-service"));
+                    let report = read_json(&saved);
+                    assert!(
+                        report["subject"]["request_id"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("digest:")
+                    );
+                    assert!(report["observations"].as_array().unwrap().iter().any(|o| {
+                        o["attributes"]["operation.name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("digest:"))
+                    }));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn diagnose_writes_reports_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let path = fixture("otlp/edge-alloy-trace.jsonl");
