@@ -18,6 +18,7 @@
 //! could not use fails the export and `--check` with exit 3. A hand-written
 //! selection that publishes every `GET` operation is a warning.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
@@ -173,7 +174,7 @@ fn normalize_paths(
 
     let base_path = manifest.api.service_base_path.trim_end_matches('/');
     let mut normalized_paths = serde_json::Map::new();
-    let mut renamed: Vec<(String, String)> = Vec::new();
+    let mut renamed = BTreeMap::new();
     for (path, operations) in std::mem::take(paths) {
         let normalized = if path == base_path {
             "/"
@@ -183,7 +184,7 @@ fn normalize_paths(
             &path
         };
         if normalized != path {
-            renamed.push((path.clone(), normalized.to_owned()));
+            renamed.insert(path.clone(), normalized.to_owned());
         }
         if normalized_paths
             .insert(normalized.to_owned(), operations)
@@ -204,10 +205,6 @@ fn normalize_paths(
     // other `$ref`/`$dynamicRef`/`operationRef` still names a stripped
     // key, rather than writing a broken document. A false positive (a
     // `$ref`-shaped string that is data) only refuses the export.
-    let targets: std::collections::BTreeMap<&str, &str> = renamed
-        .iter()
-        .map(|(old, new)| (old.as_str(), new.as_str()))
-        .collect();
     for (key, item) in paths.iter_mut() {
         // Extension data under `paths` is not a Path Item; a `$ref`-shaped
         // string there is refused below, never rewritten.
@@ -221,14 +218,14 @@ fn normalize_paths(
             continue;
         };
         if let Some((segment, rest)) = paths_reference(text)
-            && let Some(new) = targets.get(pointer_unescape(segment).as_str())
+            && let Some(new) = renamed.get(pointer_unescape(segment).as_str())
         {
             *reference = Value::String(format!("#/paths/{}{rest}", pointer_escape(new)));
         }
     }
-    // The walk below needs the whole document, beyond the `paths` borrow.
-    let stripped: Vec<String> = targets.keys().map(|old| (*old).to_owned()).collect();
-    refuse_stripped_references(document, &stripped)
+    // Reuse the rename index for the whole-document walk: each reference
+    // decodes its key once and does one lookup, never a scan of every rename.
+    refuse_stripped_references(document, &renamed)
 }
 
 /// The first pointer segment of a local `#/paths/...` reference and the
@@ -257,12 +254,12 @@ fn pointer_unescape(segment: &str) -> String {
 /// segmenting, so no spelling of a stripped key slips past refusal.
 /// Refusal matching is generous in this way, while rewriting above
 /// stays on plain pointer semantics.
-fn names_stripped_key(text: &str, stripped: &[String]) -> bool {
+fn names_stripped_key(text: &str, stripped: &BTreeMap<String, String>) -> bool {
     let decoded = percent_decode(text);
     let Some((segment, _)) = paths_reference(&decoded) else {
         return false;
     };
-    stripped.iter().any(|old| pointer_unescape(segment) == *old)
+    stripped.contains_key(pointer_unescape(segment).as_str())
 }
 
 /// Percent-decodes for comparison only (see [`names_stripped_key`]).
@@ -288,7 +285,10 @@ fn percent_decode(segment: &str) -> String {
 /// Refuses when any `$ref`/`$dynamicRef`/`operationRef` string in the
 /// document still names one of the stripped `paths` keys (the rewritten
 /// Path Item references no longer do).
-fn refuse_stripped_references(document: &Value, stripped: &[String]) -> Result<(), CliError> {
+fn refuse_stripped_references(
+    document: &Value,
+    stripped: &BTreeMap<String, String>,
+) -> Result<(), CliError> {
     let mut stack = vec![document];
     while let Some(value) = stack.pop() {
         match value {

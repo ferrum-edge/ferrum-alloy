@@ -1503,6 +1503,122 @@ fn openapi_export_rewrites_path_item_refs_when_stripping_and_refuses_other_strip
     }
 }
 
+/// A small valid artifact can contain many renamed paths and references to
+/// one unchanged path. Checking each reference must not scan all renames.
+#[test]
+fn openapi_stripped_reference_checks_scale_to_many_unchanged_targets() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "strip.toml",
+        "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"/internal/\"\nstrip_public_path = true\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n",
+    );
+    let mut paths = serde_json::Map::new();
+    paths.insert("/target".into(), serde_json::json!({}));
+    for index in 0..100_000 {
+        paths.insert(
+            format!("/internal/p{index}"),
+            serde_json::json!({ "$ref": "#/paths/~1target" }),
+        );
+    }
+    let document = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": paths,
+        "x-references": [
+            { "$dynamicRef": "#/%70aths/~1target" },
+            { "operationRef": "#/paths/~1target/get" }
+        ]
+    })
+    .to_string();
+    assert!(document.len() < 16 * 1024 * 1024);
+    let input = write(dir.path(), "input.json", &document);
+    let out = dir.path().join("out.json");
+
+    for check in [false, true] {
+        let mut command = bin();
+        command
+            .args([
+                "openapi",
+                "export",
+                "--input",
+                &input,
+                "--manifest",
+                &manifest,
+            ])
+            .arg("--output")
+            .arg(&out)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if check {
+            command.arg("--check");
+        }
+        let mut child = command.spawn().unwrap();
+        // A generous process deadline, rather than a microbenchmark: reap a
+        // regressed export instead of leaving it consuming the CI runner.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let output = loop {
+            if child.try_wait().unwrap().is_some() {
+                break child.wait_with_output().unwrap();
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("stripped reference checking did not finish within 60 s (check={check})");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(code(&output), 0, "check={check}: {}", stderr(&output));
+    }
+    let written = read_json(&out);
+    assert_eq!(written["paths"].as_object().unwrap().len(), 100_001);
+    assert_eq!(written["paths"]["/p0"]["$ref"], "#/paths/~1target");
+    assert!(written["paths"].get("/internal/p0").is_none());
+}
+
+#[test]
+fn openapi_refusal_keeps_all_reference_kinds_and_pointer_decoding() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write(
+        dir.path(),
+        "strip.toml",
+        "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"/internal/\"\nstrip_public_path = true\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n",
+    );
+    for keyword in ["$ref", "$dynamicRef", "operationRef"] {
+        for reference in [
+            "#/paths/~1internal~1a~0b",
+            "#/%70aths/~1internal~1a~0b%2Fget",
+        ] {
+            let document = serde_json::json!({
+                "openapi": "3.1.0",
+                "info": { "title": "t", "version": "1" },
+                "paths": { "/internal/a~b": {} },
+                "x-references": [{ (keyword): reference }]
+            });
+            let input = write(dir.path(), "input.json", &document.to_string());
+            let out = dir.path().join("out.json");
+            let output = bin()
+                .args([
+                    "openapi",
+                    "export",
+                    "--input",
+                    &input,
+                    "--manifest",
+                    &manifest,
+                ])
+                .arg("--output")
+                .arg(&out)
+                .output()
+                .unwrap();
+            assert_eq!(code(&output), 3, "{keyword}: {}", stderr(&output));
+            assert!(stderr(&output).contains(reference));
+            assert!(!out.exists());
+        }
+    }
+}
+
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
