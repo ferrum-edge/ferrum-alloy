@@ -105,11 +105,15 @@
   `ferrum-alloy version`. Historical audit, ADR, and changelog text is
   unchanged.
 - Diagnostic report parsing bounds its output as well as its input:
-  echoed `schema`/`schema_version` values are truncated in errors,
+  oversized echoed `schema`/`schema_version` values are omitted in errors,
   validation errors and warnings are capped at 100 plus a suppression
   marker, and `Limits::max_depth` above the JSON parser's 128 limit is
   clamped instead of silently ineffective. A `edge_record` fuzz target
   now covers `parse_observation`/`bind_record` (#197).
+- Long unknown keys and oversized diagnostic issue text are omitted in
+  full instead of retaining prefixes that could bypass exact credential
+  redaction in human or JSON CLI output. Short keys remain complete, and
+  unknown fields remain preserved in the report.
 - `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
   no Edge authentication plugin is exported yet, so the generated
   configuration authenticates nobody until authentication is configured

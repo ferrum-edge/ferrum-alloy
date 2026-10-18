@@ -646,6 +646,47 @@ fn warnings_bound_bytes_as_well_as_count() {
 }
 
 #[test]
+fn warning_bounds_omit_long_text_without_retaining_secret_prefixes() {
+    let secret = "Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2";
+    for prefix in ["x", "😀"] {
+        let key = format!("{prefix}{secret}{}", "z".repeat(32));
+        let mut report = base();
+        report[&key] = json!(0);
+        report["x-safe"] = json!(1);
+        let parsed = parse(&report).unwrap();
+        let messages = format!("{:?}", parsed.warnings);
+        assert!(!messages.contains(&secret[..8]), "{messages}");
+        assert!(messages.contains("key omitted"), "{messages}");
+        assert!(messages.contains("x-safe"), "{messages}");
+        assert!(parsed.report.unrecognized.contains_key(&key));
+    }
+
+    // Each key fits the short-key bound, but their combined warning does
+    // not. The outer issue bound must also omit rather than cut a key.
+    let mut report = base();
+    for index in 0..8 {
+        report[format!("{index}{}{secret}", "x".repeat(31))] = json!(0);
+    }
+    let parsed = parse(&report).unwrap();
+    let messages = format!("{:?}", parsed.warnings);
+    assert!(!messages.contains(&secret[..8]), "{messages}");
+    assert!(messages.contains("bytes omitted"), "{messages}");
+    assert_eq!(parsed.report.unrecognized.len(), 8);
+
+    // Other validation messages pass through the same byte limiter.
+    let name = format!("{}{secret}{}", "n".repeat(450), "z".repeat(100));
+    let mut report = base();
+    let mut item = observation("o1");
+    item["name"] = json!(name);
+    report["observations"] = json!([item]);
+    let parsed = parse(&report).unwrap();
+    let messages = format!("{:?}", parsed.warnings);
+    assert!(!messages.contains(&secret[..8]), "{messages}");
+    assert!(messages.contains("bytes omitted"), "{messages}");
+    assert_eq!(parsed.report.observations[0].name, name);
+}
+
+#[test]
 fn max_depth_above_the_parser_limit_is_clamped() {
     let limits = Limits {
         max_depth: 10_000,

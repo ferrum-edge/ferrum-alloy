@@ -183,6 +183,96 @@ fn a_reflected_token_file_credential_is_redacted_everywhere() {
     assert!(written.contains("[REDACTED]"), "{written}");
 }
 
+/// Parser bounds must never turn a complete reflected token into a
+/// fragment that exact credential redaction cannot recognize.
+#[test]
+fn bounded_warnings_do_not_disclose_reflected_credential_fragments() {
+    let token = "Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2";
+    for case in [
+        "long-key",
+        "unicode-key",
+        "short-keys",
+        "name",
+        "verification",
+        "availability",
+        "short-key",
+    ] {
+        let mut value: serde_json::Value = serde_json::from_str(&report()).unwrap();
+        let long_value = format!("{}{token}{}", "n".repeat(450), "z".repeat(100));
+        match case {
+            "long-key" => value[format!("x{token}{}", "z".repeat(32))] = 0.into(),
+            "unicode-key" => value[format!("😀{token}{}", "z".repeat(32))] = 0.into(),
+            "short-keys" => {
+                for index in 0..8 {
+                    value[format!("{index}{}{token}", "x".repeat(31))] = 0.into();
+                }
+            }
+            "name" => value["observations"][0]["name"] = long_value.into(),
+            "verification" => value["collection"]["verification"] = long_value.into(),
+            "availability" => value["observations"][0]["availability"] = long_value.into(),
+            "short-key" => value[format!("x{token}")] = 0.into(),
+            _ => unreachable!(),
+        }
+        value["x-safe"] = 1.into();
+        for format in ["human", "json"] {
+            for live in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let input = dir.path().join("input.json");
+                let token_file = dir.path().join("token");
+                let saved = dir.path().join("saved.json");
+                std::fs::write(&input, value.to_string()).unwrap();
+                std::fs::write(&token_file, format!("{token}\n")).unwrap();
+                let mut command = bin();
+                command.args(["diagnose", "--format", format, "--write-report"]);
+                command.arg(&saved);
+                let server = if live {
+                    let (url, server) = serve(value.to_string());
+                    command.env_remove(TOKEN_ENV).args([
+                        "--url",
+                        &url,
+                        "--request-id",
+                        "req-1",
+                        "--token-file",
+                    ]);
+                    command.arg(&token_file);
+                    Some(server)
+                } else {
+                    command.env(TOKEN_ENV, token).arg("--input").arg(&input);
+                    None
+                };
+                let output = command.output().unwrap();
+                if let Some(server) = server {
+                    let request = server.join().unwrap();
+                    assert!(request.to_ascii_lowercase().contains(&format!(
+                        "authorization: bearer {}",
+                        token.to_ascii_lowercase()
+                    )));
+                }
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    output.status.success(),
+                    "{case}/{format}/live={live}: {text}"
+                );
+                assert!(
+                    !text.contains(&token[..8]),
+                    "{case}/{format}/live={live}: {text}"
+                );
+                let written = std::fs::read_to_string(saved).unwrap();
+                assert!(!written.contains(&token[..8]), "{case}: {written}");
+                assert!(written.contains("x-safe"));
+                if case == "short-key" {
+                    assert!(text.contains("[REDACTED]"), "{text}");
+                    assert!(text.contains("x-safe"), "{text}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_trickling_service_body_cannot_extend_the_whole_operation_deadline() {
     let proof = trickle::prove_trickle_deadline(&report(), diagnose);
