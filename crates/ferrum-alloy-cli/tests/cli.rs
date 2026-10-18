@@ -290,40 +290,54 @@ fn diagnose_otlp_bounds_do_not_disclose_credential_fragments() {
             "FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN",
         ] {
             for format in ["human", "json"] {
-                let dir = tempfile::tempdir().unwrap();
-                let input = write(dir.path(), "otlp.json", &document.to_string());
-                let saved = dir.path().join("report.json");
-                let output = bin()
-                    .env(credential_env, token)
-                    .args([
-                        "diagnose",
-                        "--otlp",
-                        &input,
-                        "--format",
-                        format,
-                        "--write-report",
-                    ])
-                    .arg(&saved)
-                    .output()
-                    .unwrap();
-                assert_eq!(code(&output), 0, "{}", stderr(&output));
-                let text = format!("{}{}", stdout(&output), stderr(&output));
-                assert!(!text.contains(&token[..8]), "{text}");
-                let written = std::fs::read_to_string(&saved).unwrap();
-                assert!(!written.contains(&token[..8]), "{written}");
-                assert!(written.contains("ordinary-service"));
-                let report = read_json(&saved);
-                assert!(
-                    report["subject"]["request_id"]
-                        .as_str()
-                        .unwrap()
-                        .starts_with("digest:")
-                );
-                assert!(report["observations"].as_array().unwrap().iter().any(|o| {
-                    o["attributes"]["operation.name"]
-                        .as_str()
-                        .is_some_and(|name| name.starts_with("digest:"))
-                }));
+                // Plain and JSON-escaped (`\uXXXX`) spellings decode to the same
+                // credential; neither may leak a fragment.
+                for escaped in [false, true] {
+                    let raw = document.to_string();
+                    let raw = if escaped {
+                        let escaped_token: String = token
+                            .chars()
+                            .map(|c| format!("\\u{:04x}", c as u32))
+                            .collect();
+                        raw.replace(token, &escaped_token)
+                    } else {
+                        raw
+                    };
+                    let dir = tempfile::tempdir().unwrap();
+                    let input = write(dir.path(), "otlp.json", &raw);
+                    let saved = dir.path().join("report.json");
+                    let output = bin()
+                        .env(credential_env, token)
+                        .args([
+                            "diagnose",
+                            "--otlp",
+                            &input,
+                            "--format",
+                            format,
+                            "--write-report",
+                        ])
+                        .arg(&saved)
+                        .output()
+                        .unwrap();
+                    assert_eq!(code(&output), 0, "{}", stderr(&output));
+                    let text = format!("{}{}", stdout(&output), stderr(&output));
+                    assert!(!text.contains(&token[..8]), "{text}");
+                    let written = std::fs::read_to_string(&saved).unwrap();
+                    assert!(!written.contains(&token[..8]), "{written}");
+                    assert!(written.contains("ordinary-service"));
+                    let report = read_json(&saved);
+                    assert!(
+                        report["subject"]["request_id"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("digest:")
+                    );
+                    assert!(report["observations"].as_array().unwrap().iter().any(|o| {
+                        o["attributes"]["operation.name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("digest:"))
+                    }));
+                }
             }
         }
     }
