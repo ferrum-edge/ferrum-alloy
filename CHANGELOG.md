@@ -8,6 +8,9 @@
   or `operationRef` still names a stripped `#/paths/` key, instead of
   writing a document whose local references no longer resolve (#224,
   decision (a) there).
+- Stripped-path reference checking reuses the path-rename index and decodes
+  each reference once, avoiding a scan of every renamed key for each
+  reference in an OpenAPI export or `--check`.
 - Agent-tool preparation refuses distinct operations that share one
   nonempty `operationId`, in both the manifest-stamped and
   hand-written-extension flows. Exposure is granted by operationId, so
