@@ -114,6 +114,10 @@
   full instead of retaining prefixes that could bypass exact credential
   redaction in human or JSON CLI output. Short keys remain complete, and
   unknown fields remain preserved in the report.
+- OTLP import bounds long span names, attribute keys and string values
+  with full-value digests instead of source prefixes, so `diagnose --otlp`
+  cannot retain a partial reflected credential before output redaction.
+  Text up to 512 bytes and the instance-identity domain rules are unchanged.
 - `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
   no Edge authentication plugin is exported yet, so the generated
   configuration authenticates nobody until authentication is configured

@@ -166,6 +166,45 @@ fn overlong_instance_identities_are_not_truncated_into_collisions() {
 }
 
 #[test]
+fn bounded_otlp_text_keeps_short_values_whole_and_never_retains_long_prefixes() {
+    let token = "Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2";
+    let with_text = |value: &str| {
+        let mut span = server_span(ORDERS_SPAN, None, 0);
+        span["attributes"].as_array_mut().unwrap().extend([
+            str_attr("alloy.request_id", value),
+            str_attr("http.route", value),
+        ]);
+        import(
+            &otlp(vec![alloy_resource(value, vec![span])]),
+            None,
+            collector(),
+            &ImportLimits::default(),
+        )
+        .unwrap()
+    };
+    for value in ["s".repeat(512), "digest:ordinary-text".to_owned()] {
+        let report = with_text(&value);
+        assert_eq!(report.subject.request_id.as_deref(), Some(value.as_str()));
+        assert_eq!(report.subject.service.as_deref(), Some(value.as_str()));
+        assert_eq!(report.subject.route.as_deref(), Some(value.as_str()));
+    }
+    for prefix in ["x".repeat(500), "界".repeat(166)] {
+        let report = with_text(&format!("{prefix}{token}tail"));
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(!encoded.contains(&token[..8]), "{encoded}");
+        let id = report.subject.request_id.as_deref().unwrap();
+        assert!(id.starts_with("digest:"));
+        assert!(id.len() <= 512);
+    }
+    let prefix = "x".repeat(600);
+    assert_ne!(
+        with_text(&format!("{prefix}-a")).subject.request_id,
+        with_text(&format!("{prefix}-b")).subject.request_id,
+        "distinct long values must not collapse to a common prefix or omission marker"
+    );
+}
+
+#[test]
 fn a_literal_identity_never_equals_another_identity_digest() {
     // For each identity key: a long identity becomes a digest; a resource
     // whose literal identity is that digest text must not become the same

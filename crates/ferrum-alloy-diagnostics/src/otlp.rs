@@ -472,7 +472,7 @@ fn parse_span(
         trace_id,
         span_id,
         parent_span_id,
-        name: truncate(item.get("name").and_then(Value::as_str).unwrap_or_default()),
+        name: bounded_text(item.get("name").and_then(Value::as_str).unwrap_or_default()),
         kind,
         start: nanos(item.get("startTimeUnixNano")),
         end: nanos(item.get("endTimeUnixNano")),
@@ -537,7 +537,7 @@ fn attributes(value: Option<&Value>) -> BTreeMap<String, AttrValue> {
             if key == "service.instance.id" || key == "host.name" {
                 Some(AttrValue::Str(identity(s)))
             } else {
-                Some(AttrValue::Str(truncate(s)))
+                Some(AttrValue::Str(bounded_text(s)))
             }
         } else if let Some(v) = value.get("intValue") {
             match v {
@@ -558,7 +558,7 @@ fn attributes(value: Option<&Value>) -> BTreeMap<String, AttrValue> {
                 .map(AttrValue::Bool)
         };
         if let Some(parsed) = parsed {
-            out.insert(truncate(key), parsed);
+            out.insert(bounded_text(key), parsed);
         }
     }
     out
@@ -581,7 +581,7 @@ fn identity(value: &str) -> String {
     }
 }
 
-/// A bounded, deterministic stand-in for an overlong instance identity:
+/// A bounded, deterministic stand-in for an overlong identity or text:
 /// two FNV-1a/splitmix 64-bit halves over the full value, so equal
 /// identities stay equal and identities that merely share a long prefix
 /// stay distinct (up to a 128-bit collision, versus certain collision
@@ -607,15 +607,17 @@ fn bounded_identity(value: &str) -> String {
     format!("{IDENTITY_DIGEST_PREFIX}{hi:016x}{lo:016x}")
 }
 
-fn truncate(value: &str) -> String {
+/// Keep short text whole; represent long text without retaining a source
+/// prefix that could split a credential before downstream redaction. Use
+/// the full value's digest rather than one shared omission marker so
+/// distinct long service names, request ids, and attribute keys stay distinct.
+/// Instance identities additionally use [`identity`] to separate literal
+/// and digested identity domains.
+fn bounded_text(value: &str) -> String {
     if value.len() <= MAX_ATTR_BYTES {
         return value.to_owned();
     }
-    let mut end = MAX_ATTR_BYTES;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
+    bounded_identity(value)
 }
 
 fn nanos(value: Option<&Value>) -> u64 {
