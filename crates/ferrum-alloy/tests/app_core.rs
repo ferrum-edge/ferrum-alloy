@@ -16,10 +16,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bytes::Bytes;
-use ferrum_alloy::AlloyApp;
 use ferrum_alloy::extract::{Json, ValidJson, Validate, ValidationErrors};
-use ferrum_alloy::health::{CheckError, HealthCheck, Readiness};
+use ferrum_alloy::health::{self, CheckError, HealthCheck, Readiness};
 use ferrum_alloy::telemetry::RequestContext;
+use ferrum_alloy::{AlloyApp, Lifecycle};
 use http::Request;
 use http_body_util::{BodyExt, Full};
 use serde::Deserialize;
@@ -641,6 +641,65 @@ async fn concurrent_waiters_resumed_after_expiry_share_their_refresh() {
         1,
         "the waiters returned their shared refresh instead of refreshing again"
     );
+}
+
+/// Shutdown that begins while a readiness probe waits for a refresh is
+/// reported by that probe: it answers `draining`, whether the held check
+/// then passes or fails.
+#[tokio::test]
+async fn a_readiness_probe_pending_when_draining_starts_reports_draining() {
+    for healthy in [true, false] {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let check: Arc<dyn HealthCheck> = {
+            let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+            Arc::new(move || {
+                let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    if healthy {
+                        Ok::<(), CheckError>(())
+                    } else {
+                        Err(CheckError::new("connection refused"))
+                    }
+                }
+            })
+        };
+        let readiness = Arc::new(Readiness::new(
+            vec![("db".to_owned(), check)],
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        ));
+        let lifecycle = Lifecycle::new(Arc::default());
+        let probe = tokio::spawn({
+            let (readiness, lifecycle) = (Arc::clone(&readiness), lifecycle.clone());
+            async move { health::readiness(&readiness, &lifecycle).await }
+        });
+        // The probe passed its draining check and waits on the cold cache.
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the check starts");
+        assert!(!probe.is_finished(), "the probe waits for the refresh");
+        lifecycle.trigger_shutdown();
+        release.notify_one();
+        let response = tokio::time::timeout(Duration::from_secs(5), probe)
+            .await
+            .expect("the probe returns")
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "healthy: {healthy}"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "status": "draining" }),
+            "healthy: {healthy}"
+        );
+    }
 }
 
 /// A failed `prepare()` keeps the explicit configuration: retrying

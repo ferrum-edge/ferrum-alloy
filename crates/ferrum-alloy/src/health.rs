@@ -284,7 +284,11 @@ pub async fn readiness(readiness: &Readiness, lifecycle: &Lifecycle) -> Response
         );
     }
     let snapshot = readiness.snapshot().await;
-    let (status, label) = if snapshot.ready {
+    // Shutdown can begin while a refresh is pending; the probe then
+    // reports draining, whatever the refresh found.
+    let (status, label) = if lifecycle.is_draining() {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining")
+    } else if snapshot.ready {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not_ready")

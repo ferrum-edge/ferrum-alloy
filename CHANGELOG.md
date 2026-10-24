@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Minimal readiness (`/readyz` and the management readiness probe) reads
+  the draining flag again after waiting for a readiness refresh, as
+  detailed health already did. A probe that was waiting when shutdown
+  began answered `200 ready` (or `not_ready`) instead of
+  `503 {"status":"draining"}` (#252).
 - The `http-client` starter logs a failed upstream call by a fixed failure
   kind (`error.kind`: `timeout`, `connect`, `redirect`, `builder`, `body`,
   `decode` or `request`) instead of reqwest's error text, which can include
