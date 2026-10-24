@@ -166,6 +166,10 @@ const HTTP_CLIENT: &[(&str, &str)] = &[
         "tests/upstream.rs",
         include_str!("../templates/http-client/tests/upstream.rs.tmpl"),
     ),
+    (
+        "tests/upstream_logs.rs",
+        include_str!("../templates/http-client/tests/upstream_logs.rs.tmpl"),
+    ),
 ];
 
 /// A `postgres`, `jwt`, or `http-client` starter: the module and files it

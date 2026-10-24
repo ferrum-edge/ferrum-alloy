@@ -1,8 +1,6 @@
 //! The outbound client configured from alloy.toml, against a local server.
 
-use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use axum::Extension;
 use axum::Router;
@@ -17,8 +15,6 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
-use tracing::field::{Field, Visit};
-use tracing_subscriber::layer::{Context, SubscriberExt};
 use url::Url;
 
 use {{crate_name}}::upstream::{self, Upstream};
@@ -72,49 +68,6 @@ async fn call(target: Upstream) -> (StatusCode, Value) {
     let body = response.into_body().collect().await.expect("body");
     let json = serde_json::from_slice(&body.to_bytes()).unwrap_or(Value::Null);
     (status, json)
-}
-
-/// Every field of every span and event logged while it is the subscriber.
-#[derive(Clone, Default)]
-struct Logs(Arc<Mutex<String>>);
-
-impl Logs {
-    fn text(&self) -> String {
-        self.0.lock().expect("logs lock").clone()
-    }
-}
-
-struct LogVisitor<'a>(&'a Logs);
-
-impl Visit for LogVisitor<'_> {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let mut text = self.0.0.lock().expect("logs lock");
-        let _ = writeln!(text, "{}={value:?}", field.name());
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Logs {
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        _id: &tracing::span::Id,
-        _ctx: Context<'_, S>,
-    ) {
-        attrs.record(&mut LogVisitor(self));
-    }
-
-    fn on_record(
-        &self,
-        _span: &tracing::span::Id,
-        values: &tracing::span::Record<'_>,
-        _ctx: Context<'_, S>,
-    ) {
-        values.record(&mut LogVisitor(self));
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        event.record(&mut LogVisitor(self));
-    }
 }
 
 #[test]
@@ -174,28 +127,4 @@ async fn an_unreachable_upstream_is_a_bad_gateway_problem() {
     let (status, json) = call(Upstream::new(client, url)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(json["title"], "Upstream request failed");
-}
-
-/// `UPSTREAM_URL` may hold a secret in its path or query. A failed call is
-/// logged by its kind, never by reqwest's error, whose text can include the
-/// URL.
-#[tokio::test]
-async fn a_failed_call_logs_its_kind_without_the_url() {
-    let logs = Logs::default();
-    let subscriber = tracing_subscriber::registry().with(logs.clone());
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let client = AlloyClient::new(&configured()).expect("client");
-    // Nothing listens on port 1 of the loopback interface.
-    let secret = "http://127.0.0.1:1/path-secret?token=query-secret";
-    let url = upstream::parse_url(secret).expect("url");
-    let (status, json) = call(Upstream::new(client, url)).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(json["title"], "Upstream request failed");
-    let logged = logs.text();
-    assert!(logged.contains("upstream request failed"), "{logged}");
-    assert!(logged.contains("error.kind=\"connect\""), "{logged}");
-    for fragment in ["path-secret", "query-secret"] {
-        assert!(!logged.contains(fragment), "{logged}");
-        assert!(!json.to_string().contains(fragment), "{json}");
-    }
 }

@@ -2363,6 +2363,7 @@ fn new_generates_database_auth_and_client_starters() {
         "tests/db.rs",
         "tests/auth.rs",
         "tests/upstream.rs",
+        "tests/upstream_logs.rs",
         "migrations/0001_create_notes.sql",
     ] {
         assert!(!read(&target, file).contains("{{"), "{file}");
