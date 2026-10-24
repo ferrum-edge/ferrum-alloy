@@ -11,7 +11,11 @@ yanked = "deny"
 unmaintained = "all"
 unsound = "all"
 unused-ignored-advisory = "deny"
-# Every exception carries a rationale and an expiry for re-review.
+# Every exception carries a rationale and an expiry for re-review: a `reason`
+# with exactly one `[expires:YYYY-MM-DD]` token. cargo-deny does not read that
+# token; ci/check_advisory_expiry.py does, before cargo-deny in the CI
+# dependency-policy job and the weekly advisories workflow, and fails on a
+# missing, malformed, or past date.
 ignore = [
     # rsa 0.9 (via jsonwebtoken's rust_crypto backend, feature `jwt`):
     # timing side channel in RSA *private-key* operations (decryption and
@@ -38,6 +42,11 @@ ignore = [
     # secret-dependent use is reachable in Alloy or in generated services.
     # Exit: jsonwebtoken moves to p256/p384 0.14 (elliptic-curve 0.14 /
     # crypto-bigint >= 0.7.6), or Alloy switches its backend.
+    # jsonwebtoken's only other backend, `aws_lc_rs`, would remove the crate
+    # today, but `aws-lc-sys` is banned below (the crypto stack stays on
+    # ring), so that is a policy change for the owner, not a drop-in fix.
+    # Installing a ring-backed jsonwebtoken CryptoProvider instead would mean
+    # a process-global install from library code, which AGENTS.md forbids.
     # [expires:2026-11-30]
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; pending owner acceptance; see comment [expires:2026-11-30]" },
 ]
