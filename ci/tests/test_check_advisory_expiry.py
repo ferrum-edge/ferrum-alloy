@@ -65,6 +65,9 @@ class AdvisoryExpiryTests(unittest.TestCase):
             "short": "[expires:2026-1-5]",
             "empty": "[expires:]",
             "two tokens": "[expires:2026-12-31] [expires:2027-01-31]",
+            "unterminated": "[expires:2026-12-31",
+            "valid then dangling": "[expires:2027-12-31] earlier cutoff [expires:2026-11-01",
+            "dangling then valid": "cutoff [expires:2026-11-01 then [expires:2027-12-31]",
         }
         for name, token in cases.items():
             with self.subTest(name=name):
@@ -88,14 +91,26 @@ class AdvisoryExpiryTests(unittest.TestCase):
         self.assertEqual(run("").returncode, 0)
         self.assertEqual(run("[advisories\n").returncode, 2)
 
-    def test_repository_deny_toml_has_a_deadline_on_every_ignore(self):
+    def test_no_exceptions_at_all_is_valid(self):
+        # Removing the last ignore (an empty list, or no `ignore` key) must not
+        # break CI.
+        self.assertEqual(run("[advisories]\nversion = 2\nignore = []\n").returncode, 0)
+        self.assertEqual(run("[advisories]\nversion = 2\nyanked = \"deny\"\n").returncode, 0)
+
+    def test_repository_deny_toml_passes_the_checker_structurally(self):
+        # Every ignore the repository has (possibly none) carries one deadline.
+        # Dates are checked against the far past so this test never expires.
+        result = subprocess.run(
+            [sys.executable, "-I", str(SCRIPT), "--config", str(REPO_DENY), "--today", "2000-01-01"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
         config = tomllib.loads(REPO_DENY.read_text(encoding="utf-8"))
-        ignores = config["advisories"]["ignore"]
-        self.assertTrue(ignores)
-        for entry in ignores:
-            with self.subTest(id=entry.get("id")):
+        for entry in config.get("advisories", {}).get("ignore", []):
+            with self.subTest(id=entry.get("id") if isinstance(entry, dict) else entry):
                 self.assertIsInstance(entry, dict)
-                self.assertRegex(entry["reason"], r"\[expires:\d{4}-\d{2}-\d{2}\]")
 
 
 if __name__ == "__main__":

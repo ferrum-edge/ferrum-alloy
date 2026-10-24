@@ -26,7 +26,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-EXPIRES_TOKEN = re.compile(r"\[expires:([^\]]*)\]")
+EXPIRES_MARKER = "[expires:"
+EXPIRES_TOKEN = re.compile(r"\[expires:([^\]\[]*)\]")
 ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -58,12 +59,18 @@ def check(config: dict, today: dt.date) -> tuple[list[str], list[str]]:
         if not isinstance(reason, str) or not reason.strip():
             failures.append(f"{label}: missing `reason` with an [expires:YYYY-MM-DD] token")
             continue
+        # Count marker starts independently of closed tokens, so a dangling
+        # `[expires:` cannot sit beside a valid token unnoticed.
+        markers = reason.count(EXPIRES_MARKER)
         tokens = EXPIRES_TOKEN.findall(reason)
-        if not tokens:
+        if markers == 0:
             failures.append(f"{label}: `reason` has no [expires:YYYY-MM-DD] token")
             continue
-        if len(tokens) > 1:
-            failures.append(f"{label}: `reason` has {len(tokens)} [expires:] tokens; use one")
+        if markers > 1:
+            failures.append(f"{label}: `reason` has {markers} [expires: markers; use exactly one token")
+            continue
+        if len(tokens) != 1:
+            failures.append(f"{label}: the [expires: marker in `reason` is not closed; use [expires:YYYY-MM-DD]")
             continue
         raw = tokens[0].strip()
         if not ISO_DATE.fullmatch(raw):
