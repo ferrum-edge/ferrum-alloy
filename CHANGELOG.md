@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `deny.toml` adds a time-boxed exception (pending owner acceptance, expires
+  2026-11-30) for RUSTSEC-2026-0387 in `crypto-bigint` 0.5.5. It comes in
+  through jsonwebtoken's `rust_crypto` backend (`p256`/`p384` 0.13), and
+  there is no patched 0.5.x. Alloy only uses it to verify signatures with
+  public keys; only tests sign, with throwaway keys. `cargo deny check`
+  passes again.
 - `openapi export` with `strip_public_path` rewrites Path Item `$ref`s
   directly under `paths` to the stripped key, and refuses the export
   (exit 3, naming the reference) when any other `$ref`, `$dynamicRef`

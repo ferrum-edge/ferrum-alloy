@@ -20,6 +20,26 @@ ignore = [
     # No patched release exists. Re-evaluate by the expiry date or when
     # jsonwebtoken offers a backend without this crate. [expires:2026-12-26]
     { id = "RUSTSEC-2023-0071", reason = "public-key verification only; see comment [expires:2026-12-26]" },
+    # crypto-bigint 0.5.5 (via jsonwebtoken 11.1.0's rust_crypto backend ->
+    # p256 0.13.2 / p384 0.13.1 -> elliptic-curve 0.13.8): RUSTSEC-2026-0387,
+    # timing variability in operations meant to be constant-time. Fixed only in
+    # >= 0.7.6; there is no patched 0.5.x, and jsonwebtoken 11.1.0 (latest)
+    # still requires p256 ^0.13. Time-boxed risk acceptance, PENDING OWNER
+    # ACCEPTANCE. It is reached in two ways:
+    #   - The optional `jwt` feature (also in `full`, and enabled by
+    #     `ferrum-alloy new --with jwt` projects). It is not in the CLI binary
+    #     or the default features. src/jwt.rs only builds `DecodingKey`s from
+    #     JWKS and verifies ES256/ES384 signatures, so crypto-bigint only sees
+    #     public keys and signatures.
+    #   - Tests that sign ES256/ES384 with throwaway keys they generate
+    #     themselves: the ferrum-alloy dev-dependency and the dev-dependency
+    #     in the generated `jwt` starter.
+    # No private key from a deployment ever reaches this code, so no
+    # secret-dependent use is reachable in Alloy or in generated services.
+    # Exit: jsonwebtoken moves to p256/p384 0.14 (elliptic-curve 0.14 /
+    # crypto-bigint >= 0.7.6), or Alloy switches its backend.
+    # [expires:2026-11-30]
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; pending owner acceptance; see comment [expires:2026-11-30]" },
 ]
 
 [licenses]
