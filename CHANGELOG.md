@@ -15,6 +15,17 @@
   depend on `reqwest` directly for the error type, and `reqwest` is a
   reserved project name. Projects generated earlier keep the old handler in
   `src/upstream.rs` and need the same change.
+- `deny.toml` adds a time-boxed exception (pending owner acceptance, expires
+  2026-11-30) for RUSTSEC-2026-0387 in `crypto-bigint` 0.5.5. It comes in
+  through jsonwebtoken's `rust_crypto` backend (`p256`/`p384` 0.13), and
+  there is no patched 0.5.x. Alloy only uses it to verify signatures with
+  public keys; only tests sign, with throwaway keys. `cargo deny check`
+  passes again.
+- `ci/check_advisory_expiry.py` enforces the `[expires:YYYY-MM-DD]` deadline
+  on every `deny.toml` advisory ignore, which cargo-deny itself ignores. It
+  runs, with its tests, before cargo-deny in the CI dependency-policy job and
+  the weekly advisories workflow, and fails on a missing, malformed, or past
+  deadline.
 - `openapi export` with `strip_public_path` rewrites Path Item `$ref`s
   directly under `paths` to the stripped key, and refuses the export
   (exit 3, naming the reference) when any other `$ref`, `$dynamicRef`
