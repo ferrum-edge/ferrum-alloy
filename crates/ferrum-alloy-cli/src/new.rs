@@ -166,6 +166,10 @@ const HTTP_CLIENT: &[(&str, &str)] = &[
         "tests/upstream.rs",
         include_str!("../templates/http-client/tests/upstream.rs.tmpl"),
     ),
+    (
+        "tests/upstream_logs.rs",
+        include_str!("../templates/http-client/tests/upstream_logs.rs.tmpl"),
+    ),
 ];
 
 /// A `postgres`, `jwt`, or `http-client` starter: the module and files it
@@ -209,7 +213,7 @@ const POSTGRES_STARTER: Starter = Starter {
     module: "db",
     files: POSTGRES,
     dependencies: include_str!("../templates/postgres/fragments/dependencies.toml.tmpl"),
-    dev_dependencies: include_str!("../templates/postgres/fragments/dev-dependencies.toml.tmpl"),
+    dev_dependencies: "",
     main_doc: include_str!("../templates/postgres/fragments/main_doc.rs.tmpl"),
     main_use: "use ferrum_alloy::postgres;\n",
     main_resources: include_str!("../templates/postgres/fragments/main_resources.rs.tmpl"),
@@ -340,6 +344,7 @@ const RESERVED: &[&str] = &[
     "utoipa",
     "utoipa-axum",
     "sqlx",
+    "reqwest",
     "tracing",
     "tracing-subscriber",
     "jsonwebtoken",

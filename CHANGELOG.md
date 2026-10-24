@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Minimal readiness (`/readyz` and the management readiness probe) reads
+  the draining flag again after waiting for a readiness refresh, as
+  detailed health already did. A probe that was waiting when shutdown
+  began answered `200 ready` (or `not_ready`) instead of
+  `503 {"status":"draining"}` (#252).
+- The `http-client` starter logs a failed upstream call by a fixed failure
+  kind (`error.kind`: `timeout`, `connect`, `redirect`, `builder`, `body`,
+  `decode` or `request`) instead of reqwest's error text, which can include
+  the request URL, so a path or query in `UPSTREAM_URL` stays out of server
+  logs. Callers still get a generic `502` problem. Generated projects now
+  depend on `reqwest` directly for the error type, and `reqwest` is a
+  reserved project name. Projects generated earlier keep the old handler in
+  `src/upstream.rs` and need the same change.
 - `deny.toml` adds a time-boxed exception (pending owner acceptance, expires
   2026-11-30) for RUSTSEC-2026-0387 in `crypto-bigint` 0.5.5. It comes in
   through jsonwebtoken's `rust_crypto` backend (`p256`/`p384` 0.13), and

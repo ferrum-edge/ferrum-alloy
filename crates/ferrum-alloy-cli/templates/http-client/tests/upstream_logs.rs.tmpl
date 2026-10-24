@@ -1,0 +1,97 @@
+//! What a failed upstream call logs. `UPSTREAM_URL` may hold a secret in
+//! its path or query, and reqwest's error text can include the URL.
+//!
+//! This file is its own test binary with a single test. tracing caches, per
+//! process, whether a log statement has a subscriber the first time it
+//! runs; a test elsewhere reaching the same statement first, without this
+//! capture installed, would hide the event from it.
+
+use std::fmt::Write as _;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use ferrum_alloy::config::{Overrides, load_from};
+use ferrum_alloy::http_client::AlloyClient;
+use http_body_util::BodyExt;
+use serde_json::Value;
+use tower::ServiceExt;
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::{Context, SubscriberExt};
+
+use {{crate_name}}::upstream::{self, Upstream};
+
+/// Every field of every span and event logged while it is the subscriber.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<String>>);
+
+impl Logs {
+    fn text(&self) -> String {
+        self.0.lock().expect("logs lock").clone()
+    }
+}
+
+struct LogVisitor<'a>(&'a Logs);
+
+impl Visit for LogVisitor<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let mut text = self.0.0.lock().expect("logs lock");
+        let _ = writeln!(text, "{}={value:?}", field.name());
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Logs {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: Context<'_, S>,
+    ) {
+        attrs.record(&mut LogVisitor(self));
+    }
+
+    fn on_record(
+        &self,
+        _span: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: Context<'_, S>,
+    ) {
+        values.record(&mut LogVisitor(self));
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        event.record(&mut LogVisitor(self));
+    }
+}
+
+/// A failed call is logged by its kind, never by reqwest's error.
+#[tokio::test]
+async fn a_failed_call_logs_its_kind_without_the_url() {
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::registry().with(logs.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let file = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/alloy.toml"));
+    let loaded = load_from(Some(file), std::iter::empty(), &Overrides::default());
+    let (config, _) = loaded.expect("alloy.toml loads");
+    let client = AlloyClient::new(&config.http_client).expect("client");
+    // Nothing listens on port 1 of the loopback interface.
+    let secret = "http://127.0.0.1:1/path-secret?token=query-secret";
+    let url = upstream::parse_url(secret).expect("url");
+    let request = Request::get("/upstream").body(Body::empty());
+    let response = upstream::router(Upstream::new(client, url))
+        .oneshot(request.expect("request"))
+        .await
+        .expect("infallible");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.expect("body");
+    let json: Value = serde_json::from_slice(&body.to_bytes()).unwrap_or(Value::Null);
+    assert_eq!(json["title"], "Upstream request failed");
+    let logged = logs.text();
+    assert!(logged.contains("upstream request failed"), "{logged}");
+    assert!(logged.contains("error.kind=\"connect\""), "{logged}");
+    for fragment in ["path-secret", "query-secret"] {
+        assert!(!logged.contains(fragment), "{logged}");
+        assert!(!json.to_string().contains(fragment), "{json}");
+    }
+}
