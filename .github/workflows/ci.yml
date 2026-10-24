@@ -344,6 +344,14 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
+      - name: Advisory-exception expiry
+        # cargo-deny ignores the [expires:YYYY-MM-DD] token in an ignore's
+        # reason, so this checker enforces it: a missing, malformed, or past
+        # deadline fails before cargo-deny runs. Its tests run first so a
+        # checker that stopped rejecting bad entries cannot pass silently.
+        run: |
+          python3 -I -m unittest discover -s ci/tests -p 'test_*.py' -v
+          python3 -I ci/check_advisory_expiry.py
       - run: cargo deny check
       - name: Fuzz crate dependencies
         # The fuzz crate is its own workspace with its own lockfile. Alloy's
