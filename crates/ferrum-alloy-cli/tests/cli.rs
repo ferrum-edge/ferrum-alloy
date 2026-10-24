@@ -2371,6 +2371,16 @@ fn new_generates_database_auth_and_client_starters() {
     let features = r#"features = ["openapi", "postgres", "jwt", "http-client"]"#;
     assert!(cargo.contains(features), "{cargo}");
     assert!(cargo.contains(r#"default-run = "notes-api""#), "{cargo}");
+    // Starters that share a dev-dependency declare it once.
+    assert_eq!(cargo.matches("tracing-subscriber").count(), 1, "{cargo}");
+    // reqwest's error text can include the URL, so failed upstream calls
+    // log only a fixed failure kind.
+    let upstream = read(&target, "src/upstream.rs");
+    assert!(
+        upstream.contains("error.kind = failure_kind(error)"),
+        "{upstream}"
+    );
+    assert!(!upstream.contains("%error"), "{upstream}");
     let lib = read(&target, "src/lib.rs");
     let modules = "pub mod auth;\npub mod db;\npub mod upstream;\n";
     assert!(lib.contains(modules), "{lib}");

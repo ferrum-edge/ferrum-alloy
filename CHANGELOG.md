@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- The `http-client` starter logs a failed upstream call by a fixed failure
+  kind (`error.kind`: `timeout`, `connect`, `redirect`, `builder`, `body`,
+  `decode` or `request`) instead of reqwest's error text, which can include
+  the request URL, so a path or query in `UPSTREAM_URL` stays out of server
+  logs. Callers still get a generic `502` problem. Generated projects now
+  depend on `reqwest` directly for the error type, and `reqwest` is a
+  reserved project name. Projects generated earlier keep the old handler in
+  `src/upstream.rs` and need the same change.
 - `openapi export` with `strip_public_path` rewrites Path Item `$ref`s
   directly under `paths` to the stripped key, and refuses the export
   (exit 3, naming the reference) when any other `$ref`, `$dynamicRef`

@@ -1,2 +1,4 @@
 # Tests serve a JWKS or an upstream on loopback.
 tokio = { version = "1", features = ["net"] }
+# The database and upstream tests capture what their starters record and log.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
