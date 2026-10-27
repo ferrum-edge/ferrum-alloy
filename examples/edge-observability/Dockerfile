@@ -3,10 +3,10 @@
 # Every base image is pinned by digest; see docs/compatibility.md.
 
 # Ferrum Edge image for the edge stage. The default is the contract baseline:
-# Ferrum Edge v0.9.17 (published multi-arch index).
+# Ferrum Edge v0.9.19 (published multi-arch index).
 # CI sets EDGE_IMAGE through compose.yaml to test every release in the support
 # window (docs/compatibility.json).
-ARG EDGE_IMAGE=ferrumedge/ferrum-edge@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1
+ARG EDGE_IMAGE=ferrumedge/ferrum-edge@sha256:0e2ed6d720cbc474e29cfa6bcd3945db010674d69988e2bd795a26399c3cb80e
 
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 WORKDIR /src
