@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- `cargo deny` now denies duplicate crate versions instead of warning.
+  The older version lines of the 19 crates duplicated today are listed in
+  `deny.toml` under `[bans] skip`, each with the dependency split that
+  causes it (the RustCrypto digest 0.10/0.11 and rand 0.8/0.9/0.10
+  generations, syn 2/3, and splits in base64, hashbrown, tower-http,
+  io-lifetimes and windows-sys); the newest line of each stays unskipped.
+  A dependency update that adds a duplicate, including a further version
+  line of an allowlisted crate, fails the `Dependency policy` check until
+  it is reviewed. Crates reached only through dev-dependencies are
+  checked too (#197).
 - **Breaking:** `ferrum-alloy edge export` refuses a manifest with
   `auth.mode = "gateway"` (exit 3) instead of warning and writing
   configuration that authenticates nobody. Export cannot generate Edge
