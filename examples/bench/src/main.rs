@@ -4,6 +4,7 @@
 //! ```text
 //! alloy-bench run --scenario alloy --workload small --transport h1 [options]
 //! alloy-bench matrix --reps 5 --out results.jsonl [options]
+//! alloy-bench compare [--budget budget.json] results.jsonl
 //! ```
 //!
 //! Server and client run in one process on separate multi-threaded Tokio
@@ -12,7 +13,8 @@
 //! latency percentiles, CPU time and allocations per thread role, peak RSS,
 //! OpenTelemetry export counters, and the environment. Results are same-host
 //! measurements with the noise that implies; see `docs/benchmarks.md` for how
-//! to run and read them.
+//! to run and read them. `compare` reports each cell's ratios to `plain`
+//! from result lines and can check them against per-cell budgets.
 
 #![allow(
     clippy::print_stdout,
@@ -22,6 +24,7 @@
 
 mod alloc;
 mod client;
+mod compare;
 mod dims;
 mod matrix;
 mod pki;
@@ -44,11 +47,18 @@ usage:
   alloy-bench run [--scenario S] [--workload W] [--transport T] [--rep N] [options]
   alloy-bench matrix [--scenarios L] [--workloads L] [--transports L] [--reps N]
                      [--out FILE] [--dry-run] [options]
+  alloy-bench compare [--budget FILE] RESULTS...
 
 run measures one cell (default: alloy, small, h1) and prints one JSON line.
 matrix runs every combination of the lists (default: all), --reps times
-(default 5), interleaved, each in its own process, and appends the JSON lines
-to --out (default: stdout). L is `all` or a comma-separated list.
+(default 5), in a seeded shuffle per repetition, each in its own process, and
+appends the JSON lines to --out (default: stdout). L is `all` or a
+comma-separated list.
+compare reads result files and prints one JSON line per cell with the median
+and range of its throughput and latency ratios to plain in the same run_id,
+repetition, workload, transport and allocation mode; lines with errors are
+skipped. --budget checks those medians against per-cell limits (a JSON file,
+see docs/benchmarks.md) and fails when one is exceeded or has no data.
 
 options:
   --seconds N               measurement window (default 5)
@@ -94,6 +104,35 @@ enum Command {
         out: Option<PathBuf>,
         dry_run: bool,
     },
+    Compare {
+        files: Vec<PathBuf>,
+        budget: Option<PathBuf>,
+    },
+}
+
+fn parse_compare(args: &[String]) -> Result<Command, Failure> {
+    let mut files = Vec::new();
+    let mut budget = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--budget" => {
+                let value = iter.next().ok_or("--budget needs a value")?;
+                if budget.replace(PathBuf::from(value)).is_some() {
+                    return Err("--budget given twice".into());
+                }
+            }
+            flag if flag.starts_with('-') => {
+                let message = format!("unknown flag {flag} for compare\n\n{USAGE}");
+                return Err(message.into());
+            }
+            file => files.push(PathBuf::from(file)),
+        }
+    }
+    if files.is_empty() {
+        return Err(format!("compare needs at least one result file\n\n{USAGE}").into());
+    }
+    Ok(Command::Compare { files, budget })
 }
 
 fn parse(args: &[String]) -> Result<Command, Failure> {
@@ -103,6 +142,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
     let matrix = match command.as_str() {
         "run" => false,
         "matrix" => true,
+        "compare" => return parse_compare(rest),
         "help" | "-h" | "--help" => return Ok(Command::Help),
         other => return Err(format!("unknown command {other:?}\n\n{USAGE}").into()),
     };
@@ -225,6 +265,7 @@ fn execute(command: Command) -> Result<(), Failure> {
             }
             matrix::execute(&cells, reps, &options.run_id, &forward, out.as_deref())
         }
+        Command::Compare { files, budget } => compare::execute(&files, budget.as_deref()),
     }
 }
 
@@ -309,11 +350,33 @@ mod tests {
             "run --transport h3",
             "matrix --concurrency 30 --streams 8",
             "run --transport h2c --concurrency 30 --streams 8",
+            "compare",
+            "compare --budget b.json",
+            "compare r.jsonl --budget",
+            "compare r.jsonl --budget a.json --budget b.json",
+            "compare r.jsonl --reps 3",
         ] {
             assert!(parse(&args(line)).is_err(), "{line}");
         }
         let uneven_http1 = args("run --transport h1 --concurrency 30 --streams 8");
         assert!(parse(&uneven_http1).is_ok());
+    }
+
+    #[test]
+    fn compare_takes_result_files_and_an_optional_budget() {
+        let line = "compare a.jsonl --budget budget.json b.jsonl";
+        let Command::Compare { files, budget } = parse(&args(line)).unwrap() else {
+            panic!("expected compare");
+        };
+        let expected = [PathBuf::from("a.jsonl"), PathBuf::from("b.jsonl")];
+        assert_eq!(files, expected);
+        assert_eq!(budget, Some(PathBuf::from("budget.json")));
+        let Command::Compare { files, budget } = parse(&args("compare r.jsonl")).unwrap() else {
+            panic!("expected compare");
+        };
+        assert_eq!(files, [PathBuf::from("r.jsonl")]);
+        assert_eq!(budget, None);
+        assert!(USAGE.contains("alloy-bench compare [--budget FILE]"));
     }
 
     #[test]

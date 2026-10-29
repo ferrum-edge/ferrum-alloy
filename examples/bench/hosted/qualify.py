@@ -23,6 +23,8 @@ ALL_SCENARIOS = SCENARIOS + ("alloy-diagnostics",) + OTEL
 WORKLOADS = ("small", "large", "stream", "cancel")
 TRANSPORTS = ("h1", "h2c", "h1-tls", "h2-tls", "h1-mtls", "h2-mtls")
 LOSS_REASONS = {"queue_full", "byte_budget", "export_failed", "shutdown"}
+# Exporter queue levels at the window's edges, read before shutdown.
+QUEUE_FIELDS = ("spans_queued_at_start", "spans_queued_at_end", "spans_queued_bytes_at_end")
 CLASSIFICATION = "shared GitHub-hosted experimental; not dedicated baseline acceptance"
 
 
@@ -98,9 +100,12 @@ def validate(rows, scenarios, workloads, transports, reps, sha, run_id, counting
             require(set(lost) == LOSS_REASONS and all(counter(v) for v in lost.values()),
                     "missing/invalid loss counters")
             require(counter(otel.get("spans_exported")), "missing export counter")
+            require(all(counter(otel.get(field)) for field in QUEUE_FIELDS),
+                    "missing window-edge queue counters")
             if row["scenario"] == "otel-unsampled":
-                require(otel["spans_exported"] == 0 and sum(lost.values()) == 0,
-                        "unsampled scenario exported/lost spans")
+                require(otel["spans_exported"] == 0 and sum(lost.values()) == 0
+                        and all(otel[field] == 0 for field in QUEUE_FIELDS),
+                        "unsampled scenario exported/lost/queued spans")
             elif row["scenario"] == "otel-unreachable":
                 require(lost["export_failed"] > 0, "unreachable exporter not exercised")
             else:

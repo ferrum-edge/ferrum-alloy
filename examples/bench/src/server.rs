@@ -69,9 +69,17 @@ impl hyper::body::Body for Frames {
     }
 }
 
-async fn small() -> axum::Json<serde_json::Value> {
-    let body = serde_json::json!({ "id": 42, "name": "tea", "quantity": 2, "tags": ["a", "b"] });
-    axum::Json(body)
+/// The `small` workload's response body: the bytes `axum::Json` produced
+/// for `{"id": 42, "name": "tea", "quantity": 2, "tags": ["a", "b"]}`, kept
+/// static so that the handler builds no JSON value and serializes nothing
+/// per request.
+pub(crate) const SMALL_BODY: &str = r#"{"id":42,"name":"tea","quantity":2,"tags":["a","b"]}"#;
+
+/// Serves [`SMALL_BODY`] with `axum::Json`'s content type. Both values are
+/// static, so neither is copied.
+async fn small() -> ([(http::HeaderName, http::HeaderValue); 1], &'static str) {
+    let json = http::HeaderValue::from_static("application/json");
+    ([(http::header::CONTENT_TYPE, json)], SMALL_BODY)
 }
 
 async fn stream() -> Body {
@@ -188,7 +196,7 @@ where
 pub(crate) fn start(
     scenario: Scenario,
     tls: Option<ServerTls>,
-    pipeline: Option<OtelPipeline>,
+    pipeline: Option<Arc<OtelPipeline>>,
 ) -> Result<Server, Failure> {
     spawn(
         SERVER_THREAD,
@@ -315,4 +323,31 @@ pub(crate) fn start_collector() -> Result<Collector, Failure> {
         stats,
         _server: server,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    /// Both stacks serve `small` from the same router, so this pins the
+    /// bytes and the content type that each of them sends.
+    #[tokio::test]
+    async fn small_serves_the_json_bytes_it_always_served() {
+        let response = small().await.into_response();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let headers = response.headers();
+        let content_types = headers.get_all(http::header::CONTENT_TYPE);
+        assert_eq!(content_types.iter().count(), 1);
+        assert_eq!(headers[http::header::CONTENT_TYPE], "application/json");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value =
+            serde_json::json!({ "id": 42, "name": "tea", "quantity": 2, "tags": ["a", "b"] });
+        assert_eq!(body, serde_json::to_vec(&value).unwrap());
+        assert_eq!(body, SMALL_BODY.as_bytes());
+        assert_eq!(body.len(), 52);
+    }
 }
