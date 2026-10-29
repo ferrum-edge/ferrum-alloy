@@ -25,9 +25,9 @@
     still queued are no longer missing from the accounting. Other
     scenarios still have `otel: null`. The hosted qualification validator
     requires the new fields for OTEL rows.
-  - `matrix` runs each repetition in a seeded SplitMix64 shuffle that
-    avoids repeating the previous repetitions' neighbors, instead of
-    rotating the previous order by one cell. The order is reproducible, and
+  - `matrix` runs each repetition in a seeded SplitMix64 shuffle, the one
+    of up to 64 that repeats the fewest neighbor pairs from earlier
+    repetitions, instead of rotating the previous order by one cell. The order is reproducible, and
     `--dry-run` prints the method and seed.
   - The `small` handler serves a static JSON body instead of building and
     serializing a `serde_json::Value` per request. The bytes and content

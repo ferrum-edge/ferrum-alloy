@@ -281,7 +281,8 @@ fn measure_with_budget(
     let measured = runtime.block_on(measured);
     alloc::set_role(Role::Service);
     // Release this handle while the server still holds the pipeline, so
-    // that its shutdown stays on the server's runtime as before.
+    // that on this normal path its last reference drops on the server side
+    // as before. Early error returns above may drop it in either order.
     drop(queue);
     // Close the client's connections before stopping the server.
     drop(runtime);

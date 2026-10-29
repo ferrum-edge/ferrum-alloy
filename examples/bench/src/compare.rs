@@ -103,6 +103,12 @@ impl Line {
             .filter(|rate| rate.is_finite() && *rate >= 0.0)
             .ok_or("requests_per_second is not a nonnegative number")?;
         let latency = field(value, "latency_us")?;
+        let scenario = string(value, "scenario")?;
+        Scenario::parse(&scenario).map_err(|error| error.to_string())?;
+        let workload = string(value, "workload")?;
+        Workload::parse(&workload).map_err(|error| error.to_string())?;
+        let transport = string(value, "transport")?;
+        Transport::parse(&transport).map_err(|error| error.to_string())?;
         Ok(Self {
             run_id: string(value, "run_id")?,
             commit,
@@ -110,9 +116,9 @@ impl Line {
                 .as_bool()
                 .ok_or("alloc_counting is not a boolean")?,
             rep: optional_count(value, "rep")?,
-            scenario: string(value, "scenario")?,
-            workload: string(value, "workload")?,
-            transport: string(value, "transport")?,
+            scenario,
+            workload,
+            transport,
             errors: field(value, "errors")?
                 .as_u64()
                 .ok_or("errors is not a count")?,
@@ -165,7 +171,9 @@ impl Distribution {
         let n = sorted.len();
         let middle = n / 2;
         let median = if n.is_multiple_of(2) {
-            (sorted.get(middle.checked_sub(1)?)? + sorted.get(middle)?) / 2.0
+            // The midpoint without adding, which overflows near f64::MAX.
+            let (low, high) = (sorted.get(middle.checked_sub(1)?)?, sorted.get(middle)?);
+            low + (high - low) / 2.0
         } else {
             *sorted.get(middle)?
         };
@@ -214,10 +222,18 @@ impl Comparison {
         }
     }
 
-    fn add(&mut self, line: &Line, plain: &Line) {
+    /// Fails when the throughput ratio is not finite: finite rates can
+    /// still overflow it, and an infinite ratio would pass a minimum.
+    fn add(&mut self, line: &Line, plain: &Line) -> Result<(), String> {
+        let throughput = line.requests_per_second / plain.requests_per_second;
+        if !throughput.is_finite() {
+            return Err(format!(
+                "{} throughput ratio to plain is not finite in run_id {:?}",
+                line.scenario, line.run_id
+            ));
+        }
         self.reps.push(line.rep);
-        self.throughput
-            .push(line.requests_per_second / plain.requests_per_second);
+        self.throughput.push(throughput);
         self.plain_requests_per_second
             .push(plain.requests_per_second);
         if let Some(ratio) = latency_ratio(line.p50, plain.p50) {
@@ -226,6 +242,7 @@ impl Comparison {
         if let Some(ratio) = latency_ratio(line.p99, plain.p99) {
             self.p99.push(ratio);
         }
+        Ok(())
     }
 
     fn matches(&self, budget: &Budget) -> bool {
@@ -342,7 +359,7 @@ fn compare(lines: &[Line]) -> Result<Report, String> {
             by_scenario
                 .entry(scenario.as_str())
                 .or_insert_with(|| Comparison::new(group.clone(), scenario.clone()))
-                .add(line, plain);
+                .add(line, plain)?;
         }
         report.comparisons.extend(by_scenario.into_values());
     }
@@ -635,6 +652,21 @@ mod tests {
             (even.n, even.median, even.min, even.max),
             (4, 2.5, 1.0, 4.0)
         );
+        // Adding the two middle values would overflow to infinity.
+        let large = Distribution::of(&[1e308, 1e308]).unwrap();
+        assert_eq!(large.median, 1e308);
+    }
+
+    /// Finite rates can overflow the ratio; an infinite ratio would pass any
+    /// minimum, so it is refused instead.
+    #[test]
+    fn a_ratio_that_overflows_is_refused() {
+        let lines = parse(&[
+            line("run", 1, "plain", 0.1, 100),
+            line("run", 1, "alloy", 1e308, 100),
+        ]);
+        let error = compare(&lines).unwrap_err();
+        assert!(error.contains("not finite"), "{error}");
     }
 
     #[test]
@@ -726,7 +758,18 @@ mod tests {
         other_schema["schema"] = json!("alloy-bench/2");
         let mut missing = line("run", 1, "plain", 1.0, 1);
         missing.as_object_mut().unwrap().remove("errors");
-        for value in [other_schema, missing] {
+        let unknown_scenario = line("run", 1, "aloy", 1.0, 1);
+        let mut unknown_workload = line("run", 1, "plain", 1.0, 1);
+        unknown_workload["workload"] = json!("tiny");
+        let mut unknown_transport = line("run", 1, "plain", 1.0, 1);
+        unknown_transport["transport"] = json!("h4");
+        for value in [
+            other_schema,
+            missing,
+            unknown_scenario,
+            unknown_workload,
+            unknown_transport,
+        ] {
             assert!(parse_lines(&value.to_string()).is_err(), "{value}");
         }
         assert!(parse_lines("not json").is_err());
