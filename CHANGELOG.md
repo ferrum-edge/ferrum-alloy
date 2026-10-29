@@ -12,6 +12,10 @@
   line of an allowlisted crate, fails the `Dependency policy` check until
   it is reviewed. Crates reached only through dev-dependencies are
   checked too (#197).
+- Documented as a known gap: on Windows, `diagnose --write-report` files
+  inherit their directory's ACL rather than being owner-only, since an
+  explicit DACL would need unsafe Win32 calls, and `--token-file`
+  permissions are not checked on any platform (#197).
 - **Breaking:** `ferrum-alloy edge export` refuses a manifest with
   `auth.mode = "gateway"` (exit 3) instead of warning and writing
   configuration that authenticates nobody. Export cannot generate Edge

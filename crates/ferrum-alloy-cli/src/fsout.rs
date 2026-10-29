@@ -321,8 +321,9 @@ pub(crate) enum NewFileMode {
     /// Respect the process umask, as for ordinary generated artifacts.
     Umask,
     /// Restrict the file to its owner, for potentially sensitive reports.
-    /// Unix only: on Windows the file gets the default ACL of its
-    /// directory, like the token-file permission requirement.
+    /// Unix only: on Windows the file inherits its directory's ACL.
+    /// Setting an explicit DACL needs Win32 security calls that the
+    /// workspace's `unsafe_code = "forbid"` rules out.
     Private,
 }
 
