@@ -80,7 +80,48 @@ exceptions = [
 ignore = true
 
 [bans]
-multiple-versions = "warn"
+# A crate in the graph at two or more versions fails the check, so a new
+# duplicate is a reviewed decision rather than a silent warning. Every
+# accepted duplicate below names the split that causes it. Entries match
+# by crate name only, so patch bumps on either side need no edit; remove
+# an entry once the workspace graph holds one version again (cargo-deny
+# warns about an entry that no longer matches). The fuzz crate's smaller
+# graph shares this file, so it reports unmatched and unnecessary skips as
+# warnings; only the workspace check decides when to remove an entry.
+# Re-check with `cargo deny check bans`.
+multiple-versions = "deny"
+skip = [
+    # RustCrypto 0.10 -> 0.11 split. jsonwebtoken's rust_crypto backend
+    # (rsa, p256/p384 0.13, ed25519-dalek) and sha1 stay on digest 0.10;
+    # sqlx 0.9 (feature `postgres`) moved to digest/sha2/hmac/hkdf 0.11.
+    { crate = "block-buffer", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    { crate = "cpufeatures", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    { crate = "crypto-common", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    { crate = "digest", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    { crate = "hkdf", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    { crate = "hmac", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    { crate = "sha2", reason = "RustCrypto digest 0.10/0.11 split (jsonwebtoken vs sqlx)" },
+    # rand 0.8 (jsonwebtoken, rsa), 0.9 (opentelemetry, axum, tungstenite)
+    # and 0.10 (Alloy, proptest, sqlx), with their cores and OS backends.
+    { crate = "getrandom", reason = "rand 0.8/0.9/0.10 split across jsonwebtoken, opentelemetry and sqlx" },
+    { crate = "r-efi", reason = "getrandom 0.3/0.4 split (rand ecosystem)" },
+    { crate = "rand", reason = "rand 0.8/0.9/0.10 split across jsonwebtoken, opentelemetry and sqlx" },
+    { crate = "rand_chacha", reason = "rand 0.8/0.9 split (jsonwebtoken vs opentelemetry)" },
+    { crate = "rand_core", reason = "rand 0.8/0.9/0.10 split across jsonwebtoken, opentelemetry and sqlx" },
+    # Proc-macro crates still on syn 2 while most of the graph uses syn 3.
+    { crate = "syn", reason = "syn 2/3 split among proc-macro dependencies" },
+    { crate = "synstructure", reason = "syn 2/3 split among proc-macro dependencies" },
+    # sqlx-core uses base64 0.22 and hashbrown 0.16 (via hashlink); axum,
+    # reqwest and indexmap use base64 0.23 and hashbrown 0.17.
+    { crate = "base64", reason = "sqlx-core on base64 0.22; axum, reqwest and rcgen on 0.23" },
+    { crate = "hashbrown", reason = "sqlx hashlink on hashbrown 0.16; indexmap on 0.17" },
+    # reqwest and opentelemetry-otlp use tower-http 0.6; Alloy uses 0.7.
+    { crate = "tower-http", reason = "reqwest and opentelemetry-otlp on tower-http 0.6; Alloy on 0.7" },
+    # cap-std's fs-set-times is on io-lifetimes 2; cap-primitives on 3.
+    { crate = "io-lifetimes", reason = "fs-set-times on io-lifetimes 2; cap-primitives on 3" },
+    # errno, ring and others are on windows-sys 0.52; most of the graph 0.61.
+    { crate = "windows-sys", reason = "errno, ring and others on windows-sys 0.52; most crates on 0.61" },
+]
 wildcards = "deny"
 allow-wildcard-paths = true
 # Keep the crypto stack on ring; OpenSSL and aws-lc are not used.
