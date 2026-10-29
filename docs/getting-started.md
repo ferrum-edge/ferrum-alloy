@@ -170,7 +170,8 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
 
    Export does not generate Edge authentication yet, so it refuses
    `auth.mode = "gateway"` and writes nothing. Use `"service"` when the
-   service verifies credentials itself.
+   service verifies credentials itself, or `"none"` and configure Edge
+   authentication by hand.
 
    When exporting OpenAPI with `--manifest`, the document server URL uses the manifest's
    `api.public_path`. If `api.strip_public_path` is enabled, `api.service_base_path` is removed

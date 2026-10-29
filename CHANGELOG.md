@@ -155,10 +155,7 @@
   with full-value digests instead of source prefixes, so `diagnose --otlp`
   cannot retain a partial reflected credential before output redaction.
   Text up to 512 bytes and the instance-identity domain rules are unchanged.
-- `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
-  no Edge authentication plugin is exported yet, so the generated
-  configuration authenticates nobody until authentication is configured
-  in Edge. Also in this batch: atomic CLI writes create the temporary
+- CLI and Edge export hardening: atomic CLI writes create the temporary
   file with its final mode (replaced private files are never briefly
   world-readable), `--alloy-git` is URL-parsed and credentialed URLs
   are refused instead of being baked into the generated `Cargo.toml`,
