@@ -180,10 +180,19 @@ struct Sample {
     spans_lost: Vec<u64>,
     collector_requests: u64,
     collector_bytes: u64,
+    /// Spans the OpenTelemetry pipeline holds, accepted and not yet exported
+    /// or counted lost; `None` without a pipeline.
+    spans_queued: Option<usize>,
+    /// The pipeline's estimate of those spans' bytes; `None` without one.
+    spans_queued_bytes: Option<usize>,
 }
 
 impl Sample {
-    fn take(metrics: &Metrics, collector: Option<&CollectorStats>) -> Self {
+    fn take(
+        metrics: &Metrics,
+        collector: Option<&CollectorStats>,
+        pipeline: Option<&OtelPipeline>,
+    ) -> Self {
         Self {
             cpu: CpuSnapshot::take(),
             allocations: alloc::snapshot(),
@@ -194,6 +203,8 @@ impl Sample {
                 .collect(),
             collector_requests: collector.map_or(0, |c| c.requests.load(Ordering::Relaxed)),
             collector_bytes: collector.map_or(0, |c| c.bytes.load(Ordering::Relaxed)),
+            spans_queued: pipeline.map(OtelPipeline::queued_spans),
+            spans_queued_bytes: pipeline.map(OtelPipeline::queued_bytes),
         }
     }
 }
@@ -241,6 +252,10 @@ fn measure_with_budget(
         Some(pki) => Some(pki.server(cell.transport.mtls())?),
         None => None,
     };
+    // The server keeps the pipeline alive; this handle reads its queue when
+    // the window ends, before the server stops and the pipeline shuts down.
+    let pipeline = pipeline.map(Arc::new);
+    let queue = pipeline.clone();
     let server = server::start(cell.scenario, server_tls, pipeline)?;
     let target = Target {
         addr: server.addr,
@@ -258,13 +273,17 @@ fn measure_with_budget(
         .enable_all()
         .build()?;
     let collector = collector.as_deref();
-    let probe = || Sample::take(metrics, collector);
+    let probe = || Sample::take(metrics, collector, queue.as_deref());
     alloc::set_role(Role::Client);
     let measured = client::drive(target, options.load, budget, probe);
     #[cfg(test)]
     let measured = tests::bounded(measured, budget);
     let measured = runtime.block_on(measured);
     alloc::set_role(Role::Service);
+    // Release this handle while the server still holds the pipeline, so
+    // that on this normal path its last reference drops on the server side
+    // as before. Early error returns above may drop it in either order.
+    drop(queue);
     // Close the client's connections before stopping the server.
     drop(runtime);
     drop(server);
@@ -377,9 +396,14 @@ fn report(
         let stub = cell.scenario == Scenario::OtelCollector && options.collector_endpoint.is_none();
         let collector_requests = delta(start.collector_requests, end.collector_requests);
         let collector_bytes = delta(start.collector_bytes, end.collector_bytes);
+        // Levels, not deltas: what the pipeline still held when the window
+        // started and ended, read before shutdown flushes or drops it.
         json!({
             "spans_exported": delta(start.spans_exported, end.spans_exported),
             "spans_lost": lost,
+            "spans_queued_at_start": start.spans_queued,
+            "spans_queued_at_end": end.spans_queued,
+            "spans_queued_bytes_at_end": end.spans_queued_bytes,
             "collector_requests": stub.then_some(collector_requests),
             "collector_bytes": stub.then_some(collector_bytes),
         })
@@ -590,7 +614,7 @@ mod tests {
     fn http1_cancellation_reconnects_and_http2_does_not() {
         for transport in Transport::ALL {
             let metrics = Metrics::default();
-            let probe = || Sample::take(&metrics, None);
+            let probe = || Sample::take(&metrics, None, None);
             let measured = client::tests::cancellation_rounds(*transport, probe);
             let mut options = options(0.2);
             options.load.duration = measured.window;
@@ -705,6 +729,45 @@ mod tests {
             let body_bytes = result["body_bytes"].as_u64().unwrap();
             assert_eq!(body_bytes, requests * size as u64, "{result}");
         }
+    }
+
+    /// OpenTelemetry results report the pipeline's queue at both edges of
+    /// the window; other scenarios have no `otel` object, so no queue is
+    /// reported as zero.
+    #[test]
+    fn otel_results_report_the_queue_at_both_window_edges() {
+        let cell = Cell {
+            scenario: Scenario::OtelSampled,
+            workload: Workload::Small,
+            transport: Transport::H1,
+        };
+        let metrics = Arc::new(Metrics::default());
+        let pipeline =
+            OtelPipeline::with_exporter(&resource(), &otlp(1.0), Arc::clone(&metrics), || {
+                Ok(DiscardExporter)
+            })
+            .unwrap();
+        let environment = probe::environment(None);
+        let result = measure(
+            cell,
+            &options(0.2),
+            Some(pipeline),
+            &metrics,
+            None,
+            environment,
+        )
+        .unwrap();
+        assert_work_completed(&result);
+        let otel = result["otel"].as_object().unwrap();
+        for field in [
+            "spans_queued_at_start",
+            "spans_queued_at_end",
+            "spans_queued_bytes_at_end",
+        ] {
+            assert!(otel[field].is_u64(), "{field}: {result}");
+        }
+        let plain = run(Scenario::Plain, Workload::Small, Transport::H1);
+        assert_eq!(plain["otel"], Value::Null, "{plain}");
     }
 
     /// The result's keys, pinned: renaming or removing one changes what

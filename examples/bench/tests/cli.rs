@@ -155,3 +155,126 @@ fn matrix_writes_one_result_line_per_run() {
     assert_eq!(result["run_id"], "matrix-test", "{result}");
     assert_eq!(result["commit"], "0123456789abcdef", "{result}");
 }
+
+/// The cells of each repetition of a `--dry-run` plan, in order.
+fn planned(output: &Output) -> Vec<Vec<String>> {
+    assert!(output.status.success(), "{}", describe(output));
+    let mut reps: Vec<Vec<String>> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let (rep, cell) = line.split_once('\t').unwrap();
+        let rep: usize = rep.parse().unwrap();
+        if reps.len() < rep {
+            reps.resize(rep, Vec::new());
+        }
+        reps[rep - 1].push(cell.to_owned());
+    }
+    reps
+}
+
+#[test]
+fn matrix_dry_run_shuffles_reproducibly() {
+    let args = [
+        "matrix",
+        "--dry-run",
+        "--reps",
+        "3",
+        "--scenarios",
+        "plain,alloy,alloy-logs",
+        "--workloads",
+        "small,large",
+        "--transports",
+        "h1",
+    ];
+    let first = bench(&args).output().unwrap();
+    let second = bench(&args).output().unwrap();
+    let reps = planned(&first);
+    assert_eq!(reps, planned(&second));
+    assert_eq!(reps.len(), 3, "{}", describe(&first));
+    for cells in &reps {
+        let mut unique = cells.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!((cells.len(), unique.len()), (6, 6), "{cells:?}");
+    }
+    assert_ne!(reps[0], reps[1]);
+    assert_ne!(reps[1], reps[2]);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(stderr.contains("order: splitmix64"), "{stderr}");
+}
+
+/// A result line with the fields `compare` reads.
+fn result_line(rep: u64, scenario: &str, rate: f64) -> String {
+    serde_json::json!({
+        "schema": "alloy-bench/1",
+        "run_id": "compare-test",
+        "commit": null,
+        "rep": rep,
+        "scenario": scenario,
+        "workload": "small",
+        "transport": "h1",
+        "alloc_counting": false,
+        "errors": 0,
+        "requests_per_second": rate,
+        "latency_us": { "p50": 100, "p90": 150, "p99": 200, "p999": 300, "max": 400 },
+    })
+    .to_string()
+}
+
+#[test]
+fn compare_reports_ratios_and_enforces_budgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results.jsonl");
+    let lines: Vec<String> = (1..=3)
+        .flat_map(|rep| {
+            [
+                result_line(rep, "plain", 100.0),
+                result_line(rep, "alloy", 75.0),
+            ]
+        })
+        .collect();
+    std::fs::write(&results, lines.join("\n") + "\n").unwrap();
+    let results = results.to_str().unwrap();
+
+    let output = bench(&["compare", results]).output().unwrap();
+    let compared = result_lines(&output);
+    assert_eq!(compared.len(), 1, "{}", describe(&output));
+    let alloy = &compared[0];
+    assert_eq!(alloy["schema"], "alloy-bench-compare/1", "{alloy}");
+    assert_eq!(alloy["scenario"], "alloy", "{alloy}");
+    assert_eq!(alloy["pairs"], 3, "{alloy}");
+    assert_eq!(alloy["throughput_ratio"]["median"], 0.75, "{alloy}");
+    assert_eq!(alloy["latency_p99_ratio"]["median"], 1.0, "{alloy}");
+    assert_eq!(alloy["budget"], Value::Null, "{alloy}");
+
+    let budget = dir.path().join("budget.json");
+    let write_budget = |min: f64| {
+        let file = serde_json::json!({
+            "schema": "alloy-bench-budget/1",
+            "budgets": [{
+                "scenario": "alloy",
+                "workload": "small",
+                "transport": "h1",
+                "min_throughput_ratio": min,
+            }],
+        });
+        std::fs::write(&budget, file.to_string()).unwrap();
+    };
+    let budget_arg = budget.to_str().unwrap();
+    write_budget(0.7);
+    let output = bench(&["compare", "--budget", budget_arg, results])
+        .output()
+        .unwrap();
+    let compared = result_lines(&output);
+    assert_eq!(compared[0]["budget"]["exceeded"], serde_json::json!([]));
+    write_budget(0.8);
+    let output = bench(&["compare", "--budget", budget_arg, results])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", describe(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printed: Value = serde_json::from_str(stdout.trim()).unwrap();
+    let exceeded = serde_json::json!(["min_throughput_ratio"]);
+    assert_eq!(printed["budget"]["exceeded"], exceeded, "{printed}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("budget exceeded"), "{stderr}");
+}

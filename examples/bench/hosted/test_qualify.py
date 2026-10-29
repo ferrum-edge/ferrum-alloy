@@ -9,8 +9,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from qualify import (CLASSIFICATION, Evidence, LOSS_REASONS, SCENARIOS,
+from qualify import (CLASSIFICATION, Evidence, LOSS_REASONS, QUEUE_FIELDS, SCENARIOS,
                      instruction_profiles, stop, summarize, validate)
+
+
+def otel(exported, **queued):
+    counters = {"spans_exported": exported, "spans_lost": dict.fromkeys(LOSS_REASONS, 0)}
+    counters.update(dict.fromkeys(QUEUE_FIELDS, 0))
+    counters.update(queued)
+    return counters
 
 
 def result(rep, scenario):
@@ -321,9 +328,8 @@ class ValidationTests(unittest.TestCase):
     def test_collector_requires_exports_and_receipt_not_just_no_client_errors(self):
         rows = [result(rep, "otel-collector") for rep in range(1, 6)]
         for row in rows:
-            row["otel"] = {"spans_exported": 10,
-                           "spans_lost": dict.fromkeys(LOSS_REASONS, 0),
-                           "collector_requests": 1, "collector_bytes": 100}
+            row["otel"] = otel(10, spans_queued_at_end=3, spans_queued_bytes_at_end=900,
+                               collector_requests=1, collector_bytes=100)
         check(rows, scenarios=["otel-collector"])
         for field in ("spans_exported", "collector_requests", "collector_bytes"):
             broken = copy.deepcopy(rows)
@@ -337,12 +343,38 @@ class ValidationTests(unittest.TestCase):
     def test_unreachable_must_exercise_failure_and_preserve_drop_reason(self):
         rows = [result(rep, "otel-unreachable") for rep in range(1, 6)]
         for row in rows:
-            row["otel"] = {"spans_exported": 0, "spans_lost": dict.fromkeys(LOSS_REASONS, 0)}
+            row["otel"] = otel(0)
             row["otel"]["spans_lost"]["export_failed"] = 10
         check(rows, scenarios=["otel-unreachable"])
         rows[0]["otel"]["spans_lost"]["export_failed"] = 0
         with self.assertRaises(ValueError):
             check(rows, scenarios=["otel-unreachable"])
+
+    def test_otel_rows_require_window_edge_queue_counters(self):
+        rows = [result(rep, "otel-sampled") for rep in range(1, 6)]
+        for row in rows:
+            row["otel"] = otel(10, spans_queued_at_start=1, spans_queued_at_end=2,
+                               spans_queued_bytes_at_end=600)
+        check(rows, scenarios=["otel-sampled"])
+        for field in QUEUE_FIELDS:
+            for value in (None, -1, 1.5, "0"):
+                broken = copy.deepcopy(rows)
+                broken[0]["otel"][field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    check(broken, scenarios=["otel-sampled"])
+            missing = copy.deepcopy(rows)
+            del missing[0]["otel"][field]
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                check(missing, scenarios=["otel-sampled"])
+
+    def test_unsampled_must_not_queue_spans(self):
+        rows = [result(rep, "otel-unsampled") for rep in range(1, 6)]
+        for row in rows:
+            row["otel"] = otel(0)
+        check(rows, scenarios=["otel-unsampled"])
+        rows[0]["otel"]["spans_queued_at_end"] = 1
+        with self.assertRaisesRegex(ValueError, "queued"):
+            check(rows, scenarios=["otel-unsampled"])
 
     def test_pairs_same_repetition_and_separates_allocation_modes_and_invocations(self):
         for row in self.rows:

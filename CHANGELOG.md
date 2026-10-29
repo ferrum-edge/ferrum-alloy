@@ -17,6 +17,28 @@
   explicit DACL would need unsafe Win32 calls or a wrapper dependency, and
   the permissions of secret files (`--token-file`, `FERRUM_ALLOY_*_FILE`,
   the TLS private key) are not checked on any platform (#197).
+- Benchmark harness (`examples/bench`), host-independent gaps from #197
+  toward #15 and #16:
+  - OpenTelemetry result lines add `otel.spans_queued_at_start`,
+    `otel.spans_queued_at_end`, and `otel.spans_queued_bytes_at_end`, the
+    exporter queue at the window's edges, read before shutdown, so spans
+    still queued are no longer missing from the accounting. Other
+    scenarios still have `otel: null`. The hosted qualification validator
+    requires the new fields for OTEL rows.
+  - `matrix` runs each repetition in a seeded SplitMix64 shuffle, the one
+    of up to 64 that repeats the fewest neighbor pairs from earlier
+    repetitions, instead of rotating the previous order by one cell. The order is reproducible, and
+    `--dry-run` prints the method and seed.
+  - The `small` handler serves a static JSON body instead of building and
+    serializing a `serde_json::Value` per request. The bytes and content
+    type are unchanged, but `small` results from before and after this
+    change measure different handlers.
+  - New `alloy-bench compare` reports each cell's throughput and latency
+    ratios to `plain` (median and range), pairing only error-free lines of
+    the same `run_id`, repetition, and allocation mode. `--budget FILE`
+    checks those ratios against per-cell limits and exits nonzero when one
+    is exceeded. No budgets are defined yet.
+
 - **Breaking:** `ferrum-alloy edge export` refuses a manifest with
   `auth.mode = "gateway"` (exit 3) instead of warning and writing
   configuration that authenticates nobody. Export cannot generate Edge

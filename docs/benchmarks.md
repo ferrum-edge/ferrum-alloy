@@ -22,7 +22,7 @@ A run measures one *cell*: one scenario, one workload, and one transport.
 
 | Workload | Request and response |
 |---|---|
-| `small` | `GET /small`: a 60-byte JSON object |
+| `small` | `GET /small`: a 52-byte JSON object (`{"id":42,"name":"tea","quantity":2,"tags":["a","b"]}`, `content-type: application/json`), served from a static string, so the handler builds and serializes no JSON value per request. Both stacks share the router and serve the same bytes. Before #197 the handler built a `serde_json::Value` and serialized it on every request; the bytes and the content type are unchanged, but results from before and after that change are not comparable. |
 | `large` | `GET /large`: 64 KiB with a known length |
 | `stream` | `GET /stream`: 64 frames of 1 KiB with no known length (chunked on HTTP/1.1), so every frame passes through the body wrappers |
 | `cancel` | `GET /stream-long` (4,096 frames of 1 KiB); the client drops the response after the first nonempty incoming data frame, which may be a partial application chunk. On HTTP/1.1 that closes the connection (with a reset, as an aborting client's would, instead of leaving it in `TIME_WAIT`), so every request pays for a new connection; on HTTP/2 it resets the stream, with reuse subject to reset retention and protocol guards. |
@@ -58,9 +58,12 @@ target/release/alloy-bench matrix --reps 5 --label "shared hosted experimental" 
 # A subset; --dry-run prints the order and a lower bound on the duration.
 target/release/alloy-bench matrix --scenarios plain,alloy,otel-collector \
   --workloads small,stream --transports h1,h2c,h1-mtls --dry-run
+
+# Each cell's ratios to plain, from one or more result files.
+target/release/alloy-bench compare "$RUNNER_TEMP/full-matrix.jsonl"
 ```
 
-Options for both commands:
+Options for `run` and `matrix`:
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -78,7 +81,7 @@ Options for both commands:
 How a run is made:
 
 - **Process.** Server and client run in one process, on separate 4-worker Tokio runtimes, over loopback. `matrix` starts a fresh process for every run, because a process installs one global subscriber and a fresh heap keeps runs independent.
-- **Ordering.** Every repetition runs every cell once, and each repetition rotates the order by one position, so no cell always runs first or last. Neighbors stay the same, so a slow cell affects the same next cell in every repetition.
+- **Ordering.** Every repetition runs every cell exactly once, in its own seeded shuffle: a Fisher-Yates shuffle driven by SplitMix64, seeded from the fixed seed `0xa1107be4c4ed0197`, the repetition, and an attempt number. A repetition tries up to 64 shuffles and keeps the first that repeats the fewest ordered pairs of neighbors (one cell running right after another) from the previous repetition, then from all earlier repetitions; it stops at the first shuffle that repeats none. So a slow cell does not slow the same next cell in every repetition, and cells change position. The order depends only on the requested cells and `--reps`: `--dry-run` prints exactly what a run with the same lists executes, and both print the method and seed on stderr. Result lines do not record a run's position in its repetition; reconstruct it with `--dry-run` and the same lists. Before #197 each repetition rotated the previous order by one cell, so neighbors stayed the same. Shuffling reduces, but does not remove, the effect of drift within a run, and it is not a measured noise floor.
 - **Load.** The client is closed-loop: each worker sends its next request when the previous one finishes. Before the requested warm-up starts, every worker completes one exchange of the selected workload (including reading the first data frame and dropping the response for `cancel`). This preparation proves that the worker, connection, and server can serve the workload; a bound listener or an H2 dispatcher reporting `ready` alone does not. Preparation failures fail the run. Preparation requests, bytes, and latencies are excluded from measurement; `connects` still includes every connection opened, including the replacements after HTTP/1.1 preparation cancellations.
 - **Window.** After the requested warm-up duration, workers stop starting warm-up requests and finish their in-flight exchanges, including reading the first frame and dropping the response for `cancel`. Every worker then parks between requests with a usable connection (reconnecting after HTTP/1.1 cancellation). Only once all workers have reached this boundary does the coordinator take the baseline probe and release the requested measurement window. Worker termination during preparation, warm-up, or boundary admission fails the run with its cause; remaining workers are aborted and joined before returning. Draining and reconnecting are outside the window; they do not extend its duration. Only requests that start and finish inside the window count. Throughput is those requests divided by the window.
 
@@ -108,7 +111,7 @@ Each run prints one JSON object on one line. The format is versioned by `schema`
 | `cpu` | On-CPU time in the window by thread role (`service_ns`, `client_ns`, `collector_ns`) and per request (`service_us_per_request`, `client_us_per_request`) |
 | `memory` | `peak_rss_bytes` and `rss_bytes` of the whole process at the end of the run (`scope: "process"`) |
 | `allocations` | With `--alloc-counting`: allocation `calls` and `bytes` in the window, in total and per request, for each role |
-| `otel` | OpenTelemetry scenarios: `spans_exported` and `spans_lost` by reason in the window; for the stub collector, `collector_requests` and `collector_bytes` it received |
+| `otel` | OpenTelemetry scenarios: `spans_exported` and `spans_lost` by reason in the window; `spans_queued_at_start` and `spans_queued_at_end`, the spans the exporter's queue held when the window started and ended, and `spans_queued_bytes_at_end`, its estimate of their bytes; for the stub collector, `collector_requests` and `collector_bytes` it received. Other scenarios have no pipeline, so `otel` is `null` and no queue is reported |
 | `environment` | `label`, `os`, `arch`, `cpus`, `cpu_model`, `cpu_governor`, `kernel`, `load1_start`, `debug_build`, `bench_version`, `started_unix_seconds` |
 
 What these measure, and what they do not:
@@ -117,7 +120,7 @@ What these measure, and what they do not:
 - **CPU time** comes from `/proc/self/task/*/schedstat`, so it is Linux only; elsewhere `cpu` is `null`. It is summed per thread between the start and the end of the window. A thread that exits inside the window is missing, so the value is a lower bound.
 - **Memory** comes from `/proc/self/status` (Linux only). It covers the whole process, client included, and the peak includes the warm-up. Compare it between cells, not as the service's footprint.
 - **Allocations** are counted by a global allocator in the benchmark binary only, attributed to the role of the allocating thread. Counting adds shared atomic operations to every allocation, which lowers throughput, so it is off by default and **a counting run's throughput and latency must not be compared with a non-counting run's**. Measure allocations in a separate pass.
-- **Span loss** is read from Alloy's own counters (`ferrum_alloy_telemetry_spans_lost_total`, `..._spans_exported_total`). Spans still queued when the window ends are in neither count. How `otel-unreachable` loses spans depends on the platform: where a connection to a closed loopback port is refused at once (Linux, macOS), exports fail and spans are lost as `export_failed`; where the connection attempt hangs instead (Windows can), exports may time out and spans may be lost by another reason, such as a full queue.
+- **Span loss** is read from Alloy's own counters (`ferrum_alloy_telemetry_spans_lost_total`, `..._spans_exported_total`). Spans still queued when the window ends are in neither count; `spans_queued_at_end` reports them, read from the pipeline's `queued_spans()` before the server stops and the pipeline shuts down, and `spans_queued_bytes_at_end` from `queued_bytes()`, an estimate. The queue counts a span from when the processor accepts it until its export resolves, so a batch being exported is still queued. The exported and lost counts are deltas over the window, while the queue fields are levels, so the sampled spans that ended during the window are approximately `spans_exported + sum(spans_lost) + spans_queued_at_end - spans_queued_at_start` (`queue_full` and `byte_budget` losses are rejected without being queued). The counters are read one after another, not atomically, so this is approximate. Spans still queued at the end are exported or lost after the window, and the result does not record which. How `otel-unreachable` loses spans depends on the platform: where a connection to a closed loopback port is refused at once (Linux, macOS), exports fail and spans are lost as `export_failed`; where the connection attempt hangs instead (Windows can), exports may time out and spans may be lost by another reason, such as a full queue.
 
 ## Regression budgets (not yet enforced)
 
@@ -131,6 +134,48 @@ The plan, which stays open in #15 and requires the [external unblock checklist](
 
 A budget computed from result lines must use only lines with `errors == 0`, because a run with errors measured something other than the cell (fast failures inflate throughput), and must group lines by `run_id` before pairing a cell with `plain`, so that ratios never mix repetitions from different invocations, hosts, or commits. Only compare lines with the same `alloc_counting`.
 
+### `alloy-bench compare`
+
+`compare` applies those rules to result files:
+
+```bash
+target/release/alloy-bench compare results.jsonl [more.jsonl ...] [--budget budget.json]
+```
+
+- It reads every nonblank line of every file as an `alloy-bench/1` result and fails on any other line. Two lines for the same `run_id`, `commit`, `alloc_counting`, `rep`, scenario, workload, and transport also fail it, for example a file given twice.
+- Lines with `errors > 0` are skipped, `plain` included; it reports how many on stderr.
+- Lines are grouped by `run_id`, `commit`, `alloc_counting`, workload, and transport. Within a group, each line is paired with the `plain` line of the same `rep`. A line whose repetition has no error-free `plain` line with nonzero throughput is left unpaired and counted on stderr. A counting run is never paired with a non-counting one, and lines of different invocations are never paired, even with the same `rep`.
+- For every scenario other than `plain` with at least one pair in each group, it prints one JSON line (`schema: "alloy-bench-compare/1"`) with the group, `pairs`, the paired `reps`, and the `n`, `median`, `min`, and `max` of `throughput_ratio` (`requests_per_second / plain's`), `latency_p50_ratio` and `latency_p99_ratio` (`latency_us.p50` or `p99 / plain's`, `null` when no pair has both latencies with plain's above zero), `plain_requests_per_second`, plain's observed spread in those repetitions, and `budget` (`null` unless a `--budget` file covers the cell). A scenario with no pair prints no line; the skipped and unpaired counts on stderr account for it. The median of an even count is the midpoint of the two middle values. A throughput ratio that is not finite (finite rates can still overflow it) fails the command.
+- It fails when no line can be paired at all.
+
+These are observations of one invocation, not a noise floor or a significance test.
+
+`--budget FILE` checks each printed cell against a budget file. **No budgets are defined, and none is committed**: deriving them needs the dedicated-host baseline above. The file is JSON:
+
+```json
+{
+  "schema": "alloy-bench-budget/1",
+  "budgets": [
+    {
+      "scenario": "<scenario other than plain>",
+      "workload": "<workload>",
+      "transport": "<transport>",
+      "alloc_counting": false,
+      "min_throughput_ratio": "<number>",
+      "max_latency_p50_ratio": "<number>",
+      "max_latency_p99_ratio": "<number>"
+    }
+  ]
+}
+```
+
+The placeholders stand for values a baseline must supply; the limits are JSON numbers. `scenario`, `workload`, and `transport` are required and must name a matrix value; `alloc_counting` defaults to `false`; at least one limit is required, and each limit is a positive number. Unknown keys, a second budget for the same cell, and a `plain` budget are rejected. A budget applies to every group with its cell and allocation mode, and each group is checked on its medians:
+
+- `min_throughput_ratio` is exceeded when the median throughput ratio is below it;
+- `max_latency_p50_ratio` and `max_latency_p99_ratio` are exceeded when the median latency ratio is above them, or unknown (unknown is not within a limit).
+
+Each printed line then carries `budget: {"exceeded": [...]}` with the names of the exceeded limits (empty when within), or `budget: null` when no budget covers the cell. `compare` exits nonzero when any limit is exceeded or any budget matched no paired line (a budgeted cell that failed or was not run), after printing every line and listing the failures on stderr.
+
 Until then, no number is quoted without its artifact, source commit, environment, and repetition count. The harness compiles in the workspace build. Its real-service unit health matrices use a 1-second warm-up and a fixed 5-second window for every workload and transport on both plain and Alloy servers. Cancellation health has a finite per-worker exchange budget below the pinned client's reset-retention capacity (see [Functional health tests](#functional-health-tests)). Other workloads retain continuous closed-loop load. The warmed cancellation regression uses a 100 ms warm-up with the same 5-second window. Separate boundary/probe and full-body regressions retain their 200 ms windows; the end-to-end tests (every scenario as a separate `alloy-bench run` process, and a one-cell `matrix` whose output is parsed) also retain 0.2-second windows. These are functional checks, not performance budgets or dedicated-host acceptance.
 
 ## Hosted qualification preparation
@@ -140,13 +185,13 @@ Until then, no number is quoted without its artifact, source commit, environment
 The fixed weekly workload is bounded by a 60-minute job timeout and a 15-minute collection step:
 
 - Callgrind profiles of `alloy-logs-fmt` and `alloy-logs`, each bounded to 90 seconds of wall time, with a 1-second measurement window, 0.2-second warm-up, eight concurrent HTTP/1.1 requests, and the `small` workload. Raw per-thread instruction/call graph dumps and function annotations are retained. These are one profile per formatter, including startup, preparation, warm-up, client work, and teardown. They locate candidate costs in unchanged code before any future optimization; they do not establish native elapsed-time costs or statistically repeated improvements. Callgrind changes scheduling and simulates instructions; see its [manual](https://valgrind.org/docs/manual/cl-manual.html).
-- Five interleaved repetitions of `plain`, `alloy`, `alloy-logs`, and `alloy-logs-fmt`, with `small`, `h1`, 32 concurrent requests, the default 1-second warm-up and 5-second window: 20 runs. The existing matrix driver rotates by one cell per repetition. Neighbors remain correlated, so this ordering does not eliminate drift or constitute a measured noise floor.
+- Five interleaved repetitions of `plain`, `alloy`, `alloy-logs`, and `alloy-logs-fmt`, with `small`, `h1`, 32 concurrent requests, the default 1-second warm-up and 5-second window: 20 runs. The matrix driver shuffles each repetition (see [Ordering](#running-it)); the 2026-10-04 sample below predates that and rotated by one cell per repetition, so its neighbors were correlated. Neither ordering eliminates drift or constitutes a measured noise floor.
 - The same 20 runs in a separate allocation-counting pass. Only ratios within that pass are paired; its throughput is never compared with the ordinary pass.
 - One smoke run of each OTEL scenario with the same load/window. Sampled exporters must make progress; unsampled must export/drop no spans; the unreachable exporter must report `export_failed`; the accepting stub must receive requests and bytes without export failures. Queue/byte-budget/shutdown losses remain raw facts, with no invented drop rate or performance threshold. These single runs check exercised behavior, not stability or real Collector health.
 
-The Linux probes capture service/client on-CPU time, process RSS (including the client and warm-up peak), and allocation counts only in the counting pass. Span counters cover the measurement window, excluding spans still queued at its end; their totals need not equal completed requests. The stub returns an empty successful OTLP response without decoding spans. Its receipt checks establish only stub/exporter progress. The harness currently records no real Collector receiver/processor health, external Collector CPU/RSS, end-of-run queue backlog, or complete delivery accounting.
+The Linux probes capture service/client on-CPU time, process RSS (including the client and warm-up peak), and allocation counts only in the counting pass. Span counters cover the measurement window, excluding spans still queued at its end; their totals need not equal completed requests. The exporter queue at both edges of the window is recorded separately (`spans_queued_at_start`, `spans_queued_at_end`, `spans_queued_bytes_at_end`); the 2026-10-04 sample predates those fields. The stub returns an empty successful OTLP response without decoding spans. Its receipt checks establish only stub/exporter progress. The harness currently records no real Collector receiver/processor health, external Collector CPU/RSS, or the fate of spans still queued after the window, so delivery accounting remains incomplete.
 
-`examples/bench/hosted/qualify.py` validates all expected cells and repetitions, source/run identifiers, release environment, allocation mode, offered load, nonzero requests, zero client errors, and supported CPU/RSS counters. Missing or zero CPU probes, missing RSS, missing/empty profiles, profiler incompatibility, timeout, nonzero subprocess exits, and validation failures fail qualification. There is no `continue-on-error` and no waived gate. Commands run in process groups; timeout/cancellation terminates the group, including matrix children, and joins the directly owned child. Cleanup errors also fail. Runner termination can prevent final artifact upload; a missing artifact or `running` stage is incomplete evidence.
+`examples/bench/hosted/qualify.py` validates all expected cells and repetitions, source/run identifiers, release environment, allocation mode, offered load, nonzero requests, zero client errors, supported CPU/RSS counters, and, for OTEL scenarios, the window-edge queue counters (zero for `otel-unsampled`). Missing or zero CPU probes, missing RSS, missing/empty profiles, profiler incompatibility, timeout, nonzero subprocess exits, and validation failures fail qualification. There is no `continue-on-error` and no waived gate. Commands run in process groups; timeout/cancellation terminates the group, including matrix children, and joins the directly owned child. Cleanup errors also fail. Runner termination can prevent final artifact upload; a missing artifact or `running` stage is incomplete evidence.
 
 The supported profile layout is Callgrind format version 1 with the fixed options above: one final `part: 1` dump per thread, `positions: instr line`, and exactly `events: Ir`. Valgrind appends a thread ID to [separate-thread filenames](https://valgrind.org/docs/manual/cl-manual.html#cl-manual.options); the captured Valgrind 3.22 output uses `profile-<scenario>.callgrind.<PID>-<thread>` with at least two thread digits (`-01`, `-02`, ..., `-10`). The validator binds that canonical name to the owned profiler process PID and the dump's `pid`, `thread`, exact benchmark command, and creator version matching stderr. It requires the format marker, cache descriptions, a basic-block range starting at zero, and `Program termination` trigger. Partial/combined dumps, other metadata layouts, unknown suffixes/PIDs, symlinks, and extra profile files fail closed.
 

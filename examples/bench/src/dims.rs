@@ -122,7 +122,7 @@ pub(crate) const CANCEL_FRAMES: usize = 4096;
 /// What each request asks for, and how the client reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Workload {
-    /// `GET /small`: a 60-byte JSON object.
+    /// `GET /small`: a static 52-byte JSON object.
     Small,
     /// `GET /large`: 64 KiB with a known length.
     Large,
