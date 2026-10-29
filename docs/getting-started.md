@@ -168,6 +168,10 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
 
    Or write a GitForgeOps tree with `--format gitforgeops --output DIR`. Nothing is applied to a gateway.
 
+   Export does not generate Edge authentication yet, so it refuses
+   `auth.mode = "gateway"` and writes nothing. Use `"service"` when the
+   service verifies credentials itself.
+
    When exporting OpenAPI with `--manifest`, the document server URL uses the manifest's
    `api.public_path`. If `api.strip_public_path` is enabled, `api.service_base_path` is removed
    from operation paths that start with that prefix; paths already written relative to the

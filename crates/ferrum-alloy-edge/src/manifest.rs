@@ -51,7 +51,8 @@ pub struct ServiceManifest {
     /// Gateway resources to generate.
     #[serde(default)]
     pub gateway: ManifestGateway,
-    /// Declared authentication requirement (informational).
+    /// Declared authentication requirement. `edge export` refuses
+    /// `gateway`, which it cannot generate yet.
     #[serde(default)]
     pub auth: ManifestAuth,
     /// AI-agent tools: the document-level `x-ferrum-mcp` that `openapi
@@ -211,10 +212,9 @@ impl Default for ManifestGateway {
 #[serde(deny_unknown_fields, default)]
 pub struct ManifestAuth {
     /// `none`, `gateway` (Edge authenticates), or `service` (the service
-    /// verifies tokens itself). Export does not generate an Edge
-    /// authentication plugin yet: with `gateway`, `edge export` warns
-    /// that the generated configuration authenticates nobody until
-    /// authentication is configured in Edge.
+    /// verifies tokens itself). Export does not generate Edge
+    /// authentication yet, so `edge export` refuses `gateway` rather than
+    /// produce configuration that authenticates nobody.
     pub mode: Option<String>,
 }
 

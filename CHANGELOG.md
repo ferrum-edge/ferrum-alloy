@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **Breaking:** `ferrum-alloy edge export` refuses a manifest with
+  `auth.mode = "gateway"` (exit 3) instead of warning and writing
+  configuration that authenticates nobody. Export cannot generate Edge
+  authentication yet. The refusal comes before any output, so no stdout
+  document, file, or GitForgeOps directory is written, and `--force` leaves
+  an existing file untouched. In the library, `export::resources` returns
+  `Result<EdgeResources, ExportError>` and `export_warnings` is removed. To
+  export, set `auth.mode` to `"service"` when the service verifies
+  credentials itself, or to `"none"` and configure Edge authentication by
+  hand (#197).
 - Minimal readiness (`/readyz` and the management readiness probe) reads
   the draining flag again after waiting for a readiness refresh, as
   detailed health already did. A probe that was waiting when shutdown

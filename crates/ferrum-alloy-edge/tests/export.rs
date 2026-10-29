@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use ferrum_alloy_edge::export::{
-    export_warnings, file_mode_document, file_mode_yaml, gitforgeops_files, resources,
+    ExportError, file_mode_document, file_mode_yaml, gitforgeops_files, resources,
 };
 use ferrum_alloy_edge::manifest::{EDGE_RESOURCE_ID_MAX_LENGTH, ServiceManifest};
 use ferrum_alloy_edge::yaml;
@@ -115,7 +115,7 @@ fn keys(value: &Value) -> Vec<&str> {
 
 #[test]
 fn generated_resources_use_only_existing_edge_fields() {
-    let resources = resources(&manifest());
+    let resources = resources(&manifest()).unwrap();
     for key in keys(&resources.proxy) {
         assert!(
             PROXY_FIELDS.contains(&key),
@@ -154,7 +154,7 @@ fn generated_resources_use_only_existing_edge_fields() {
 
 #[test]
 fn backend_tls_moves_to_the_upstream_when_one_is_used() {
-    let resources = resources(&manifest());
+    let resources = resources(&manifest()).unwrap();
     assert_eq!(resources.proxy["upstream_id"], "orders-api-upstream");
     assert!(
         resources
@@ -181,7 +181,7 @@ fn backend_tls_moves_to_the_upstream_when_one_is_used() {
 fn without_health_checks_the_proxy_targets_the_backend_directly() {
     let mut manifest = manifest();
     manifest.health = None;
-    let resources = resources(&manifest);
+    let resources = resources(&manifest).unwrap();
     assert!(resources.upstream.is_none());
     assert_eq!(resources.proxy["backend_host"], "orders.internal");
     assert_eq!(resources.proxy["backend_port"], 8443);
@@ -198,7 +198,7 @@ fn file_mode_yaml_matches_snapshots() {
             &std::fs::read_to_string(fixtures().join(format!("{name}.toml"))).unwrap(),
         )
         .unwrap();
-        let rendered = file_mode_yaml(&resources(&manifest));
+        let rendered = file_mode_yaml(&resources(&manifest).unwrap());
         let path = fixtures().join(format!("{name}.edge.yaml"));
         if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
             std::fs::write(&path, &rendered).unwrap();
@@ -214,7 +214,7 @@ fn service_base_path_and_sampling_map_to_edge_fields() {
         &std::fs::read_to_string(fixtures().join("plain-http.toml")).unwrap(),
     )
     .unwrap();
-    let resources = resources(&manifest);
+    let resources = resources(&manifest).unwrap();
     assert_eq!(resources.proxy["backend_path"], "/v1");
     assert_eq!(
         resources.proxy["backend_read_timeout_ms"], 0,
@@ -238,7 +238,7 @@ fn service_base_path_and_sampling_map_to_edge_fields() {
 
 #[test]
 fn gitforgeops_files_use_kind_and_spec_only() {
-    let files = gitforgeops_files(&resources(&manifest()), "ferrum");
+    let files = gitforgeops_files(&resources(&manifest()).unwrap(), "ferrum");
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
@@ -268,7 +268,7 @@ fn proxy_id_boundary_accounts_for_the_longest_generated_resource_id() {
     manifest.gateway.proxy_id = Some("a".repeat(max_proxy_id_length));
     manifest.validate().unwrap();
 
-    let resources = resources(&manifest);
+    let resources = resources(&manifest).unwrap();
     assert!(
         generated_ids(&resources)
             .iter()
@@ -311,7 +311,7 @@ fn each_generated_id_suffix_is_checked_at_its_boundary() {
         manifest.gateway.proxy_id = Some("a".repeat(base_length));
         manifest.validate().unwrap();
 
-        let resources = resources(&manifest);
+        let resources = resources(&manifest).unwrap();
         assert!(
             generated_ids(&resources)
                 .iter()
@@ -339,7 +339,7 @@ fn direct_proxy_id_can_use_the_full_edge_limit_without_derived_resources() {
     manifest.gateway.proxy_id = Some("a".repeat(EDGE_RESOURCE_ID_MAX_LENGTH));
 
     manifest.validate().unwrap();
-    let resources = resources(&manifest);
+    let resources = resources(&manifest).unwrap();
     assert!(generated_ids(&resources).is_empty());
     assert_eq!(
         resources.proxy["id"].as_str().unwrap().len(),
@@ -392,23 +392,38 @@ fn ordinary_pchar_paths_are_accepted() {
     }
 }
 
-/// `gateway` auth is accepted by the manifest schema but export cannot
-/// generate the Edge authentication plugin yet; that must be loud, not a
-/// silently unauthenticated proxy.
+/// `gateway` auth is accepted by the manifest schema, but export cannot
+/// generate Edge authentication yet. Export refuses rather than produce an
+/// unauthenticated proxy.
 #[test]
-fn gateway_auth_produces_an_export_warning() {
-    assert!(export_warnings(&manifest()).is_empty());
+fn gateway_auth_refuses_export() {
     let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
+    for mode in ["service", "none"] {
+        let text = fixture.replace("mode = \"service\"", &format!("mode = {mode:?}"));
+        let manifest = ServiceManifest::from_toml(&text).unwrap();
+        assert!(resources(&manifest).is_ok(), "{mode}");
+    }
+    let text = fixture.replace("[auth]\nmode = \"service\"\n", "");
+    assert_ne!(text, fixture);
+    let manifest = ServiceManifest::from_toml(&text).unwrap();
+    assert!(resources(&manifest).is_ok(), "auth.mode absent");
+
     let text = fixture.replace("mode = \"service\"", "mode = \"gateway\"");
     assert_ne!(text, fixture);
     let manifest = ServiceManifest::from_toml(&text).unwrap();
-    let warnings = export_warnings(&manifest);
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("gateway"), "{warnings:?}");
+    let ExportError(reasons) = resources(&manifest).unwrap_err();
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
     assert!(
-        warnings[0].contains("does not authenticate"),
-        "{warnings:?}"
+        reasons[0].contains("auth.mode is \"gateway\""),
+        "{reasons:?}"
     );
+    assert!(reasons[0].contains("unauthenticated"), "{reasons:?}");
+
+    // A manifest that skipped validation still fails closed.
+    let mut manifest = manifest;
+    manifest.auth.mode = Some("Gateway".into());
+    let ExportError(reasons) = resources(&manifest).unwrap_err();
+    assert!(reasons[0].contains("\"Gateway\""), "{reasons:?}");
 }
 
 /// Keys YAML would read back as a bool, null, or number are quoted, in
