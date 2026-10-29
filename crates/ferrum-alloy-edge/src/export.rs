@@ -46,21 +46,33 @@ pub struct ResourceFile {
     pub content: String,
 }
 
-/// Things the generated configuration does not do, although the manifest
-/// asks for them. Export stays possible, but the operator must hear about
-/// every gap instead of discovering it in production.
-pub fn export_warnings(manifest: &ServiceManifest) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if manifest.auth.mode.as_deref() == Some("gateway") {
-        warnings.push(
-            "auth.mode is \"gateway\" but no Edge authentication plugin is exported yet; \
-             the generated configuration does not authenticate requests. Configure \
-             authentication in Edge (or set auth.mode to \"service\" or \"none\") \
-             before applying it."
+/// Why a manifest cannot be exported. Export fails closed: when the
+/// generated configuration would not do something security-relevant the
+/// manifest asks for, nothing is generated instead of configuration that
+/// silently leaves it out.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("cannot export this manifest:\n  - {}", .0.join("\n  - "))]
+pub struct ExportError(pub Vec<String>);
+
+/// Every reason the manifest cannot be exported, empty when it can. Modes
+/// are allowlisted, so a manifest built without [`ServiceManifest::validate`]
+/// fails closed too.
+fn refusals(manifest: &ServiceManifest) -> Vec<String> {
+    let mut refusals = Vec::new();
+    match manifest.auth.mode.as_deref() {
+        None | Some("none" | "service") => {}
+        Some("gateway") => refusals.push(
+            "auth.mode is \"gateway\", but export cannot generate Edge authentication yet, \
+             and the generated configuration would let every request through \
+             unauthenticated. Set auth.mode to \"service\" if the service verifies \
+             credentials itself, or to \"none\" and configure Edge authentication by hand."
                 .to_owned(),
-        );
+        ),
+        Some(mode) => refusals.push(format!(
+            "auth.mode {mode:?} is not none, gateway, or service"
+        )),
     }
-    warnings
+    refusals
 }
 
 fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<&String>) {
@@ -70,7 +82,16 @@ fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<&String>) 
 }
 
 /// Builds Edge resources from a validated manifest.
-pub fn resources(manifest: &ServiceManifest) -> EdgeResources {
+///
+/// # Errors
+///
+/// [`ExportError`] when the manifest asks for something export cannot
+/// generate, such as `auth.mode = "gateway"`.
+pub fn resources(manifest: &ServiceManifest) -> Result<EdgeResources, ExportError> {
+    let refusals = refusals(manifest);
+    if !refusals.is_empty() {
+        return Err(ExportError(refusals));
+    }
     let proxy_id = manifest.proxy_id().to_owned();
     let namespace = manifest.gateway.namespace.clone();
     let upstream_id = format!("{proxy_id}{UPSTREAM_ID_SUFFIX}");
@@ -210,11 +231,11 @@ pub fn resources(manifest: &ServiceManifest) -> EdgeResources {
     if !plugin_refs.is_empty() {
         proxy.insert("plugins".into(), Value::Array(plugin_refs));
     }
-    EdgeResources {
+    Ok(EdgeResources {
         proxy: Value::Object(proxy),
         upstream,
         plugin_configs,
-    }
+    })
 }
 
 /// A complete Edge file-mode configuration document (`FERRUM_MODE=file`).
