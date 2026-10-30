@@ -15,6 +15,7 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.request
 
 
 SCENARIOS = ("plain", "alloy", "alloy-logs", "alloy-logs-fmt")
@@ -26,6 +27,17 @@ LOSS_REASONS = {"queue_full", "byte_budget", "export_failed", "shutdown"}
 # Exporter queue levels at the window's edges, read before shutdown.
 QUEUE_FIELDS = ("spans_queued_at_start", "spans_queued_at_end", "spans_queued_bytes_at_end")
 CLASSIFICATION = "shared GitHub-hosted experimental; not dedicated baseline acceptance"
+# The real Collector the workflow starts beside the benchmark (collector.yaml).
+COLLECTOR_CONTAINER = "alloy-bench-collector"
+COLLECTOR_ENDPOINT = "http://127.0.0.1:4318/v1/traces"
+COLLECTOR_HEALTH = "http://127.0.0.1:13133/"
+COLLECTOR_METRICS = "http://127.0.0.1:8888/metrics"
+# Receiver counters for the otlp receiver. `failed` exists only in newer
+# Collectors, so it is checked when present; accepted and refused are required.
+RECEIVER_COUNTERS = ("accepted", "refused", "failed")
+PROMETHEUS_SAMPLE = re.compile(
+    r"([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+-?[0-9]+)?")
+PROMETHEUS_LABEL = re.compile(r'\s*([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"\s*(?:,|$)')
 
 
 def require(condition, message):
@@ -42,8 +54,13 @@ def counter(value):
 
 
 def validate(rows, scenarios, workloads, transports, reps, sha, run_id, counting,
-             seconds=5.0, warmup=1.0, concurrency=32):
-    """Reject incomplete, mixed, duplicate, erroneous, or unsupported evidence."""
+             seconds=5.0, warmup=1.0, concurrency=32, external_collector=False):
+    """Reject incomplete, mixed, duplicate, erroneous, or unsupported evidence.
+
+    With `external_collector`, `otel-collector` exported to the real Collector,
+    whose receipt is checked from its own counters (`collector_accounting`);
+    the result line's stub-only receipt fields must then be null, not zero.
+    """
     expected = {(rep, scenario, workload, transport)
                 for rep in range(1, reps + 1) for scenario in scenarios
                 for workload in workloads for transport in transports}
@@ -111,7 +128,11 @@ def validate(rows, scenarios, workloads, transports, reps, sha, run_id, counting
             else:
                 require(otel["spans_exported"] > 0 and lost["export_failed"] == 0,
                         "healthy exporter made no progress or failed")
-            if row["scenario"] == "otel-collector":
+            if row["scenario"] == "otel-collector" and external_collector:
+                require("collector_requests" in otel and otel["collector_requests"] is None
+                        and "collector_bytes" in otel and otel["collector_bytes"] is None,
+                        "stub receipt counters reported for a real Collector")
+            elif row["scenario"] == "otel-collector":
                 require(positive(otel.get("collector_requests"))
                         and positive(otel.get("collector_bytes")), "stub received no exports")
         else:
@@ -158,6 +179,96 @@ def summarize(rows):
                      for row in selected])
             summaries.append(summary)
     return summaries
+
+
+def receiver_counters(text):
+    """Sum the otlp receiver's span counters from Prometheus text exposition.
+
+    Matches `otelcol_receiver_<kind>_spans` with or without `_total`, summed over
+    other labels (transport, scope). A family that never appeared is absent, not
+    zero; the caller decides which absences are acceptable.
+    """
+    counters = {}
+    names = {f"otelcol_receiver_{kind}_spans{suffix}": kind
+             for kind in RECEIVER_COUNTERS for suffix in ("", "_total")}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        sample = PROMETHEUS_SAMPLE.fullmatch(line)
+        require(sample is not None, f"malformed Collector metric line: {line[:80]}")
+        kind = names.get(sample[1])
+        if kind is None:
+            continue
+        labels = dict(PROMETHEUS_LABEL.findall(sample[2] or ""))
+        if labels.get("receiver") != "otlp":
+            continue
+        value = float(sample[3])
+        require(math.isfinite(value) and value >= 0 and value == int(value),
+                f"invalid Collector counter {sample[1]}")
+        counters[kind] = counters.get(kind, 0) + int(value)
+    return counters
+
+
+def cgroup_usage(cgroup):
+    """CPU time (usec) and peak memory (bytes) of a container's cgroup v2.
+
+    Each probe is optional and independent: a missing, unreadable, or malformed
+    file yields null for that probe (unknown, not zero), never a failed stage.
+    """
+    cpu = None
+    try:
+        for line in (cgroup / "cpu.stat").read_text().splitlines():
+            if line.startswith("usage_usec "):
+                cpu = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        cpu = None
+    try:
+        peak = int((cgroup / "memory.peak").read_text())
+    except (OSError, ValueError):
+        peak = None
+    return cpu, peak
+
+
+def collector_accounting(before, after, rows):
+    """Corroborate, in aggregate, that the real Collector received the exports.
+
+    `before`/`after` are `Evidence.collector_state` snapshots around one matrix.
+    Every span the exporter counts as exported got a success response, so
+    accepted growth must at least cover the window exports. It is a lower
+    bound, not span-level reconciliation: growth also includes warm-up, retries,
+    and shutdown drain, so a shortfall smaller than that slack is not detected
+    here (per-row `export_failed` and the refused/failed counters cover the
+    failure paths). A refused or failed span, a counter that resets or
+    disappears, or a container restart fails.
+    """
+    for state in (before, after):
+        require(state["healthy"], "Collector health check failed")
+        container = state["container"]
+        require(container["running"] and not container["oom_killed"]
+                and container["restart_count"] == 0, "Collector container not running cleanly")
+    require(before["container"]["id"] == after["container"]["id"]
+            and before["container"]["started_at"] == after["container"]["started_at"],
+            "Collector container restarted during the matrix")
+    counts = after["receiver"]
+    require("accepted" in counts and "refused" in counts,
+            "Collector receiver counters missing after export")
+    delta = {}
+    for kind in RECEIVER_COUNTERS:
+        require(kind in counts or kind not in before["receiver"],
+                f"Collector {kind} counter disappeared")
+        if kind in counts:
+            delta[kind] = counts[kind] - before["receiver"].get(kind, 0)
+            require(delta[kind] >= 0, f"Collector {kind} counter went backwards")
+    exported = sum(row["otel"]["spans_exported"] for row in rows
+                   if row["scenario"] == "otel-collector")
+    require(exported > 0, "no window exports to account for")
+    require(delta["accepted"] >= exported,
+            "Collector accepted fewer spans than the exporter reported exported")
+    require(delta["refused"] == 0 and delta.get("failed", 0) == 0,
+            "Collector refused or failed spans")
+    return {"receiver_spans_delta": delta, "window_spans_exported": exported,
+            "accepted_outside_windows": delta["accepted"] - exported}
 
 
 def write_json(path, value):
@@ -349,12 +460,57 @@ class Evidence:
                        f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}",
             "attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
             "event": os.environ.get("GITHUB_EVENT_NAME"),
-            "collector": "in-process accepting stub; not a real Collector",
+            "collector": "otel-smoke: in-process accepting stub; collector stage and full "
+                         "matrix: real pinned Collector co-located on the shared runner",
             "profile": "Callgrind simulated instructions; not native CPU time",
             "dedicated_baseline": "blocked: owner-provided hosted environment required",
         })
 
-    def matrix(self, name, scenarios, workloads, transports, reps=5, counting=False, timeout=300):
+    def collector_state(self, name, wait=0):
+        """Health, receiver counters, and container identity of the real Collector.
+
+        Raw metrics text is retained. CPU and peak memory come from the
+        container's cgroup when readable, else null (unknown, not zero).
+        """
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                with urllib.request.urlopen(COLLECTOR_HEALTH, timeout=5) as response:
+                    healthy = response.status == 200
+            except OSError:
+                healthy = False
+            if healthy or time.monotonic() >= deadline:
+                break
+            time.sleep(1)
+        # Classic text format: no OpenMetrics exemplars for the parser to misread.
+        request = urllib.request.Request(COLLECTOR_METRICS,
+                                         headers={"Accept": "text/plain;version=0.0.4"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            require(response.status == 200, "Collector metrics unavailable")
+            text = response.read().decode()
+        (self.out / f"{name}.prom").write_text(text)
+        inspect = json.loads(subprocess.check_output(
+            ["docker", "container", "inspect", COLLECTOR_CONTAINER], text=True, timeout=30))
+        require(len(inspect) == 1, "ambiguous Collector container")
+        state = inspect[0]["State"]
+        container_id = inspect[0]["Id"]
+        cpu, peak = cgroup_usage(
+            Path(f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope"))
+        snapshot = {
+            "healthy": healthy,
+            "receiver": receiver_counters(text),
+            "container": {"id": container_id, "image": inspect[0]["Config"]["Image"],
+                          "started_at": state["StartedAt"], "running": state["Running"],
+                          "oom_killed": state["OOMKilled"],
+                          "restart_count": inspect[0]["RestartCount"]},
+            "cgroup_cpu_usage_usec": cpu,
+            "cgroup_memory_peak_bytes": peak,
+        }
+        write_json(self.out / f"{name}.json", snapshot)
+        return snapshot
+
+    def matrix(self, name, scenarios, workloads, transports, reps=5, counting=False, timeout=300,
+               collector=False):
         run_id = f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{name}"
         path = self.out / f"{name}.jsonl"
         args = ["target/release/alloy-bench", "matrix", "--scenarios", ",".join(scenarios),
@@ -364,9 +520,27 @@ class Evidence:
                 "--label", CLASSIFICATION]
         if counting:
             args.append("--alloc-counting")
+        if collector:
+            args.extend(["--collector-endpoint", COLLECTOR_ENDPOINT])
+            before = self.collector_state(f"{name}-collector-before", wait=60)
         self.command(name, args, timeout)
         rows = [json.loads(line) for line in path.read_text().splitlines()]
-        validate(rows, scenarios, workloads, transports, reps, self.sha, run_id, counting)
+        validate(rows, scenarios, workloads, transports, reps, self.sha, run_id, counting,
+                 external_collector=collector)
+        if collector:
+            after = self.collector_state(f"{name}-collector-after")
+            accounting = collector_accounting(before, after, rows)
+            cpu = [state["cgroup_cpu_usage_usec"] for state in (before, after)]
+            write_json(self.out / f"{name}-collector.json", {
+                "classification": CLASSIFICATION, "raw_file": path.name,
+                "raw_sha256": digest(path), "endpoint": COLLECTOR_ENDPOINT,
+                "co_located": True, **accounting,
+                "collector_cpu_usec_delta": None if None in cpu else cpu[1] - cpu[0],
+                # memory.peak is a high-water mark since the container started,
+                # so the stage's own peak shows only when `after` exceeds `before`.
+                "collector_memory_peak_bytes_before": before["cgroup_memory_peak_bytes"],
+                "collector_memory_peak_bytes_after": after["cgroup_memory_peak_bytes"],
+            })
         if "plain" in scenarios:
             write_json(self.out / f"{name}-summary.json", {
                 "classification": CLASSIFICATION, "raw_file": path.name,
@@ -424,9 +598,11 @@ def main():
         "allocations", SCENARIOS, ["small"], ["h1"], counting=True))
     evidence.stage("otel-smoke", lambda: evidence.matrix(
         "otel-smoke", OTEL, ["small"], ["h1"], reps=1, timeout=90))
+    evidence.stage("collector", lambda: evidence.matrix(
+        "collector", ("plain", "alloy", "otel-collector"), ["small"], ["h1"], collector=True))
     if full:
         evidence.stage("full-matrix", lambda: evidence.matrix(
-            "full-matrix", ALL_SCENARIOS, WORKLOADS, TRANSPORTS, timeout=9000))
+            "full-matrix", ALL_SCENARIOS, WORKLOADS, TRANSPORTS, timeout=9000, collector=True))
     evidence.stage("immutable-binary", lambda: require(digest(binary) == before, "binary changed"))
     complete = all(stage["status"] == "complete" for stage in evidence.stages.values())
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
@@ -434,7 +610,8 @@ def main():
                       f"{CLASSIFICATION}. Source `{sha}`, binary SHA-256 `{before}`.\n\n"
                       "Raw JSONL, commands, environment, profiles, summaries, and hashes are in "
                       "the run artifact. No performance budget or improvement is asserted. "
-                      "A real Collector and dedicated hosted baseline remain external blockers.\n")
+                      "The real Collector is co-located on this shared runner; a dedicated "
+                      "hosted baseline remains an external blocker.\n")
     return 0 if complete else 1
 
 

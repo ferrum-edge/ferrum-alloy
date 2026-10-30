@@ -1,5 +1,5 @@
 {
-  "$comment": "Tested Alloy-Edge pairing. docs/compatibility.md is the human-readable record. edge is the contract baseline; edge_support.tested lists every release CI tests, newest first. Values here must match .github/workflows/ci.yml, examples/edge-observability/Dockerfile, and docs/compatibility.md (checked by crates/ferrum-alloy-edge/tests/pairing.rs). .github/workflows/edge-bump.yml proposes new releases.",
+  "$comment": "Tested Alloy-Edge pairing. docs/compatibility.md is the human-readable record. edge is the contract baseline; edge_support.tested lists every release CI tests, newest first. Values here must match .github/workflows/ci.yml, examples/edge-observability/Dockerfile, docs/compatibility.md, and (collector) .github/workflows/newbenchmark-only.yml (checked by crates/ferrum-alloy-edge/tests/pairing.rs). .github/workflows/edge-bump.yml proposes new releases.",
   "record_version": 1,
   "status": "development",
   "alloy": {
