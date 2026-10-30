@@ -84,7 +84,7 @@ Not covered: an upstream reset after a connection is established, and per-attemp
 | Component | Version | Notes |
 |---|---|---|
 | Rust (development and CI) | 1.98.1 (`rust-toolchain.toml`) | |
-| Rust MSRV | 1.94 (`rust-version`) | Set by sqlx 0.9. Checked in CI by the `MSRV (1.94)` job: every target and test built with all and with default features, and each crate checked alone with its default features. |
+| Rust MSRV | 1.94 (`rust-version`) | Set by sqlx 0.9. Checked in CI by the `MSRV (1.94)` job: every target and test built with all and with default features, and each library crate checked alone with its default features. |
 | axum | 0.8.9 | |
 | hyper / hyper-util | 1.11.1 / 0.1.21 | |
 | tokio | 1.53.1 | |
