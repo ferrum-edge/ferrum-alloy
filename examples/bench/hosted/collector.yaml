@@ -1,0 +1,34 @@
+# Real OpenTelemetry Collector for hosted benchmark qualification only.
+# The image is the pinned demo/compatibility Collector (docs/compatibility.json);
+# the workflow runs it beside the benchmark on the same shared runner.
+#
+# Spans are accepted by the OTLP/HTTP receiver and dropped by the nop exporter,
+# with no processor in between, so the receiver's own accepted/refused/failed
+# counters (scraped from the Prometheus endpoint) are the delivery evidence.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  nop:
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [nop]

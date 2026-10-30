@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/newbenchmark-only.yml'
+      - 'examples/bench/hosted/**'
   # The bounded preparation run, weekly on main (Mondays 04:17 UTC). It is
   # experimental evidence, not a pull request gate.
   schedule:
@@ -34,6 +35,9 @@ jobs:
       RUST_BACKTRACE: '1'
       QUALIFICATION_SHA: ${{ github.sha }}
       QUALIFICATION_FULL: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+      # The pinned demo/compatibility Collector (docs/compatibility.json),
+      # run beside the benchmark on this runner. Not a dedicated endpoint.
+      COLLECTOR_IMAGE: otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
     steps:
       - name: Initialize qualification output directory
         run: |
@@ -59,7 +63,8 @@ jobs:
           git diff --exit-code
           git rev-parse HEAD > "$QUALIFICATION_OUT/source.txt"
           git status --porcelain >> "$QUALIFICATION_OUT/source.txt"
-          sha256sum Cargo.lock rust-toolchain.toml > "$QUALIFICATION_OUT/inputs.sha256"
+          sha256sum Cargo.lock rust-toolchain.toml examples/bench/hosted/collector.yaml \
+            > "$QUALIFICATION_OUT/inputs.sha256"
           {
             echo 'classification=shared GitHub-hosted experimental; no dedicated baseline or budget'
             printenv ImageOS ImageVersion RUNNER_OS RUNNER_ARCH
@@ -96,9 +101,38 @@ jobs:
           cargo build --release --locked -p example-bench \
             2>&1 | tee "$QUALIFICATION_OUT/build.log"
           sha256sum target/release/alloy-bench > "$QUALIFICATION_OUT/binary.sha256"
+      - name: Start the pinned real Collector
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          docker pull "$COLLECTOR_IMAGE" 2>&1 | tee "$QUALIFICATION_OUT/collector-pull.log"
+          # Loopback-only ports; no credentials; no restart, so a crash is visible.
+          docker run --detach --name alloy-bench-collector --restart no \
+            --memory 1g --memory-swap 1g \
+            --publish 127.0.0.1:4318:4318 --publish 127.0.0.1:8888:8888 \
+            --publish 127.0.0.1:13133:13133 \
+            --volume "$PWD/examples/bench/hosted/collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            "$COLLECTOR_IMAGE" > "$QUALIFICATION_OUT/collector-container.txt"
+          {
+            echo "collector_image=$COLLECTOR_IMAGE"
+            docker image inspect --format '{{.Id}} {{json .RepoDigests}}' "$COLLECTOR_IMAGE"
+            echo 'collector_limits=memory 1g, no CPU limit, co-located with service and client'
+            docker version --format 'docker {{.Server.Version}}'
+          } >> "$QUALIFICATION_OUT/environment.txt"
       - name: Collect profiles and five interleaved repetitions
-        timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 180 || 15 }}
+        timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 180 || 20 }}
         run: python3 examples/bench/hosted/qualify.py
+      - name: Retain Collector logs and remove it
+        if: always()
+        run: |
+          set -euo pipefail
+          if docker container inspect alloy-bench-collector > /dev/null 2>&1; then
+            docker container inspect alloy-bench-collector \
+              > "$QUALIFICATION_OUT/collector-inspect.json"
+            docker logs --timestamps alloy-bench-collector \
+              > "$QUALIFICATION_OUT/collector.log" 2>&1
+            docker rm --force alloy-bench-collector
+          fi
       - name: Hash all evidence including partial failures
         if: always()
         run: |

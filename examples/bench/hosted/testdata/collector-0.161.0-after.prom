@@ -1,0 +1,34 @@
+# HELP otelcol_process_cpu_seconds Total CPU user and system time in seconds [Alpha]
+# TYPE otelcol_process_cpu_seconds counter
+otelcol_process_cpu_seconds 17.74
+# HELP otelcol_process_memory_rss Total physical memory (resident set size) [Alpha]
+# TYPE otelcol_process_memory_rss gauge
+otelcol_process_memory_rss 2.2114304e+08
+# HELP otelcol_process_runtime_heap_alloc_bytes Bytes of allocated heap objects (see 'go doc runtime.MemStats.HeapAlloc') [Alpha]
+# TYPE otelcol_process_runtime_heap_alloc_bytes gauge
+otelcol_process_runtime_heap_alloc_bytes 2.482976e+07
+# HELP otelcol_process_runtime_total_alloc_bytes Cumulative bytes allocated for heap objects (see 'go doc runtime.MemStats.TotalAlloc') [Alpha]
+# TYPE otelcol_process_runtime_total_alloc_bytes counter
+otelcol_process_runtime_total_alloc_bytes 8.965052344e+09
+# HELP otelcol_process_runtime_total_sys_memory_bytes Total bytes of memory obtained from the OS (see 'go doc runtime.MemStats.Sys') [Alpha]
+# TYPE otelcol_process_runtime_total_sys_memory_bytes gauge
+otelcol_process_runtime_total_sys_memory_bytes 6.6185496e+07
+# HELP otelcol_process_uptime Uptime of the process [Alpha]
+# TYPE otelcol_process_uptime counter
+otelcol_process_uptime 366.292433346
+# HELP otelcol_receiver_accepted_spans Number of spans successfully pushed into the pipeline. [Alpha]
+# TYPE otelcol_receiver_accepted_spans counter
+otelcol_receiver_accepted_spans{receiver="otlp",transport="http"} 1.452544e+06
+# HELP otelcol_receiver_failed_spans The number of spans that failed to be processed by the receiver due to internal errors. [Alpha]
+# TYPE otelcol_receiver_failed_spans counter
+otelcol_receiver_failed_spans{receiver="otlp",transport="http"} 0
+# HELP otelcol_receiver_refused_spans Number of spans that could not be pushed into the pipeline. [Alpha]
+# TYPE otelcol_receiver_refused_spans counter
+otelcol_receiver_refused_spans{receiver="otlp",transport="http"} 0
+# HELP promhttp_metric_handler_errors_total Total number of internal errors encountered by the promhttp metric handler.
+# TYPE promhttp_metric_handler_errors_total counter
+promhttp_metric_handler_errors_total{cause="encoding"} 0
+promhttp_metric_handler_errors_total{cause="gathering"} 0
+# HELP target_info Target metadata
+# TYPE target_info gauge
+target_info{service_instance_id="ddf03442-e215-4b24-9850-104ed744768d",service_name="otelcol-contrib",service_version="0.161.0"} 1

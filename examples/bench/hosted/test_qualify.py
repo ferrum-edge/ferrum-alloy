@@ -9,8 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from qualify import (CLASSIFICATION, Evidence, LOSS_REASONS, QUEUE_FIELDS, SCENARIOS,
-                     instruction_profiles, stop, summarize, validate)
+from qualify import (CLASSIFICATION, COLLECTOR_ENDPOINT, Evidence, LOSS_REASONS, QUEUE_FIELDS,
+                     SCENARIOS, cgroup_usage, collector_accounting, instruction_profiles,
+                     receiver_counters, stop, summarize, validate)
 
 
 def otel(exported, **queued):
@@ -289,6 +290,234 @@ class ProfileTests(unittest.TestCase):
         evidence = self.evidence(annotation_stdout="")
         evidence.stage(self.name, lambda: evidence.profile(self.scenario))
         self.assertEqual(evidence.stages[self.name]["status"], "failed")
+
+
+def collector_state(accepted=None, refused=None, failed=None, healthy=True, **container):
+    receiver = {kind: value for kind, value in
+                (("accepted", accepted), ("refused", refused), ("failed", failed))
+                if value is not None}
+    state = {"id": "c1", "image": "collector", "started_at": "t0", "running": True,
+             "oom_killed": False, "restart_count": 0}
+    state.update(container)
+    return {"healthy": healthy, "receiver": receiver, "container": state,
+            "cgroup_cpu_usage_usec": None, "cgroup_memory_peak_bytes": None}
+
+
+def collector_rows(exported=10):
+    rows = []
+    for rep in range(1, 6):
+        for scenario in ("plain", "alloy", "otel-collector"):
+            row = result(rep, scenario)
+            if scenario == "otel-collector":
+                row["otel"] = otel(exported, collector_requests=None, collector_bytes=None)
+            rows.append(row)
+    return rows
+
+
+class CollectorTests(unittest.TestCase):
+    METRICS = (
+        "# HELP otelcol_receiver_accepted_spans_total Spans accepted.\n"
+        "# TYPE otelcol_receiver_accepted_spans_total counter\n"
+        'otelcol_receiver_accepted_spans_total{otel_scope_name="receiverhelper",'
+        'receiver="otlp",transport="http"} 120\n'
+        'otelcol_receiver_accepted_spans_total{receiver="otlp",transport="grpc"} 5\n'
+        'otelcol_receiver_accepted_spans_total{receiver="other",transport="http"} 999\n'
+        'otelcol_receiver_refused_spans{receiver="otlp",transport="http"} 0\n'
+        'otelcol_process_uptime_seconds_total{service_name="otelcol-contrib"} 1.5e+01\n'
+        'otelcol_exporter_queue_size{exporter="nop"} NaN\n'
+    )
+
+    def test_sums_otlp_receiver_counters_with_or_without_total_suffix(self):
+        self.assertEqual(receiver_counters(self.METRICS), {"accepted": 125, "refused": 0})
+        self.assertEqual(receiver_counters(""), {})
+
+    def test_parses_the_pinned_collectors_real_exposition(self):
+        # Scraped from contrib 0.161.0 with collector.yaml by hosted run 41000091456.
+        testdata = Path(__file__).with_name("testdata")
+        before = (testdata / "collector-0.161.0-before.prom").read_text()
+        after = (testdata / "collector-0.161.0-after.prom").read_text()
+        self.assertEqual(receiver_counters(before), {})
+        self.assertEqual(receiver_counters(after),
+                         {"accepted": 1452544, "refused": 0, "failed": 0})
+
+    def test_rejects_malformed_or_invalid_receiver_counters(self):
+        for text in ("garbage line with spaces\n",
+                     'otelcol_receiver_refused_spans_total{receiver="otlp"} -1\n',
+                     'otelcol_receiver_refused_spans_total{receiver="otlp"} 1.5\n',
+                     'otelcol_receiver_accepted_spans_total{receiver="otlp"} +Inf\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                receiver_counters(text)
+
+    def test_cgroup_probes_are_independent_and_unknown_when_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup = Path(directory)
+            self.assertEqual(cgroup_usage(cgroup / "missing"), (None, None))
+            (cgroup / "cpu.stat").write_text("usage_usec 1500\nuser_usec 1000\n")
+            self.assertEqual(cgroup_usage(cgroup), (1500, None))
+            (cgroup / "memory.peak").write_text("4096\n")
+            self.assertEqual(cgroup_usage(cgroup), (1500, 4096))
+            (cgroup / "cpu.stat").write_text("usage_usec\n")
+            self.assertEqual(cgroup_usage(cgroup), (None, 4096))
+            (cgroup / "memory.peak").write_text("max\n")
+            self.assertEqual(cgroup_usage(cgroup), (None, None))
+            (cgroup / "cpu.stat").write_text("usage_usec 7\n")
+            real_read = Path.read_text
+
+            def denied(path, *args, **kwargs):
+                if path.name == "memory.peak":
+                    raise PermissionError("read denied")
+                return real_read(path, *args, **kwargs)
+
+            with patch.object(Path, "read_text", denied):
+                self.assertEqual(cgroup_usage(cgroup), (7, None))
+
+    def test_accounting_requires_acceptance_of_every_window_export(self):
+        rows = collector_rows(exported=10)
+        before = collector_state()
+        summary = collector_accounting(before, collector_state(accepted=70, refused=0), rows)
+        self.assertEqual(summary, {"receiver_spans_delta": {"accepted": 70, "refused": 0},
+                                   "window_spans_exported": 50,
+                                   "accepted_outside_windows": 20})
+        summary = collector_accounting(collector_state(accepted=5, refused=0, failed=0),
+                                       collector_state(accepted=55, refused=0, failed=0), rows)
+        self.assertEqual(summary["receiver_spans_delta"],
+                         {"accepted": 50, "refused": 0, "failed": 0})
+        for after in (collector_state(accepted=49, refused=0),
+                      collector_state(accepted=70, refused=1),
+                      collector_state(accepted=70, refused=0, failed=1),
+                      collector_state(accepted=70),
+                      collector_state(refused=0)):
+            with self.subTest(after=after["receiver"]), self.assertRaises(ValueError):
+                collector_accounting(before, after, rows)
+
+    def test_accounting_rejects_resets_restarts_and_unhealthy_collectors(self):
+        rows = collector_rows()
+        good = collector_state(accepted=70, refused=0)
+        for before, after in [
+            (collector_state(accepted=100, refused=0), good),
+            (collector_state(healthy=False), good),
+            (collector_state(), collector_state(accepted=70, refused=0, healthy=False)),
+            (collector_state(), collector_state(accepted=70, refused=0, started_at="t1")),
+            (collector_state(), collector_state(accepted=70, refused=0, id="c2")),
+            (collector_state(), collector_state(accepted=70, refused=0, restart_count=1)),
+            (collector_state(), collector_state(accepted=70, refused=0, running=False)),
+            (collector_state(), collector_state(accepted=70, refused=0, oom_killed=True)),
+            (collector_state(failed=3), collector_state(accepted=70, refused=0)),
+        ]:
+            with self.subTest(before=before, after=after), self.assertRaises(ValueError):
+                collector_accounting(before, after, rows)
+
+    def test_accounting_needs_exports_to_account_for(self):
+        with self.assertRaisesRegex(ValueError, "no window exports"):
+            collector_accounting(collector_state(), collector_state(accepted=1, refused=0),
+                                 collector_rows(exported=0))
+
+    def test_real_collector_rows_must_not_carry_stub_receipt(self):
+        rows = collector_rows()
+        scenarios = ["plain", "alloy", "otel-collector"]
+        validate(rows, scenarios, ["small"], ["h1"], 5, "head", "run", False,
+                 external_collector=True)
+        with self.assertRaisesRegex(ValueError, "stub received no exports"):
+            check(rows, scenarios=scenarios)
+        for field, value in (("collector_requests", 0), ("collector_bytes", 7), (None, None)):
+            broken = copy.deepcopy(rows)
+            if field is None:
+                del broken[2]["otel"]["collector_bytes"]
+            else:
+                broken[2]["otel"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "stub receipt"):
+                validate(broken, scenarios, ["small"], ["h1"], 5, "head", "run", False,
+                         external_collector=True)
+
+    def test_collector_matrix_exports_to_the_real_endpoint_and_records_accounting(self):
+        rows = collector_rows()
+        states = iter([collector_state(accepted=3, refused=0),
+                       collector_state(accepted=73, refused=0)])
+        commands = []
+
+        def command(name, args, timeout):
+            commands.append(args)
+            path = Path(args[args.index("--out") + 1])
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict("qualify.os.environ", {"GITHUB_RUN_ID": "run", "GITHUB_RUN_ATTEMPT": "1"}):
+            for row in rows:
+                row["run_id"] = "run-1-collector"
+            evidence = Evidence(Path(directory), "head")
+            evidence.command = command
+            evidence.collector_state = lambda name, wait=0: next(states)
+            evidence.matrix("collector", ("plain", "alloy", "otel-collector"), ["small"], ["h1"],
+                            collector=True)
+            summary = json.loads((Path(directory) / "collector-collector.json").read_text())
+        args = commands[0]
+        self.assertEqual(args[args.index("--collector-endpoint") + 1], COLLECTOR_ENDPOINT)
+        self.assertEqual(summary["receiver_spans_delta"], {"accepted": 70, "refused": 0})
+        self.assertEqual(summary["window_spans_exported"], 50)
+        self.assertIsNone(summary["collector_cpu_usec_delta"])
+        self.assertIsNone(summary["collector_memory_peak_bytes_before"])
+        self.assertIsNone(summary["collector_memory_peak_bytes_after"])
+        self.assertTrue(summary["co_located"])
+
+    def test_collector_state_reads_health_metrics_container_and_cgroup(self):
+        metrics = (Path(__file__).with_name("testdata")
+                   / "collector-0.161.0-after.prom").read_text()
+        inspect = [{"Id": "abc", "Config": {"Image": "collector@sha256:1"},
+                    "RestartCount": 0,
+                    "State": {"StartedAt": "t0", "Running": True, "OOMKilled": False}}]
+        requests = []
+
+        def urlopen(request, timeout):
+            url = getattr(request, "full_url", request)
+            requests.append(request)
+            body = metrics if url.endswith("/metrics") else "{}"
+            response = Mock(status=200)
+            response.read.return_value = body.encode()
+            context = Mock()
+            context.__enter__ = Mock(return_value=response)
+            context.__exit__ = Mock(return_value=False)
+            return context
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("qualify.urllib.request.urlopen", side_effect=urlopen), \
+             patch("qualify.subprocess.check_output", return_value=json.dumps(inspect)), \
+             patch("qualify.cgroup_usage", return_value=(1500, None)) as cgroup:
+            out = Path(directory)
+            state = Evidence(out, "head").collector_state("probe")
+            self.assertEqual((out / "probe.prom").read_text(), metrics)
+            self.assertEqual(json.loads((out / "probe.json").read_text()), state)
+        self.assertTrue(state["healthy"])
+        self.assertEqual(state["receiver"], {"accepted": 1452544, "refused": 0, "failed": 0})
+        self.assertEqual(state["container"], {"id": "abc", "image": "collector@sha256:1",
+                                              "started_at": "t0", "running": True,
+                                              "oom_killed": False, "restart_count": 0})
+        self.assertEqual((state["cgroup_cpu_usage_usec"], state["cgroup_memory_peak_bytes"]),
+                         (1500, None))
+        self.assertEqual(cgroup.call_args.args[0],
+                         Path("/sys/fs/cgroup/system.slice/docker-abc.scope"))
+        self.assertEqual(requests[1].get_header("Accept"), "text/plain;version=0.0.4")
+
+    def test_collector_state_records_an_unhealthy_collector_without_waiting(self):
+        inspect = [{"Id": "abc", "Config": {"Image": "c"}, "RestartCount": 0,
+                    "State": {"StartedAt": "t0", "Running": True, "OOMKilled": False}}]
+
+        def urlopen(request, timeout):
+            if not hasattr(request, "full_url"):
+                raise ConnectionRefusedError("health down")
+            response = Mock(status=200)
+            response.read.return_value = b""
+            context = Mock()
+            context.__enter__ = Mock(return_value=response)
+            context.__exit__ = Mock(return_value=False)
+            return context
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("qualify.urllib.request.urlopen", side_effect=urlopen), \
+             patch("qualify.subprocess.check_output", return_value=json.dumps(inspect)), \
+             patch("qualify.time.sleep") as sleep:
+            state = Evidence(Path(directory), "head").collector_state("probe")
+        self.assertFalse(state["healthy"])
+        sleep.assert_not_called()
 
 
 class ValidationTests(unittest.TestCase):
