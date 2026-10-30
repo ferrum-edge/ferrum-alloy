@@ -14,7 +14,7 @@ v0.9.15 (previous), as recorded in [compatibility.json](compatibility.json) and
 No producer wire fields, bounds, enums, reader rules or fixture payloads change.
 The only generated snapshot changes are the known Edge release/source headers.
 
-## Current adoption (2026-10-05)
+## v0.9.12 adoption (2026-10-05, historical)
 
 The canonical v0.9.12 release was published at 13:58:38 UTC after its sole
 main PUSH [Validate contracts run 37320780987](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/37320780987)
@@ -24,7 +24,7 @@ the diagnostic-ref schema refreshes only provenance. The report's original
 v0.9.11 coordinated-release metadata and owner-unreleased status remain intact.
 The two gateway vocabularies refresh Edge provenance, and admin ETag/If-Match
 wording adds deployment-v1. Alloy consumes no new admin deployment surface or
-schema. The [inventory](edge-contract-inventory.md#revisions-inspected) records
+schema. The [inventory](edge-contract-inventory.md#historical-re-audits) records
 the static re-audit and unchanged data-plane/trust/lifecycle boundaries.
 
 The preceding bot head `39e9404` passed both release-specific Edge jobs in

@@ -3,12 +3,14 @@
 Issue #134 / GHSA-68jq-pr65-chjv uses the safe `cap-std` and `cap-fs-ext`
 4.0.3 APIs. Only the CLI depends on them. Workspace `unsafe_code = "forbid"`,
 MSRV 1.94, default/optional integration boundaries, and Linux/macOS/Windows
-support remain in effect. This is unpublished development work, not a claim
-about a patched release. Edge pairing and G01 contracts are unchanged.
+support remain in effect. The change merged in #135 (`690aed7`); Alloy is
+unpublished, so this is not a claim about a patched release. Edge pairing and
+G01 contracts are unchanged.
 
 ## Static provenance
 
-The following published archives were downloaded from `static.crates.io`,
+This is the static qualification recorded when #135 merged. The following
+published archives were downloaded from `static.crates.io`,
 unpacked with `tar`, and inspected as source without executing their code or
 build scripts. Each SHA-256 was calculated with `shasum -a 256` and matched
 the corresponding non-yanked version's `cksum` in the official sparse index
@@ -61,32 +63,10 @@ Alloy's exact locked graph still requires its hosted MSRV 1.94 gate.
 All new licenses are allowed by the existing policy: Apache-2.0 with the LLVM
 exception, Apache-2.0 or MIT. No license/advisory exceptions were added.
 
-## Manual lockfile graph and required hosted gates
+## Dependency graph
 
-The lockfile was edited from the published manifests/index, without running
-Cargo. The normal and platform dependency edges added are:
-
-- cap-fs-ext → cap-primitives, cap-std, io-lifetimes 3, windows-sys 0.61.2.
-- cap-std → cap-primitives, io-extras, io-lifetimes 3, rustix.
-- cap-primitives → ambient-authority, fs-set-times, io-extras, io-lifetimes 3,
-  ipnet, maybe-owned, rustix, rustix-linux-procfs, windows-sys 0.61.2, winx.
-- fs-set-times → io-lifetimes 2, rustix, windows-sys 0.52.0.
-- io-extras → io-lifetimes 3, windows-sys 0.52.0.
-- rustix-linux-procfs → once_cell, rustix.
-- winx → bitflags, windows-sys 0.52.0.
-- ambient-authority, both io-lifetimes versions and maybe-owned have no active
-  normal dependency edges under the selected features.
-
-The existing bitflags, ipnet, once_cell, rustix and Windows packages satisfy
-these requirements and retain their versions/checksums. cap-fs-ext enables only
+`Cargo.lock` is authoritative for the dependency graph. cap-fs-ext enables only
 `std`; cap-std defaults are empty; optional UTF-8/async integrations and
 io-lifetimes `close` are not enabled. Unix rustix filesystem/process/termios/time
 features add no packages beyond those already locked. The existing runtime
 socket2 dependency and its owned-handle guard remain unchanged.
-
-No local format, compile, lint, test, MSRV or cargo-deny command was executed.
-Before merge, the existing GitHub-hosted gates must pass with `--locked`,
-including formatting, both clippy configurations, both feature test suites on
-Linux/macOS/Windows, MSRV 1.94, dependency/license auditing and generated-project
-checks. Static inspection and `git diff --check` alone do not prove compilation
-or platform behavior.
