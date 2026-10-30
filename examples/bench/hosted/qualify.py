@@ -210,14 +210,37 @@ def receiver_counters(text):
     return counters
 
 
+def cgroup_usage(cgroup):
+    """CPU time (usec) and peak memory (bytes) of a container's cgroup v2.
+
+    Each probe is optional and independent: a missing, unreadable, or malformed
+    file yields null for that probe (unknown, not zero), never a failed stage.
+    """
+    cpu = None
+    try:
+        for line in (cgroup / "cpu.stat").read_text().splitlines():
+            if line.startswith("usage_usec "):
+                cpu = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        cpu = None
+    try:
+        peak = int((cgroup / "memory.peak").read_text())
+    except (OSError, ValueError):
+        peak = None
+    return cpu, peak
+
+
 def collector_accounting(before, after, rows):
-    """Prove the real Collector accepted what the exporter reported as exported.
+    """Corroborate, in aggregate, that the real Collector received the exports.
 
     `before`/`after` are `Evidence.collector_state` snapshots around one matrix.
-    Every span the exporter counts as exported got a success response, and the
-    receiver counts it as accepted, so accepted growth must cover the window
-    exports (it also includes warm-up, retries, and shutdown drain). A refused
-    or failed span, a counter reset, or a container restart fails.
+    Every span the exporter counts as exported got a success response, so
+    accepted growth must at least cover the window exports. It is a lower
+    bound, not span-level reconciliation: growth also includes warm-up, retries,
+    and shutdown drain, so a shortfall smaller than that slack is not detected
+    here (per-row `export_failed` and the refused/failed counters cover the
+    failure paths). A refused or failed span, a counter that resets or
+    disappears, or a container restart fails.
     """
     for state in (before, after):
         require(state["healthy"], "Collector health check failed")
@@ -232,6 +255,8 @@ def collector_accounting(before, after, rows):
             "Collector receiver counters missing after export")
     delta = {}
     for kind in RECEIVER_COUNTERS:
+        require(kind in counts or kind not in before["receiver"],
+                f"Collector {kind} counter disappeared")
         if kind in counts:
             delta[kind] = counts[kind] - before["receiver"].get(kind, 0)
             require(delta[kind] >= 0, f"Collector {kind} counter went backwards")
@@ -457,7 +482,10 @@ class Evidence:
             if healthy or time.monotonic() >= deadline:
                 break
             time.sleep(1)
-        with urllib.request.urlopen(COLLECTOR_METRICS, timeout=10) as response:
+        # Classic text format: no OpenMetrics exemplars for the parser to misread.
+        request = urllib.request.Request(COLLECTOR_METRICS,
+                                         headers={"Accept": "text/plain;version=0.0.4"})
+        with urllib.request.urlopen(request, timeout=10) as response:
             require(response.status == 200, "Collector metrics unavailable")
             text = response.read().decode()
         (self.out / f"{name}.prom").write_text(text)
@@ -466,15 +494,8 @@ class Evidence:
         require(len(inspect) == 1, "ambiguous Collector container")
         state = inspect[0]["State"]
         container_id = inspect[0]["Id"]
-        cgroup = Path(f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope")
-        cpu = None
-        if (cgroup / "cpu.stat").is_file():
-            for line in (cgroup / "cpu.stat").read_text().splitlines():
-                if line.startswith("usage_usec "):
-                    cpu = int(line.split()[1])
-        peak = None
-        if (cgroup / "memory.peak").is_file():
-            peak = int((cgroup / "memory.peak").read_text())
+        cpu, peak = cgroup_usage(
+            Path(f"/sys/fs/cgroup/system.slice/docker-{container_id}.scope"))
         snapshot = {
             "healthy": healthy,
             "receiver": receiver_counters(text),
@@ -515,7 +536,10 @@ class Evidence:
                 "raw_sha256": digest(path), "endpoint": COLLECTOR_ENDPOINT,
                 "co_located": True, **accounting,
                 "collector_cpu_usec_delta": None if None in cpu else cpu[1] - cpu[0],
-                "collector_memory_peak_bytes": after["cgroup_memory_peak_bytes"],
+                # memory.peak is a high-water mark since the container started,
+                # so the stage's own peak shows only when `after` exceeds `before`.
+                "collector_memory_peak_bytes_before": before["cgroup_memory_peak_bytes"],
+                "collector_memory_peak_bytes_after": after["cgroup_memory_peak_bytes"],
             })
         if "plain" in scenarios:
             write_json(self.out / f"{name}-summary.json", {

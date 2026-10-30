@@ -145,6 +145,11 @@ fn edge_pin_is_consistent() {
         bench.contains(&format!("COLLECTOR_IMAGE: {collector}\n")),
         "newbenchmark-only.yml does not pin {collector}"
     );
+    assert_eq!(
+        bench.matches("opentelemetry-collector").count(),
+        1,
+        "newbenchmark-only.yml references a second Collector image"
+    );
 }
 
 #[test]

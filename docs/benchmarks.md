@@ -180,7 +180,7 @@ Until then, no number is quoted without its artifact, source commit, environment
 
 ## Hosted qualification preparation
 
-[Hosted benchmark qualification](../.github/workflows/newbenchmark-only.yml) runs the bounded preparation workload weekly on `main` and on pull requests that change that workflow file, and the full matrix on manual dispatch (main only). Except for those workflow-file pull requests it is not a pull request check, and nothing here establishes it as a required branch-protection gate. It checks out the exact immutable `github.sha` for the run and builds one optimized binary with debug symbols using the pinned toolchain and `Cargo.lock`. That binary supplies every profile and comparison in the artifact. Existing workspace CI still checks formatting, linting, and tests; qualification additionally runs the harness tests and the compiled `json_log` schema/snapshot tests without updating snapshots.
+[Hosted benchmark qualification](../.github/workflows/newbenchmark-only.yml) runs the bounded preparation workload weekly on `main` and on pull requests that change that workflow file or `examples/bench/hosted/`, and the full matrix on manual dispatch (main only). Except for those pull requests it is not a pull request check, and nothing here establishes it as a required branch-protection gate. It checks out the exact immutable `github.sha` for the run and builds one optimized binary with debug symbols using the pinned toolchain and `Cargo.lock`. That binary supplies every profile and comparison in the artifact. Existing workspace CI still checks formatting, linting, and tests; qualification additionally runs the harness tests and the compiled `json_log` schema/snapshot tests without updating snapshots.
 
 The fixed weekly workload is bounded by a 60-minute job timeout and a 20-minute collection step:
 
@@ -199,12 +199,12 @@ The workflow starts the Collector already pinned for the end-to-end demo and in 
 Around the `collector` stage, and around the full matrix on dispatch, `qualify.py` reads the Collector's health endpoint, its Prometheus metrics, and `docker container inspect`, and keeps the raw metrics. It fails the stage unless:
 
 - the Collector is healthy, running, never OOM-killed or restarted, and the same container before and after;
-- the otlp receiver's `accepted` and `refused` span counters exist after the matrix, and no receiver counter goes backwards;
-- `accepted` grew by at least the sum of `spans_exported` over the `otel-collector` windows, since every span the exporter counts as exported got a success response;
+- the otlp receiver's `accepted` and `refused` span counters exist after the matrix, and no receiver counter goes backwards or disappears;
+- `accepted` grew by at least the sum of `spans_exported` over the `otel-collector` windows, since every span the exporter counts as exported got a success response. This is a lower bound, not span-by-span reconciliation: the growth also includes spans outside the windows, so a shortfall smaller than that slack would pass this check. Per-row `export_failed` and the refused and failed counters cover the failure paths;
 - `refused` and, when the Collector reports it, `failed` did not grow;
 - `otel-collector` result lines report `collector_requests` and `collector_bytes` as `null`. Those fields describe only the stub, so a real Collector's receipt is never substituted with them.
 
-`<name>-collector.json` records the receiver deltas, the window exports, and the spans accepted outside the windows (warm-up, retries, and the drain at shutdown, together; the harness does not separate them). It also records the Collector container's CPU time and peak memory from its cgroup when the runner exposes them, and `null` otherwise. The Collector's log and final `inspect` are retained even when the job fails.
+`<name>-collector.json` records the receiver deltas, the window exports, and the spans accepted outside the windows (warm-up, retries, and the drain at shutdown, together; the harness does not separate them). It also records the Collector container's CPU time during the matrix and its cgroup peak memory before and after (`memory.peak` is a high-water mark since the container started, so the full matrix's value includes the earlier stage), each when the runner exposes it and `null` otherwise. Metrics are requested in the classic Prometheus text format. The Collector's log and final `inspect` are retained even when the job fails.
 
 This qualifies a real, healthy Collector as the export target. It does not qualify the environment: the Collector competes for the same shared vCPUs as the service and client, so its cost is part of what `otel-collector` measures here. Its configuration has no batching, queueing, or onward export, unlike a production pipeline.
 
@@ -218,7 +218,7 @@ The run artifact `alloy-benchmark-<head SHA>-<run ID>-<attempt>` contains raw JS
 
 On `main`, the workflow's input-free `workflow_dispatch` can collect the full 216-cell matrix with five repetitions (1,080 runs), plus the preparation passes above. Both the workflow and driver reject full execution from other refs. The full job is bounded to 210 minutes; full collection to 180 minutes, and the full matrix subprocess to 150 minutes. Dispatch is an owner/root action; this implementation does not launch it. Its `otel-collector` cells export to the [real Collector](#real-collector), with the same accounting. It still uses a standard shared GitHub-hosted runner, so its artifact is **experimental**, even when complete. It cannot satisfy #15's dedicated baseline, committed raw data, derived budgets, or regression enforcement, or #16's demonstrated improvement beyond measured noise. The bounded preparation evidence below does not change those acceptance limits.
 
-The workflow has only `contents: read`, SHA-pinned actions, a digest-pinned Collector image, no persisted checkout credentials, caches, secrets, `pull_request_target`, or reusable untrusted workflow calls. It runs on pull requests that change the workflow or `examples/bench/hosted/`. It neither provisions infrastructure nor changes account settings. A dedicated acceptance workflow must be a separately reviewed main-only change.
+The workflow has only `contents: read`, SHA-pinned actions, a digest-pinned Collector image, no persisted checkout credentials, caches, secrets, `pull_request_target`, or reusable untrusted workflow calls. It neither provisions infrastructure nor changes account settings. A dedicated acceptance workflow must be a separately reviewed main-only change.
 
 ## Infrastructure qualification (2026-10-29)
 

@@ -11,7 +11,8 @@
   use the same Collector. The stage fails unless the Collector stays
   healthy and unrestarted, and its receiver accepted at least every span
   the exporter reported exported, with none refused or failed. Its raw
-  metrics, logs, and cgroup CPU/memory are retained. The weekly
+  metrics and logs are retained, and so are its cgroup CPU and peak
+  memory when the runner exposes them (`null` otherwise). The weekly
   collection step's limit rises from 15 to 20 minutes, and the workflow
   also runs on pull requests that change `examples/bench/hosted/`.
 - `docs/benchmarks.md` records the 2026-10-29 infrastructure
