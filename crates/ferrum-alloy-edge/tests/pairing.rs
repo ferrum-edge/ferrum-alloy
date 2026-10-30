@@ -139,6 +139,12 @@ fn edge_pin_is_consistent() {
     assert_pins_only("Dockerfile", &dockerfile, &[digest]);
     let collector = pairing["collector"]["image"].as_str().unwrap();
     assert!(dockerfile.contains(collector));
+    // Hosted benchmark qualification runs the same pinned Collector.
+    let bench = repo(".github/workflows/newbenchmark-only.yml");
+    assert!(
+        bench.contains(&format!("COLLECTOR_IMAGE: {collector}\n")),
+        "newbenchmark-only.yml does not pin {collector}"
+    );
 }
 
 #[test]

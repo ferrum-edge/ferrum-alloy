@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- Hosted benchmark qualification (#15, #16) exports to a real
+  OpenTelemetry Collector: the pinned demo image
+  (`otel/opentelemetry-collector-contrib:0.161.0`, by digest) runs beside
+  the benchmark with `examples/bench/hosted/collector.yaml`. A new
+  `collector` stage runs `plain`, `alloy`, and `otel-collector` for five
+  interleaved repetitions, and the full matrix's `otel-collector` cells
+  use the same Collector. The stage fails unless the Collector stays
+  healthy and unrestarted, and its receiver accepted at least every span
+  the exporter reported exported, with none refused or failed. Its raw
+  metrics, logs, and cgroup CPU/memory are retained. The weekly
+  collection step's limit rises from 15 to 20 minutes, and the workflow
+  also runs on pull requests that change `examples/bench/hosted/`.
+- `docs/benchmarks.md` records the 2026-10-29 infrastructure
+  qualification: no existing resource provides the isolated GitHub-hosted
+  environment that the dedicated baseline needs, so that acceptance, the
+  regression budgets and gate, and further logging optimization are
+  deferred explicitly. The benchmark policy is unchanged.
 - `cargo deny` now denies duplicate crate versions instead of warning.
   The older version lines of the 19 crates duplicated today are listed in
   `deny.toml` under `[bans] skip`, each with the dependency split that
