@@ -112,4 +112,4 @@ post-default bounds, derived IDs and endpoint relationships remain owner rules.
    production-apply, trace-store or separate crate publishing acceptance.
 
 Alloy #27 and #28 remain open for root disposition. This accepted shared freeze does not grant
-the separate owner publishing approval required by [#24](release.md#open-owner-decisions).
+the separate owner publishing approval that any registry release needs; [#24](release.md#distribution-decision) settled on Git-only distribution.

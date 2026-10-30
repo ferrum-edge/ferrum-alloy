@@ -19,7 +19,7 @@ Ferrum Alloy is a batteries-included toolkit for Rust API services built on [Axu
 
 Alloy works on its own. Behind [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge), it also shows a verified request story shared with the gateway. You can see which gateway span each service span belongs to and whether the gateway's identity was cryptographically verified. You can also see what the evidence does and does not prove about where the time went.
 
-> **Pre-release.** Nothing is published to crates.io yet (see [release readiness](docs/release.md)), and Rust APIs may change. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
+> **Pre-release, Git-only.** Alloy is distributed from Git and is not published to crates.io or any other registry (see the [distribution decision](docs/release.md#distribution-decision)), and Rust APIs may change. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
 
 ## Quick start
 
@@ -100,7 +100,7 @@ The management listener binds to loopback by default, but loopback does not auth
 | [Implementation status](docs/implementation-status.md) | What is built and tested |
 | [Testing](docs/testing.md) | Property tests and fuzz targets for untrusted input |
 | [Benchmarks](docs/benchmarks.md) | Local, same-host overhead measurements and their limits |
-| [Release readiness](docs/release.md) | Packaging checks, the release checklist, and open owner decisions |
+| [Release readiness](docs/release.md) | The Git-only distribution decision, packaging checks, the release checklist, and deferred registry decisions |
 
 ## Contracts
 
@@ -134,6 +134,6 @@ The Ferrum Edge end-to-end stack is defined in [`examples/edge-observability/com
 
 ## License
 
-Ferrum Alloy is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), and commercial licensing is available ([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). "Ferrum Alloy" and the crate and command names are working names. Registry and trademark availability has not been verified.
+Ferrum Alloy is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), and commercial licensing is available ([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). "Ferrum Alloy" and the crate and command names are working names. Alloy is distributed from Git only; registry and trademark availability are [deferred decisions](docs/release.md#deferred-registry-decisions), and no trademark search has been done.
 
 Files under [`crates/ferrum-alloy/assets/swagger-ui/`](crates/ferrum-alloy/assets/swagger-ui/) are third-party code (Swagger UI, feature `openapi-ui`) and are licensed only under their own terms: Apache-2.0, with the bundled MIT, BSD-3-Clause, and DOMPurify notices in that directory. They are not covered by the repository's PolyForm Noncommercial or commercial licensing.

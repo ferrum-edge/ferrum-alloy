@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Distribution decision (#24): Alloy stays Git-only. No crate is
+  published to crates.io or any other registry, `publish = false` stays,
+  and the PolyForm Noncommercial license is unchanged. `docs/release.md`
+  records the decision, marks the release checklist's registry-only
+  items, and moves crate names, trademark, registry and license policy,
+  homepage, and publisher to deferred registry decisions, with crate-name
+  availability, related-name, and Swagger UI license evidence refreshed
+  on 2026-10-29.
 - Hosted benchmark qualification (#15, #16) exports to a real
   OpenTelemetry Collector: the pinned demo image
   (`otel/opentelemetry-collector-contrib:0.161.0`, by digest) runs beside
