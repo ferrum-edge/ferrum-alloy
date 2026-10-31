@@ -139,17 +139,23 @@ fn edge_pin_is_consistent() {
     assert_pins_only("Dockerfile", &dockerfile, &[digest]);
     let collector = pairing["collector"]["image"].as_str().unwrap();
     assert!(dockerfile.contains(collector));
-    // Hosted benchmark qualification runs the same pinned Collector.
-    let bench = repo(".github/workflows/newbenchmark-only.yml");
-    assert!(
-        bench.contains(&format!("COLLECTOR_IMAGE: {collector}\n")),
-        "newbenchmark-only.yml does not pin {collector}"
-    );
-    assert_eq!(
-        bench.matches("opentelemetry-collector").count(),
-        1,
-        "newbenchmark-only.yml references a second Collector image"
-    );
+    // Hosted benchmark qualification and the regression gate run the same
+    // pinned Collector.
+    for file in [
+        ".github/workflows/newbenchmark-only.yml",
+        ".github/workflows/bench-gate.yml",
+    ] {
+        let bench = repo(file);
+        assert!(
+            bench.contains(&format!("COLLECTOR_IMAGE: {collector}\n")),
+            "{file} does not pin {collector}"
+        );
+        assert_eq!(
+            bench.matches("opentelemetry-collector").count(),
+            1,
+            "{file} references a second Collector image"
+        );
+    }
 }
 
 #[test]

@@ -24,7 +24,8 @@ def otel(exported, **queued):
 def result(rep, scenario):
     return {"schema": "alloy-bench/1", "rep": rep, "scenario": scenario,
             "workload": "small", "transport": "h1", "commit": "head", "run_id": "run",
-            "alloc_counting": False, "allocations": None, "requests": 100,
+            "alloc_counting": False, "injected_service_ns": 0, "allocations": None,
+            "requests": 100,
             "requests_per_second": 20.0, "errors": 0, "error_samples": [],
             "seconds": 5.0, "warmup_seconds": 1.0, "concurrency": 32,
             "connections": 32, "streams_per_connection": 1,
@@ -534,6 +535,7 @@ class ValidationTests(unittest.TestCase):
         for key, value in [("errors", 1), ("error_samples", ["connection reset"]),
                            ("commit", "other"), ("run_id", "other"),
                            ("alloc_counting", True), ("seconds", 0.2),
+                           ("injected_service_ns", 5000), ("injected_service_ns", None),
                            ("requests", 0), ("requests_per_second", float("nan")),
                            ("cpu", None), ("memory", None)]:
             with self.subTest(key=key), self.assertRaises(ValueError):

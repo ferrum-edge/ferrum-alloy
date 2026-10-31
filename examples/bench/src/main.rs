@@ -72,6 +72,9 @@ options:
                             of one matrix records the same id
   --collector-endpoint URL  otel-collector exports to this OTLP/HTTP traces
                             URL instead of the in-process stub
+  --inject-service-ns N     busy-wait N ns per request in every scenario but
+                            plain: a synthetic regression for checking the
+                            regression gate, never a measurement (default 0)
 
 scenarios:  plain, alloy, alloy-logs, alloy-logs-fmt, alloy-diagnostics,
             otel-sampled, otel-unsampled, otel-unreachable, otel-collector
@@ -87,6 +90,7 @@ const FORWARDED: &[&str] = &[
     "--streams",
     "--label",
     "--collector-endpoint",
+    "--inject-service-ns",
 ];
 
 #[derive(Debug)]
@@ -157,6 +161,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         label: None,
         run_id: String::new(),
         collector_endpoint: None,
+        inject_service_ns: 0,
         rep: None,
     };
     let mut cell = Cell {
@@ -196,6 +201,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             (_, "--label") => options.label = Some(value.clone()),
             (_, "--run-id") => options.run_id = value.clone(),
             (_, "--collector-endpoint") => options.collector_endpoint = Some(value.clone()),
+            (_, "--inject-service-ns") => options.inject_service_ns = value.parse()?,
             (false, "--scenario") => cell.scenario = Scenario::parse(value)?,
             (false, "--workload") => cell.workload = Workload::parse(value)?,
             (false, "--transport") => cell.transport = Transport::parse(value)?,
@@ -319,7 +325,8 @@ mod tests {
     #[test]
     fn matrix_forwards_common_flags_only() {
         let line = "matrix --scenarios plain,alloy --transports h1,h2c --reps 3 \
-                    --seconds 2 --label ci --alloc-counting --out r.jsonl --dry-run";
+                    --seconds 2 --label ci --alloc-counting --out r.jsonl --dry-run \
+                    --inject-service-ns 5000";
         let Command::Matrix {
             cells,
             reps,
@@ -333,7 +340,10 @@ mod tests {
         };
         assert_eq!(cells.len(), 2 * Workload::ALL.len() * 2);
         assert_eq!(reps, 3);
-        assert_eq!(forward.join(" "), "--seconds 2 --label ci --alloc-counting");
+        assert_eq!(
+            forward.join(" "),
+            "--seconds 2 --label ci --alloc-counting --inject-service-ns 5000"
+        );
         assert_eq!(out, Some(PathBuf::from("r.jsonl")));
         assert!(dry_run);
     }
