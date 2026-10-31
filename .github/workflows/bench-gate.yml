@@ -1,8 +1,8 @@
 name: Benchmark regression gate
 
 on:
-  # Exercise the whole pipeline on a tiny matrix: calibration, derivation,
-  # held-out checks, and a synthetic regression. Not evidence.
+  # Exercise the whole pipeline on a tiny matrix: calibration, positive
+  # controls, derivation, and held-out checks. Not evidence.
   pull_request:
     paths:
       - '.github/workflows/bench-gate.yml'
@@ -52,16 +52,15 @@ jobs:
             pull_request:)
               echo 'mode=calibrate' >> "$GITHUB_OUTPUT"
               echo 'profile=smoke' >> "$GITHUB_OUTPUT"
-              echo 'slots=["calibration-01","calibration-02","calibration-03","injected-01"]' \
+              echo 'slots=["calibration-01","calibration-02","calibration-03"]' \
                 >> "$GITHUB_OUTPUT" ;;
             workflow_dispatch:calibrate)
               echo 'mode=calibrate' >> "$GITHUB_OUTPUT"
               echo 'profile=full' >> "$GITHUB_OUTPUT"
               # Runner CPU models vary, and budgets are per model, so enough
               # slots for the common models to reach the minimum run count.
-              slots=$(printf '"calibration-%02d",' $(seq 1 16))
-              injected=$(printf '"injected-%02d",' $(seq 1 3))
-              echo "slots=[${slots}${injected}\"allocations\"]" >> "$GITHUB_OUTPUT" ;;
+              slots=$(printf '"calibration-%02d",' $(seq 1 18))
+              echo "slots=[${slots}\"allocations\"]" >> "$GITHUB_OUTPUT" ;;
             workflow_dispatch:gate)
               # Three runners: a slot on an uncalibrated CPU model runs nothing.
               echo 'mode=gate' >> "$GITHUB_OUTPUT"
@@ -156,7 +155,7 @@ jobs:
             docker version --format 'docker {{.Server.Version}}'
           } >> "$QUALIFICATION_OUT/environment.txt"
       - name: Collect the slot
-        timeout-minutes: ${{ needs.plan.outputs.profile == 'full' && 190 || 15 }}
+        timeout-minutes: ${{ needs.plan.outputs.profile == 'full' && 200 || 15 }}
         run: python3 examples/bench/hosted/gate.py collect
       - name: Check the committed budgets for this CPU model
         if: needs.plan.outputs.mode == 'gate'
@@ -229,7 +228,7 @@ jobs:
         with:
           pattern: bench-gate-*-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-*
           path: ${{ runner.temp }}/slots
-      - name: Derive budgets, hold out each run, and check the synthetic regression
+      - name: Derive budgets, check positive controls, and hold out each run
         run: python3 examples/bench/hosted/gate.py derive "$RUNNER_TEMP/slots"
       - name: Hash the derivation
         if: always()

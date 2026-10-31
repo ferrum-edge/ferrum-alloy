@@ -43,23 +43,31 @@ SPREAD_MULTIPLIER = 3.0
 MARGIN_FLOOR = 0.02
 MARGIN_CAP = 0.20
 # A CPU model gets budgets from at least this many calibration runs, so that
-# each held-out check still derives its limits from three. Runs of other
+# each held-out check still derives its limits from four. Runs of other
 # models are never held to them: ratios move more between models than within.
-MIN_MODEL_RUNS = 4
+MIN_MODEL_RUNS = 5
 # The smoke profile treats every runner as one model, to exercise the pipeline.
 ANY_MODEL = "*"
 
 PROFILES = {
     # The full matrix, at the policy's repetitions and window. Main only.
+    # Every calibration slot then runs `control`, a subset with the synthetic
+    # regression injected, on the same runner: the positive control for its
+    # CPU model's budgets.
     "full": {"scenarios": qualify.ALL_SCENARIOS, "workloads": qualify.WORKLOADS,
              "transports": qualify.TRANSPORTS, "reps": 5, "seconds": 5, "warmup": 1,
-             "timeout": 10800, "inject_ns": 5000, "per_model": True},
+             "timeout": 10800, "per_model": True,
+             "control": {"scenarios": ("plain", "alloy", "alloy-logs", "alloy-diagnostics"),
+                         "workloads": ("small",), "transports": ("h1", "h2c"),
+                         "inject_ns": 5000, "timeout": 900}},
     # Pull requests exercise the pipeline on a tiny matrix. Not evidence.
     "smoke": {"scenarios": ("plain", "alloy", "otel-collector"), "workloads": ("small",),
               "transports": ("h1", "h2c"), "reps": 3, "seconds": 1, "warmup": 0.5,
-              "timeout": 600, "inject_ns": 50000, "per_model": False},
+              "timeout": 600, "per_model": False,
+              "control": {"scenarios": ("plain", "alloy"), "workloads": ("small",),
+                          "transports": ("h1",), "inject_ns": 50000, "timeout": 300}},
 }
-SLOT = re.compile(r"(calibration)-[0-9]{2}|(injected)-[0-9]{2}|(allocations)|(gate)-[0-9]{2}")
+SLOT = re.compile(r"(calibration)-[0-9]{2}|(allocations)|(gate)-[0-9]{2}")
 
 
 def slot_kind(slot):
@@ -228,6 +236,11 @@ def load_slots(root, sha, profile):
         raw = directory / slot["raw_file"]
         require(digest(raw) == slot["raw_sha256"], f"raw results changed in {directory.name}")
         slot["path"] = raw
+        if slot["kind"] == "calibration":
+            control = directory / slot["control_file"]
+            require(digest(control) == slot["control_sha256"],
+                    f"control results changed in {directory.name}")
+            slot["control_path"] = control
         previous = slots.get(slot["slot"])
         if previous is None or slot["attempt"] > previous["attempt"]:
             slots[slot["slot"]] = slot
@@ -261,37 +274,74 @@ def write_index(directory, sets, sha):
         "derivation": "derivation.json"})
 
 
-def evaluate(slots, profile, out, binary=BINARY):
-    """Derive budgets and check them out of sample; returns the derivation report.
+def restrict(budget, cells):
+    """The entries of a budget file for some cells only."""
+    return {"schema": budget["schema"],
+            "budgets": [entry for entry in budget["budgets"]
+                        if (entry["scenario"], entry["workload"], entry["transport"]) in cells]}
 
-    Accepted when at least one CPU model is calibrated, no calibration run of a
-    calibrated model fails the limits derived from that model's other runs,
-    and every synthetic-regression run on a calibrated model (at least one)
-    fails its model's limits. Runs on other models are reported, not checked.
+
+def control_cells(profile):
+    control = PROFILES[profile]["control"]
+    return {(scenario, workload, transport) for scenario in control["scenarios"]
+            if scenario != "plain" for workload in control["workloads"]
+            for transport in control["transports"]}
+
+
+def evaluate(slots, profile, out, binary=BINARY):
+    """Derive budgets and check them; returns the derivation report.
+
+    A CPU model with MIN_MODEL_RUNS calibration runs is published only when
+    every one of its runs' positive controls (the synthetic regression on
+    the same runner) exceeds its limits: a model whose budgets would not catch
+    the regression on its own hardware stays uncalibrated. The calibration is
+    accepted when at least one model is published and no run of a published
+    model fails the limits derived from that model's other runs.
     """
     per_model = PROFILES[profile]["per_model"]
     calibration = sorted((slot for slot in slots.values() if slot["kind"] == "calibration"),
                          key=lambda slot: slot["slot"])
-    injected = sorted((slot for slot in slots.values() if slot["kind"] == "injected"),
-                      key=lambda slot: slot["slot"])
-    require(calibration and injected, "missing calibration or synthetic-regression slots")
+    require(calibration, "missing calibration slots")
     for slot in calibration:
         code, lines, stderr = run_compare([slot["path"]], binary=binary)
         require(code == 0, f"compare failed for {slot['slot']}: {stderr.strip()}")
         slot["medians"] = medians(lines)
     pairs = [(slot["cpu_model"], slot["medians"]) for slot in calibration]
-    sets = budget_sets(pairs, per_model)
-    require(sets, f"no CPU model has {MIN_MODEL_RUNS} calibration runs")
+    candidates = budget_sets(pairs, per_model)
+    require(candidates, f"no CPU model has {MIN_MODEL_RUNS} calibration runs")
+    cells = control_cells(profile)
+
+    # Positive controls: the synthetic regression on each candidate's runners.
+    controls, sets = [], {}
+    for model, derived in candidates.items():
+        subset = restrict(derived[0], cells)
+        path = budget_file(out / "controls", model)
+        write_sets(path.parent, {model: (subset, None)})
+        results = []
+        for slot in calibration:
+            if model not in (ANY_MODEL, slot["cpu_model"]):
+                continue
+            entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model,
+                     "injected_service_ns": slot["control_injected_service_ns"]}
+            if subset["budgets"]:
+                entry.update(check_budget(slot["control_path"], path, binary))
+            else:
+                entry.update(passed=None, reason="no control cell is budgeted")
+            results.append(entry)
+        controls.extend(results)
+        if all(result["passed"] is False for result in results):
+            sets[model] = derived
     write_sets(out / "budgets", sets)
     write_index(out / "budgets", sets, calibration[0]["commit"])
 
-    # Out of sample: each run against limits derived from its model's others.
+    # Out of sample: each run of a published model against limits derived
+    # from that model's other runs.
     held_out = []
     for index, slot in enumerate(calibration):
         model = select(sets, slot["cpu_model"])
         entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model}
         if model is None:
-            held_out.append({**entry, "passed": None, "reason": "uncalibrated CPU model"})
+            held_out.append({**entry, "passed": None, "reason": "CPU model not published"})
             continue
         others = [cells for position, (other, cells) in enumerate(pairs)
                   if position != index and model in (ANY_MODEL, other)]
@@ -299,33 +349,22 @@ def evaluate(slots, profile, out, binary=BINARY):
         write_sets(path.parent, {model: derive(others)})
         held_out.append({**entry, **check_budget(slot["path"], path, binary)})
 
-    regressions = []
-    for slot in injected:
-        model = select(sets, slot["cpu_model"])
-        entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model,
-                 "injected_service_ns": slot["injected_service_ns"]}
-        if model is None:
-            regressions.append({**entry, "passed": None, "reason": "uncalibrated CPU model"})
-            continue
-        regressions.append({**entry, **check_budget(slot["path"],
-                                                    budget_file(out / "budgets", model), binary)})
     false_positives = [check["slot"] for check in held_out if check["passed"] is False]
-    checked = [check for check in regressions if check["passed"] is not None]
-    caught = bool(checked) and all(check["passed"] is False for check in checked)
     report = {
         "schema": "alloy-bench-derivation/1", "classification": CLASSIFICATION,
         "profile": profile, "commit": calibration[0]["commit"], "rule": rule(),
-        "calibration": [{key: slot[key] for key in ("slot", "run_id", "cpu_model", "raw_file",
-                                                    "raw_sha256", "binary_sha256", "attempt")}
-                        for slot in calibration],
-        "cells": {model: records for model, (_, records) in sets.items()},
+        "calibration": [{key: slot[key] for key in (
+            "slot", "run_id", "cpu_model", "raw_file", "raw_sha256", "control_file",
+            "control_sha256", "binary_sha256", "attempt")} for slot in calibration],
+        "candidates": sorted(candidates),
+        "published": sorted(sets),
+        "cells": {model: records for model, (_, records) in candidates.items()},
+        "positive_controls": controls,
         "leave_one_out": held_out,
         "false_positives": false_positives,
-        "synthetic_regression": regressions,
-        "synthetic_regression_caught": caught,
         # Smoke runs exercise the pipeline only, so held-out failures are not
         # held against them; the synthetic regression must still be caught.
-        "accepted": caught and (profile == "smoke" or not false_positives),
+        "accepted": bool(sets) and (profile == "smoke" or not false_positives),
     }
     write_json(out / "budgets" / "derivation.json", report)
     return report
@@ -349,17 +388,27 @@ def collect(out, sha, profile_name, slot, cpuinfo=Path("/proc/cpuinfo")):
         if model not in committed_index()["models"]:
             write_json(out / "slot.json", {**record, "cpu_model": model, "calibrated": False})
             return False
-    inject = profile["inject_ns"] if kind == "injected" else 0
     evidence = qualify.Evidence(out, sha)
     path, rows = evidence.matrix(
         slot, profile["scenarios"], profile["workloads"], profile["transports"],
         reps=profile["reps"], counting=kind == "allocations", timeout=profile["timeout"],
         collector=True, seconds=profile["seconds"], warmup=profile["warmup"],
-        inject_ns=inject, label=CLASSIFICATION)
-    write_json(out / "slot.json", {
-        **record, "run_id": rows[0]["run_id"], "cpu_model": run_model(rows), "calibrated": True,
-        "raw_file": path.name, "raw_sha256": digest(path), "binary_sha256": digest(BINARY),
-        "injected_service_ns": inject, "alloc_counting": kind == "allocations"})
+        label=CLASSIFICATION)
+    model = run_model(rows)
+    record.update(run_id=rows[0]["run_id"], cpu_model=model, calibrated=True,
+                  raw_file=path.name, raw_sha256=digest(path), binary_sha256=digest(BINARY),
+                  alloc_counting=kind == "allocations")
+    if kind == "calibration":
+        control = profile["control"]
+        control_path, control_rows = evidence.matrix(
+            f"{slot}-control", control["scenarios"], control["workloads"],
+            control["transports"], reps=profile["reps"], timeout=control["timeout"],
+            seconds=profile["seconds"], warmup=profile["warmup"],
+            inject_ns=control["inject_ns"], label=CLASSIFICATION)
+        require(run_model(control_rows) == model, "the control ran on another CPU model")
+        record.update(control_file=control_path.name, control_sha256=digest(control_path),
+                      control_injected_service_ns=control["inject_ns"])
+    write_json(out / "slot.json", record)
     return True
 
 
@@ -444,15 +493,15 @@ def main(command, *args):
     if command == "derive":
         (root,) = args
         report = evaluate(load_slots(Path(root), sha, profile), profile, out)
-        regressions = report["synthetic_regression"]
-        caught = sum(1 for entry in regressions if entry["passed"] is False)
+        controls = report["positive_controls"]
+        caught = sum(1 for entry in controls if entry["passed"] is False)
         summary(f"### Budget calibration ({profile}): "
                 f"{'accepted' if report['accepted'] else 'REJECTED'}\n\n"
-                f"Source `{sha}`, {len(report['calibration'])} unchanged-code runs, budgets for "
-                f"{len(report['cells'])} CPU model(s). Held-out false positives: "
-                f"{len(report['false_positives'])}. Synthetic regression caught in {caught} of "
-                f"{sum(1 for entry in regressions if entry['passed'] is not None)} runs on "
-                "calibrated models.\n")
+                f"Source `{sha}`, {len(report['calibration'])} unchanged-code runs. CPU models "
+                f"with enough runs: {len(report['candidates'])}; published (synthetic "
+                f"regression caught on every run of the model): {len(report['published'])}. "
+                f"Positive controls caught: {caught} of {len(controls)}. Held-out false "
+                f"positives: {len(report['false_positives'])}.\n")
         return 0 if report["accepted"] else 1
     raise ValueError(f"unknown command {command!r}")
 
