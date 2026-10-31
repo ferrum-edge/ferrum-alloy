@@ -264,8 +264,8 @@ jobs:
       QUALIFICATION_SHA: ${{ github.sha }}
       GATE_PROFILE: ${{ needs.plan.outputs.profile }}
       GATE_SLOTS: ${{ needs.plan.outputs.slots }}
-      # The slot jobs' combined result; gate.py also requires each slot's
-      # newest artifact to hold that attempt's verdict.
+      # The slot jobs' combined result; gate.py also requires every planned
+      # slot's verdict from this run attempt.
       GATE_COLLECT_RESULT: ${{ needs.collect.result }}
     steps:
       - name: Initialize output directory

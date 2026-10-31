@@ -221,8 +221,8 @@ class CheckTests(unittest.TestCase):
             if path.name != "SHA256SUMS"))
         return directory
 
-    def verdict(self, planned, collected="success"):
-        return gate.verdict(self.root / "artifacts", planned, collected, "head", 41)
+    def verdict(self, planned, collected="success", attempt=1):
+        return gate.verdict(self.root / "artifacts", planned, collected, "head", 41, attempt)
 
     def test_gate_slots_check_their_models_budgets_and_skip_uncalibrated_models(self):
         budgets = self.gate_budgets()
@@ -251,15 +251,11 @@ class CheckTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
             self.verdict(["gate-01"])
 
-    def test_verdict_needs_a_calibrated_slot_and_uses_each_slots_newest_attempt(self):
+    def test_verdict_needs_a_calibrated_slot(self):
         self.artifact("gate-01", 1, {"passed": None})
         self.artifact("gate-02", 1, {"passed": True})
         self.assertTrue(self.verdict(["gate-01", "gate-02"])["passed"])
-        # A rerun of gate-02 that landed on an uncalibrated model.
-        self.artifact("gate-02", 2, {"passed": None})
-        result = self.verdict(["gate-01", "gate-02"])
-        self.assertEqual([entry["attempt"] for entry in result["verdicts"]], [1, 2])
-        self.assertFalse(result["passed"])
+        self.assertFalse(self.verdict(["gate-01"])["passed"])
 
     def test_a_planned_slot_without_a_verdict_fails_the_gate(self):
         self.artifact("gate-01", 1, {"passed": True})
@@ -268,24 +264,29 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result["missing"], ["gate-02"])
         self.assertFalse(result["passed"])
 
-    def test_a_failed_rerun_cannot_hide_behind_an_earlier_passing_verdict(self):
-        # Attempt 1 of gate-01 passed; its attempt 2 (a rerun of that job
-        # alone) failed before checking and uploaded partial evidence.
+    def test_a_verdict_never_combines_attempts(self):
+        planned = ["gate-01", "gate-02"]
         self.artifact("gate-01", 1, {"passed": True})
         self.artifact("gate-02", 1, {"passed": True})
-        self.artifact("gate-01", 2)
-        planned = ["gate-01", "gate-02"]
-        result = self.verdict(planned)  # even when the jobs' result says success
+        # Attempt 3 reran gate-02 alone; gate-01's attempt 2 left no artifact.
+        self.artifact("gate-02", 3, {"passed": True})
+        result = self.verdict(planned, attempt=3)
         self.assertEqual(result["missing"], ["gate-01"])
         self.assertFalse(result["passed"])
-        self.artifact("gate-01", 3, {"passed": True})
-        self.assertTrue(self.verdict(planned)["passed"])
-        self.assertFalse(self.verdict(planned, "failure")["passed"])
+        # A partial attempt that failed before checking is missing too.
+        self.artifact("gate-01", 4)
+        self.artifact("gate-02", 4, {"passed": True})
+        self.assertEqual(self.verdict(planned, attempt=4)["missing"], ["gate-01"])
+        # A complete attempt passes on its own verdicts only.
+        self.artifact("gate-01", 5, {"passed": True})
+        self.artifact("gate-02", 5, {"passed": False})
+        self.assertFalse(self.verdict(planned, attempt=5)["passed"])
+        self.assertFalse(self.verdict(planned, "failure", attempt=1)["passed"])
 
     def test_verdict_rejects_foreign_or_mismatched_artifacts(self):
-        directory = self.artifact("gate-01", 2, {"passed": True})
+        directory = self.artifact("gate-01", 1, {"passed": True})
         gate_json = json.loads((directory / "gate.json").read_text())
-        gate_json["attempt"] = 1
+        gate_json["slot"] = "gate-02"
         (directory / "gate.json").write_text(json.dumps(gate_json))
         (directory / "SHA256SUMS").write_text("".join(
             f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())

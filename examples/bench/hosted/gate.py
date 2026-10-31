@@ -528,41 +528,35 @@ def check(out):
     return verdict
 
 
-def verdict(root, planned, collected, sha, run_id):
-    """The gate passes when every slot job succeeded, each planned slot's
-    latest attempt has a verdict, at least one ran on a calibrated model, and
-    none regressed.
+def verdict(root, planned, collected, sha, run_id, attempt):
+    """The gate passes when every slot job of this attempt succeeded, every
+    planned slot has this attempt's verdict, at least one ran on a calibrated
+    model, and none regressed.
 
-    Every attempt of a slot job uploads an artifact, even a failed one, named
-    `bench-gate-<slot>-<sha>-<run id>-<attempt>`. Each slot's newest artifact
-    must hold that attempt's verdict, so a later attempt that failed before
-    writing one cannot be hidden behind an earlier attempt's, however the
-    jobs were rerun. `collected`, the workflow's result for the slot jobs,
-    must also be success.
+    Only artifacts of the current run attempt count
+    (`bench-gate-<slot>-<sha>-<run id>-<attempt>`), so a verdict can never
+    combine attempts: a slot that a partial rerun did not repeat, or whose
+    repeated attempt left no verdict or no artifact at all, is missing. Rerun
+    all jobs, or dispatch again, to retry a gate.
     """
     name = re.compile(rf"bench-gate-(.+)-{re.escape(sha)}-{re.escape(str(run_id))}-([0-9]+)")
-    newest = {}
+    latest = {}
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         match = name.fullmatch(directory.name)
         require(match is not None, f"unexpected artifact {directory.name}")
-        slot, attempt = match[1], int(match[2])
-        if slot not in newest or attempt > newest[slot][0]:
-            newest[slot] = (attempt, directory)
-    latest = {}
-    for slot, (attempt, directory) in newest.items():
         path = directory / "gate.json"
-        if not path.is_file():
-            continue  # That attempt failed before checking: the slot has no verdict.
+        if int(match[2]) != attempt or not path.is_file():
+            continue  # Another attempt's, or this attempt failed before checking.
         verify_manifest(directory)
         entry = json.loads(path.read_text())
-        require(entry["slot"] == slot and entry["attempt"] == attempt,
+        require(entry["slot"] == match[1] and entry["attempt"] == attempt,
                 f"verdict does not match its artifact {directory.name}")
-        latest[slot] = entry
+        latest[entry["slot"]] = entry
     verdicts = [latest[slot] for slot in sorted(latest)]
     checked = [entry for entry in verdicts if entry["passed"] is not None]
     missing = sorted(set(planned) - set(latest))
     return {"verdicts": verdicts, "checked": len(checked), "missing": missing,
-            "collected": collected,
+            "collected": collected, "attempt": attempt,
             "passed": (collected == "success" and bool(checked) and not missing
                        and all(entry["passed"] for entry in checked))}
 
@@ -605,11 +599,12 @@ def main(command, *args):
         (root,) = args
         planned = json.loads(os.environ["GATE_SLOTS"])
         result = verdict(Path(root), planned, os.environ["GATE_COLLECT_RESULT"], sha,
-                         os.environ["GITHUB_RUN_ID"])
+                         os.environ["GITHUB_RUN_ID"], int(os.environ["GITHUB_RUN_ATTEMPT"]))
         write_json(out / "verdict.json", result)
         summary(f"### Regression gate: {'pass' if result['passed'] else 'FAIL'}\n\n"
                 f"{result['checked']} of {len(planned)} slots ran on a calibrated CPU model; "
-                f"slots without a verdict: {', '.join(result['missing']) or 'none'}; slot jobs: "
+                f"slots without a verdict in attempt {result['attempt']}: "
+                f"{', '.join(result['missing']) or 'none'}; slot jobs: "
                 f"{result['collected']}. The gate needs every slot job to succeed with a "
                 "verdict, at least one calibrated run, and no regression.\n")
         return 0 if result["passed"] else 1
