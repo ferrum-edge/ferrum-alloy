@@ -64,7 +64,9 @@ PROFILES = {
                          "workloads": ("small",), "transports": ("h1", "h2c"),
                          "inject_ns": 5000, "timeout": 900}},
     # Pull requests exercise the pipeline on a tiny matrix. Not evidence.
-    "smoke": {"scenarios": ("plain", "alloy", "otel-collector"), "workloads": ("small",),
+    # Sustained `cancel` over h2c is in it because it once exhausted the
+    # client's reset limit only under continuous load.
+    "smoke": {"scenarios": ("plain", "alloy", "otel-collector"), "workloads": ("small", "cancel"),
               "transports": ("h1", "h2c"), "reps": 3, "seconds": 1, "warmup": 0.5,
               "timeout": 600, "per_model": False, "coverage_floor": 0,
               "control": {"scenarios": ("plain", "alloy"), "workloads": ("small",),
