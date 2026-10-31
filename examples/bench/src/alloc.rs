@@ -316,6 +316,60 @@ mod tests {
         drop(data);
     }
 
+    /// Requests served in process, on this thread, after a warm-up, and the
+    /// allocations they made, per request.
+    async fn allocations_per_request(router: axum::Router) -> f64 {
+        use http_body_util::BodyExt as _;
+        use hyper::service::Service as _;
+
+        const WARMUP: usize = 16;
+        const REQUESTS: usize = 256;
+        let service = hyper_util::service::TowerToHyperService::new(router);
+        let request = || {
+            http::Request::get("/small")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        for _ in 0..WARMUP {
+            let response = service.call(request()).await.unwrap();
+            response.into_body().collect().await.unwrap();
+        }
+        let scope = observation::Scope::enter();
+        for _ in 0..REQUESTS {
+            let response = service.call(request()).await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            response.into_body().collect().await.unwrap();
+        }
+        let counted = scope.snapshot()[Role::Service as usize];
+        drop(scope);
+        counted.calls as f64 / REQUESTS as f64
+    }
+
+    /// Each `Router::layer` call boxes every route again, and a boxed route
+    /// is cloned, with every box under it, on every request. Alloy composes
+    /// its middleware into one stack per router instead. When this test was
+    /// added, the defaults added 30 allocations per request over the bare
+    /// router here (34 with the `edge` feature); applied one layer at a
+    /// time, they added 70.
+    #[tokio::test(flavor = "current_thread")]
+    async fn alloy_defaults_add_a_bounded_number_of_allocations_per_request() {
+        const MAX_ADDED: f64 = 45.0;
+        let plain = allocations_per_request(crate::server::router()).await;
+        let parts = ferrum_alloy::AlloyApp::new("bench")
+            .config(ferrum_alloy::config::AlloyConfig::default())
+            .telemetry(ferrum_alloy::TelemetryInit::ApplicationOwned)
+            .router(crate::server::router())
+            .into_parts()
+            .unwrap();
+        let alloy = allocations_per_request(parts.router.clone()).await;
+        let added = alloy - plain;
+        assert!(
+            added <= MAX_ADDED,
+            "Alloy's defaults added {added} allocations per request over the bare router \
+             ({alloy} against {plain}); the limit is {MAX_ADDED}"
+        );
+    }
+
     /// The manifest restates `[workspace.lints]` with `unsafe_code` lowered
     /// from `forbid` to `deny`, so that this module alone can expect it. Any
     /// other difference is drift.

@@ -1,0 +1,32 @@
+load { 29.52 26.22 24.19 }
+MB before round 0 plain min 581 p10 590 alloy min 4994 p10 5049 added_min 4413
+MB before round 1 plain min 556 p10 567 alloy min 4981 p10 5064 added_min 4425
+MB before round 2 plain min 555 p10 575 alloy min 5009 p10 5376 added_min 4454
+load { 29.52 26.22 24.19 }
+MB after round 0 plain min 572 p10 583 alloy min 3951 p10 3997 added_min 3378
+MB after round 1 plain min 534 p10 551 alloy min 3985 p10 4037 added_min 3451
+MB after round 2 plain min 563 p10 578 alloy min 3990 p10 4048 added_min 3426
+load { 29.52 26.22 24.19 }
+MB before round 0 plain min 575 p10 592 alloy min 4968 p10 5063 added_min 4393
+MB before round 1 plain min 545 p10 561 alloy min 4975 p10 5055 added_min 4430
+MB before round 2 plain min 542 p10 556 alloy min 5007 p10 5068 added_min 4465
+load { 28.27 26.01 24.13 }
+MB after round 0 plain min 558 p10 564 alloy min 3970 p10 4013 added_min 3413
+MB after round 1 plain min 537 p10 549 alloy min 3985 p10 4059 added_min 3448
+MB after round 2 plain min 543 p10 551 alloy min 3995 p10 4200 added_min 3452
+load { 28.27 26.01 24.13 }
+MB before round 0 plain min 580 p10 592 alloy min 4973 p10 5076 added_min 4393
+MB before round 1 plain min 540 p10 554 alloy min 4980 p10 5083 added_min 4440
+MB before round 2 plain min 556 p10 612 alloy min 5008 p10 5118 added_min 4451
+load { 28.27 26.01 24.13 }
+MB after round 0 plain min 552 p10 559 alloy min 3994 p10 4025 added_min 3442
+MB after round 1 plain min 526 p10 533 alloy min 3991 p10 4038 added_min 3465
+MB after round 2 plain min 541 p10 548 alloy min 4003 p10 4060 added_min 3462
+load { 28.27 26.01 24.13 }
+MB before round 0 plain min 546 p10 553 alloy min 4968 p10 5016 added_min 4422
+MB before round 1 plain min 534 p10 545 alloy min 5008 p10 5124 added_min 4474
+MB before round 2 plain min 531 p10 542 alloy min 4995 p10 5046 added_min 4464
+load { 26.73 25.73 24.04 }
+MB after round 0 plain min 559 p10 572 alloy min 3947 p10 3985 added_min 3388
+MB after round 1 plain min 546 p10 555 alloy min 3946 p10 4005 added_min 3400
+MB after round 2 plain min 538 p10 551 alloy min 3955 p10 4015 added_min 3417

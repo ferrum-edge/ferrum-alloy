@@ -382,6 +382,28 @@ The results table above predates this change, and its `alloy-logs` row used trac
 
 **How to measure it:** both formatters are in the same binary, so one build is enough. The hosted preparation above interleaves `alloy-logs-fmt` and `alloy-logs` within each repetition, with `plain` and `alloy` controls, and profiles both formatters. This compares the existing implementations at one immutable head; it is not a historical before/after experiment. `plain`'s observed variation on the shared runner is not a qualified noise floor. Inspect the profile artifacts before attributing remaining costs or making any further logging change.
 
+## Layer composition (2026-10-31)
+
+`AlloyApp` used to apply each of its layers with its own `Router::layer` call. Every call wraps every route in a new boxed, cloneable service, and axum clones a route's box, with every box under it, each time the route is called, so each extra layer cost several allocations per request, at every level of the stack. An allocation profile of the `alloy` scenario (sampled backtraces from the counting allocator) attributed about half of the service's allocations to cloning those routes and boxing their futures. The layers are now composed into one stack and applied with one `Router::layer` call per router (the application routes, and liveness without admission). The order is unchanged: telemetry, the Edge policy, CORS, compression, the panic boundary, the body limits, admission (not on liveness), the headers deadline, and normalization, outermost first.
+
+**Allocations** (`--alloc-counting`, one run per cell and build, 2-second window, both builds from the same tree with the pinned toolchain): every Alloy scenario, workload, and transport measured makes 40 fewer allocations per request, and `plain` is unchanged.
+
+| Cell | `plain` | `alloy` before → after | `alloy-logs` before → after | `otel-sampled` before → after |
+|---|---:|---:|---:|---:|
+| `small` / `h1` | 15 | 88 → 48 | 98 → 58 | 120 → 80 |
+| `small` / `h2c` | 14 | 89 → 49 | 99 → 59 | 122 → 82 |
+| `small` / `h1-tls` | 18 | 91 → 51 | 101 → 61 | 123 → 83 |
+| `large` / `h1` | 16 | 90 → 50 | 100 → 60 | 122 → 82 |
+| `stream` / `h1` | 14 | 89 → 49 | 99 → 59 | 121 → 81 |
+
+The other measured cells (`large` and `stream` over `h2c` and `h1-tls`) show the same 40-allocation drop. Allocation counts do not depend on machine load. Bytes per request fall by about 3 KB in most cells; over `h2c` with `stream`, bytes vary by tens of KB between repeated runs of one build, so that cell's bytes are not comparable. `alloy_defaults_add_a_bounded_number_of_allocations_per_request` in `examples/bench/src/alloc.rs` serves `small` in process and fails if the defaults add more than 45 allocations per request over the bare router; when it was added they added 30, against 70 before the change.
+
+**Service time in process:** a single-threaded loop served `small` through the composed router 100 requests at a time, 400 batches per measurement, and kept the fastest batch. The fastest batch is the one least disturbed by other load. Builds alternated four times, with three measurements each. `alloy` took 4.97 to 5.01 µs per request before and 3.95 to 4.00 µs after (−20%), and the bare router took 0.53 to 0.58 µs throughout. That excludes the connection, hyper, and the client.
+
+**Throughput:** 5 interleaved repetitions of `plain`, `alloy`, and `alloy-logs` with `small` over `h1` and `h2c`, at a 1-minute load average of 14 to 32 on 10 cores. Unchanged `plain` code moved by 0.90 (0.83 – 0.95) on `h1` and 1.05 (0.55 – 1.34) on `h2c` between builds, so these runs cannot show a throughput change. Medians, after/before: `alloy` 1.14 on `h1` and 1.30 on `h2c`; `alloy-logs` 1.01 and 1.03. These are noise-level observations, not a claimed improvement. A measurement on an isolated host is still needed.
+
+**Raw data:** `examples/bench/results/2026-10-31-macos-m4-layer-composition-alloc.jsonl`, `…-ab.jsonl`, and `…-in-process.txt`.
+
 ## Discarded run
 
 An earlier sequential run went through all scenarios in order, 3 times, for 10 seconds each, then ran large-payload and h2c variants once. Its load average was around 17 on 10 cores. `plain` fell from 178k to 77k requests/s between the first and third repetitions, and single runs contradicted each other; for example, `otel-sampled` with the large payload appeared faster than `plain`.

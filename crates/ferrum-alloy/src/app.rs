@@ -15,6 +15,9 @@ use ferrum_alloy_telemetry::{Metrics, RecordRouteLayer, TelemetryLayer, TrustedP
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use tokio::net::TcpListener;
+use tower::ServiceBuilder;
+#[cfg(any(feature = "edge", feature = "compression"))]
+use tower::util::MapResponseLayer;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::config::{AlloyConfig, ConfigError, ConfigIssue, EdgeMode, Overrides};
@@ -402,44 +405,8 @@ impl AlloyApp {
         let limit = config.server.request_body_limit_bytes;
         let timeout = Duration::from_millis(config.server.request_timeout_ms);
         let deadline = HeadersDeadlineLayer::new(timeout);
-        let mut app = app
-            .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
-            .fallback_service(user_router.layer(RecordRouteLayer))
-            .layer(NormalizeLayer)
-            .layer(deadline)
-            .layer(AdmissionLayer::new(
-                config.server.max_in_flight_requests,
-                Duration::from_millis(config.server.admission_wait_timeout_ms),
-            ));
-        // The admission limit bounds the handlers doing work. Liveness does
-        // none, and a full budget means the process is busy, not that it
-        // needs a restart, so the liveness probe bypasses the limit. It gets
-        // every other layer. Readiness stays behind the limit.
-        if let Some(liveness) = liveness {
-            app = app.merge(
-                liveness
-                    .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
-                    .layer(NormalizeLayer)
-                    .layer(deadline),
-            );
-        }
-        #[allow(unused_mut, reason = "optional layers are feature-gated")]
-        let mut app = app
-            .layer(DefaultBodyLimit::max(
-                usize::try_from(limit).unwrap_or(usize::MAX),
-            ))
-            .layer(BodyLimitLayer::new(limit))
-            .layer(CatchPanicLayer::custom(panic_response));
-        #[cfg(feature = "compression")]
-        if config.compression.enabled {
-            app = app.layer(crate::http_layers::compression(&config.compression));
-        }
-        #[cfg(feature = "cors")]
-        if config.cors.enabled {
-            app = app.layer(crate::http_layers::cors(&config.cors)?);
-        }
         #[cfg(feature = "edge")]
-        {
+        let edge_layer = {
             let mut policy_config = ferrum_alloy_edge::EdgePolicyConfig::default();
             policy_config.mode = match config.edge.mode {
                 EdgeMode::Standalone => ferrum_alloy_edge::DeploymentMode::Standalone,
@@ -449,11 +416,70 @@ impl AlloyApp {
             policy_config.accept_consumer_identity = config.edge.accept_consumer_identity;
             let policy = ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier))
                 .with_exempt_paths(exempt_paths);
-            app = app.layer(ferrum_alloy_edge::EdgeLayer::new(policy));
-        }
+            ferrum_alloy_edge::EdgeLayer::new(policy)
+        };
         #[cfg(not(feature = "edge"))]
         let _ = EdgeMode::Standalone;
-        let app = app.layer(telemetry_layer);
+        // Every route gets the same middleware, outermost first: telemetry,
+        // the Edge policy, CORS, compression, the panic boundary, the body
+        // limits, then (except for liveness, below) admission, the headers
+        // deadline, and normalization. Each `Router::layer` call boxes every
+        // route again, and a boxed route is cloned, recursively, on every
+        // call, so the layers are composed into one stack and applied with a
+        // single call per router instead of one call per layer.
+        let outer = ServiceBuilder::new().layer(telemetry_layer);
+        #[cfg(feature = "edge")]
+        let outer = outer.layer(edge_layer);
+        #[cfg(feature = "cors")]
+        let outer = outer.option_layer(
+            config
+                .cors
+                .enabled
+                .then(|| crate::http_layers::cors(&config.cors))
+                .transpose()?,
+        );
+        #[cfg(feature = "compression")]
+        let outer = outer.option_layer(config.compression.enabled.then(|| {
+            (
+                MapResponseLayer::new(into_axum_response),
+                crate::http_layers::compression(&config.compression),
+            )
+        }));
+        // The Edge policy and the compression switch need axum's body type
+        // below them; without either, the panic boundary's own boxed body
+        // goes straight to telemetry and is not boxed a second time.
+        #[cfg(any(feature = "edge", feature = "compression"))]
+        let outer = outer.layer(MapResponseLayer::new(into_axum_response));
+        let outer = outer
+            .layer(CatchPanicLayer::custom(panic_response))
+            .layer(BodyLimitLayer::new(limit))
+            .layer(DefaultBodyLimit::max(
+                usize::try_from(limit).unwrap_or(usize::MAX),
+            ));
+        let mut app = app
+            .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
+            .fallback_service(user_router.layer(RecordRouteLayer))
+            .layer(
+                outer
+                    .clone()
+                    .layer(AdmissionLayer::new(
+                        config.server.max_in_flight_requests,
+                        Duration::from_millis(config.server.admission_wait_timeout_ms),
+                    ))
+                    .layer(deadline)
+                    .layer(NormalizeLayer),
+            );
+        // The admission limit bounds the handlers doing work. Liveness does
+        // none, and a full budget means the process is busy, not that it
+        // needs a restart, so the liveness probe bypasses the limit. It gets
+        // every other layer. Readiness stays behind the limit.
+        if let Some(liveness) = liveness {
+            app = app.merge(
+                liveness
+                    .method_not_allowed_fallback(crate::normalize::method_not_allowed_fallback)
+                    .layer(outer.layer(deadline).layer(NormalizeLayer)),
+            );
+        }
 
         let app_stats = Arc::new(ServerStats::default());
         let management_token = config.management.token.is_some();
@@ -524,6 +550,18 @@ impl AlloyApp {
     pub async fn run(self) -> Result<(), AlloyError> {
         self.into_parts()?.serve().await
     }
+}
+
+/// Boxes a response body into axum's [`Body`](axum::body::Body): the Edge
+/// policy writes its rejections in that type, and the compression switch
+/// needs one body type whether or not compression is enabled.
+#[cfg(any(feature = "edge", feature = "compression"))]
+fn into_axum_response<B>(response: http::Response<B>) -> axum::response::Response
+where
+    B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
+    B::Error: Into<axum::BoxError>,
+{
+    response.map(axum::body::Body::new)
 }
 
 /// Describes each of Alloy's own paths on one listener that an earlier one

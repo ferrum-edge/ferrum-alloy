@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- `AlloyApp` applies its middleware as one composed stack per router
+  instead of one `Router::layer` call per layer. Each call boxed every
+  route again, and axum clones a boxed route, with every box under it, on
+  every request. The default stack made 88 allocations per small HTTP/1.1
+  request, against 15 for plain hyper; it now makes 48, and every
+  measured Alloy scenario makes 40 fewer. In-process service time for the
+  default stack falls from about 5.0 to 4.0 µs per request. Layer order
+  and behavior are unchanged. A bench test bounds the allocations the
+  defaults add per request, and `docs/benchmarks.md` records the
+  measurements.
 - The benchmark client disables h2's local error-reset limit. Sustained
   `cancel` load over HTTP/2 made late DATA on forgotten streams exhaust
   its default of 1,024 resets, so the client ended its own connections:
