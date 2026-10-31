@@ -11,8 +11,9 @@
   CPU model with at least five runs, drops every limit that one of the
   model's runs exceeds when held out, and publishes a model's limits only
   when at least half of its cell metrics keep one and a synthetic
-  regression on each of its runners fails them. Its `gate` mode checks a fresh full matrix on up
-  to five runners against their CPU models' committed budgets; pull
+  regression on each of its runners fails them. Its `gate` mode checks a
+  fresh full matrix on up to five runners against their CPU models'
+  committed budgets; pull
   requests run the pipeline on a tiny matrix. `alloy-bench`
   gains `--inject-service-ns N`, a busy-wait per request in every scenario
   but `plain` for that check, and records it as `injected_service_ns`.
