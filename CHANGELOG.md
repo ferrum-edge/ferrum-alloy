@@ -13,10 +13,10 @@
   when at least half of its cell metrics keep one and a synthetic
   regression on each of its runners fails them. Its `gate` mode checks a
   fresh full matrix on up to five runners against their CPU models'
-  committed budgets; pull
-  requests run the pipeline on a tiny matrix. `alloy-bench`
-  gains `--inject-service-ns N`, a busy-wait per request in every scenario
-  but `plain` for that check, and records it as `injected_service_ns`.
+  committed budgets; pull requests run the pipeline on a tiny matrix.
+  `alloy-bench` gains `--inject-service-ns N`, a busy-wait per request in
+  every scenario but `plain` for that check, and records it as
+  `injected_service_ns`.
 - Distribution decision (#24): Alloy stays Git-only. No crate is
   published to crates.io or any other registry, `publish = false` stays,
   and the PolyForm Noncommercial license is unchanged. `docs/release.md`
