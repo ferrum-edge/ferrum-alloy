@@ -335,15 +335,15 @@ mod tests {
         }
     }
 
-    /// The router of `AlloyApp`'s defaults around the benchmark's routes.
-    fn alloy_router() -> axum::Router {
+    /// `AlloyApp`'s defaults around the benchmark's routes. The caller keeps
+    /// the parts alive while it serves their router.
+    fn alloy_parts() -> ferrum_alloy::AlloyParts {
         ferrum_alloy::AlloyApp::new("bench")
             .config(ferrum_alloy::config::AlloyConfig::default())
             .telemetry(ferrum_alloy::TelemetryInit::ApplicationOwned)
             .router(crate::server::router())
             .into_parts()
             .unwrap()
-            .router
     }
 
     /// Allocations per request after a warm-up.
@@ -362,7 +362,7 @@ mod tests {
     /// is cloned, with every box under it, on every request. Alloy composes
     /// its middleware into one stack per router instead. When this test was
     /// added, the defaults added 30 allocations per request over the bare
-    /// router here with `ferrum-alloy`'s default features, and 34 under
+    /// router here with the benchmark's `ferrum-alloy` features, and 34 under
     /// `cargo test --workspace --all-features`, where the `edge` feature adds
     /// its layer; applied one layer at a time, they added 70.
     #[tokio::test(flavor = "current_thread")]
@@ -372,7 +372,8 @@ mod tests {
         // default keeps spans disabled whichever test ran first.
         let _no_subscriber = tracing::dispatcher::set_default(&tracing::Dispatch::none());
         let plain = allocations_per_request(crate::server::router()).await;
-        let alloy = allocations_per_request(alloy_router()).await;
+        let parts = alloy_parts();
+        let alloy = allocations_per_request(parts.router.clone()).await;
         let added = alloy - plain;
         assert!(
             added <= MAX_ADDED,
@@ -406,7 +407,8 @@ mod tests {
         let _no_subscriber = tracing::dispatcher::set_default(&tracing::Dispatch::none());
         for round in 0..3 {
             let (plain_min, plain_p10) = measure(crate::server::router()).await;
-            let (alloy_min, alloy_p10) = measure(alloy_router()).await;
+            let parts = alloy_parts();
+            let (alloy_min, alloy_p10) = measure(parts.router.clone()).await;
             eprintln!(
                 "round {round}: plain min {plain_min} p10 {plain_p10}, \
                  alloy min {alloy_min} p10 {alloy_p10} ns/request"
