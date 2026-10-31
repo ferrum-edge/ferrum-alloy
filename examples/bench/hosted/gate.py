@@ -42,6 +42,9 @@ METRICS = {"throughput_ratio": ("min_throughput_ratio", -1),
 SPREAD_MULTIPLIER = 3.0
 MARGIN_FLOOR = 0.02
 MARGIN_CAP = 0.20
+# A model is published only if, after held-out screening, at least this
+# fraction of its cell metrics keeps a limit.
+COVERAGE_FLOOR = 0.5
 # A CPU model gets budgets from at least this many calibration runs, so that
 # each held-out check still derives its limits from four. Runs of other
 # models are never held to them: ratios move more between models than within.
@@ -56,14 +59,14 @@ PROFILES = {
     # CPU model's budgets.
     "full": {"scenarios": qualify.ALL_SCENARIOS, "workloads": qualify.WORKLOADS,
              "transports": qualify.TRANSPORTS, "reps": 5, "seconds": 5, "warmup": 1,
-             "timeout": 10800, "per_model": True,
+             "timeout": 10800, "per_model": True, "coverage_floor": COVERAGE_FLOOR,
              "control": {"scenarios": ("plain", "alloy", "alloy-logs", "alloy-diagnostics"),
                          "workloads": ("small",), "transports": ("h1", "h2c"),
                          "inject_ns": 5000, "timeout": 900}},
     # Pull requests exercise the pipeline on a tiny matrix. Not evidence.
     "smoke": {"scenarios": ("plain", "alloy", "otel-collector"), "workloads": ("small",),
               "transports": ("h1", "h2c"), "reps": 3, "seconds": 1, "warmup": 0.5,
-              "timeout": 600, "per_model": False,
+              "timeout": 600, "per_model": False, "coverage_floor": 0,
               "control": {"scenarios": ("plain", "alloy"), "workloads": ("small",),
                           "transports": ("h1",), "inject_ns": 50000, "timeout": 300}},
 }
@@ -101,15 +104,19 @@ def exceeded(lines):
 def check_budget(path, budget, binary=BINARY):
     """Whether one run is within a budget file, by `compare --budget`.
 
-    A nonzero exit with no exceeded limit is not a regression verdict (for
-    example a budgeted cell without data), so it fails as an error instead.
+    Every budgeted cell must have been checked: a budget entry without data
+    (which `compare` also fails on) is an error, never a verdict, even when
+    another cell exceeded a limit.
     """
     code, lines, stderr = run_compare([path], budget, binary)
     over = exceeded(lines)
-    require(code == 0 or over, f"compare failed without a budget verdict: {stderr.strip()}")
+    entries = len(json.loads(Path(budget).read_text())["budgets"])
     budgeted = sum(1 for line in lines if line.get("budget") is not None)
-    require(budgeted, "no cell of the run is budgeted")
-    return {"passed": code == 0, "exceeded": over, "budgeted": budgeted}
+    require(entries and budgeted == entries,
+            f"{entries - budgeted} of {entries} budgeted cells have no data: {stderr.strip()}")
+    require(code == 0 or over, f"compare failed without a budget verdict: {stderr.strip()}")
+    return {"passed": code == 0, "exceeded": over, "budgeted": budgeted,
+            "compare_stderr": stderr.strip()}
 
 
 def medians(lines):
@@ -223,8 +230,19 @@ def verify_manifest(directory):
     require(files == listed, f"unlisted evidence in {directory.name}")
 
 
+def evidence_file(directory, name):
+    require(isinstance(name, str) and name and Path(name).name == name,
+            f"evidence file {name!r} is not a plain name")
+    return directory / name
+
+
 def load_slots(root, sha, profile):
-    """Complete slots by name; a rerun's later attempt replaces an earlier one."""
+    """Complete slots by name; a rerun's later attempt replaces an earlier one.
+
+    Every field the derivation relies on is checked against the slot's own
+    evidence, not trusted from `slot.json`.
+    """
+    control = PROFILES[profile]["control"]
     slots = {}
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         if not (directory / "slot.json").is_file():
@@ -233,17 +251,36 @@ def load_slots(root, sha, profile):
         slot = json.loads((directory / "slot.json").read_text())
         require(slot.get("schema") == SLOT_SCHEMA and slot.get("commit") == sha
                 and slot.get("profile") == profile, f"foreign slot in {directory.name}")
-        raw = directory / slot["raw_file"]
+        require(slot.get("kind") == slot_kind(slot.get("slot", "")),
+                f"slot kind does not match its name in {directory.name}")
+        require(type(slot.get("attempt")) is int and slot["attempt"] >= 1,
+                f"invalid attempt in {directory.name}")
+        raw = evidence_file(directory, slot.get("raw_file"))
         require(digest(raw) == slot["raw_sha256"], f"raw results changed in {directory.name}")
+        rows = [json.loads(line) for line in raw.read_text().splitlines() if line.strip()]
+        require(run_model(rows) == slot["cpu_model"], f"CPU model differs in {directory.name}")
+        require({row.get("run_id") for row in rows} == {slot["run_id"]},
+                f"run id differs in {directory.name}")
         slot["path"] = raw
         if slot["kind"] == "calibration":
-            control = directory / slot["control_file"]
-            require(digest(control) == slot["control_sha256"],
+            path = evidence_file(directory, slot.get("control_file"))
+            require(digest(path) == slot["control_sha256"],
                     f"control results changed in {directory.name}")
-            slot["control_path"] = control
+            require(slot.get("control_injected_service_ns") == control["inject_ns"],
+                    f"control injected another cost in {directory.name}")
+            controls = [json.loads(line) for line in path.read_text().splitlines()
+                        if line.strip()]
+            require(run_model(controls) == slot["cpu_model"],
+                    f"control ran on another CPU model in {directory.name}")
+            slot["control_path"] = path
         previous = slots.get(slot["slot"])
         if previous is None or slot["attempt"] > previous["attempt"]:
             slots[slot["slot"]] = slot
+    calibration = [slot for slot in slots.values() if slot["kind"] == "calibration"]
+    require(len({slot["run_id"] for slot in calibration}) == len(calibration),
+            "calibration slots share a run id")
+    require(len({slot["binary_sha256"] for slot in calibration}) <= 1,
+            "calibration slots ran different binaries")
     return slots
 
 
@@ -261,7 +298,8 @@ def write_sets(directory, sets):
 def rule():
     return {"metrics": list(METRICS), "spread_multiplier": SPREAD_MULTIPLIER,
             "margin_floor": MARGIN_FLOOR, "margin_cap": MARGIN_CAP,
-            "min_model_runs": MIN_MODEL_RUNS}
+            "min_model_runs": MIN_MODEL_RUNS, "coverage_floor": COVERAGE_FLOOR,
+            "held_out_screening": "a limit any held-out run exceeds is dropped"}
 
 
 def write_index(directory, sets, sha):
@@ -288,17 +326,50 @@ def control_cells(profile):
             for transport in control["transports"]}
 
 
-def evaluate(slots, profile, out, binary=BINARY):
-    """Derive budgets and check them; returns the derivation report.
+def screened(budget, records, failures):
+    """`budget` without the limits that failed a held-out check.
 
-    A CPU model with MIN_MODEL_RUNS calibration runs is published only when
-    every one of its runs' positive controls (the synthetic regression on
-    the same runner) exceeds its limits: a model whose budgets would not catch
-    the regression on its own hardware stays uncalibrated. The calibration is
-    accepted when at least one model is published and no run of a published
-    model fails the limits derived from that model's other runs.
+    `failures` holds (scenario, workload, transport, budget key) tuples.
     """
-    per_model = PROFILES[profile]["per_model"]
+    keys = {key: metric for metric, (key, _) in METRICS.items()}
+    entries = []
+    for entry in budget["budgets"]:
+        cell = (entry["scenario"], entry["workload"], entry["transport"])
+        kept = {key: value for key, value in entry.items()
+                if key not in keys or cell + (key,) not in failures}
+        if any(key in kept for key in keys):
+            entries.append(kept)
+    for record in records:
+        cell = (record["scenario"], record["workload"], record["transport"])
+        for key, metric in keys.items():
+            info = record["metrics"][metric]
+            if cell + (key,) in failures and info.get("gated"):
+                info.update(gated=False, reason="failed a held-out check")
+                info.pop("limit", None)
+    return {"schema": budget["schema"], "budgets": entries}
+
+
+def coverage(records):
+    gated = sum(1 for record in records for info in record["metrics"].values()
+                if info.get("gated"))
+    total = len(records) * len(METRICS)
+    return {"gated": gated, "total": total, "fraction": gated / total if total else 0.0}
+
+
+def evaluate(slots, profile, out, binary=BINARY, planned=()):
+    """Derive budgets and qualify each CPU model's; returns the derivation report.
+
+    For each model with MIN_MODEL_RUNS calibration runs, in order:
+    1. derive its limits from all its runs;
+    2. hold out each run against limits derived from the model's other runs,
+       and drop every limit a held-out run exceeds (screening, recorded);
+    3. require COVERAGE_FLOOR of its cell metrics to keep a limit;
+    4. require every one of its runs' positive controls (the synthetic
+       regression on the same runner) to exceed the screened limits.
+    A model passing all of these is published; the calibration is accepted
+    when at least one is.
+    """
+    settings = PROFILES[profile]
     calibration = sorted((slot for slot in slots.values() if slot["kind"] == "calibration"),
                          key=lambda slot: slot["slot"])
     require(calibration, "missing calibration slots")
@@ -307,71 +378,82 @@ def evaluate(slots, profile, out, binary=BINARY):
         require(code == 0, f"compare failed for {slot['slot']}: {stderr.strip()}")
         slot["medians"] = medians(lines)
     pairs = [(slot["cpu_model"], slot["medians"]) for slot in calibration]
-    candidates = budget_sets(pairs, per_model)
+    candidates = budget_sets(pairs, settings["per_model"])
     require(candidates, f"no CPU model has {MIN_MODEL_RUNS} calibration runs")
     cells = control_cells(profile)
 
-    # Positive controls: the synthetic regression on each candidate's runners.
-    controls, sets = [], {}
-    for model, derived in candidates.items():
-        subset = restrict(derived[0], cells)
+    models, sets = {}, {}
+    for model, (budget, records) in candidates.items():
+        runs = [index for index, slot in enumerate(calibration)
+                if model in (ANY_MODEL, slot["cpu_model"])]
+        held_out, failures = [], set()
+        for index in runs:
+            slot = calibration[index]
+            others = [pairs[other][1] for other in runs if other != index]
+            loo = derive(others)
+            if not loo[0]["budgets"]:
+                held_out.append({"slot": slot["slot"], "passed": None,
+                                 "reason": "no limit derived without this run"})
+                continue
+            path = budget_file(out / "leave-one-out" / slot["slot"], model)
+            write_sets(path.parent, {model: loo})
+            result = check_budget(slot["path"], path, binary)
+            held_out.append({"slot": slot["slot"], **result})
+            for line in result["exceeded"]:
+                cell = (line["scenario"], line["workload"], line["transport"])
+                failures.update(cell + (key,) for key in line["exceeded"])
+        kept = screened(budget, records, failures)
+        covered = coverage(records)
+        state = {"runs": [calibration[index]["slot"] for index in runs],
+                 "leave_one_out": held_out, "screened_limits": len(failures),
+                 "coverage": covered, "positive_controls": []}
+        models[model] = state
+        if covered["fraction"] < settings["coverage_floor"]:
+            state["reason"] = "coverage below the floor after screening"
+            continue
+        subset = restrict(kept, cells)
         path = budget_file(out / "controls", model)
         write_sets(path.parent, {model: (subset, None)})
-        results = []
-        for slot in calibration:
-            if model not in (ANY_MODEL, slot["cpu_model"]):
-                continue
-            entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model,
+        for index in runs:
+            slot = calibration[index]
+            entry = {"slot": slot["slot"],
                      "injected_service_ns": slot["control_injected_service_ns"]}
             if subset["budgets"]:
                 entry.update(check_budget(slot["control_path"], path, binary))
             else:
                 entry.update(passed=None, reason="no control cell is budgeted")
-            results.append(entry)
-        controls.extend(results)
-        if all(result["passed"] is False for result in results):
-            sets[model] = derived
+            state["positive_controls"].append(entry)
+        if not all(entry["passed"] is False for entry in state["positive_controls"]):
+            state["reason"] = "a positive control was not caught"
+            continue
+        sets[model] = (kept, records)
+    for model, state in models.items():
+        state["published"] = model in sets
     write_sets(out / "budgets", sets)
     write_index(out / "budgets", sets, calibration[0]["commit"])
-
-    # Out of sample: each run of a published model against limits derived
-    # from that model's other runs.
-    held_out = []
-    for index, slot in enumerate(calibration):
-        model = select(sets, slot["cpu_model"])
-        entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model}
-        if model is None:
-            held_out.append({**entry, "passed": None, "reason": "CPU model not published"})
-            continue
-        others = [cells for position, (other, cells) in enumerate(pairs)
-                  if position != index and model in (ANY_MODEL, other)]
-        path = budget_file(out / "leave-one-out" / slot["slot"], model)
-        write_sets(path.parent, {model: derive(others)})
-        held_out.append({**entry, **check_budget(slot["path"], path, binary)})
-
-    false_positives = [check["slot"] for check in held_out if check["passed"] is False]
     report = {
         "schema": "alloy-bench-derivation/1", "classification": CLASSIFICATION,
         "profile": profile, "commit": calibration[0]["commit"], "rule": rule(),
+        "planned_slots": list(planned),
+        "missing_slots": sorted(set(planned) - set(slots)),
         "calibration": [{key: slot[key] for key in (
             "slot", "run_id", "cpu_model", "raw_file", "raw_sha256", "control_file",
             "control_sha256", "binary_sha256", "attempt")} for slot in calibration],
-        "candidates": sorted(candidates),
+        "uncalibrated_runs": [slot["slot"] for slot in calibration
+                              if select(candidates, slot["cpu_model"]) is None],
+        "models": models,
         "published": sorted(sets),
         "cells": {model: records for model, (_, records) in candidates.items()},
-        "positive_controls": controls,
-        "leave_one_out": held_out,
-        "false_positives": false_positives,
-        # Smoke runs exercise the pipeline only, so held-out failures are not
-        # held against them; the synthetic regression must still be caught.
-        "accepted": bool(sets) and (profile == "smoke" or not false_positives),
+        "accepted": bool(sets),
     }
     write_json(out / "budgets" / "derivation.json", report)
     return report
 
 
 def committed_index():
-    index = json.loads((BUDGETS / "index.json").read_text())
+    path = BUDGETS / "index.json"
+    require(path.is_file(), f"no committed budgets: {path} is missing; run calibrate first")
+    index = json.loads(path.read_text())
     require(index.get("schema") == INDEX_SCHEMA, "unknown budget index")
     return index
 
@@ -492,16 +574,22 @@ def main(command, *args):
         return 0 if result["passed"] else 1
     if command == "derive":
         (root,) = args
-        report = evaluate(load_slots(Path(root), sha, profile), profile, out)
-        controls = report["positive_controls"]
-        caught = sum(1 for entry in controls if entry["passed"] is False)
-        summary(f"### Budget calibration ({profile}): "
-                f"{'accepted' if report['accepted'] else 'REJECTED'}\n\n"
-                f"Source `{sha}`, {len(report['calibration'])} unchanged-code runs. CPU models "
-                f"with enough runs: {len(report['candidates'])}; published (synthetic "
-                f"regression caught on every run of the model): {len(report['published'])}. "
-                f"Positive controls caught: {caught} of {len(controls)}. Held-out false "
-                f"positives: {len(report['false_positives'])}.\n")
+        planned = json.loads(os.environ.get("GATE_SLOTS", "[]"))
+        report = evaluate(load_slots(Path(root), sha, profile), profile, out, planned=planned)
+        lines = [f"### Budget calibration ({profile}): "
+                 f"{'accepted' if report['accepted'] else 'REJECTED'}\n",
+                 f"Source `{sha}`, {len(report['calibration'])} unchanged-code runs; "
+                 f"missing slots: {', '.join(report['missing_slots']) or 'none'}.\n",
+                 "| CPU model | Runs | Limits dropped by held-out runs | Limits kept | "
+                 "Controls caught | Published |", "|---|---:|---:|---:|---:|---|"]
+        for model, state in report["models"].items():
+            controls = state["positive_controls"]
+            caught = sum(1 for entry in controls if entry["passed"] is False)
+            lines.append(f"| {model} | {len(state['runs'])} | {state['screened_limits']} | "
+                         f"{state['coverage']['gated']} of {state['coverage']['total']} | "
+                         f"{caught} of {len(controls)} | "
+                         f"{'yes' if state['published'] else state['reason']} |")
+        summary("\n".join(lines) + "\n")
         return 0 if report["accepted"] else 1
     raise ValueError(f"unknown command {command!r}")
 

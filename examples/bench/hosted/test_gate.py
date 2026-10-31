@@ -14,7 +14,7 @@ from qualify import digest
 CELLS = [("alloy", "small", "h1"), ("alloy", "small", "h2c"), ("otel-collector", "small", "h1")]
 
 
-def compare_line(run_id, cell, throughput, p50=1.5, p99=2.0):
+def compare_line(run_id, cell, throughput, p50=1.5, p99=2.0, model="A"):
     scenario, workload, transport = cell
     summary = lambda value: None if value is None else {
         "n": 5, "median": value, "min": value, "max": value}
@@ -23,7 +23,9 @@ def compare_line(run_id, cell, throughput, p50=1.5, p99=2.0):
             "transport": transport, "pairs": 5, "reps": [1, 2, 3, 4, 5],
             "throughput_ratio": summary(throughput), "latency_p50_ratio": summary(p50),
             "latency_p99_ratio": summary(p99), "plain_requests_per_second": summary(1e5),
-            "budget": None}
+            "budget": None,
+            # Raw result lines carry the environment; the fixtures reuse one line shape.
+            "environment": {"cpu_model": model}}
 
 
 def fake_compare(paths, budget=None, binary=None):
@@ -167,7 +169,8 @@ class CheckTests(unittest.TestCase):
         with patch("gate.run_compare", fake_compare):
             self.write_budget(0.5)
             self.assertEqual(gate.check_budget(self.run, self.budget),
-                             {"passed": True, "exceeded": [], "budgeted": 3})
+                             {"passed": True, "exceeded": [], "budgeted": 3,
+                              "compare_stderr": ""})
             self.write_budget(0.7)
             result = gate.check_budget(self.run, self.budget)
         self.assertFalse(result["passed"])
@@ -175,11 +178,21 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result["exceeded"][0]["exceeded"], ["min_throughput_ratio"])
 
     def test_a_compare_error_or_an_unbudgeted_run_is_not_a_verdict(self):
-        failing = lambda *args, **kwargs: (1, [], "budget matched no paired line")
+        self.write_budget(0.5)
+        checked = [dict(compare_line("r", cell, 0.6), budget={"exceeded": []}) for cell in CELLS]
+        failing = lambda *args, **kwargs: (1, checked, "unexpected failure")
         with patch("gate.run_compare", failing), self.assertRaisesRegex(ValueError, "verdict"):
             gate.check_budget(self.run, self.budget)
         unbudgeted = lambda *args, **kwargs: (0, [compare_line("r", CELLS[0], 0.6)], "")
-        with patch("gate.run_compare", unbudgeted), self.assertRaisesRegex(ValueError, "budgeted"):
+        with patch("gate.run_compare", unbudgeted), self.assertRaisesRegex(ValueError, "no data"):
+            gate.check_budget(self.run, self.budget)
+        # An exceeded limit does not hide budgeted cells that were never checked.
+        partial = self.root / "partial.jsonl"
+        partial.write_text(json.dumps(compare_line("r", CELLS[0], 0.6)) + "\n")
+        with patch("gate.run_compare", fake_compare), self.assertRaisesRegex(ValueError, "no data"):
+            gate.check_budget(partial, self.budget)
+        self.budget.write_text(json.dumps({"schema": "alloy-bench-budget/1", "budgets": []}))
+        with patch("gate.run_compare", fake_compare), self.assertRaisesRegex(ValueError, "0 of 0"):
             gate.check_budget(self.run, self.budget)
 
     def gate_budgets(self):
@@ -262,17 +275,20 @@ def write_slot(root, slot, throughputs, model="A", attempt=1, profile="full", co
     directory = root / f"bench-gate-{slot}-{attempt}"
     directory.mkdir()
     raw = directory / f"{slot}.jsonl"
-    raw.write_text("".join(json.dumps(compare_line(f"{slot}-{attempt}", cell, value)) + "\n"
+    raw.write_text("".join(json.dumps(compare_line(f"{slot}-{attempt}", cell, value,
+                                                   model=model)) + "\n"
                            for cell, value in zip(CELLS, throughputs)))
     controls = directory / f"{slot}-control.jsonl"
-    controls.write_text("".join(json.dumps(compare_line(f"{slot}-c", cell, control)) + "\n"
+    controls.write_text("".join(json.dumps(compare_line(f"{slot}-c", cell, control,
+                                                        model=model)) + "\n"
                                 for cell in CELLS))
     (directory / "slot.json").write_text(json.dumps({
         "schema": gate.SLOT_SCHEMA, "slot": slot, "kind": gate.slot_kind(slot),
         "profile": profile, "commit": "head", "run_id": f"{slot}-{attempt}",
         "attempt": attempt, "cpu_model": model, "raw_file": raw.name,
         "raw_sha256": digest(raw), "control_file": controls.name,
-        "control_sha256": digest(controls), "control_injected_service_ns": 5000,
+        "control_sha256": digest(controls),
+        "control_injected_service_ns": gate.PROFILES[profile]["control"]["inject_ns"],
         "binary_sha256": "binary", "alloc_counting": False}))
     (directory / "SHA256SUMS").write_text("".join(
         f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())
@@ -305,37 +321,82 @@ class EvaluationTests(unittest.TestCase):
         self.calibrate([0.65, 0.66], model="B", first=7)
         report = self.evaluate()
         self.assertTrue(report["accepted"])
-        self.assertEqual((report["candidates"], report["published"]), (["A"], ["A"]))
-        self.assertEqual(report["false_positives"], [])
-        held_out = {check["slot"]: check for check in report["leave_one_out"]}
-        self.assertEqual([held_out[f"calibration-{i:02d}"]["budgets"] for i in range(1, 7)],
-                         ["A"] * 6)
-        self.assertIsNone(held_out["calibration-07"]["passed"])
-        controls = report["positive_controls"]
-        self.assertEqual(len(controls), 6)  # Only model A's runs; B is not a candidate.
+        self.assertEqual(report["published"], ["A"])
+        self.assertEqual(report["uncalibrated_runs"], ["calibration-07", "calibration-08"])
+        state = report["models"]["A"]
+        self.assertEqual(state["runs"], [f"calibration-{i:02d}" for i in range(1, 7)])
+        self.assertEqual(state["screened_limits"], 0)
+        self.assertEqual(state["coverage"], {"gated": 9, "total": 9, "fraction": 1.0})
+        self.assertTrue(all(check["passed"] for check in state["leave_one_out"]))
+        controls = state["positive_controls"]
+        self.assertEqual(len(controls), 6)
         for control in controls:
             # Only the control's cells are budgeted for it: alloy small h1 and h2c.
             self.assertEqual((control["passed"], control["budgeted"]), (False, 2))
         index = json.loads((self.out / "budgets" / "index.json").read_text())
         self.assertEqual(index["models"], {"A": "model-a.json"})
         self.assertEqual(index["rule"]["min_model_runs"], gate.MIN_MODEL_RUNS)
+        self.assertEqual(index["rule"]["coverage_floor"], gate.COVERAGE_FLOOR)
         for name in ("model-a.json", "derivation.json"):
             self.assertTrue((self.out / "budgets" / name).is_file(), name)
         self.assertFalse((self.out / "budgets" / "model-b.json").exists())
+
+    def test_held_out_failures_drop_their_limits_and_the_record_says_why(self):
+        self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600, 0.585])
+        report = self.evaluate()
+        state = report["models"]["A"]
+        self.assertFalse(state["leave_one_out"][-1]["passed"])
+        self.assertEqual(state["screened_limits"], 3)  # throughput, in each of 3 cells
+        self.assertEqual(state["coverage"]["gated"], 6)
+        reasons = {record["metrics"]["throughput_ratio"].get("reason")
+                   for record in report["cells"]["A"]}
+        self.assertEqual(reasons, {"failed a held-out check"})
+        # With throughput dropped, the latency-neutral control is no longer caught.
+        self.assertEqual(state["reason"], "a positive control was not caught")
+        self.assertFalse(report["accepted"])
+
+    def test_screened_budgets_keep_the_limits_that_held(self):
+        self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600, 0.585], control=0.45)
+        for directory in self.slots.iterdir():  # Controls that also slow latency.
+            control = directory / f"{directory.name.split('-1')[0].removeprefix('bench-gate-')}" \
+                                  "-control.jsonl"
+            lines = [json.loads(line) for line in control.read_text().splitlines()]
+            for line in lines:
+                line["latency_p50_ratio"]["median"] = 2.0
+            control.write_text("".join(json.dumps(line) + "\n" for line in lines))
+            slot = json.loads((directory / "slot.json").read_text())
+            slot["control_sha256"] = digest(control)
+            (directory / "slot.json").write_text(json.dumps(slot))
+            (directory / "SHA256SUMS").write_text("".join(
+                f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())
+                if path.name != "SHA256SUMS"))
+        report = self.evaluate()
+        self.assertEqual(report["published"], ["A"])
+        budget = json.loads((self.out / "budgets" / "model-a.json").read_text())["budgets"]
+        self.assertTrue(budget and all("min_throughput_ratio" not in entry for entry in budget))
+        self.assertTrue(all("max_latency_p50_ratio" in entry for entry in budget))
+
+    def test_a_model_below_the_coverage_floor_is_not_published(self):
+        self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
+        with patch("gate.MARGIN_CAP", 0.021), \
+             patch.dict(gate.PROFILES["full"], {"coverage_floor": 0.9}):
+            report = self.evaluate()
+        state = report["models"]["A"]
+        self.assertLess(state["coverage"]["fraction"], 0.9)
+        self.assertEqual(state["reason"], "coverage below the floor after screening")
+        self.assertFalse(report["accepted"])
 
     def test_a_model_whose_budgets_miss_one_control_is_not_published(self):
         self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
         self.calibrate([0.700, 0.701, 0.700, 0.701], model="B", first=6)
         write_slot(self.slots, "calibration-10", [0.700] * 3, model="B", control=0.69)
         report = self.evaluate()
-        self.assertEqual(report["candidates"], ["A", "B"])
         self.assertEqual(report["published"], ["A"])
         self.assertTrue(report["accepted"])
-        missed = [c for c in report["positive_controls"] if c["passed"]]
-        self.assertEqual([c["slot"] for c in missed], ["calibration-10"])
-        # B's runs are not held out against budgets that were never published.
-        held_out = {check["slot"]: check for check in report["leave_one_out"]}
-        self.assertIsNone(held_out["calibration-06"]["passed"])
+        state = report["models"]["B"]
+        self.assertEqual(state["reason"], "a positive control was not caught")
+        missed = [c["slot"] for c in state["positive_controls"] if c["passed"]]
+        self.assertEqual(missed, ["calibration-10"])
         self.assertEqual(json.loads((self.out / "budgets" / "index.json").read_text())["models"],
                          {"A": "model-a.json"})
 
@@ -343,14 +404,10 @@ class EvaluationTests(unittest.TestCase):
         self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
         self.calibrate([0.700, 0.701, 0.700, 0.701, 0.700], model="B", first=6, control=0.5)
         report = self.evaluate()
-        self.assertEqual(report["false_positives"], [])
         self.assertEqual(report["published"], ["A", "B"])
-
-    def test_rejects_a_held_out_false_positive(self):
-        self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600, 0.585])
-        report = self.evaluate()
-        self.assertFalse(report["accepted"])
-        self.assertEqual(report["false_positives"], ["calibration-06"])
+        for state in report["models"].values():
+            self.assertEqual(state["screened_limits"], 0)
+            self.assertEqual(len(state["leave_one_out"]), 5)
 
     def test_rejects_when_no_model_catches_the_synthetic_regression(self):
         self.calibrate([0.6] * 5, control=0.6)
@@ -359,21 +416,22 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse(report["accepted"])
 
     def test_a_control_without_budgeted_cells_cannot_publish_its_model(self):
-        values = [0.600, 0.601, 0.600, 0.601, 0.600]
-        for index, value in enumerate(values, 1):
-            directory = write_slot(self.slots, f"calibration-{index:02d}", [value] * 3)
+        self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
         with patch("gate.control_cells", lambda profile: {("alloy", "large", "h1")}):
             report = self.evaluate()
-        self.assertEqual(report["positive_controls"][0]["reason"], "no control cell is budgeted")
+        state = report["models"]["A"]
+        self.assertEqual(state["positive_controls"][0]["reason"], "no control cell is budgeted")
         self.assertFalse(report["accepted"])
-        self.assertTrue(directory.is_dir())
 
-    def test_smoke_pools_models_and_does_not_require_held_out_passes(self):
+    def test_smoke_pools_models_and_reports_missing_slots(self):
         self.calibrate([0.600, 0.601], profile="smoke")
-        self.calibrate([0.585], profile="smoke", model="B", first=3, control=0.3)
-        report = self.evaluate("smoke")
-        self.assertTrue(report["false_positives"])
+        self.calibrate([0.602], profile="smoke", model="B", first=3, control=0.3)
+        with patch("gate.run_compare", fake_compare):
+            report = gate.evaluate(gate.load_slots(self.slots, "head", "smoke"), "smoke",
+                                   self.out, planned=["calibration-01", "calibration-02",
+                                                      "calibration-03", "calibration-04"])
         self.assertEqual(report["published"], [gate.ANY_MODEL])
+        self.assertEqual(report["missing_slots"], ["calibration-04"])
         self.assertTrue(report["accepted"])
 
     def test_needs_a_model_with_enough_runs_and_one_profile(self):
@@ -385,6 +443,36 @@ class EvaluationTests(unittest.TestCase):
             self.evaluate()  # Mixed profiles are foreign evidence.
         with patch("gate.run_compare", fake_compare), self.assertRaisesRegex(ValueError, "slots"):
             gate.evaluate({}, "full", self.out)
+
+    def test_slot_fields_are_checked_against_the_evidence(self):
+        def broken(change, message):
+            root = self.root / f"case-{len(list(self.root.iterdir()))}"
+            root.mkdir()
+            directory = write_slot(root, "calibration-01", [0.6] * 3)
+            slot = json.loads((directory / "slot.json").read_text())
+            change(slot)
+            (directory / "slot.json").write_text(json.dumps(slot))
+            (directory / "SHA256SUMS").write_text("".join(
+                f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())
+                if path.name != "SHA256SUMS"))
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                gate.load_slots(root, "head", "full")
+        broken(lambda slot: slot.update(kind="allocations"), "kind")
+        broken(lambda slot: slot.update(attempt="2"), "attempt")
+        broken(lambda slot: slot.update(raw_file="../x.jsonl"), "plain name")
+        broken(lambda slot: slot.update(cpu_model="B"), "CPU model differs")
+        broken(lambda slot: slot.update(run_id="other"), "run id")
+        broken(lambda slot: slot.update(control_injected_service_ns=0), "another cost")
+        write_slot(self.slots, "calibration-01", [0.6] * 3)
+        other = write_slot(self.slots, "calibration-02", [0.6] * 3)
+        slot = json.loads((other / "slot.json").read_text())
+        slot["binary_sha256"] = "other"
+        (other / "slot.json").write_text(json.dumps(slot))
+        (other / "SHA256SUMS").write_text("".join(
+            f"{digest(path)}  ./{path.name}\n" for path in sorted(other.iterdir())
+            if path.name != "SHA256SUMS"))
+        with self.assertRaisesRegex(ValueError, "different binaries"):
+            gate.load_slots(self.slots, "head", "full")
 
     def test_rerun_attempts_replace_earlier_ones_and_partial_evidence_is_ignored(self):
         self.calibrate([0.6] * 6)

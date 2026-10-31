@@ -24,7 +24,9 @@ permissions:
 
 concurrency:
   group: bench-gate-${{ github.ref }}-${{ github.event_name }}-${{ inputs.mode || 'auto' }}
-  cancel-in-progress: true
+  # A new push supersedes a pull request's smoke run; a second dispatch on
+  # main queues instead of cancelling hours of collection.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The pinned demo/compatibility Collector (docs/compatibility.json), run
@@ -191,7 +193,9 @@ jobs:
 
   derive:
     needs: [plan, collect]
-    if: needs.plan.outputs.mode == 'calibrate'
+    # Also when a slot failed: derivation uses the complete slots and
+    # reports the missing ones.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'calibrate' }}
     name: Derive and verify budgets (${{ needs.plan.outputs.profile }})
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -200,6 +204,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       QUALIFICATION_SHA: ${{ github.sha }}
       GATE_PROFILE: ${{ needs.plan.outputs.profile }}
+      GATE_SLOTS: ${{ needs.plan.outputs.slots }}
     steps:
       - name: Initialize output directory
         run: |
@@ -228,7 +233,7 @@ jobs:
         with:
           pattern: bench-gate-*-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-*
           path: ${{ runner.temp }}/slots
-      - name: Derive budgets, check positive controls, and hold out each run
+      - name: Derive budgets, screen them with held-out runs, and check positive controls
         run: python3 examples/bench/hosted/gate.py derive "$RUNNER_TEMP/slots"
       - name: Hash the derivation
         if: always()
