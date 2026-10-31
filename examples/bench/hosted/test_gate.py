@@ -2,6 +2,7 @@
 
 import json
 import math
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -255,7 +256,8 @@ class CheckTests(unittest.TestCase):
         self.artifact("gate-01", 1, {"passed": None})
         self.artifact("gate-02", 1, {"passed": True})
         self.assertTrue(self.verdict(["gate-01", "gate-02"])["passed"])
-        self.assertFalse(self.verdict(["gate-01"])["passed"])
+        shutil.rmtree(self.root / "artifacts" / "bench-gate-gate-02-head-41-1")
+        self.assertFalse(self.verdict(["gate-01"])["passed"])  # only an uncalibrated slot
 
     def test_a_planned_slot_without_a_verdict_fails_the_gate(self):
         self.artifact("gate-01", 1, {"passed": True})
@@ -293,9 +295,13 @@ class CheckTests(unittest.TestCase):
             if path.name != "SHA256SUMS"))
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.verdict(["gate-01"])
-        (self.root / "artifacts" / "bench-gate-gate-02-other-41-1").mkdir()
-        with self.assertRaisesRegex(ValueError, "unexpected artifact"):
-            self.verdict(["gate-01"])
+        shutil.rmtree(directory)
+        for foreign in ("bench-gate-gate-01-other-41-1", "bench-gate-gate-09-head-41-1"):
+            (self.root / "artifacts" / foreign).mkdir()
+            with self.subTest(foreign=foreign), \
+                 self.assertRaisesRegex(ValueError, "unexpected artifact"):
+                self.verdict(["gate-01"])
+            shutil.rmtree(self.root / "artifacts" / foreign)
 
     def test_gate_collect_runs_nothing_on_an_uncalibrated_model(self):
         budgets = self.gate_budgets()

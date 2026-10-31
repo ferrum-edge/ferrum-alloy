@@ -543,7 +543,8 @@ def verdict(root, planned, collected, sha, run_id, attempt):
     latest = {}
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         match = name.fullmatch(directory.name)
-        require(match is not None, f"unexpected artifact {directory.name}")
+        require(match is not None and match[1] in planned,
+                f"unexpected artifact {directory.name}")
         path = directory / "gate.json"
         if int(match[2]) != attempt or not path.is_file():
             continue  # Another attempt's, or this attempt failed before checking.
