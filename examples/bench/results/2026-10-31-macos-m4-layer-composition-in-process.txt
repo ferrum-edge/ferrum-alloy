@@ -1,3 +1,10 @@
+# In-process service time per request for GET /small, nanoseconds, before and after
+# composing AlloyApp's middleware into one stack (docs/benchmarks.md, "Layer composition").
+# Each "MB" line is one measurement: 400 batches of 100 requests on one thread through
+# the bare router ("plain") and AlloyApp's defaults ("alloy"); "min" is the fastest
+# batch, "p10" the tenth percentile, "added_min" alloy min minus plain min. "load" lines
+# are vm.loadavg before each build's three measurements. Produced by the scratch
+# predecessor of `alloc::tests::in_process_service_time` (same loop and batch sizes).
 load { 29.52 26.22 24.19 }
 MB before round 0 plain min 581 p10 590 alloy min 4994 p10 5049 added_min 4413
 MB before round 1 plain min 556 p10 567 alloy min 4981 p10 5064 added_min 4425
