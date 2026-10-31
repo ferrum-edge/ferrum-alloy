@@ -410,6 +410,7 @@ class EvaluationTests(unittest.TestCase):
         with patch("gate.derive", folds_without_throughput):
             state = self.evaluate()["models"]["A"]
         self.assertEqual(state["screened_limits"], 3)
+        self.assertEqual((state["held_out_failures"], state["untested_limits"]), (0, 3))
         reasons = {record["metrics"]["throughput_ratio"]["reason"]
                    for record in self.evaluate_records()}
         self.assertEqual(reasons, {"no held-out run tested it"})

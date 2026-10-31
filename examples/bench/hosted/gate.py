@@ -414,13 +414,14 @@ def evaluate(slots, profile, out, binary=BINARY, planned=()):
                                               "failed a held-out check"))
         # A limit no fold derived (its spread crossed the cap without some
         # run) was never held out, so it is not kept as if screened.
-        for key in limit_keys(budget) - tested - set(failures):
-            failures[key] = "no held-out run tested it"
+        exceeded_limits = len(failures)
+        untested = limit_keys(budget) - tested - set(failures)
+        failures.update(dict.fromkeys(untested, "no held-out run tested it"))
         kept, removed = screened(budget, records, failures)
         covered = coverage(records)
         state = {"runs": [calibration[index]["slot"] for index in runs],
                  "leave_one_out": held_out, "screened_limits": removed,
-                 "held_out_failures": len(failures),
+                 "held_out_failures": exceeded_limits, "untested_limits": len(untested),
                  "coverage": covered, "positive_controls": []}
         models[model] = state
         if covered["fraction"] < settings["coverage_floor"]:
