@@ -229,12 +229,12 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(verdicts["B"]["passed"])
         self.assertIsNone(verdicts["C"]["passed"])
         self.assertNotIn("budget_file", verdicts["C"])
-        overall = gate.verdict(self.root, PLANNED)
+        overall = gate.verdict(self.root, PLANNED, "success")
         self.assertEqual(overall["checked"], 2)
         self.assertFalse(overall["passed"])
         (self.root / "bench-gate-A" / "gate.json").write_text('{"passed": true}')
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
-            gate.verdict(self.root, PLANNED)
+            gate.verdict(self.root, PLANNED, "success")
 
     def test_verdict_needs_a_calibrated_slot(self):
         for name, passed in (("one", None), ("two", True)):
@@ -244,14 +244,14 @@ class CheckTests(unittest.TestCase):
                 json.dumps({"slot": name, "attempt": 1, "passed": passed}))
             (directory / "SHA256SUMS").write_text(
                 f"{digest(directory / 'gate.json')}  ./gate.json\n")
-            result = gate.verdict(self.root, PLANNED)
+            result = gate.verdict(self.root, PLANNED, "success")
         self.assertTrue(result["passed"])
         # A rerun attempt of slot "two" that landed on an uncalibrated model.
         rerun = self.root / "two-rerun"
         rerun.mkdir()
         (rerun / "gate.json").write_text(json.dumps({"slot": "two", "attempt": 2, "passed": None}))
         (rerun / "SHA256SUMS").write_text(f"{digest(rerun / 'gate.json')}  ./gate.json\n")
-        result = gate.verdict(self.root, PLANNED)
+        result = gate.verdict(self.root, PLANNED, "success")
         self.assertEqual([entry["attempt"] for entry in result["verdicts"]], [1, 2])
         self.assertFalse(result["passed"])
 
@@ -261,9 +261,26 @@ class CheckTests(unittest.TestCase):
         (directory / "gate.json").write_text(
             json.dumps({"slot": "gate-01", "attempt": 1, "passed": True}))
         (directory / "SHA256SUMS").write_text(f"{digest(directory / 'gate.json')}  ./gate.json\n")
-        self.assertTrue(gate.verdict(self.root, ["gate-01"])["passed"])
-        result = gate.verdict(self.root, ["gate-01", "gate-02"])
+        self.assertTrue(gate.verdict(self.root, ["gate-01"], "success")["passed"])
+        result = gate.verdict(self.root, ["gate-01", "gate-02"], "success")
         self.assertEqual(result["missing"], ["gate-02"])
+        self.assertFalse(result["passed"])
+
+    def test_a_failed_rerun_cannot_hide_behind_an_earlier_passing_verdict(self):
+        # Attempt 1 passed gate-01; attempt 2 of gate-01 failed before writing
+        # a verdict, and gate-02 recovered in attempt 2.
+        for name, slot, attempt, passed in (("a1", "gate-01", 1, True),
+                                            ("b2", "gate-02", 2, True)):
+            directory = self.root / name
+            directory.mkdir()
+            (directory / "gate.json").write_text(
+                json.dumps({"slot": slot, "attempt": attempt, "passed": passed}))
+            (directory / "SHA256SUMS").write_text(
+                f"{digest(directory / 'gate.json')}  ./gate.json\n")
+        planned = ["gate-01", "gate-02"]
+        self.assertTrue(gate.verdict(self.root, planned, "success")["passed"])
+        result = gate.verdict(self.root, planned, "failure")
+        self.assertEqual(result["missing"], [])
         self.assertFalse(result["passed"])
 
     def test_gate_collect_runs_nothing_on_an_uncalibrated_model(self):

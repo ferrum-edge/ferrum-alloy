@@ -528,12 +528,14 @@ def check(out):
     return verdict
 
 
-def verdict(root, planned):
-    """The gate passes when every planned slot has a verdict, at least one ran
-    on a calibrated model, and none regressed.
+def verdict(root, planned, collected):
+    """The gate passes when every slot job succeeded, every planned slot has a
+    verdict, at least one ran on a calibrated model, and none regressed.
 
-    A rerun's later attempt of a slot replaces the earlier one. A planned slot
-    without a verdict (its job failed before checking) fails the gate.
+    `collected` is the workflow's result for the slot jobs (in a rerun, of
+    their latest attempts), so a later attempt that failed before writing its
+    verdict cannot be hidden behind an earlier attempt's. A rerun's later
+    verdict of a slot replaces the earlier one.
     """
     latest = {}
     for path in sorted(root.glob("*/gate.json")):
@@ -546,7 +548,8 @@ def verdict(root, planned):
     checked = [entry for entry in verdicts if entry["passed"] is not None]
     missing = sorted(set(planned) - set(latest))
     return {"verdicts": verdicts, "checked": len(checked), "missing": missing,
-            "passed": (bool(checked) and not missing
+            "collected": collected,
+            "passed": (collected == "success" and bool(checked) and not missing
                        and all(entry["passed"] for entry in checked))}
 
 
@@ -587,12 +590,13 @@ def main(command, *args):
     if command == "verdict":
         (root,) = args
         planned = json.loads(os.environ["GATE_SLOTS"])
-        result = verdict(Path(root), planned)
+        result = verdict(Path(root), planned, os.environ["GATE_COLLECT_RESULT"])
         write_json(out / "verdict.json", result)
         summary(f"### Regression gate: {'pass' if result['passed'] else 'FAIL'}\n\n"
                 f"{result['checked']} of {len(planned)} slots ran on a calibrated CPU model; "
-                f"slots without a verdict: {', '.join(result['missing']) or 'none'}. The gate "
-                "needs every slot's verdict, at least one calibrated run, and no regression.\n")
+                f"slots without a verdict: {', '.join(result['missing']) or 'none'}; slot jobs: "
+                f"{result['collected']}. The gate needs every slot job to succeed with a "
+                "verdict, at least one calibrated run, and no regression.\n")
         return 0 if result["passed"] else 1
     if command == "derive":
         (root,) = args

@@ -264,6 +264,8 @@ jobs:
       QUALIFICATION_SHA: ${{ github.sha }}
       GATE_PROFILE: ${{ needs.plan.outputs.profile }}
       GATE_SLOTS: ${{ needs.plan.outputs.slots }}
+      # The slot jobs' combined result, of their latest attempts on a rerun.
+      GATE_COLLECT_RESULT: ${{ needs.collect.result }}
     steps:
       - name: Initialize output directory
         run: |
