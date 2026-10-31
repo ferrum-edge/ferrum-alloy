@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -97,6 +98,26 @@ pub(crate) fn router() -> Router {
         .route("/large", get(move || std::future::ready(large.clone())))
         .route("/stream", get(stream))
         .route("/stream-long", get(stream_long))
+}
+
+/// Busy-waits `nanos` on the serving thread before every request reaches
+/// the router: a synthetic per-request regression for checking that the
+/// regression gate detects one (`--inject-service-ns`). Zero leaves the
+/// router unchanged.
+fn inject(router: Router, nanos: u64) -> Router {
+    if nanos == 0 {
+        return router;
+    }
+    let cost = Duration::from_nanos(nanos);
+    router.layer(middleware::from_fn(
+        move |request: Request, next: Next| async move {
+            let start = Instant::now();
+            while start.elapsed() < cost {
+                std::hint::spin_loop();
+            }
+            next.run(request).await
+        },
+    ))
 }
 
 /// Attributes every request to one tenant, so its evidence is retained.
@@ -192,11 +213,13 @@ where
 }
 
 /// Starts the server for `scenario`. `pipeline` is kept alive for as long
-/// as the server runs.
+/// as the server runs. Every scenario but `plain` busy-waits `inject_ns`
+/// per request; see [`inject`].
 pub(crate) fn start(
     scenario: Scenario,
     tls: Option<ServerTls>,
     pipeline: Option<Arc<OtelPipeline>>,
+    inject_ns: u64,
 ) -> Result<Server, Failure> {
     spawn(
         SERVER_THREAD,
@@ -220,11 +243,12 @@ pub(crate) fn start(
                 .config(config)
                 .telemetry(TelemetryInit::ApplicationOwned)
                 .shutdown_signal(stopped(stop));
+            let router = inject(router(), inject_ns);
             let app = if diagnostics {
-                let router = router().layer(middleware::from_fn(tag_tenant));
+                let router = router.layer(middleware::from_fn(tag_tenant));
                 app.router(router).diagnostics_authorizer(deny)
             } else {
-                app.router(router())
+                app.router(router)
             };
             let parts = app.into_parts();
             match parts {

@@ -5,9 +5,9 @@
 //! Pairing follows `docs/benchmarks.md`: only lines with `errors == 0` are
 //! used, lines are grouped by `run_id` (and commit and allocation mode)
 //! before a cell is paired with `plain` of the same repetition, and counting
-//! and non-counting runs are never compared. No budget is defined yet; the
-//! budget file format exists so that one can be checked once a dedicated
-//! host has measured a baseline.
+//! and non-counting runs are never compared. Budget files are derived from
+//! unchanged-code calibration by the regression gate
+//! (`examples/bench/hosted/gate.py`), never written by hand.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

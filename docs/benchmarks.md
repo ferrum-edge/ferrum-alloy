@@ -2,7 +2,7 @@
 
 The harness in `examples/bench` measures the relative cost of Alloy's layers against a plain hyper server, across server stacks, workloads, and transports. It writes one machine-readable JSON line per run, so that regression budgets can later be computed from committed raw data.
 
-Recorded evidence includes historical shared-machine measurements from 2026-09-26 (see [Results](#results-2026-09-26-previous-harness)) and [bounded shared hosted preparation from 2026-10-04](#hosted-evidence-2026-10-04). Neither supplies capacity numbers or a dedicated baseline. **No performance regression budget exists.** The [hosted qualification workflow](#hosted-qualification-preparation) checks evidence completeness and collects experimental profiles and comparisons, including exports to a real, pinned Collector; it does not fulfill the dedicated-host acceptance criteria in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15). The [infrastructure qualification of 2026-10-29](#infrastructure-qualification-2026-10-29) found no existing environment that meets them and defers that acceptance explicitly.
+Recorded evidence includes historical shared-machine measurements from 2026-09-26 (see [Results](#results-2026-09-26-previous-harness)) and [bounded shared hosted preparation from 2026-10-04](#hosted-evidence-2026-10-04). Neither supplies capacity numbers or a dedicated baseline. **No performance regression budget is committed yet.** The [hosted qualification workflow](#hosted-qualification-preparation) checks evidence completeness and collects experimental profiles and comparisons, including exports to a real, pinned Collector. The [infrastructure qualification of 2026-10-29](#infrastructure-qualification-2026-10-29) found no isolated environment for the dedicated-host criteria in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15); on 2026-10-31 the owner replaced them with the shared-runner policy of the [regression gate](#regression-gate), whose budgets come from a calibration on `main`.
 
 ## The matrix
 
@@ -75,6 +75,7 @@ Options for `run` and `matrix`:
 | `--label TEXT` | none | Recorded as `environment.label`; use it for the host and commit |
 | `--run-id ID` | random | Recorded as `run_id`. `matrix` generates one (a version 4 UUID) and passes it to every run, so the lines of one matrix share it |
 | `--collector-endpoint URL` | stub | OTLP/HTTP traces URL for `otel-collector` |
+| `--inject-service-ns N` | 0 | Busy-wait N ns on the serving thread before every request reaches the router, in every scenario but `plain`: the regression gate's [synthetic regression](#deriving-budgets). Never set it for a measurement |
 
 `matrix` takes `--scenarios`, `--workloads`, and `--transports` (each `all` or a comma-separated list, default `all`), `--reps` (default 5), and `--out` (default stdout). `Scenario::ALL` lists nine scenarios: the full matrix has 9 × 4 × 6 = 216 cells and 1,080 runs at five repetitions. The default 1-second warm-up plus 5-second window therefore takes **at least 108 minutes**, excluding process startup, connection preparation, draining, probes, and teardown.
 
@@ -102,6 +103,7 @@ Each run prints one JSON object on one line. The format is versioned by `schema`
 | `server_threads`, `client_threads` | Tokio worker threads of each runtime |
 | `warmup_seconds`, `seconds` | Warm-up and measurement window |
 | `alloc_counting` | Whether allocations were counted; see below |
+| `injected_service_ns` | The run's `--inject-service-ns` setting, never applied to `plain` (0 for every measurement) |
 | `requests`, `errors` | Requests completed in the window, and failed ones |
 | `error_samples` | The messages and available error source chains of the first 5 client errors of the run (including failed reconnections), so a failing run says why; empty when `errors` is 0 |
 | `connects` | Connections opened during the whole run, including warm-up and the initial ones |
@@ -122,15 +124,55 @@ What these measure, and what they do not:
 - **Allocations** are counted by a global allocator in the benchmark binary only, attributed to the role of the allocating thread. Counting adds shared atomic operations to every allocation, which lowers throughput, so it is off by default and **a counting run's throughput and latency must not be compared with a non-counting run's**. Measure allocations in a separate pass.
 - **Span loss** is read from Alloy's own counters (`ferrum_alloy_telemetry_spans_lost_total`, `..._spans_exported_total`). Spans still queued when the window ends are in neither count; `spans_queued_at_end` reports them, read from the pipeline's `queued_spans()` before the server stops and the pipeline shuts down, and `spans_queued_bytes_at_end` from `queued_bytes()`, an estimate. The queue counts a span from when the processor accepts it until its export resolves, so a batch being exported is still queued. The exported and lost counts are deltas over the window, while the queue fields are levels, so the sampled spans that ended during the window are approximately `spans_exported + sum(spans_lost) + spans_queued_at_end - spans_queued_at_start` (`queue_full` and `byte_budget` losses are rejected without being queued). The counters are read one after another, not atomically, so this is approximate. Spans still queued at the end are exported or lost after the window, and the result does not record which. How `otel-unreachable` loses spans depends on the platform: where a connection to a closed loopback port is refused at once (Linux, macOS), exports fail and spans are lost as `export_failed`; where the connection attempt hangs instead (Windows can), exports may time out and spans may be lost by another reason, such as a full queue.
 
-## Regression budgets (not yet enforced)
+## Regression gate
 
-Budgets are the goal of #15, but they need a dedicated host first. Same-host numbers from a shared machine move with background load by more than the regressions a budget should catch. In the [discarded run](#discarded-run), `plain` fell from 178k to 77k requests/s between repetitions on unchanged code. Hosted CI runners are shared virtual machines with variable neighbors and CPU frequency, so a budget checked there would either fail at random or have to be too loose to mean anything.
+**Policy (owner decision, 2026-10-31).** Benchmarks run on standard shared GitHub-hosted runners, and the regression gate holds Alloy to budgets derived from a measured noise model of those runners, not to a dedicated host. This replaces the requirement for an isolated environment ([infrastructure qualification](#infrastructure-qualification-2026-10-29)). It changes where evidence comes from, not how strict it is:
 
-The plan, which stays open in #15 and requires the [external unblock checklist](#external-unblock-checklist):
+- Budgets are ratios to `plain` in the same cell, repetition, and invocation, never absolute rates or latencies. Runner-to-runner variation in absolute numbers mostly cancels in the ratio.
+- The noise model is measured on unchanged code: independent runs of the full matrix, each on its own runner, from one source commit. Neither `plain`'s spread within one run nor a guessed tolerance is a noise floor.
+- Budgets are kept per runner CPU model, and a run is only ever held to its own model's budgets. The standard runners come with at least six CPU models (Intel Xeon Platinum 8370C and 8573C, Intel Xeon 6975P-C, AMD EPYC 7763, 9V45, and 9V74, seen in this workflow's first runs), and the same code's ratios differ by more between CPU models (for `alloy` `small`/`h1`, about 7% in the throughput ratio and 13% in the p50 latency ratio between a Xeon 8370C and an 8573C runner (medians of five interleaved repetitions, 32 concurrent requests, 5-second windows), in hosted runs [41002220361](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41002220361) and [41000091456](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41000091456)) than between two stages of one run on one runner (under 1% in the throughput ratio), so pooling them would loosen every limit until it caught nothing.
+- A CPU model's budgets are published only if they keep limits on at least half of its cell metrics and a synthetic regression on each of that model's own runners fails them. Otherwise no budget is committed for it.
+- A metric too noisy to gate is left without a limit and listed, never given a wider one. That includes a limit that one of the model's own runs exceeds when held out.
+- Budgets record the commit they were derived from. A change to the harness, a workload, the runner image, or the toolchain can move the ratios; recalibrate before relying on the gate across one.
 
-1. Run the full matrix on an owner-provided dedicated or isolated **GitHub-hosted** Linux environment, with verified CPU isolation and frequency controls, at least 5 interleaved repetitions, and commit the raw JSON lines under `examples/bench/results/`. A reported `performance` governor alone does not prove a pinned frequency or isolated physical CPU.
-2. From that baseline, derive each cell's budget as a ratio to `plain` in the same cell and repetition, not as absolute requests per second, with the noise floor measured on `plain` itself.
-3. Add a scheduled job on that host that runs the matrix and fails when a ratio moves by more than the noise floor.
+The [`Benchmark regression gate`](../.github/workflows/bench-gate.yml) workflow implements this, on `main` only, with `examples/bench/hosted/gate.py`:
+
+- **`calibrate`** (manual dispatch) runs eighteen unchanged-code calibration slots and one allocation-counting slot as parallel jobs, each on its own runner. GitHub assigns the CPU models, so eighteen slots give the common models enough runs; a model that gets too few is left uncalibrated. Every slot builds the release binary from the same commit, starts the [real Collector](#real-collector), runs the full 216-cell matrix with five interleaved repetitions (1,080 runs), and passes the same validation and Collector accounting as hosted qualification. Each calibration slot then runs its positive control on the same runner (below). The allocation-counting slot is archived evidence for allocation ratios; the derivation does not read it. A `derive` job runs even when some slots failed: it checks every complete slot artifact against its `SHA256SUMS` and the slot's recorded fields against its raw lines, derives and screens the budgets, checks the controls, lists the missing slots, and uploads the budget files with their derivation. A failed slot can be rerun alone, which reruns `derive`; the latest complete attempt of each slot is used. A second dispatch queues behind a running one instead of cancelling it.
+- **`gate`** (manual dispatch; a weekly schedule is added together with the first committed budgets) starts five slots, so that at least one is likely to land on a calibrated model. Each reads its runner's CPU model before running a matrix: on a model without committed budgets it runs no matrix and says so; otherwise it runs one full matrix and checks it against that model's budgets. The gate fails when any slot exceeds a limit, when a slot job fails or ends without a verdict, or when no slot landed on a calibrated model. A verdict counts only the current run attempt's slots, so a partial rerun cannot combine attempts and fails; to retry a gate, rerun all its jobs or dispatch it again.
+- **Pull requests** that change the workflow, `examples/bench/hosted/`, or `examples/bench/budgets/` run the same pipeline on a tiny matrix (`plain`, `alloy`, `otel-collector`; `small`; `h1`, `h2c`; three repetitions of 1 s, with a 50 µs control on `alloy` `small` `h1`) to exercise it, treating every runner as one model and with no coverage floor. The derivation must complete; whether it is accepted depends on which CPU models the few runners drew, so it is reported, not required. Their budgets are discarded; they are not evidence.
+
+Every check runs `alloy-bench compare --budget` on the raw result lines, so the gate applies exactly the pairing rules below. Lines with errors never reach it: validation fails a slot with any client error.
+
+### Deriving budgets
+
+`gate.py derive` reads each calibration run's `compare` output and, for every cell other than `plain` and each of `throughput_ratio`, `latency_p50_ratio`, and `latency_p99_ratio`:
+
+1. takes the run medians m₁ … mₖ (one per calibration run, each the median of five paired repetitions);
+2. sets the **center** c to their median and the **spread** s to the largest |ln(mᵢ / c)|: the widest unchanged-code deviation observed;
+3. sets the **margin** to 3 × s + 0.02 in log space, so a limit sits three spreads plus 2% beyond the center: `min_throughput_ratio` = c × e^−margin, rounded down to four decimals, and the latency maxima c × e^+margin, rounded up;
+4. leaves the metric without a limit when the margin exceeds 0.20 (about 22%), or when it is unknown in any run.
+
+Budgets are derived separately for each CPU model with at least five calibration runs, from that model's runs only; other models get none. Each model's budgets then pass three checks, in this order:
+
+1. **Held-out screening.** Each of the model's runs is checked against limits derived by the same rule from the model's other runs (at least four). Every limit a held-out run exceeds is dropped from the model's budgets, and so is every limit that no fold derived (its spread crossed the cap whenever some run was left out), so it was never held out; each with its reason recorded. A metric that one unchanged-code run of its own model would fail is too noisy to gate.
+2. **Coverage floor.** At least half of the model's cell metrics (192 cells × 3) must keep a limit after screening.
+3. **Positive controls**, below.
+
+The multiplier, floor, cap, minimum run count, coverage floor, and screening are fixed in `gate.py` and recorded in the budget index; they were set before the calibration they apply to.
+
+A model's budgets are published only when **the synthetic regression is caught on its own hardware.** After its matrix, every calibration slot runs a positive control on the same runner with the same binary: `plain`, `alloy`, `alloy-logs`, and `alloy-diagnostics`, `small`, `h1` and `h2c`, five interleaved repetitions, with `--inject-service-ns 5000`, so every request to an Alloy stack busy-waits 5 µs on its serving thread before the router while `plain` is unchanged. Each of the model's controls must exceed at least one of the model's screened limits for those six cells. A model whose budgets would let the regression pass on one of its runners is not published, and neither is one whose control cells all lack limits.
+
+The calibration is accepted when at least one model is published.
+
+The derivation artifact holds the budget files, their index (`index.json`: source commit, calibration run, rule, and which file belongs to which CPU model), and `derivation.json`, which lists every candidate model's cells with their run medians, center, spread, margin, and limit or reason for having none, its held-out results and screened limits, its coverage, and each positive control's exceeded cells, plus the planned slots that are missing. Accepted budgets are committed under `examples/bench/budgets/` with that derivation, and the calibration's raw results under `examples/bench/results/`.
+
+What this does and does not establish:
+
+- A limit catches a change in a cell's ratio larger than its margin; smaller changes pass. The margin per cell is the gate's resolution there, and `derivation.json` records it.
+- Held-out screening removes the limits that the calibration's own runs show to be fragile. It is a screen, not a measurement: the remaining limits passed it by construction, so it says nothing about how often an unchanged-code gate run fails, and each gate run checks up to 576 limits on one model at once. The gate's run history is the prospective record of that rate.
+- A positive control shows the gate detects 5 µs per request in at least one of six `small` cells on that model, not that every cell resolves it. Each cell's margin in `derivation.json` is its resolution.
+- Uncalibrated CPU models are not checked at all. If GitHub changes its runner hardware, the gate reports that no slot was calibrated and fails until a new calibration covers the new models.
+- The service, client, and Collector share the runner's vCPUs. Ratios measure Alloy's cost relative to `plain` under that contention, not capacity.
 
 A budget computed from result lines must use only lines with `errors == 0`, because a run with errors measured something other than the cell (fast failures inflate throughput), and must group lines by `run_id` before pairing a cell with `plain`, so that ratios never mix repetitions from different invocations, hosts, or commits. Only compare lines with the same `alloc_counting`.
 
@@ -150,7 +192,7 @@ target/release/alloy-bench compare results.jsonl [more.jsonl ...] [--budget budg
 
 These are observations of one invocation, not a noise floor or a significance test.
 
-`--budget FILE` checks each printed cell against a budget file. **No budgets are defined, and none is committed**: deriving them needs the dedicated-host baseline above. The file is JSON:
+`--budget FILE` checks each printed cell against a budget file. Budget files are derived by the [regression gate](#deriving-budgets), never written by hand. The file is JSON:
 
 ```json
 {
@@ -169,14 +211,14 @@ These are observations of one invocation, not a noise floor or a significance te
 }
 ```
 
-The placeholders stand for values a baseline must supply; the limits are JSON numbers. `scenario`, `workload`, and `transport` are required and must name a matrix value; `alloc_counting` defaults to `false`; at least one limit is required, and each limit is a positive number. Unknown keys, a second budget for the same cell, and a `plain` budget are rejected. A budget applies to every group with its cell and allocation mode, and each group is checked on its medians:
+The placeholders stand for values a calibration supplies; the limits are JSON numbers. `scenario`, `workload`, and `transport` are required and must name a matrix value; `alloc_counting` defaults to `false`; at least one limit is required, and each limit is a positive number. Unknown keys, a second budget for the same cell, and a `plain` budget are rejected. A budget applies to every group with its cell and allocation mode, and each group is checked on its medians:
 
 - `min_throughput_ratio` is exceeded when the median throughput ratio is below it;
 - `max_latency_p50_ratio` and `max_latency_p99_ratio` are exceeded when the median latency ratio is above them, or unknown (unknown is not within a limit).
 
 Each printed line then carries `budget: {"exceeded": [...]}` with the names of the exceeded limits (empty when within), or `budget: null` when no budget covers the cell. `compare` exits nonzero when any limit is exceeded or any budget matched no paired line (a budgeted cell that failed or was not run), after printing every line and listing the failures on stderr.
 
-Until then, no number is quoted without its artifact, source commit, environment, and repetition count. The harness compiles in the workspace build. Its real-service unit health matrices use a 1-second warm-up and a fixed 5-second window for every workload and transport on both plain and Alloy servers. Cancellation health has a finite per-worker exchange budget below the pinned client's reset-retention capacity (see [Functional health tests](#functional-health-tests)). Other workloads retain continuous closed-loop load. The warmed cancellation regression uses a 100 ms warm-up with the same 5-second window. Separate boundary/probe and full-body regressions retain their 200 ms windows; the end-to-end tests (every scenario as a separate `alloy-bench run` process, and a one-cell `matrix` whose output is parsed) also retain 0.2-second windows. These are functional checks, not performance budgets or dedicated-host acceptance.
+No number is quoted without its artifact, source commit, environment, and repetition count. The harness compiles in the workspace build. Its real-service unit health matrices use a 1-second warm-up and a fixed 5-second window for every workload and transport on both plain and Alloy servers. Cancellation health has a finite per-worker exchange budget below the pinned client's reset-retention capacity (see [Functional health tests](#functional-health-tests)). Other workloads retain continuous closed-loop load. The warmed cancellation regression uses a 100 ms warm-up with the same 5-second window. Separate boundary/probe and full-body regressions retain their 200 ms windows; the end-to-end tests (every scenario as a separate `alloy-bench run` process, and a one-cell `matrix` whose output is parsed) also retain 0.2-second windows. These are functional checks, not performance budgets or dedicated-host acceptance.
 
 ## Hosted qualification preparation
 
@@ -231,12 +273,9 @@ Before collecting a baseline, the existing, already approved resources were chec
 | Third-party runner groups configured at the organization level | Runner groups exist; no repository workflow uses them and no runner is registered | No. They are not GitHub-hosted, which the policy requires. Using them would be a policy change. |
 | Pinned Collector image (demo and compatibility pin) | Available | Yes, for item 2's Collector, co-located on the shared runner: see [Real Collector](#real-collector). |
 
-**Decision: dedicated-baseline acceptance is deferred, and the policy is unchanged.** No existing resource provides an isolated GitHub-hosted environment with verified CPU and frequency controls. Until the owner provides one, or records a separate decision to change this policy:
+**Decision (2026-10-29): dedicated-baseline acceptance is deferred, and the policy is unchanged.** No existing resource provides an isolated GitHub-hosted environment with verified CPU and frequency controls.
 
-- [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15): the full 216-cell matrix with five interleaved repetitions can still be collected on the shared runner as experimental evidence (main-only dispatch), but it is not committed under `examples/bench/results/` as a baseline. No noise floor is derived from it, no budget file is committed, and no scheduled gate is enabled. A gate run on shared VMs would fail at random or have limits too loose to catch a regression, so demonstrating that it catches one there would prove nothing.
-- [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16): no further logging optimization is proposed. The JSON schema and the synchronous, lossless default stay as they are. The before/after comparison against measured noise waits for the same environment.
-
-Changing the policy would mean, for example, accepting third-party runners or shared VMs with a measured unchanged-code noise model instead of isolation. That is a separate owner decision with its own review. It is not made here, and this section does not weaken the acceptance criteria.
+**Superseded (2026-10-31).** The owner chose the second option this section left open: shared GitHub-hosted runners with a measured unchanged-code noise model instead of isolation. The [regression gate](#regression-gate) states the policy and its acceptance checks. No runner was provisioned or paid for, and third-party runners remain unused.
 
 ## Hosted evidence (2026-10-04)
 
@@ -262,6 +301,8 @@ The harness's unit tests check that every cell works; they are not performance e
 The budgeted workers previously sent one more request on each retained H2 sender after the measurement deadline. The 15-second timeout in [#142](https://github.com/ferrum-edge/ferrum-alloy/issues/142) first occurred on the commit that added that test-only probe, and its one instrumented recurrence stalled waiting for the probe's response headers. The probe was removed, together with the test-only observers built to investigate it.
 
 ## External unblock checklist
+
+**Status (2026-10-31).** Item 1 is superseded by the [shared-runner policy](#regression-gate). Items 3 and 4 are implemented by the regression gate's `calibrate` mode and are met once a calibration is accepted and committed; item 5's comparison uses the same calibration runs. The items below are kept as written for the record.
 
 The owner/root must provide these concrete inputs and evidence before dedicated baseline acceptance or a budget can be proposed. All execution remains in GitHub-hosted CI; no local or self-hosted repository execution is an alternative:
 
@@ -349,8 +390,8 @@ That data is kept in `examples/bench/results/2026-09-26-macos-m4-discarded-high-
 
 ## Not measured
 
-- The complete matrix on a dedicated host: large payloads, streaming, cancellation, h2c, TLS, mTLS and export to a real Collector still lack accepted baseline measurements. The bounded hosted sample supplies experimental small HTTP/1.1 on-CPU/RSS and allocation observations, and real-Collector exports, only; full acceptance waits for the external unblock checklist and is [deferred](#infrastructure-qualification-2026-10-29).
+- Accepted full-matrix measurements: large payloads, streaming, cancellation, h2c, TLS, mTLS and export to a real Collector have no committed calibration yet. The bounded hosted sample supplies experimental small HTTP/1.1 on-CPU/RSS and allocation observations, and real-Collector exports, only; the [regression gate](#regression-gate)'s calibration supplies the full matrix.
 - Authorized diagnostic mode (`alloy-diagnostics`, #13): the scenario exists; no run has measured it.
 - Behavior behind Ferrum Edge.
-- A dedicated Linux benchmarking host. The existing Linux sample is a shared Ubuntu 24.04 VM.
+- A dedicated Linux benchmarking host. By the 2026-10-31 policy, none is required; every hosted measurement is from shared GitHub-hosted VMs.
 - Long-duration stability and tail latency beyond p99.9.

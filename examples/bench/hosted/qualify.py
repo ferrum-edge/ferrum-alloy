@@ -54,8 +54,11 @@ def counter(value):
 
 
 def validate(rows, scenarios, workloads, transports, reps, sha, run_id, counting,
-             seconds=5.0, warmup=1.0, concurrency=32, external_collector=False):
+             seconds=5.0, warmup=1.0, concurrency=32, external_collector=False, injected=0):
     """Reject incomplete, mixed, duplicate, erroneous, or unsupported evidence.
+
+    `injected` is the synthetic per-request cost the rows must report (zero
+    for every measurement; only a regression-gate check injects one).
 
     With `external_collector`, `otel-collector` exported to the real Collector,
     whose receipt is checked from its own counters (`collector_accounting`);
@@ -73,6 +76,8 @@ def validate(rows, scenarios, workloads, transports, reps, sha, run_id, counting
         require(row.get("commit") == sha and row.get("run_id") == run_id,
                 "mixed source or invocation")
         require(row.get("alloc_counting") is counting, "mixed allocation modes")
+        require(row.get("injected_service_ns") == injected,
+                "unexpected synthetic regression setting")
         require(row.get("errors") == 0 and row.get("error_samples") == [],
                 f"client errors in {key}")
         require(positive(row.get("requests")) and positive(row.get("requests_per_second")),
@@ -172,7 +177,10 @@ def summarize(rows):
             if key[2]:
                 summary["service_allocations_per_request"] = distribution(
                     [row["allocations"]["service"]["calls_per_request"] for row in selected])
-            if scenario == "alloy-logs":
+            # Subset matrices (the regression gate's controls) can run the
+            # typed logger without the fmt one; there is nothing to pair then.
+            if scenario == "alloy-logs" and any(row["scenario"] == "alloy-logs-fmt"
+                                                for row in group):
                 summary["throughput_ratio_typed_to_fmt"] = distribution(
                     [row["requests_per_second"] /
                      by_cell[(row["rep"], "alloy-logs-fmt")]["requests_per_second"]
@@ -510,23 +518,26 @@ class Evidence:
         return snapshot
 
     def matrix(self, name, scenarios, workloads, transports, reps=5, counting=False, timeout=300,
-               collector=False):
+               collector=False, seconds=5, warmup=1, inject_ns=0, label=CLASSIFICATION):
         run_id = f"{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{name}"
         path = self.out / f"{name}.jsonl"
         args = ["target/release/alloy-bench", "matrix", "--scenarios", ",".join(scenarios),
                 "--workloads", ",".join(workloads), "--transports", ",".join(transports),
                 "--reps", str(reps), "--run-id", run_id, "--out", str(path),
-                "--seconds", "5", "--warmup", "1", "--concurrency", "32", "--streams", "8",
-                "--label", CLASSIFICATION]
+                "--seconds", str(seconds), "--warmup", str(warmup), "--concurrency", "32",
+                "--streams", "8", "--label", label]
         if counting:
             args.append("--alloc-counting")
+        if inject_ns:
+            args.extend(["--inject-service-ns", str(inject_ns)])
         if collector:
             args.extend(["--collector-endpoint", COLLECTOR_ENDPOINT])
             before = self.collector_state(f"{name}-collector-before", wait=60)
         self.command(name, args, timeout)
         rows = [json.loads(line) for line in path.read_text().splitlines()]
         validate(rows, scenarios, workloads, transports, reps, self.sha, run_id, counting,
-                 external_collector=collector)
+                 seconds=float(seconds), warmup=float(warmup), external_collector=collector,
+                 injected=inject_ns)
         if collector:
             after = self.collector_state(f"{name}-collector-after")
             accounting = collector_accounting(before, after, rows)
@@ -547,6 +558,7 @@ class Evidence:
                 "raw_sha256": digest(path), "plain_spread_is_noise_floor": False,
                 "summaries": summarize(rows),
             })
+        return path, rows
 
     def profile(self, scenario):
         name = f"profile-{scenario}"

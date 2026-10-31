@@ -1,0 +1,294 @@
+name: Benchmark regression gate
+
+on:
+  # Exercise the whole pipeline on a tiny matrix: calibration, positive
+  # controls, derivation, and held-out checks. Not evidence.
+  pull_request:
+    paths:
+      - '.github/workflows/bench-gate.yml'
+      - 'examples/bench/hosted/**'
+      - 'examples/bench/budgets/**'
+  # Main only, with no ref/URL inputs: `gate` holds one fresh full matrix to
+  # the committed budgets; `calibrate` collects unchanged-code runs and
+  # derives new budgets (docs/benchmarks.md#regression-gate).
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: gate (check committed budgets) or calibrate (derive new ones)
+        type: choice
+        options: [gate, calibrate]
+        default: gate
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-gate-${{ github.ref }}-${{ github.event_name }}-${{ inputs.mode || 'auto' }}
+  # A new push supersedes a pull request's smoke run; a second dispatch on
+  # main queues instead of cancelling hours of collection.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The pinned demo/compatibility Collector (docs/compatibility.json), run
+  # beside the benchmark on each runner.
+  COLLECTOR_IMAGE: otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    name: Plan slots
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      profile: ${{ steps.plan.outputs.profile }}
+      slots: ${{ steps.plan.outputs.slots }}
+    steps:
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          case "$EVENT:$MODE" in
+            pull_request:)
+              echo 'mode=calibrate' >> "$GITHUB_OUTPUT"
+              echo 'profile=smoke' >> "$GITHUB_OUTPUT"
+              echo 'slots=["calibration-01","calibration-02","calibration-03"]' \
+                >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch:calibrate)
+              echo 'mode=calibrate' >> "$GITHUB_OUTPUT"
+              echo 'profile=full' >> "$GITHUB_OUTPUT"
+              # Runner CPU models vary, and budgets are per model, so enough
+              # slots for the common models to reach the minimum run count.
+              slots=$(printf '"calibration-%02d",' $(seq 1 18))
+              echo "slots=[${slots}\"allocations\"]" >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch:gate)
+              # Five runners: a slot on an uncalibrated CPU model runs nothing.
+              echo 'mode=gate' >> "$GITHUB_OUTPUT"
+              echo 'profile=full' >> "$GITHUB_OUTPUT"
+              slots=$(printf '"gate-%02d",' $(seq 1 5))
+              echo "slots=[${slots%,}]" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "unsupported event $EVENT:$MODE" >&2
+              exit 1 ;;
+          esac
+
+  collect:
+    needs: plan
+    name: ${{ matrix.slot }} (${{ needs.plan.outputs.profile }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: ${{ needs.plan.outputs.profile == 'full' && 240 || 45 }}
+    strategy:
+      # Independent runners are the point: one slot's failure must not
+      # cancel the others, and a rerun of failed jobs replaces only them.
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(needs.plan.outputs.slots) }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      RUST_BACKTRACE: '1'
+      QUALIFICATION_SHA: ${{ github.sha }}
+      GATE_PROFILE: ${{ needs.plan.outputs.profile }}
+      GATE_SLOT: ${{ matrix.slot }}
+    steps:
+      - name: Initialize output directory
+        run: |
+          set -euo pipefail
+          QUALIFICATION_OUT="$RUNNER_TEMP/bench-gate"
+          # Publish the path before mkdir so always() steps retain it on failure.
+          printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
+          mkdir -p "$QUALIFICATION_OUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ env.QUALIFICATION_SHA }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      # No cache, secrets, reusable workflow, or privileged PR event.
+      - name: Record immutable source and environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SHA"
+          git diff --exit-code
+          git rev-parse HEAD > "$QUALIFICATION_OUT/source.txt"
+          sha256sum Cargo.lock rust-toolchain.toml examples/bench/hosted/collector.yaml \
+            > "$QUALIFICATION_OUT/inputs.sha256"
+          {
+            echo "classification=shared GitHub-hosted; profile $GATE_PROFILE, slot $GATE_SLOT"
+            printenv ImageOS ImageVersion RUNNER_OS RUNNER_ARCH
+            uname -a
+            lscpu
+            cat /proc/loadavg
+            rustc -Vv
+            cargo -V
+            python3 --version
+          } > "$QUALIFICATION_OUT/environment.txt"
+      - name: Test the gate and validator
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s examples/bench/hosted -p 'test_*.py' -v \
+            2>&1 | tee "$QUALIFICATION_OUT/validator-tests.log"
+      - name: Build the release binary
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p example-bench \
+            2>&1 | tee "$QUALIFICATION_OUT/build.log"
+          sha256sum target/release/alloy-bench > "$QUALIFICATION_OUT/binary.sha256"
+      - name: Start the pinned real Collector
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          docker pull "$COLLECTOR_IMAGE" 2>&1 | tee "$QUALIFICATION_OUT/collector-pull.log"
+          # Loopback-only ports; no credentials; no restart, so a crash is visible.
+          docker run --detach --name alloy-bench-collector --restart no \
+            --memory 1g --memory-swap 1g \
+            --publish 127.0.0.1:4318:4318 --publish 127.0.0.1:8888:8888 \
+            --publish 127.0.0.1:13133:13133 \
+            --volume "$PWD/examples/bench/hosted/collector.yaml:/etc/otelcol-contrib/config.yaml:ro" \
+            "$COLLECTOR_IMAGE" > "$QUALIFICATION_OUT/collector-container.txt"
+          {
+            echo "collector_image=$COLLECTOR_IMAGE"
+            docker image inspect --format '{{.Id}} {{json .RepoDigests}}' "$COLLECTOR_IMAGE"
+            echo 'collector_limits=memory 1g, no CPU limit, co-located with service and client'
+            docker version --format 'docker {{.Server.Version}}'
+          } >> "$QUALIFICATION_OUT/environment.txt"
+      - name: Collect the slot
+        timeout-minutes: ${{ needs.plan.outputs.profile == 'full' && 200 || 15 }}
+        run: python3 examples/bench/hosted/gate.py collect
+      - name: Check the committed budgets for this CPU model
+        if: needs.plan.outputs.mode == 'gate'
+        timeout-minutes: 5
+        run: python3 examples/bench/hosted/gate.py check
+      - name: Retain Collector logs and remove it
+        if: always()
+        run: |
+          set -euo pipefail
+          if docker container inspect alloy-bench-collector > /dev/null 2>&1; then
+            docker container inspect alloy-bench-collector \
+              > "$QUALIFICATION_OUT/collector-inspect.json"
+            docker logs --timestamps alloy-bench-collector \
+              > "$QUALIFICATION_OUT/collector.log" 2>&1
+            docker rm --force alloy-bench-collector
+          fi
+      - name: Hash all evidence including partial failures
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUALIFICATION_OUT"
+          cd "$QUALIFICATION_OUT"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z \
+            | xargs -0 -r sha256sum > SHA256SUMS
+      - name: Upload raw evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-gate-${{ matrix.slot }}-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_OUT }}/
+          if-no-files-found: error
+          retention-days: 90
+
+  derive:
+    needs: [plan, collect]
+    # Also when a slot failed: derivation uses the complete slots and
+    # reports the missing ones.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'calibrate' }}
+    name: Derive and verify budgets (${{ needs.plan.outputs.profile }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      QUALIFICATION_SHA: ${{ github.sha }}
+      GATE_PROFILE: ${{ needs.plan.outputs.profile }}
+      GATE_SLOTS: ${{ needs.plan.outputs.slots }}
+    steps:
+      - name: Initialize output directory
+        run: |
+          set -euo pipefail
+          QUALIFICATION_OUT="$RUNNER_TEMP/bench-derive"
+          printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
+          mkdir -p "$QUALIFICATION_OUT" "$RUNNER_TEMP/slots"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ env.QUALIFICATION_SHA }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      # Only `compare` is used here: the same command the gate runs.
+      - name: Build the release binary
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QUALIFICATION_SHA"
+          cargo build --release --locked -p example-bench \
+            2>&1 | tee "$QUALIFICATION_OUT/build.log"
+          sha256sum target/release/alloy-bench > "$QUALIFICATION_OUT/binary.sha256"
+      # Every attempt's slot artifacts of this run, each in its own directory.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bench-gate-*-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/slots
+      - name: Derive budgets, screen them with held-out runs, and check positive controls
+        run: python3 examples/bench/hosted/gate.py derive "$RUNNER_TEMP/slots"
+      - name: Hash the derivation
+        if: always()
+        run: |
+          set -euo pipefail
+          cd "$QUALIFICATION_OUT"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z \
+            | xargs -0 -r sha256sum > SHA256SUMS
+      - name: Upload the derivation
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-derivation-${{ needs.plan.outputs.profile }}-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_OUT }}/
+          if-no-files-found: error
+          retention-days: 90
+
+  verdict:
+    needs: [plan, collect]
+    # Also after a slot fails (a regression fails its slot), so the verdict
+    # names every slot's outcome.
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'gate'
+    name: Gate verdict
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      QUALIFICATION_SHA: ${{ github.sha }}
+      GATE_PROFILE: ${{ needs.plan.outputs.profile }}
+      GATE_SLOTS: ${{ needs.plan.outputs.slots }}
+      # The slot jobs' combined result; gate.py also requires every planned
+      # slot's verdict from this run attempt.
+      GATE_COLLECT_RESULT: ${{ needs.collect.result }}
+    steps:
+      - name: Initialize output directory
+        run: |
+          set -euo pipefail
+          QUALIFICATION_OUT="$RUNNER_TEMP/bench-verdict"
+          printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
+          mkdir -p "$QUALIFICATION_OUT" "$RUNNER_TEMP/slots"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ env.QUALIFICATION_SHA }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bench-gate-*-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/slots
+      - name: Combine the slots' verdicts
+        run: python3 examples/bench/hosted/gate.py verdict "$RUNNER_TEMP/slots"
+      - name: Upload the verdict
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-verdict-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_OUT }}/
+          if-no-files-found: warn
+          retention-days: 90

@@ -39,6 +39,9 @@ pub(crate) struct RunOptions {
     /// An external OTLP/HTTP traces endpoint for `otel-collector`, instead of
     /// the in-process stub.
     pub(crate) collector_endpoint: Option<String>,
+    /// Busy-wait added to every request outside `plain`: a synthetic
+    /// regression for checking the regression gate. Zero in measurements.
+    pub(crate) inject_service_ns: u64,
     /// Repetition index, set by `matrix`.
     pub(crate) rep: Option<u32>,
 }
@@ -256,7 +259,12 @@ fn measure_with_budget(
     // the window ends, before the server stops and the pipeline shuts down.
     let pipeline = pipeline.map(Arc::new);
     let queue = pipeline.clone();
-    let server = server::start(cell.scenario, server_tls, pipeline)?;
+    let server = server::start(
+        cell.scenario,
+        server_tls,
+        pipeline,
+        options.inject_service_ns,
+    )?;
     let target = Target {
         addr: server.addr,
         transport: cell.transport,
@@ -430,6 +438,7 @@ fn report(
         "warmup_seconds": load.warmup.as_secs_f64(),
         "seconds": window.as_secs_f64(),
         "alloc_counting": options.alloc_counting,
+        "injected_service_ns": options.inject_service_ns,
         "requests": requests,
         "errors": totals.errors,
         "error_samples": totals.error_samples,
@@ -512,6 +521,7 @@ mod tests {
             label: Some("test".into()),
             run_id: "test-run".into(),
             collector_endpoint: None,
+            inject_service_ns: 0,
             rep: Some(1),
         }
     }
@@ -525,6 +535,33 @@ mod tests {
         let metrics = Metrics::default();
         let environment = probe::environment(None);
         measure(cell, &options(0.2), None, &metrics, None, environment).unwrap()
+    }
+
+    /// The synthetic regression reaches every request of an Alloy stack, and
+    /// the result says it was injected; `plain` is never slowed.
+    #[test]
+    fn injected_cost_slows_every_alloy_request_and_is_recorded() {
+        const INJECTED_NS: u64 = 2_000_000;
+        let mut options = options(0.2);
+        options.inject_service_ns = INJECTED_NS;
+        for scenario in [Scenario::Alloy, Scenario::Plain] {
+            let cell = Cell {
+                scenario,
+                workload: Workload::Small,
+                transport: Transport::H1,
+            };
+            let metrics = Metrics::default();
+            let environment = probe::environment(None);
+            let result = measure(cell, &options, None, &metrics, None, environment).unwrap();
+            assert_work_completed(&result);
+            assert_eq!(result["injected_service_ns"], INJECTED_NS, "{result}");
+            let p50 = result["latency_us"]["p50"].as_u64().unwrap();
+            if scenario == Scenario::Plain {
+                assert!(p50 < INJECTED_NS / 1_000, "{result}");
+            } else {
+                assert!(p50 >= INJECTED_NS / 1_000, "{result}");
+            }
+        }
     }
 
     fn assert_work_completed(result: &Value) {
@@ -795,6 +832,7 @@ mod tests {
             "environment",
             "error_samples",
             "errors",
+            "injected_service_ns",
             "latency_us",
             "memory",
             "mtls",
@@ -821,6 +859,7 @@ mod tests {
         assert_eq!(latency, ["max", "p50", "p90", "p99", "p999"], "{result}");
         assert_eq!(result["run_id"], "test-run", "{result}");
         assert_eq!(result["alloc_counting"], false, "{result}");
+        assert_eq!(result["injected_service_ns"], 0, "{result}");
         assert_eq!(result["error_samples"], json!([]), "{result}");
     }
 

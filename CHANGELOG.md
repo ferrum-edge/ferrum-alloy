@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- Benchmark policy (#15, #16, owner decision of 2026-10-31): regression
+  budgets come from a measured noise model of shared GitHub-hosted
+  runners instead of a dedicated host. The new `Benchmark regression gate`
+  workflow (`.github/workflows/bench-gate.yml`, `examples/bench/hosted/gate.py`)
+  calibrates on `main` with eighteen independent unchanged-code full-matrix
+  runs, derives per-cell limits on the ratios to `plain` for each runner
+  CPU model with at least five runs, drops every limit that one of the
+  model's runs exceeds when held out, and publishes a model's limits only
+  when at least half of its cell metrics keep one and a synthetic
+  regression on each of its runners fails them. Its `gate` mode checks a
+  fresh full matrix on up to five runners against their CPU models'
+  committed budgets; pull requests run the pipeline on a tiny matrix.
+  `alloy-bench` gains `--inject-service-ns N`, a busy-wait per request in
+  every scenario but `plain` for that check, and records it as
+  `injected_service_ns`.
 - Distribution decision (#24): Alloy stays Git-only. No crate is
   published to crates.io or any other registry, `publish = false` stays,
   and the PolyForm Noncommercial license is unchanged. `docs/release.md`
