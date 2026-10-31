@@ -1,0 +1,15 @@
+{
+  "schema": "alloy-bench-slot/1",
+  "slot": "allocations",
+  "kind": "allocations",
+  "profile": "full",
+  "commit": "bea5e7386986a9cc6a1ce140bf9f85b05115c4e8",
+  "attempt": 1,
+  "run_id": "41192218581-1-allocations",
+  "cpu_model": "AMD EPYC 7763 64-Core Processor",
+  "calibrated": true,
+  "raw_file": "allocations.jsonl",
+  "raw_sha256": "bfb0880f70f40db432716046fceb33a706fd7e948c19e195e620c4d0d069f007",
+  "binary_sha256": "db818d52919adfb60a2aeeed453fc1adb2146b30033eb35dd2aa3b826662ea9f",
+  "alloc_counting": true
+}

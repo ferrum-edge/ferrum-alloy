@@ -1,0 +1,18 @@
+{
+  "schema": "alloy-bench-slot/1",
+  "slot": "calibration-07",
+  "kind": "calibration",
+  "profile": "full",
+  "commit": "bea5e7386986a9cc6a1ce140bf9f85b05115c4e8",
+  "attempt": 1,
+  "run_id": "41192218581-1-calibration-07",
+  "cpu_model": "Intel(R) Xeon(R) 6975P-C",
+  "calibrated": true,
+  "raw_file": "calibration-07.jsonl",
+  "raw_sha256": "58f87d142fd34cf03fb64aa293935aa26663bf2311219c752678897ae71420ce",
+  "binary_sha256": "db818d52919adfb60a2aeeed453fc1adb2146b30033eb35dd2aa3b826662ea9f",
+  "alloc_counting": false,
+  "control_file": "calibration-07-control.jsonl",
+  "control_sha256": "dd59f43e64302de8d90a284a21ec58224f5a8205cebe434c4cd72d5a8a0b9397",
+  "control_injected_service_ns": 5000
+}

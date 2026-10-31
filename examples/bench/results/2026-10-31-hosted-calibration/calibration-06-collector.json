@@ -1,0 +1,17 @@
+{
+  "classification": "shared GitHub-hosted experimental; not dedicated baseline acceptance",
+  "raw_file": "calibration-06.jsonl",
+  "raw_sha256": "f537bb6d9e01e26de07a927e2e484ec507a008e5a40ce377832acff012cd16f0",
+  "endpoint": "http://127.0.0.1:4318/v1/traces",
+  "co_located": true,
+  "receiver_spans_delta": {
+    "accepted": 10617856,
+    "refused": 0,
+    "failed": 0
+  },
+  "window_spans_exported": 8876544,
+  "accepted_outside_windows": 1741312,
+  "collector_cpu_usec_delta": 151754575,
+  "collector_memory_peak_bytes_before": 33116160,
+  "collector_memory_peak_bytes_after": 60841984
+}

@@ -1,8 +1,8 @@
 # Benchmarks
 
-The harness in `examples/bench` measures the relative cost of Alloy's layers against a plain hyper server, across server stacks, workloads, and transports. It writes one machine-readable JSON line per run, so that regression budgets can later be computed from committed raw data.
+The harness in `examples/bench` measures the relative cost of Alloy's layers against a plain hyper server, across server stacks, workloads, and transports. It writes one machine-readable JSON line per run, so that regression budgets are computed from committed raw data.
 
-Recorded evidence includes historical shared-machine measurements from 2026-09-26 (see [Results](#results-2026-09-26-previous-harness)) and [bounded shared hosted preparation from 2026-10-04](#hosted-evidence-2026-10-04). Neither supplies capacity numbers or a dedicated baseline. **No performance regression budget is committed yet.** The [hosted qualification workflow](#hosted-qualification-preparation) checks evidence completeness and collects experimental profiles and comparisons, including exports to a real, pinned Collector. The [infrastructure qualification of 2026-10-29](#infrastructure-qualification-2026-10-29) found no isolated environment for the dedicated-host criteria in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15); on 2026-10-31 the owner replaced them with the shared-runner policy of the [regression gate](#regression-gate), whose budgets come from a calibration on `main`.
+Recorded evidence includes historical shared-machine measurements from 2026-09-26 (see [Results](#results-2026-09-26-previous-harness)) and [bounded shared hosted preparation from 2026-10-04](#hosted-evidence-2026-10-04). Neither supplies capacity numbers or a dedicated baseline. **Regression budgets are committed** for the runner CPU model the [calibration of 2026-10-31](#calibration-2026-10-31) qualified, and the [regression gate](#regression-gate) holds `main` to them weekly. The [hosted qualification workflow](#hosted-qualification-preparation) checks evidence completeness and collects experimental profiles and comparisons, including exports to a real, pinned Collector. The [infrastructure qualification of 2026-10-29](#infrastructure-qualification-2026-10-29) found no isolated environment for the dedicated-host criteria in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15); on 2026-10-31 the owner replaced them with the shared-runner policy of the [regression gate](#regression-gate), whose budgets come from that calibration on `main`.
 
 ## The matrix
 
@@ -14,7 +14,7 @@ A run measures one *cell*: one scenario, one workload, and one transport.
 | `alloy` | `AlloyApp` defaults (Alloy's server loop, limits, admission, request id, route labels, metrics, telemetry layer); subscriber with no layers |
 | `alloy-logs` | As `alloy`, with Alloy's JSON log layer at `info` writing to a sink. The historical 2026-09-26 results predate that layer and used tracing-subscriber's JSON `fmt` layer instead; the hosted 2026-10-04 sample uses the typed layer. |
 | `alloy-logs-fmt` | As `alloy-logs`, formatted by tracing-subscriber's JSON `fmt` layer with the same line layout. Profiled and compared in the bounded shared hosted sample; dedicated before/after acceptance remains open. |
-| `alloy-diagnostics` | Authorized diagnostic mode: as `alloy`, with a `DiagnosticsAuthorizer` installed and every request tagged with a tenant, so each request's evidence is retained in the bounded ring (default bounds, so steady-state runs evict on every request). The management router is built but not served, and retrieval itself is not measured. Added with diagnostic retrieval (#13) and not yet measured. |
+| `alloy-diagnostics` | Authorized diagnostic mode: as `alloy`, with a `DiagnosticsAuthorizer` installed and every request tagged with a tenant, so each request's evidence is retained in the bounded ring (default bounds, so steady-state runs evict on every request). The management router is built but not served, and retrieval itself is not measured. Added with diagnostic retrieval (#13); first measured in the [calibration](#calibration-2026-10-31). |
 | `otel-sampled` | OpenTelemetry bridge, sampling ratio 1.0, exporter that discards batches in process |
 | `otel-unsampled` | OpenTelemetry bridge, sampling ratio 0.0 |
 | `otel-unreachable` | Sampling ratio 1.0, OTLP/HTTP to a closed port (200 ms timeout, no retries) |
@@ -138,7 +138,7 @@ What these measure, and what they do not:
 The [`Benchmark regression gate`](../.github/workflows/bench-gate.yml) workflow implements this, on `main` only, with `examples/bench/hosted/gate.py`:
 
 - **`calibrate`** (manual dispatch) runs eighteen unchanged-code calibration slots and one allocation-counting slot as parallel jobs, each on its own runner. GitHub assigns the CPU models, so eighteen slots give the common models enough runs; a model that gets too few is left uncalibrated. Every slot builds the release binary from the same commit, starts the [real Collector](#real-collector), runs the full 216-cell matrix with five interleaved repetitions (1,080 runs), and passes the same validation and Collector accounting as hosted qualification. Each calibration slot then runs its positive control on the same runner (below). The allocation-counting slot is archived evidence for allocation ratios; the derivation does not read it. A `derive` job runs even when some slots failed: it checks every complete slot artifact against its `SHA256SUMS` and the slot's recorded fields against its raw lines, derives and screens the budgets, checks the controls, lists the missing slots, and uploads the budget files with their derivation. A failed slot can be rerun alone, which reruns `derive`; the latest complete attempt of each slot is used. A second dispatch queues behind a running one instead of cancelling it.
-- **`gate`** (manual dispatch; a weekly schedule is added together with the first committed budgets) starts five slots, so that at least one is likely to land on a calibrated model. Each reads its runner's CPU model before running a matrix: on a model without committed budgets it runs no matrix and says so; otherwise it runs one full matrix and checks it against that model's budgets. The gate fails when any slot exceeds a limit, when a slot job fails or ends without a verdict, or when no slot landed on a calibrated model. A verdict counts only the current run attempt's slots, so a partial rerun cannot combine attempts and fails; to retry a gate, rerun all its jobs or dispatch it again.
+- **`gate`** (weekly on `main`, Wednesdays 04:37 UTC, and on manual dispatch) starts five slots, so that at least one is likely to land on a calibrated model. Each reads its runner's CPU model before running a matrix: on a model without committed budgets it runs no matrix and says so; otherwise it runs one full matrix and checks it against that model's budgets. The gate fails when any slot exceeds a limit, when a slot job fails or ends without a verdict, or when no slot landed on a calibrated model. A verdict counts only the current run attempt's slots, so a partial rerun cannot combine attempts and fails; to retry a gate, rerun all its jobs or dispatch it again.
 - **Pull requests** that change the workflow, `examples/bench/hosted/`, or `examples/bench/budgets/` run the same pipeline on a tiny matrix (`plain`, `alloy`, `otel-collector`; `small` and `cancel`; `h1`, `h2c`; three repetitions of 1 s, with a 50 µs control on `alloy` `small` `h1`) to exercise it, treating every runner as one model and with no coverage floor. The derivation must complete; whether it is accepted depends on which CPU models the few runners drew, so it is reported, not required. Their budgets are discarded; they are not evidence.
 
 Every check runs `alloy-bench compare --budget` on the raw result lines, so the gate applies exactly the pairing rules below. Lines with errors never reach it: validation fails a slot with any client error.
@@ -175,6 +175,43 @@ What this does and does not establish:
 - The service, client, and Collector share the runner's vCPUs. Ratios measure Alloy's cost relative to `plain` under that contention, not capacity.
 
 A budget computed from result lines must use only lines with `errors == 0`, because a run with errors measured something other than the cell (fast failures inflate throughput), and must group lines by `run_id` before pairing a cell with `plain`, so that ratios never mix repetitions from different invocations, hosts, or commits. Only compare lines with the same `alloc_counting`.
+
+### Calibration (2026-10-31)
+
+[Run 41192218581](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41192218581) calibrated `main` at [`bea5e73`](https://github.com/ferrum-edge/ferrum-alloy/commit/bea5e7386986a9cc6a1ce140bf9f85b05115c4e8). Every slot succeeded on its first attempt: eighteen full matrices of 1,080 runs each with zero client errors and passing Collector accounting, eighteen positive controls, and the allocation-counting slot. The derivation was **accepted**, with one model published.
+
+| CPU model | Calibration runs | Outcome |
+|---|---:|---|
+| AMD EPYC 7763 64-Core Processor | 9 | Published: `examples/bench/budgets/model-amd-epyc-7763-64-core-processor.json` |
+| AMD EPYC 9V74 80-Core Processor | 3 | Uncalibrated (fewer than five runs) |
+| AMD EPYC 9V45 96-Core Processor | 3 | Uncalibrated |
+| Intel Xeon 6975P-C | 3 | Uncalibrated |
+
+The Intel Xeon Platinum 8370C and 8573C models seen in earlier runs drew no slot this time. The gate checks only AMD EPYC 7763 runners. In this calibration half the slots landed on one, so all five gate slots miss one about one run in thirty, and that gate run fails for want of a calibrated run, as described above.
+
+For AMD EPYC 7763:
+
+- **Coverage:** 552 of 576 cell metrics (95.8%) have a limit. 23 were too noisy (their nine-run spread put the margin above the cap; 20 of them are p99 latency, mostly in `stream` and `cancel` cells), and screening removed 1.
+- **Held-out screening:** five of the nine runs passed limits derived from the other eight. Four exceeded six limits in all; five of those six were already without a limit in the full derivation, because adding the held-out run took their spread past the cap. Screening removed the sixth, `otel-unsampled` `cancel` `h1-mtls` `min_throughput_ratio`.
+- **Positive controls:** all nine were caught. Each exceeded four or five of the six control cells' screened limits.
+- **Resolution:** the margin in log space has a median of 0.080 for `throughput_ratio` (0.037 to 0.195), 0.083 for `latency_p50_ratio`, and 0.111 for `latency_p99_ratio`. A margin of 0.080 means a cell's throughput ratio must fall by about 7.7% before its limit fails. Each cell's own margin is in `derivation.json`.
+
+Centers (the median of the nine run medians) and limits for `small` over `h1`, for reference:
+
+| Scenario | Throughput / `plain` | Limit | p50 latency / `plain` | Limit |
+|---|---:|---:|---:|---:|
+| `alloy` | 0.572 | ≥ 0.5345 | 1.794 | ≤ 1.9177 |
+| `alloy-logs` | 0.496 | ≥ 0.4597 | 2.092 | ≤ 2.2749 |
+| `alloy-logs-fmt` | 0.327 | ≥ 0.2951 | 3.146 | ≤ 3.4732 |
+| `alloy-diagnostics` | 0.468 | ≥ 0.4444 | 2.158 | ≤ 2.3015 |
+| `otel-unsampled` | 0.495 | ≥ 0.4691 | 2.104 | ≤ 2.2192 |
+| `otel-sampled` | 0.460 | ≥ 0.4304 | 2.174 | ≤ 2.3383 |
+| `otel-unreachable` | 0.441 | ≥ 0.4072 | 2.235 | ≤ 2.4272 |
+| `otel-collector` | 0.376 | ≥ 0.3426 | 2.462 | ≤ 2.7075 |
+
+These ratios are measured with the service, the client, and (for `otel-collector`) the Collector sharing four vCPUs, against a handler that does no work. They are a regression baseline, not a statement of Alloy's cost under production load.
+
+The budgets, their index, and `derivation.json` are in `examples/bench/budgets/`. Every slot's raw result lines and control lines (gzipped; `slot.json` records the SHA-256 of the uncompressed file), Collector accounting, and environment are in `examples/bench/results/2026-10-31-hosted-calibration/`. `committed_budgets_parse_and_match_their_index` in `examples/bench/src/compare.rs` checks that every budget file the index names parses and that the index matches the derivation.
 
 ### `alloy-bench compare`
 
@@ -287,7 +324,7 @@ Artifact [`11308638664`](https://github.com/ferrum-edge/ferrum-alloy/actions/run
 - 20 ordinary comparison records and 20 separate allocation-counting records: four scenarios (`plain`, `alloy`, `alloy-logs`, `alloy-logs-fmt`), five interleaved repetitions each, `small` / `h1`. On-CPU/RSS observations and allocation counters retain their environment and mode; counting and ordinary timings must not be mixed.
 - Four OTEL smoke records. `otel-collector` used the in-process accepting stub, not a real Collector.
 
-This is **experimental preparation**. It establishes neither a qualified noise floor nor the full 216-cell/1,080-observation acceptance matrix, real Collector health, historical before/after production gains or regression budgets. Production logging was unchanged by #140. Issues [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15#issuecomment-5982335298) and [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16#issuecomment-5982335463) remain open and externally blocked for dedicated acceptance. Artifacts expire after 30 days; root must preserve the evidence before it expires. The [external unblock checklist](#external-unblock-checklist) names the owner-dependent steps.
+This is **experimental preparation**. It establishes neither a qualified noise floor nor the full 216-cell/1,080-observation acceptance matrix, real Collector health, historical before/after production gains or regression budgets. Production logging was unchanged by #140. Issues [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15#issuecomment-5982335298) and [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16#issuecomment-5982335463) then remained open, blocked on dedicated acceptance, until the [2026-10-31 policy](#regression-gate). Artifacts expire after 30 days; root must preserve the evidence before it expires. The [external unblock checklist](#external-unblock-checklist) names the owner-dependent steps.
 
 ## Functional health tests
 
@@ -302,7 +339,7 @@ The budgeted workers previously sent one more request on each retained H2 sender
 
 ## External unblock checklist
 
-**Status (2026-10-31).** Item 1 is superseded by the [shared-runner policy](#regression-gate). Items 3 and 4 are implemented by the regression gate's `calibrate` mode and are met once a calibration is accepted and committed; item 5's comparison uses the same calibration runs. The items below are kept as written for the record.
+**Status (2026-10-31).** Item 1 is superseded by the [shared-runner policy](#regression-gate). Items 2 to 4 are met: the regression gate runs on `main` only, and the [accepted calibration](#calibration-2026-10-31) is committed with its raw results. Item 5 is met by [logging cost on hosted runners](#logging-cost-on-hosted-runners-2026-10-31). The items below are kept as written for the record.
 
 The owner/root must provide these concrete inputs and evidence before dedicated baseline acceptance or a budget can be proposed. All execution remains in GitHub-hosted CI; no local or self-hosted repository execution is an alternative:
 
@@ -378,9 +415,62 @@ The results table above predates this change, and its `alloy-logs` row used trac
 
 **Why it should be cheaper:** tracing-subscriber keeps a span's fields as one JSON string. Each `record` call parses that string into a map, adds the new values, and serializes the whole map again. Each event parses the current span's string once more to embed it. Alloy's layer keeps every span field as its rendered JSON value in a span extension, so recording renders only the new values and an event copies stored bytes. Each event is rendered once, into a reused per-thread buffer, and written with one `write_all`. For the request span this removes three parse-and-reserialize passes per request (one per `record_all!` phase) and one parse for every event logged inside it, including the access event.
 
-**Expected effect:** a smaller gap between `alloy-logs` and `alloy`. The original layer change had no accompanying profile or benchmark. The later [hosted preparation](#hosted-evidence-2026-10-04) profiles and compares both existing implementations at one head; it does not establish a historical before/after gain or satisfy #16.
+**Expected effect:** a smaller gap between `alloy-logs` and `alloy`. The original layer change had no accompanying profile or benchmark. [Logging cost on hosted runners](#logging-cost-on-hosted-runners-2026-10-31) measures it.
 
-**How to measure it:** both formatters are in the same binary, so one build is enough. The hosted preparation above interleaves `alloy-logs-fmt` and `alloy-logs` within each repetition, with `plain` and `alloy` controls, and profiles both formatters. This compares the existing implementations at one immutable head; it is not a historical before/after experiment. `plain`'s observed variation on the shared runner is not a qualified noise floor. Inspect the profile artifacts before attributing remaining costs or making any further logging change.
+**How to measure it:** both formatters are in the same binary, so one build is enough. `alloy-logs-fmt` logs through the tracing-subscriber JSON formatter the layer replaced, and every matrix interleaves it with `alloy-logs` within each repetition. `lines_match_the_tracing_subscriber_json_formatter` in `crates/ferrum-alloy-telemetry/tests/json_log.rs` checks that both write the same bytes, so the comparison is of two implementations of one output.
+
+## Logging cost on hosted runners (2026-10-31)
+
+This is the evidence for [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16) under the [2026-10-31 policy](#regression-gate): the before is tracing-subscriber's JSON formatter (`alloy-logs-fmt`), the after is Alloy's layer (`alloy-logs`), both in one binary, interleaved in every repetition, on shared hosted runners, with the noise measured on unchanged code.
+
+**Profiles.** Callgrind profiles of both formatters (`small`, `h1`, eight concurrent requests, 1-second window) from hosted qualification [run 41180529588](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41180529588) on `main` at `cd5edac` (AMD EPYC 7763). Between `cd5edac` and the calibration commit `bea5e73` only a test changed under `crates/`. Share of each profile's instructions, across its ten threads:
+
+| Where | tracing-subscriber JSON (`alloy-logs-fmt`) | Alloy JSON layer (`alloy-logs`) |
+|---|---:|---:|
+| serde_json parsing (`read.rs`, `de.rs`) | 6.4% | 0.0% |
+| serde_json serialization (`ser.rs`) | 8.0% | 0.0% |
+| tracing-subscriber `fmt` | 16.2% | 0.2% |
+| UTF-8 validation (`core::str::converts::from_utf8`) | 10.9% | 0.4% |
+| `ferrum_alloy_telemetry::json` | 0.0% | 21.6% |
+| malloc/free | 7.7% | 9.0% |
+| memcpy/memmove/memcmp | 10.1% | 10.8% |
+
+About 41% of the formatter's instructions went to parsing and re-serializing span fields and validating the result; the layer spends none there. Its own rendering, 21.6%, is now the largest logging cost. Shares, not totals, are comparable: each profile serves as many requests as its window allows. Hosted run [41002220361](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41002220361) on an Intel Xeon Platinum 8370C gave the same shares within 0.1 point. Callgrind counts simulated instructions, including the client and teardown, not native time. The annotations, the run's `SHA256SUMS`, environment, and commands are in `examples/bench/results/2026-10-31-hosted-profiles/`.
+
+**Throughput.** In each of the nine AMD EPYC 7763 calibration runs, the median over five repetitions of `alloy-logs` throughput divided by `alloy-logs-fmt` throughput, per cell. The noise floor is e^margin of that model's `alloy-logs` `throughput_ratio` in the same cell, the [derived](#deriving-budgets) bound on unchanged-code variation; a cell counts as beyond noise when even its lowest run median exceeds it. This rule was fixed before the calibration's results were read.
+
+| Workload | Transport | Typed / fmt, median of runs (lowest – highest) | Noise floor | Beyond noise |
+|---|---|---:|---:|---|
+| `small` | `h1` | 1.523 (1.495 – 1.545) | 1.079 | yes |
+| `small` | `h1-tls` | 1.429 (1.413 – 1.445) | 1.072 | yes |
+| `small` | `h1-mtls` | 1.422 (1.410 – 1.441) | 1.151 | yes |
+| `small` | `h2c` | 1.510 (1.492 – 1.522) | 1.081 | yes |
+| `small` | `h2-tls` | 1.465 (1.453 – 1.479) | 1.065 | yes |
+| `small` | `h2-mtls` | 1.458 (1.434 – 1.471) | 1.064 | yes |
+| `large` | `h1` | 1.275 (1.256 – 1.301) | 1.090 | yes |
+| `large` | `h1-tls` | 1.194 (1.183 – 1.207) | 1.099 | yes |
+| `large` | `h1-mtls` | 1.193 (1.184 – 1.202) | 1.071 | yes |
+| `large` | `h2c` | 1.206 (1.167 – 1.230) | 1.149 | yes |
+| `large` | `h2-tls` | 1.164 (1.159 – 1.214) | 1.104 | yes |
+| `large` | `h2-mtls` | 1.165 (1.154 – 1.179) | 1.124 | yes |
+| `stream` | `h1` | 1.149 (1.132 – 1.156) | 1.087 | yes |
+| `stream` | `h1-tls` | 1.127 (1.119 – 1.140) | 1.071 | yes |
+| `stream` | `h1-mtls` | 1.131 (1.111 – 1.143) | 1.055 | yes |
+| `stream` | `h2c` | 1.043 (1.035 – 1.046) | 1.048 | no |
+| `stream` | `h2-tls` | 1.041 (1.035 – 1.085) | 1.058 | no |
+| `stream` | `h2-mtls` | 1.041 (1.030 – 1.048) | 1.072 | no |
+| `cancel` | `h1` | 1.045 (1.024 – 1.067) | 1.089 | no |
+| `cancel` | `h1-tls` | 1.021 (0.992 – 1.033) | 1.086 | no |
+| `cancel` | `h1-mtls` | 1.020 (1.013 – 1.027) | 1.038 | no |
+| `cancel` | `h2c` | 1.055 (1.045 – 1.065) | 1.084 | no |
+| `cancel` | `h2-tls` | 1.053 (1.040 – 1.066) | 1.107 | no |
+| `cancel` | `h2-mtls` | 1.055 (1.042 – 1.073) | 1.060 | no |
+
+- **Supported:** Alloy's layer raises throughput beyond measured noise in 15 of 24 cells: every `small` and `large` cell (by 16% to 52% at the median) and `stream` over HTTP/1.
+- **Not shown:** a gain in `cancel` cells or in `stream` over HTTP/2. Their medians (1.02 to 1.06) are within the noise floor, so the only supported claim there is that the layer is not measurably slower.
+- This is one CPU model with co-located client and service; it is not a statement about production throughput.
+
+No further logging change is proposed from this evidence. The profile shows no re-parse cost left to remove; a future optimization would target the layer's own rendering and needs its own before/after measurement through the [regression gate](#regression-gate).
 
 ## Layer composition (2026-10-31)
 
@@ -408,12 +498,12 @@ The other measured cells (`large` and `stream` over `h2c` and `h1-tls`) show the
 
 An earlier sequential run went through all scenarios in order, 3 times, for 10 seconds each, then ran large-payload and h2c variants once. Its load average was around 17 on 10 cores. `plain` fell from 178k to 77k requests/s between the first and third repetitions, and single runs contradicted each other; for example, `otel-sampled` with the large payload appeared faster than `plain`.
 
-That data is kept in `examples/bench/results/2026-09-26-macos-m4-discarded-high-load.jsonl` for transparency and must not be quoted. Large-payload and h2c results therefore have **no valid measurement** yet.
+That data is kept in `examples/bench/results/2026-09-26-macos-m4-discarded-high-load.jsonl` for transparency and must not be quoted. That run therefore has no valid large-payload or h2c measurement; the [calibration](#calibration-2026-10-31) measures both.
 
 ## Not measured
 
-- Accepted full-matrix measurements: large payloads, streaming, cancellation, h2c, TLS, mTLS and export to a real Collector have no committed calibration yet. The bounded hosted sample supplies experimental small HTTP/1.1 on-CPU/RSS and allocation observations, and real-Collector exports, only; the [regression gate](#regression-gate)'s calibration supplies the full matrix.
-- Authorized diagnostic mode (`alloy-diagnostics`, #13): the scenario exists; no run has measured it.
+- CPU models other than AMD EPYC 7763: the [calibration](#calibration-2026-10-31) gave them too few runs, so the gate does not check them.
+- Diagnostic report retrieval under load (#13): `alloy-diagnostics` measures retention with diagnostics authorized; no cell retrieves reports.
 - Behavior behind Ferrum Edge.
 - A dedicated Linux benchmarking host. By the 2026-10-31 policy, none is required; every hosted measurement is from shared GitHub-hosted VMs.
 - Long-duration stability and tail latency beyond p99.9.

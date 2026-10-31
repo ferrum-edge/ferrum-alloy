@@ -1,0 +1,23 @@
+{
+  "schema": "alloy-bench-budget-index/1",
+  "commit": "bea5e7386986a9cc6a1ce140bf9f85b05115c4e8",
+  "classification": "shared GitHub-hosted; regression budgets per CPU model from unchanged-code calibration",
+  "calibration_run": "https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41192218581",
+  "rule": {
+    "metrics": [
+      "throughput_ratio",
+      "latency_p50_ratio",
+      "latency_p99_ratio"
+    ],
+    "spread_multiplier": 3.0,
+    "margin_floor": 0.02,
+    "margin_cap": 0.2,
+    "min_model_runs": 5,
+    "coverage_floor": 0.5,
+    "held_out_screening": "a limit any held-out run exceeds is dropped"
+  },
+  "models": {
+    "AMD EPYC 7763 64-Core Processor": "model-amd-epyc-7763-64-core-processor.json"
+  },
+  "derivation": "derivation.json"
+}
