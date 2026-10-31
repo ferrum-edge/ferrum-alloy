@@ -177,7 +177,10 @@ def summarize(rows):
             if key[2]:
                 summary["service_allocations_per_request"] = distribution(
                     [row["allocations"]["service"]["calls_per_request"] for row in selected])
-            if scenario == "alloy-logs":
+            # Subset matrices (the regression gate's controls) can run the
+            # typed logger without the fmt one; there is nothing to pair then.
+            if scenario == "alloy-logs" and any(row["scenario"] == "alloy-logs-fmt"
+                                                for row in group):
                 summary["throughput_ratio_typed_to_fmt"] = distribution(
                     [row["requests_per_second"] /
                      by_cell[(row["rep"], "alloy-logs-fmt")]["requests_per_second"]

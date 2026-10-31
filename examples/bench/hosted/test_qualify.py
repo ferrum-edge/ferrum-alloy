@@ -627,6 +627,15 @@ class ValidationTests(unittest.TestCase):
                              {"n": 5, "median": 2, "min": 2, "max": 2})
             self.assertEqual(row["throughput_ratio_typed_to_fmt"]["median"], 2)
 
+    def test_summaries_tolerate_the_typed_logger_without_the_fmt_one(self):
+        # The regression gate's positive control runs this subset.
+        scenarios = ("plain", "alloy", "alloy-logs", "alloy-diagnostics")
+        rows = [result(rep, scenario) for rep in range(1, 6) for scenario in scenarios]
+        summaries = summarize(rows)
+        self.assertEqual(len(summaries), 4)
+        self.assertTrue(all("throughput_ratio_typed_to_fmt" not in summary
+                            for summary in summaries))
+
     def test_stage_failure_is_recorded_and_not_waived(self):
         with tempfile.TemporaryDirectory() as directory:
             evidence = Evidence(Path(directory), "head")

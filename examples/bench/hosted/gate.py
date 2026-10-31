@@ -327,11 +327,10 @@ def control_cells(profile):
 
 
 def screened(budget, records, failures):
-    """`budget` without the limits that failed a held-out check, and how many
-    limits that removed.
+    """`budget` without the limits screening dropped, and how many it removed.
 
-    `failures` holds (scenario, workload, transport, budget key) tuples; a
-    failure of a limit the full budget never had removes nothing.
+    `failures` maps (scenario, workload, transport, budget key) to the reason;
+    a failure of a limit the full budget never had removes nothing.
     """
     keys = {key: metric for metric, (key, _) in METRICS.items()}
     entries, removed = [], 0
@@ -347,9 +346,15 @@ def screened(budget, records, failures):
         for key, metric in keys.items():
             info = record["metrics"][metric]
             if cell + (key,) in failures and info.get("gated"):
-                info.update(gated=False, reason="failed a held-out check")
+                info.update(gated=False, reason=failures[cell + (key,)])
                 info.pop("limit", None)
     return {"schema": budget["schema"], "budgets": entries}, removed
+
+
+def limit_keys(budget):
+    keys = {key for key, _ in METRICS.values()}
+    return {(entry["scenario"], entry["workload"], entry["transport"], key)
+            for entry in budget["budgets"] for key in entry if key in keys}
 
 
 def coverage(records):
@@ -389,7 +394,7 @@ def evaluate(slots, profile, out, binary=BINARY, planned=()):
     for model, (budget, records) in candidates.items():
         runs = [index for index, slot in enumerate(calibration)
                 if model in (ANY_MODEL, slot["cpu_model"])]
-        held_out, failures = [], set()
+        held_out, failures, tested = [], {}, set()
         for index in runs:
             slot = calibration[index]
             others = [pairs[other][1] for other in runs if other != index]
@@ -402,9 +407,15 @@ def evaluate(slots, profile, out, binary=BINARY, planned=()):
             write_sets(path.parent, {model: loo})
             result = check_budget(slot["path"], path, binary)
             held_out.append({"slot": slot["slot"], **result})
+            tested.update(limit_keys(loo[0]))
             for line in result["exceeded"]:
                 cell = (line["scenario"], line["workload"], line["transport"])
-                failures.update(cell + (key,) for key in line["exceeded"])
+                failures.update(dict.fromkeys((cell + (key,) for key in line["exceeded"]),
+                                              "failed a held-out check"))
+        # A limit no fold derived (its spread crossed the cap without some
+        # run) was never held out, so it is not kept as if screened.
+        for key in limit_keys(budget) - tested - set(failures):
+            failures[key] = "no held-out run tested it"
         kept, removed = screened(budget, records, failures)
         covered = coverage(records)
         state = {"runs": [calibration[index]["slot"] for index in runs],

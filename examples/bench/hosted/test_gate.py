@@ -398,6 +398,25 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(state["screened_limits"], 0)
         self.assertEqual(state["coverage"]["gated"], 6)
 
+    def test_a_limit_no_fold_derived_is_dropped_as_untested(self):
+        self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
+        real = gate.derive
+        def folds_without_throughput(runs):
+            budget, records = real(runs)
+            if len(runs) < gate.MIN_MODEL_RUNS:  # a held-out fold
+                for entry in budget["budgets"]:
+                    entry.pop("min_throughput_ratio", None)
+            return budget, records
+        with patch("gate.derive", folds_without_throughput):
+            state = self.evaluate()["models"]["A"]
+        self.assertEqual(state["screened_limits"], 3)
+        reasons = {record["metrics"]["throughput_ratio"]["reason"]
+                   for record in self.evaluate_records()}
+        self.assertEqual(reasons, {"no held-out run tested it"})
+
+    def evaluate_records(self):
+        return json.loads((self.out / "budgets" / "derivation.json").read_text())["cells"]["A"]
+
     def test_a_model_below_the_coverage_floor_is_not_published(self):
         self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
         with patch("gate.MARGIN_CAP", 0.021), \
@@ -537,6 +556,38 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(control_scenarios, ("plain", "alloy", "alloy-logs", "alloy-diagnostics"))
         self.assertEqual((slot["attempt"], slot["cpu_model"], slot["control_file"]),
                          (2, "A", "calibration-01-control.jsonl"))
+
+    def test_the_full_profile_control_runs_through_real_validation_and_summaries(self):
+        from test_qualify import result
+        control = gate.PROFILES["full"]["control"]
+
+        def command(name, args, timeout):
+            value = lambda flag: args[args.index(flag) + 1]
+            rows = []
+            for rep in range(1, int(value("--reps")) + 1):
+                for scenario in value("--scenarios").split(","):
+                    for transport in value("--transports").split(","):
+                        row = result(rep, scenario)
+                        h2 = transport.startswith("h2")
+                        row.update(transport=transport, run_id=value("--run-id"),
+                                   injected_service_ns=int(value("--inject-service-ns")),
+                                   streams_per_connection=8 if h2 else 1,
+                                   connections=4 if h2 else 32)
+                        rows.append(row)
+            Path(value("--out")).write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        out = self.root / "control"
+        out.mkdir()
+        with patch.dict("qualify.os.environ", {"GITHUB_RUN_ID": "run", "GITHUB_RUN_ATTEMPT": "1"}):
+            evidence = gate.qualify.Evidence(out, "head")
+            evidence.command = command
+            path, rows = evidence.matrix(
+                "calibration-01-control", control["scenarios"], control["workloads"],
+                control["transports"], reps=5, timeout=control["timeout"],
+                inject_ns=control["inject_ns"], label=gate.CLASSIFICATION)
+        self.assertEqual(len(rows), 4 * 2 * 5)
+        summary = json.loads((out / "calibration-01-control-summary.json").read_text())
+        self.assertEqual(len(summary["summaries"]), 4 * 2)
 
     def test_a_changed_control_file_fails(self):
         directory = write_slot(self.slots, "calibration-01", [0.6] * 3)

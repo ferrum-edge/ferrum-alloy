@@ -281,3 +281,11 @@ jobs:
           path: ${{ runner.temp }}/slots
       - name: Combine the slots' verdicts
         run: python3 examples/bench/hosted/gate.py verdict "$RUNNER_TEMP/slots"
+      - name: Upload the verdict
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-verdict-${{ env.QUALIFICATION_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QUALIFICATION_OUT }}/
+          if-no-files-found: warn
+          retention-days: 90
