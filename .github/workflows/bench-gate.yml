@@ -64,10 +64,11 @@ jobs:
               slots=$(printf '"calibration-%02d",' $(seq 1 18))
               echo "slots=[${slots}\"allocations\"]" >> "$GITHUB_OUTPUT" ;;
             workflow_dispatch:gate)
-              # Three runners: a slot on an uncalibrated CPU model runs nothing.
+              # Five runners: a slot on an uncalibrated CPU model runs nothing.
               echo 'mode=gate' >> "$GITHUB_OUTPUT"
               echo 'profile=full' >> "$GITHUB_OUTPUT"
-              echo 'slots=["gate-01","gate-02","gate-03"]' >> "$GITHUB_OUTPUT" ;;
+              slots=$(printf '"gate-%02d",' $(seq 1 5))
+              echo "slots=[${slots%,}]" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "unsupported event $EVENT:$MODE" >&2
               exit 1 ;;

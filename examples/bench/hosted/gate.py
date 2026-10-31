@@ -590,7 +590,10 @@ def main(command, *args):
                          f"{caught} of {len(controls)} | "
                          f"{'yes' if state['published'] else state['reason']} |")
         summary("\n".join(lines) + "\n")
-        return 0 if report["accepted"] else 1
+        # A smoke run draws a few runners of whatever CPU models GitHub
+        # assigns, so its statistics are not evidence: it must complete, and
+        # its acceptance is reported, not required.
+        return 0 if report["accepted"] or profile == "smoke" else 1
     raise ValueError(f"unknown command {command!r}")
 
 
