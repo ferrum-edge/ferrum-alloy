@@ -3,7 +3,8 @@
 See docs/benchmarks.md#regression-gate. `collect` runs one matrix slot beside
 the real Collector; `derive` turns unchanged-code calibration slots into
 budgets per CPU model and checks them out of sample and against a synthetic
-regression; `check` holds one fresh run to the committed budgets. Every budget
+regression; `check` holds a fresh gate run to its CPU model's committed budgets,
+and `verdict` combines the gate's slots. Every budget
 check goes through `alloy-bench compare --budget`, the same code CI and users
 run, so the gate cannot drift from the documented pairing rules.
 """
@@ -41,21 +42,24 @@ METRICS = {"throughput_ratio": ("min_throughput_ratio", -1),
 SPREAD_MULTIPLIER = 3.0
 MARGIN_FLOOR = 0.02
 MARGIN_CAP = 0.20
-# A CPU model gets its own budgets from at least this many calibration runs;
-# runners of any other model are checked against the pooled budgets.
-MIN_MODEL_RUNS = 3
+# A CPU model gets budgets from at least this many calibration runs, so that
+# each held-out check still derives its limits from three. Runs of other
+# models are never held to them: ratios move more between models than within.
+MIN_MODEL_RUNS = 4
+# The smoke profile treats every runner as one model, to exercise the pipeline.
+ANY_MODEL = "*"
 
 PROFILES = {
     # The full matrix, at the policy's repetitions and window. Main only.
     "full": {"scenarios": qualify.ALL_SCENARIOS, "workloads": qualify.WORKLOADS,
              "transports": qualify.TRANSPORTS, "reps": 5, "seconds": 5, "warmup": 1,
-             "timeout": 10800, "inject_ns": 5000, "min_calibration": 6},
+             "timeout": 10800, "inject_ns": 5000, "per_model": True},
     # Pull requests exercise the pipeline on a tiny matrix. Not evidence.
     "smoke": {"scenarios": ("plain", "alloy", "otel-collector"), "workloads": ("small",),
               "transports": ("h1", "h2c"), "reps": 3, "seconds": 1, "warmup": 0.5,
-              "timeout": 600, "inject_ns": 50000, "min_calibration": 3},
+              "timeout": 600, "inject_ns": 50000, "per_model": False},
 }
-SLOT = re.compile(r"(calibration)-[0-9]{2}|(injected)|(allocations)|(gate)")
+SLOT = re.compile(r"(calibration)-[0-9]{2}|(injected)-[0-9]{2}|(allocations)|(gate)-[0-9]{2}")
 
 
 def slot_kind(slot):
@@ -157,22 +161,36 @@ def derive(runs):
     return {"schema": BUDGET_SCHEMA, "budgets": budgets}, records
 
 
-def budget_sets(calibration):
-    """Pooled budgets (key None) plus one set per well-sampled CPU model.
+def budget_sets(calibration, per_model=True):
+    """Budgets by CPU model, for each model with at least MIN_MODEL_RUNS runs.
 
-    `calibration` is a list of (cpu_model, medians) pairs.
+    `calibration` is a list of (cpu_model, medians) pairs. Without
+    `per_model`, every run counts as one model, ANY_MODEL.
     """
-    sets = {None: derive([cells for _, cells in calibration])}
+    if not per_model:
+        calibration = [(ANY_MODEL, cells) for _, cells in calibration]
+    sets = {}
     for model in sorted({model for model, _ in calibration}):
         runs = [cells for other, cells in calibration if other == model]
-        if len(runs) >= MIN_MODEL_RUNS:
+        if len(runs) >= MIN_MODEL_RUNS or not per_model:
             sets[model] = derive(runs)
     return sets
 
 
 def select(sets, model):
-    """The budgets a run on `model` is held to: its model's, else pooled."""
-    return model if model in sets else None
+    """The budget set a run on `model` is held to, or None: uncalibrated."""
+    if model in sets:
+        return model
+    return ANY_MODEL if ANY_MODEL in sets else None
+
+
+def cpuinfo_model(text):
+    """The first `model name` of /proc/cpuinfo, as `alloy-bench` records it."""
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "model name":
+            return value.strip()
+    return None
 
 
 def run_model(rows):
@@ -217,7 +235,8 @@ def load_slots(root, sha, profile):
 
 
 def budget_file(directory, model):
-    return directory / ("pooled.json" if model is None else f"model-{model_slug(model)}.json")
+    name = "any-model" if model == ANY_MODEL else f"model-{model_slug(model)}"
+    return directory / f"{name}.json"
 
 
 def write_sets(directory, sets):
@@ -237,70 +256,99 @@ def write_index(directory, sets, sha):
         "schema": INDEX_SCHEMA, "commit": sha, "classification": CLASSIFICATION,
         "calibration_run": f"https://github.com/{os.environ.get('GITHUB_REPOSITORY', '')}"
                            f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}",
-        "rule": rule(), "fallback": budget_file(Path("."), None).name,
-        "models": {model: budget_file(Path("."), model).name
-                   for model in sets if model is not None},
+        "rule": rule(),
+        "models": {model: budget_file(Path("."), model).name for model in sets},
         "derivation": "derivation.json"})
 
 
 def evaluate(slots, profile, out, binary=BINARY):
-    """Derive budgets and check them; returns the derivation report."""
+    """Derive budgets and check them out of sample; returns the derivation report.
+
+    Accepted when at least one CPU model is calibrated, no calibration run of a
+    calibrated model fails the limits derived from that model's other runs,
+    and every synthetic-regression run on a calibrated model (at least one)
+    fails its model's limits. Runs on other models are reported, not checked.
+    """
+    per_model = PROFILES[profile]["per_model"]
     calibration = sorted((slot for slot in slots.values() if slot["kind"] == "calibration"),
                          key=lambda slot: slot["slot"])
-    require(len(calibration) >= PROFILES[profile]["min_calibration"],
-            f"only {len(calibration)} complete calibration slots")
-    injected = [slot for slot in slots.values() if slot["kind"] == "injected"]
-    require(len(injected) == 1, "missing the synthetic-regression slot")
+    injected = sorted((slot for slot in slots.values() if slot["kind"] == "injected"),
+                      key=lambda slot: slot["slot"])
+    require(calibration and injected, "missing calibration or synthetic-regression slots")
     for slot in calibration:
         code, lines, stderr = run_compare([slot["path"]], binary=binary)
         require(code == 0, f"compare failed for {slot['slot']}: {stderr.strip()}")
         slot["medians"] = medians(lines)
     pairs = [(slot["cpu_model"], slot["medians"]) for slot in calibration]
-    sets = budget_sets(pairs)
+    sets = budget_sets(pairs, per_model)
+    require(sets, f"no CPU model has {MIN_MODEL_RUNS} calibration runs")
     write_sets(out / "budgets", sets)
     write_index(out / "budgets", sets, calibration[0]["commit"])
 
-    # Out of sample: each run against budgets derived without it.
+    # Out of sample: each run against limits derived from its model's others.
     held_out = []
     for index, slot in enumerate(calibration):
-        others = pairs[:index] + pairs[index + 1:]
-        loo = budget_sets(others)
-        model = select(loo, slot["cpu_model"])
+        model = select(sets, slot["cpu_model"])
+        entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model}
+        if model is None:
+            held_out.append({**entry, "passed": None, "reason": "uncalibrated CPU model"})
+            continue
+        others = [cells for position, (other, cells) in enumerate(pairs)
+                  if position != index and model in (ANY_MODEL, other)]
         path = budget_file(out / "leave-one-out" / slot["slot"], model)
-        write_sets(path.parent, {model: loo[model]})
-        result = check_budget(slot["path"], path, binary)
-        held_out.append({"slot": slot["slot"], "cpu_model": slot["cpu_model"],
-                         "budgets": model or "pooled", **result})
+        write_sets(path.parent, {model: derive(others)})
+        held_out.append({**entry, **check_budget(slot["path"], path, binary)})
 
-    target = injected[0]
-    model = select(sets, target["cpu_model"])
-    regression = check_budget(target["path"], budget_file(out / "budgets", model), binary)
-    false_positives = [check["slot"] for check in held_out if not check["passed"]]
+    regressions = []
+    for slot in injected:
+        model = select(sets, slot["cpu_model"])
+        entry = {"slot": slot["slot"], "cpu_model": slot["cpu_model"], "budgets": model,
+                 "injected_service_ns": slot["injected_service_ns"]}
+        if model is None:
+            regressions.append({**entry, "passed": None, "reason": "uncalibrated CPU model"})
+            continue
+        regressions.append({**entry, **check_budget(slot["path"],
+                                                    budget_file(out / "budgets", model), binary)})
+    false_positives = [check["slot"] for check in held_out if check["passed"] is False]
+    checked = [check for check in regressions if check["passed"] is not None]
+    caught = bool(checked) and all(check["passed"] is False for check in checked)
     report = {
         "schema": "alloy-bench-derivation/1", "classification": CLASSIFICATION,
         "profile": profile, "commit": calibration[0]["commit"], "rule": rule(),
         "calibration": [{key: slot[key] for key in ("slot", "run_id", "cpu_model", "raw_file",
                                                     "raw_sha256", "binary_sha256", "attempt")}
                         for slot in calibration],
-        "cells": {model or "pooled": records for model, (_, records) in sets.items()},
+        "cells": {model: records for model, (_, records) in sets.items()},
         "leave_one_out": held_out,
         "false_positives": false_positives,
-        "synthetic_regression": {"slot": target["slot"], "cpu_model": target["cpu_model"],
-                                 "injected_service_ns": target["injected_service_ns"],
-                                 "budgets": model or "pooled", **regression},
+        "synthetic_regression": regressions,
+        "synthetic_regression_caught": caught,
         # Smoke runs exercise the pipeline only, so held-out failures are not
         # held against them; the synthetic regression must still be caught.
-        "accepted": (not regression["passed"]
-                     and (profile == "smoke" or not false_positives)),
+        "accepted": caught and (profile == "smoke" or not false_positives),
     }
     write_json(out / "budgets" / "derivation.json", report)
     return report
 
 
-def collect(out, sha, profile_name, slot):
+def committed_index():
+    index = json.loads((BUDGETS / "index.json").read_text())
+    require(index.get("schema") == INDEX_SCHEMA, "unknown budget index")
+    return index
+
+
+def collect(out, sha, profile_name, slot, cpuinfo=Path("/proc/cpuinfo")):
+    """Run one slot. A gate slot on a CPU model without budgets runs nothing."""
     profile = PROFILES[profile_name]
     kind = slot_kind(slot)
     require(kind != "gate" or profile_name == "full", "the gate runs the full matrix only")
+    record = {"schema": SLOT_SCHEMA, "slot": slot, "kind": kind, "profile": profile_name,
+              "commit": sha, "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])}
+    if kind == "gate":
+        model = cpuinfo_model(cpuinfo.read_text())
+        if model not in committed_index()["models"]:
+            write_json(out / "slot.json", {**record, "cpu_model": model, "calibrated": False})
+            return False
     inject = profile["inject_ns"] if kind == "injected" else 0
     evidence = qualify.Evidence(out, sha)
     path, rows = evidence.matrix(
@@ -309,28 +357,46 @@ def collect(out, sha, profile_name, slot):
         collector=True, seconds=profile["seconds"], warmup=profile["warmup"],
         inject_ns=inject, label=CLASSIFICATION)
     write_json(out / "slot.json", {
-        "schema": SLOT_SCHEMA, "slot": slot, "kind": kind, "profile": profile_name,
-        "commit": sha, "run_id": rows[0]["run_id"],
-        "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "cpu_model": run_model(rows),
+        **record, "run_id": rows[0]["run_id"], "cpu_model": run_model(rows), "calibrated": True,
         "raw_file": path.name, "raw_sha256": digest(path), "binary_sha256": digest(BINARY),
         "injected_service_ns": inject, "alloc_counting": kind == "allocations"})
+    return True
 
 
 def check(out):
-    """Hold this job's fresh `gate` run to the committed budgets."""
+    """Hold this job's fresh gate run to its CPU model's committed budgets."""
     slot = json.loads((out / "slot.json").read_text())
     require(slot["kind"] == "gate", "only a gate slot is checked against committed budgets")
-    index = json.loads((BUDGETS / "index.json").read_text())
-    require(index.get("schema") == INDEX_SCHEMA, "unknown budget index")
-    model = slot["cpu_model"]
-    name = index["models"].get(model, index["fallback"])
-    result = check_budget(out / slot["raw_file"], BUDGETS / name)
+    index = committed_index()
     verdict = {"schema": "alloy-bench-gate/1", "classification": CLASSIFICATION,
-               "commit": slot["commit"], "cpu_model": model, "budget_file": name,
-               "calibrated_model": model in index["models"],
-               "budgets_commit": index["commit"], **result}
+               "slot": slot["slot"], "attempt": slot["attempt"], "commit": slot["commit"],
+               "cpu_model": slot["cpu_model"],
+               "budgets_commit": index["commit"]}
+    if not slot["calibrated"]:
+        verdict.update(passed=None, reason="uncalibrated CPU model: no run")
+    else:
+        name = index["models"][slot["cpu_model"]]
+        verdict.update(budget_file=name, **check_budget(out / slot["raw_file"], BUDGETS / name))
     write_json(out / "gate.json", verdict)
     return verdict
+
+
+def verdict(root):
+    """The gate passes when a slot ran on a calibrated model and none regressed.
+
+    A rerun's later attempt of a slot replaces the earlier one.
+    """
+    latest = {}
+    for path in sorted(root.glob("*/gate.json")):
+        verify_manifest(path.parent)
+        entry = json.loads(path.read_text())
+        previous = latest.get(entry["slot"])
+        if previous is None or entry["attempt"] > previous["attempt"]:
+            latest[entry["slot"]] = entry
+    verdicts = [latest[slot] for slot in sorted(latest)]
+    checked = [entry for entry in verdicts if entry["passed"] is not None]
+    return {"verdicts": verdicts, "checked": len(checked),
+            "passed": bool(checked) and all(entry["passed"] for entry in checked)}
 
 
 def summary(text):
@@ -356,24 +422,37 @@ def main(command, *args):
         collect(out, sha, profile, os.environ["GATE_SLOT"])
         return 0
     if command == "check":
-        verdict = check(out)
-        summary(f"### Regression gate: {'pass' if verdict['passed'] else 'REGRESSION'}\n\n"
-                f"Source `{sha}` on `{verdict['cpu_model']}`, checked against "
-                f"`{verdict['budget_file']}` (budgets from `{verdict['budgets_commit']}`). "
-                f"{len(verdict['exceeded'])} of {verdict['budgeted']} budgeted cells exceeded a "
-                f"limit.\n")
-        return 0 if verdict["passed"] else 1
+        result = check(out)
+        if result["passed"] is None:
+            summary(f"### Regression gate slot: no run\n\n`{result['cpu_model']}` has no "
+                    "committed budgets, so this slot ran nothing.\n")
+            return 0
+        summary(f"### Regression gate slot: {'pass' if result['passed'] else 'REGRESSION'}\n\n"
+                f"Source `{sha}` on `{result['cpu_model']}`, checked against "
+                f"`{result['budget_file']}` (budgets from `{result['budgets_commit']}`). "
+                f"{len(result['exceeded'])} of {result['budgeted']} budgeted cells exceeded "
+                "a limit.\n")
+        return 0 if result["passed"] else 1
+    if command == "verdict":
+        (root,) = args
+        result = verdict(Path(root))
+        write_json(out / "verdict.json", result)
+        summary(f"### Regression gate: {'pass' if result['passed'] else 'FAIL'}\n\n"
+                f"{result['checked']} of {len(result['verdicts'])} slots ran on a calibrated "
+                "CPU model. The gate needs at least one, and no regression.\n")
+        return 0 if result["passed"] else 1
     if command == "derive":
         (root,) = args
         report = evaluate(load_slots(Path(root), sha, profile), profile, out)
-        regression = report["synthetic_regression"]
+        regressions = report["synthetic_regression"]
+        caught = sum(1 for entry in regressions if entry["passed"] is False)
         summary(f"### Budget calibration ({profile}): "
                 f"{'accepted' if report['accepted'] else 'REJECTED'}\n\n"
-                f"Source `{sha}`, {len(report['calibration'])} unchanged-code runs. "
-                f"Leave-one-out false positives: {len(report['false_positives'])}. "
-                f"Synthetic regression of {regression['injected_service_ns']} ns/request: "
-                f"{len(regression['exceeded'])} of {regression['budgeted']} budgeted cells exceeded "
-                f"({'caught' if not regression['passed'] else 'NOT caught'}).\n")
+                f"Source `{sha}`, {len(report['calibration'])} unchanged-code runs, budgets for "
+                f"{len(report['cells'])} CPU model(s). Held-out false positives: "
+                f"{len(report['false_positives'])}. Synthetic regression caught in {caught} of "
+                f"{sum(1 for entry in regressions if entry['passed'] is not None)} runs on "
+                "calibrated models.\n")
         return 0 if report["accepted"] else 1
     raise ValueError(f"unknown command {command!r}")
 

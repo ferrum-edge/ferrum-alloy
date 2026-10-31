@@ -6,12 +6,13 @@
   budgets come from a measured noise model of shared GitHub-hosted
   runners instead of a dedicated host. The new `Benchmark regression gate`
   workflow (`.github/workflows/bench-gate.yml`, `examples/bench/hosted/gate.py`)
-  calibrates on `main` with ten independent unchanged-code full-matrix
+  calibrates on `main` with sixteen independent unchanged-code full-matrix
   runs, derives per-cell limits on the ratios to `plain` for each runner
-  CPU model plus a pooled fallback, and accepts them only when every run
-  passes the limits derived without it and a synthetic regression fails
-  them. Its `gate` mode checks one fresh full matrix against committed
-  budgets; pull requests run the pipeline on a tiny matrix. `alloy-bench`
+  CPU model with at least four runs, and accepts them only when every run
+  passes the limits derived from its model's other runs and a synthetic
+  regression fails them. Its `gate` mode checks a fresh full matrix on up
+  to three runners against their CPU models' committed budgets; pull
+  requests run the pipeline on a tiny matrix. `alloy-bench`
   gains `--inject-service-ns N`, a busy-wait per request in every scenario
   but `plain` for that check, and records it as `injected_service_ns`.
 - Distribution decision (#24): Alloy stays Git-only. No crate is

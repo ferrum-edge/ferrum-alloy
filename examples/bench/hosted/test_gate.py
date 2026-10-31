@@ -101,17 +101,24 @@ class DerivationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate.derive([run_cells([0.6] * 3), short])
 
-    def test_well_sampled_models_get_their_own_budgets_others_use_pooled(self):
-        calibration = [("A", run_cells([0.66] * 3))] * 3 + [("B", run_cells([0.61] * 3))] * 2
+    def test_only_well_sampled_models_get_budgets_and_others_are_uncalibrated(self):
+        calibration = [("A", run_cells([0.66] * 3))] * 4 + [("B", run_cells([0.61] * 3))] * 3
         sets = gate.budget_sets(calibration)
-        self.assertEqual(set(sets), {None, "A"})
+        self.assertEqual(set(sets), {"A"})
         self.assertEqual(gate.select(sets, "A"), "A")
         self.assertIsNone(gate.select(sets, "B"))
         self.assertIsNone(gate.select(sets, "never seen"))
-        # Pooled limits include the spread between models.
-        pooled = sets[None][1][0]["metrics"]["throughput_ratio"]
-        model = sets["A"][1][0]["metrics"]["throughput_ratio"]
-        self.assertGreater(pooled["margin"], model["margin"])
+        # The smoke profile treats every runner as one model.
+        pooled = gate.budget_sets(calibration, per_model=False)
+        self.assertEqual(set(pooled), {gate.ANY_MODEL})
+        self.assertEqual(gate.select(pooled, "B"), gate.ANY_MODEL)
+        self.assertEqual(gate.budget_file(Path("."), gate.ANY_MODEL).name, "any-model.json")
+
+    def test_cpu_model_matches_what_the_harness_records(self):
+        text = "processor\t: 0\nvendor_id\t: x\nmodel name\t: AMD EPYC 7763 64-Core Processor\n" \
+               "processor\t: 1\nmodel name\t: other\n"
+        self.assertEqual(gate.cpuinfo_model(text), "AMD EPYC 7763 64-Core Processor")
+        self.assertIsNone(gate.cpuinfo_model("processor\t: 0\n"))
 
     def test_medians_come_from_one_uncounted_invocation(self):
         lines = [compare_line("r", cell, 0.6) for cell in CELLS]
@@ -127,9 +134,10 @@ class DerivationTests(unittest.TestCase):
 
     def test_slot_names_and_model_slugs(self):
         self.assertEqual(gate.slot_kind("calibration-07"), "calibration")
-        for slot in ("injected", "allocations", "gate"):
-            self.assertEqual(gate.slot_kind(slot), slot)
-        for slot in ("calibration-7", "calibration", "gate-1", ""):
+        self.assertEqual(gate.slot_kind("injected-02"), "injected")
+        self.assertEqual(gate.slot_kind("gate-03"), "gate")
+        self.assertEqual(gate.slot_kind("allocations"), "allocations")
+        for slot in ("calibration-7", "calibration", "gate", "injected", "gate-1", ""):
             with self.subTest(slot=slot), self.assertRaises(ValueError):
                 gate.slot_kind(slot)
         self.assertEqual(gate.model_slug("Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz"),
@@ -175,45 +183,94 @@ class CheckTests(unittest.TestCase):
         with patch("gate.run_compare", unbudgeted), self.assertRaisesRegex(ValueError, "budgeted"):
             gate.check_budget(self.run, self.budget)
 
-    def test_gate_check_selects_the_runners_model_or_the_pooled_fallback(self):
-        out = self.root / "out"
+    def gate_budgets(self):
         budgets = self.root / "budgets"
-        out.mkdir()
         budgets.mkdir()
-        (out / "run.jsonl").write_text(self.run.read_text())
         self.write_budget(0.7)
         (budgets / "model-a.json").write_text(self.budget.read_text())
         self.write_budget(0.5)
-        (budgets / "pooled.json").write_text(self.budget.read_text())
+        (budgets / "model-b.json").write_text(self.budget.read_text())
         (budgets / "index.json").write_text(json.dumps({
-            "schema": gate.INDEX_SCHEMA, "commit": "calibrated", "models": {"A": "model-a.json"},
-            "fallback": "pooled.json"}))
+            "schema": gate.INDEX_SCHEMA, "commit": "calibrated",
+            "models": {"A": "model-a.json", "B": "model-b.json"}}))
+        return budgets
+
+    def test_gate_slots_check_their_models_budgets_and_skip_uncalibrated_models(self):
+        budgets = self.gate_budgets()
         verdicts = {}
-        for model in ("A", "B"):
+        for model in ("A", "B", "C"):
+            out = self.root / f"bench-gate-{model}"
+            out.mkdir()
+            (out / "run.jsonl").write_text(self.run.read_text())
             (out / "slot.json").write_text(json.dumps({
-                "kind": "gate", "commit": "head", "cpu_model": model, "raw_file": "run.jsonl"}))
+                "slot": f"gate-{model}", "attempt": 1, "kind": "gate", "commit": "head",
+                "cpu_model": model,
+                "calibrated": model != "C", "raw_file": "run.jsonl"}))
             with patch("gate.run_compare", fake_compare), patch("gate.BUDGETS", budgets):
                 verdicts[model] = gate.check(out)
+            (out / "SHA256SUMS").write_text("".join(
+                f"{digest(path)}  ./{path.name}\n" for path in sorted(out.iterdir())))
         self.assertFalse(verdicts["A"]["passed"])
-        self.assertTrue(verdicts["A"]["calibrated_model"])
+        self.assertEqual(verdicts["A"]["budget_file"], "model-a.json")
         self.assertTrue(verdicts["B"]["passed"])
-        self.assertEqual(verdicts["B"]["budget_file"], "pooled.json")
-        self.assertFalse(verdicts["B"]["calibrated_model"])
-        self.assertEqual(json.loads((out / "gate.json").read_text())["cpu_model"], "B")
+        self.assertIsNone(verdicts["C"]["passed"])
+        self.assertNotIn("budget_file", verdicts["C"])
+        overall = gate.verdict(self.root)
+        self.assertEqual(overall["checked"], 2)
+        self.assertFalse(overall["passed"])
+        (self.root / "bench-gate-A" / "gate.json").write_text('{"passed": true}')
+        with self.assertRaisesRegex(ValueError, "hash mismatch"):
+            gate.verdict(self.root)
+
+    def test_verdict_needs_a_calibrated_slot(self):
+        for name, passed in (("one", None), ("two", True)):
+            directory = self.root / name
+            directory.mkdir()
+            (directory / "gate.json").write_text(
+                json.dumps({"slot": name, "attempt": 1, "passed": passed}))
+            (directory / "SHA256SUMS").write_text(
+                f"{digest(directory / 'gate.json')}  ./gate.json\n")
+            result = gate.verdict(self.root)
+        self.assertTrue(result["passed"])
+        # A rerun attempt of slot "two" that landed on an uncalibrated model.
+        rerun = self.root / "two-rerun"
+        rerun.mkdir()
+        (rerun / "gate.json").write_text(json.dumps({"slot": "two", "attempt": 2, "passed": None}))
+        (rerun / "SHA256SUMS").write_text(f"{digest(rerun / 'gate.json')}  ./gate.json\n")
+        result = gate.verdict(self.root)
+        self.assertEqual([entry["attempt"] for entry in result["verdicts"]], [1, 2])
+        self.assertFalse(result["passed"])
+
+    def test_gate_collect_runs_nothing_on_an_uncalibrated_model(self):
+        budgets = self.gate_budgets()
+        cpuinfo = self.root / "cpuinfo"
+        cpuinfo.write_text("model name\t: C\n")
+        out = self.root / "out"
+        out.mkdir()
+        with patch("gate.BUDGETS", budgets), \
+             patch.dict("gate.os.environ", {"GITHUB_RUN_ATTEMPT": "1"}), \
+             patch("gate.qualify.Evidence") as evidence:
+            self.assertFalse(gate.collect(out, "head", "full", "gate-01", cpuinfo))
+        evidence.assert_not_called()
+        slot = json.loads((out / "slot.json").read_text())
+        self.assertEqual((slot["cpu_model"], slot["calibrated"]), ("C", False))
+        with self.assertRaisesRegex(ValueError, "full matrix"):
+            gate.collect(out, "head", "smoke", "gate-01", cpuinfo)
 
 
-def write_slot(root, slot, throughputs, model="A", attempt=1, kind=None, profile="full"):
+def write_slot(root, slot, throughputs, model="A", attempt=1, profile="full"):
     directory = root / f"bench-gate-{slot}-{attempt}"
     directory.mkdir()
     raw = directory / f"{slot}.jsonl"
     raw.write_text("".join(json.dumps(compare_line(f"{slot}-{attempt}", cell, value)) + "\n"
                            for cell, value in zip(CELLS, throughputs)))
     (directory / "slot.json").write_text(json.dumps({
-        "schema": gate.SLOT_SCHEMA, "slot": slot, "kind": kind or gate.slot_kind(slot),
+        "schema": gate.SLOT_SCHEMA, "slot": slot, "kind": gate.slot_kind(slot),
         "profile": profile, "commit": "head", "run_id": f"{slot}-{attempt}",
         "attempt": attempt, "cpu_model": model, "raw_file": raw.name,
         "raw_sha256": digest(raw), "binary_sha256": "binary",
-        "injected_service_ns": 5000 if slot == "injected" else 0, "alloc_counting": False}))
+        "injected_service_ns": 5000 if slot.startswith("injected") else 0,
+        "alloc_counting": False}))
     (directory / "SHA256SUMS").write_text("".join(
         f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())
         if path.name != "SHA256SUMS"))
@@ -235,58 +292,86 @@ class EvaluationTests(unittest.TestCase):
         with patch("gate.run_compare", fake_compare):
             return gate.evaluate(gate.load_slots(self.slots, "head", profile), profile, self.out)
 
-    def calibrate(self, values, profile="full"):
-        for index, value in enumerate(values, 1):
-            write_slot(self.slots, f"calibration-{index:02d}", [value] * 3, profile=profile)
+    def calibrate(self, values, profile="full", model="A", first=1):
+        for index, value in enumerate(values, first):
+            write_slot(self.slots, f"calibration-{index:02d}", [value] * 3, model=model,
+                       profile=profile)
 
     def test_accepts_quiet_calibration_that_catches_the_synthetic_regression(self):
         self.calibrate([0.600, 0.603, 0.597, 0.601, 0.599, 0.602])
-        write_slot(self.slots, "injected", [0.50] * 3)
+        self.calibrate([0.65, 0.66], model="B", first=7)
+        write_slot(self.slots, "injected-01", [0.50] * 3)
+        write_slot(self.slots, "injected-02", [0.50] * 3, model="B")
         report = self.evaluate()
         self.assertTrue(report["accepted"])
         self.assertEqual(report["false_positives"], [])
-        self.assertEqual([check["budgets"] for check in report["leave_one_out"]], ["A"] * 6)
-        regression = report["synthetic_regression"]
-        self.assertFalse(regression["passed"])
-        self.assertEqual(len(regression["exceeded"]), 3)
+        held_out = {check["slot"]: check for check in report["leave_one_out"]}
+        self.assertEqual([held_out[f"calibration-{i:02d}"]["budgets"] for i in range(1, 7)],
+                         ["A"] * 6)
+        self.assertIsNone(held_out["calibration-07"]["passed"])
+        first, second = report["synthetic_regression"]
+        self.assertFalse(first["passed"])
+        self.assertEqual(len(first["exceeded"]), 3)
+        self.assertIsNone(second["passed"])  # B has no budgets: reported, not checked.
         index = json.loads((self.out / "budgets" / "index.json").read_text())
         self.assertEqual(index["models"], {"A": "model-a.json"})
-        self.assertEqual(index["fallback"], "pooled.json")
-        self.assertEqual(index["rule"]["spread_multiplier"], gate.SPREAD_MULTIPLIER)
-        for name in ("model-a.json", "pooled.json", "derivation.json"):
+        self.assertEqual(index["rule"]["min_model_runs"], gate.MIN_MODEL_RUNS)
+        for name in ("model-a.json", "derivation.json"):
             self.assertTrue((self.out / "budgets" / name).is_file(), name)
+        self.assertFalse((self.out / "budgets" / "model-b.json").exists())
+
+    def test_held_out_limits_come_only_from_the_same_models_runs(self):
+        self.calibrate([0.600, 0.601, 0.600, 0.601])
+        self.calibrate([0.700, 0.701, 0.700, 0.701], model="B", first=5)
+        write_slot(self.slots, "injected-01", [0.50] * 3)
+        report = self.evaluate()
+        self.assertEqual(report["false_positives"], [])
+        self.assertEqual(set(report["cells"]), {"A", "B"})
 
     def test_rejects_a_held_out_false_positive_or_an_uncaught_regression(self):
         self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600, 0.560])
-        write_slot(self.slots, "injected", [0.59] * 3)
+        write_slot(self.slots, "injected-01", [0.59] * 3)
         report = self.evaluate()
         self.assertFalse(report["accepted"])
         self.assertEqual(report["false_positives"], ["calibration-06"])
-        self.assertTrue(report["synthetic_regression"]["passed"])
+        self.assertFalse(report["synthetic_regression_caught"])
 
-    def test_smoke_reports_but_does_not_require_held_out_passes(self):
-        self.calibrate([0.600, 0.601, 0.585], profile="smoke")
-        write_slot(self.slots, "injected", [0.30] * 3, profile="smoke")
+    def test_a_regression_only_on_uncalibrated_models_is_not_caught(self):
+        self.calibrate([0.6] * 4)
+        write_slot(self.slots, "injected-01", [0.3] * 3, model="B")
+        report = self.evaluate()
+        self.assertFalse(report["synthetic_regression_caught"])
+        self.assertFalse(report["accepted"])
+
+    def test_smoke_pools_models_and_does_not_require_held_out_passes(self):
+        self.calibrate([0.600, 0.601], profile="smoke")
+        self.calibrate([0.585], profile="smoke", model="B", first=3)
+        write_slot(self.slots, "injected-01", [0.30] * 3, model="C", profile="smoke")
         report = self.evaluate("smoke")
         self.assertTrue(report["false_positives"])
+        self.assertEqual(set(report["cells"]), {gate.ANY_MODEL})
         self.assertTrue(report["accepted"])
 
-    def test_needs_enough_calibration_and_one_injected_slot(self):
-        self.calibrate([0.6] * 5)
-        write_slot(self.slots, "injected", [0.5] * 3)
-        with self.assertRaisesRegex(ValueError, "calibration slots"):
+    def test_needs_a_calibrated_model_and_a_synthetic_regression_slot(self):
+        self.calibrate([0.6] * 3)
+        write_slot(self.slots, "injected-01", [0.5] * 3)
+        with self.assertRaisesRegex(ValueError, "calibration runs"):
             self.evaluate()
         write_slot(self.slots, "calibration-06", [0.6] * 3, profile="smoke")
         with self.assertRaisesRegex(ValueError, "foreign"):
             self.evaluate()  # Mixed profiles are foreign evidence.
+        empty = self.root / "empty"
+        empty.mkdir()
+        with patch("gate.run_compare", fake_compare), self.assertRaisesRegex(ValueError, "slots"):
+            gate.evaluate({}, "full", self.out)
 
     def test_rerun_attempts_replace_earlier_ones_and_partial_evidence_is_ignored(self):
         self.calibrate([0.6] * 6)
-        write_slot(self.slots, "injected", [0.6] * 3)
-        write_slot(self.slots, "injected", [0.5] * 3, attempt=2)
+        write_slot(self.slots, "injected-01", [0.6] * 3)
+        write_slot(self.slots, "injected-01", [0.5] * 3, attempt=2)
         (self.slots / "bench-gate-calibration-01-2").mkdir()  # failed, no slot.json
         slots = gate.load_slots(self.slots, "head", "full")
-        self.assertEqual(slots["injected"]["attempt"], 2)
+        self.assertEqual(slots["injected-01"]["attempt"], 2)
         self.assertEqual(slots["calibration-01"]["attempt"], 1)
 
     def test_tampered_unlisted_or_foreign_evidence_fails(self):
