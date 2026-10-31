@@ -263,6 +263,7 @@ jobs:
     env:
       QUALIFICATION_SHA: ${{ github.sha }}
       GATE_PROFILE: ${{ needs.plan.outputs.profile }}
+      GATE_SLOTS: ${{ needs.plan.outputs.slots }}
     steps:
       - name: Initialize output directory
         run: |

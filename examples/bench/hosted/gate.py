@@ -327,16 +327,19 @@ def control_cells(profile):
 
 
 def screened(budget, records, failures):
-    """`budget` without the limits that failed a held-out check.
+    """`budget` without the limits that failed a held-out check, and how many
+    limits that removed.
 
-    `failures` holds (scenario, workload, transport, budget key) tuples.
+    `failures` holds (scenario, workload, transport, budget key) tuples; a
+    failure of a limit the full budget never had removes nothing.
     """
     keys = {key: metric for metric, (key, _) in METRICS.items()}
-    entries = []
+    entries, removed = [], 0
     for entry in budget["budgets"]:
         cell = (entry["scenario"], entry["workload"], entry["transport"])
         kept = {key: value for key, value in entry.items()
                 if key not in keys or cell + (key,) not in failures}
+        removed += len(entry) - len(kept)
         if any(key in kept for key in keys):
             entries.append(kept)
     for record in records:
@@ -346,7 +349,7 @@ def screened(budget, records, failures):
             if cell + (key,) in failures and info.get("gated"):
                 info.update(gated=False, reason="failed a held-out check")
                 info.pop("limit", None)
-    return {"schema": budget["schema"], "budgets": entries}
+    return {"schema": budget["schema"], "budgets": entries}, removed
 
 
 def coverage(records):
@@ -402,10 +405,11 @@ def evaluate(slots, profile, out, binary=BINARY, planned=()):
             for line in result["exceeded"]:
                 cell = (line["scenario"], line["workload"], line["transport"])
                 failures.update(cell + (key,) for key in line["exceeded"])
-        kept = screened(budget, records, failures)
+        kept, removed = screened(budget, records, failures)
         covered = coverage(records)
         state = {"runs": [calibration[index]["slot"] for index in runs],
-                 "leave_one_out": held_out, "screened_limits": len(failures),
+                 "leave_one_out": held_out, "screened_limits": removed,
+                 "held_out_failures": len(failures),
                  "coverage": covered, "positive_controls": []}
         models[model] = state
         if covered["fraction"] < settings["coverage_floor"]:
@@ -512,10 +516,12 @@ def check(out):
     return verdict
 
 
-def verdict(root):
-    """The gate passes when a slot ran on a calibrated model and none regressed.
+def verdict(root, planned):
+    """The gate passes when every planned slot has a verdict, at least one ran
+    on a calibrated model, and none regressed.
 
-    A rerun's later attempt of a slot replaces the earlier one.
+    A rerun's later attempt of a slot replaces the earlier one. A planned slot
+    without a verdict (its job failed before checking) fails the gate.
     """
     latest = {}
     for path in sorted(root.glob("*/gate.json")):
@@ -526,8 +532,10 @@ def verdict(root):
             latest[entry["slot"]] = entry
     verdicts = [latest[slot] for slot in sorted(latest)]
     checked = [entry for entry in verdicts if entry["passed"] is not None]
-    return {"verdicts": verdicts, "checked": len(checked),
-            "passed": bool(checked) and all(entry["passed"] for entry in checked)}
+    missing = sorted(set(planned) - set(latest))
+    return {"verdicts": verdicts, "checked": len(checked), "missing": missing,
+            "passed": (bool(checked) and not missing
+                       and all(entry["passed"] for entry in checked))}
 
 
 def summary(text):
@@ -566,11 +574,13 @@ def main(command, *args):
         return 0 if result["passed"] else 1
     if command == "verdict":
         (root,) = args
-        result = verdict(Path(root))
+        planned = json.loads(os.environ["GATE_SLOTS"])
+        result = verdict(Path(root), planned)
         write_json(out / "verdict.json", result)
         summary(f"### Regression gate: {'pass' if result['passed'] else 'FAIL'}\n\n"
-                f"{result['checked']} of {len(result['verdicts'])} slots ran on a calibrated "
-                "CPU model. The gate needs at least one, and no regression.\n")
+                f"{result['checked']} of {len(planned)} slots ran on a calibrated CPU model; "
+                f"slots without a verdict: {', '.join(result['missing']) or 'none'}. The gate "
+                "needs every slot's verdict, at least one calibrated run, and no regression.\n")
         return 0 if result["passed"] else 1
     if command == "derive":
         (root,) = args

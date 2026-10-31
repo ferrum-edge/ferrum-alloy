@@ -11,6 +11,8 @@ import gate
 from qualify import digest
 
 
+PLANNED = ()
+
 CELLS = [("alloy", "small", "h1"), ("alloy", "small", "h2c"), ("otel-collector", "small", "h1")]
 
 
@@ -227,12 +229,12 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(verdicts["B"]["passed"])
         self.assertIsNone(verdicts["C"]["passed"])
         self.assertNotIn("budget_file", verdicts["C"])
-        overall = gate.verdict(self.root)
+        overall = gate.verdict(self.root, PLANNED)
         self.assertEqual(overall["checked"], 2)
         self.assertFalse(overall["passed"])
         (self.root / "bench-gate-A" / "gate.json").write_text('{"passed": true}')
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
-            gate.verdict(self.root)
+            gate.verdict(self.root, PLANNED)
 
     def test_verdict_needs_a_calibrated_slot(self):
         for name, passed in (("one", None), ("two", True)):
@@ -242,15 +244,26 @@ class CheckTests(unittest.TestCase):
                 json.dumps({"slot": name, "attempt": 1, "passed": passed}))
             (directory / "SHA256SUMS").write_text(
                 f"{digest(directory / 'gate.json')}  ./gate.json\n")
-            result = gate.verdict(self.root)
+            result = gate.verdict(self.root, PLANNED)
         self.assertTrue(result["passed"])
         # A rerun attempt of slot "two" that landed on an uncalibrated model.
         rerun = self.root / "two-rerun"
         rerun.mkdir()
         (rerun / "gate.json").write_text(json.dumps({"slot": "two", "attempt": 2, "passed": None}))
         (rerun / "SHA256SUMS").write_text(f"{digest(rerun / 'gate.json')}  ./gate.json\n")
-        result = gate.verdict(self.root)
+        result = gate.verdict(self.root, PLANNED)
         self.assertEqual([entry["attempt"] for entry in result["verdicts"]], [1, 2])
+        self.assertFalse(result["passed"])
+
+    def test_a_planned_slot_without_a_verdict_fails_the_gate(self):
+        directory = self.root / "one"
+        directory.mkdir()
+        (directory / "gate.json").write_text(
+            json.dumps({"slot": "gate-01", "attempt": 1, "passed": True}))
+        (directory / "SHA256SUMS").write_text(f"{digest(directory / 'gate.json')}  ./gate.json\n")
+        self.assertTrue(gate.verdict(self.root, ["gate-01"])["passed"])
+        result = gate.verdict(self.root, ["gate-01", "gate-02"])
+        self.assertEqual(result["missing"], ["gate-02"])
         self.assertFalse(result["passed"])
 
     def test_gate_collect_runs_nothing_on_an_uncalibrated_model(self):
@@ -375,6 +388,15 @@ class EvaluationTests(unittest.TestCase):
         budget = json.loads((self.out / "budgets" / "model-a.json").read_text())["budgets"]
         self.assertTrue(budget and all("min_throughput_ratio" not in entry for entry in budget))
         self.assertTrue(all("max_latency_p50_ratio" in entry for entry in budget))
+
+    def test_screening_counts_only_limits_that_existed(self):
+        # The full-data throughput margin exceeds the cap, so there is no
+        # throughput limit to drop even though the held-out run fails one.
+        self.calibrate([0.6, 0.6, 0.6, 0.6, 0.5])
+        state = self.evaluate()["models"]["A"]
+        self.assertEqual(state["held_out_failures"], 3)
+        self.assertEqual(state["screened_limits"], 0)
+        self.assertEqual(state["coverage"]["gated"], 6)
 
     def test_a_model_below_the_coverage_floor_is_not_published(self):
         self.calibrate([0.600, 0.601, 0.600, 0.601, 0.600])
