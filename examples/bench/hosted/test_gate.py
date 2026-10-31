@@ -11,8 +11,6 @@ import gate
 from qualify import digest
 
 
-PLANNED = ()
-
 CELLS = [("alloy", "small", "h1"), ("alloy", "small", "h2c"), ("otel-collector", "small", "h1")]
 
 
@@ -209,17 +207,33 @@ class CheckTests(unittest.TestCase):
             "models": {"A": "model-a.json", "B": "model-b.json"}}))
         return budgets
 
+    def artifact(self, slot, attempt, verdict=None):
+        """A downloaded slot artifact as the workflow names it, with or
+        without that attempt's verdict."""
+        directory = self.root / "artifacts" / f"bench-gate-{slot}-head-41-{attempt}"
+        directory.mkdir(parents=True)
+        (directory / "source.txt").write_text("head\n")
+        if verdict is not None:
+            (directory / "gate.json").write_text(
+                json.dumps({"slot": slot, "attempt": attempt, **verdict}))
+        (directory / "SHA256SUMS").write_text("".join(
+            f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())
+            if path.name != "SHA256SUMS"))
+        return directory
+
+    def verdict(self, planned, collected="success"):
+        return gate.verdict(self.root / "artifacts", planned, collected, "head", 41)
+
     def test_gate_slots_check_their_models_budgets_and_skip_uncalibrated_models(self):
         budgets = self.gate_budgets()
         verdicts = {}
-        for model in ("A", "B", "C"):
-            out = self.root / f"bench-gate-{model}"
-            out.mkdir()
+        for index, model in enumerate(("A", "B", "C"), 1):
+            out = self.artifact(f"gate-{index:02d}", 1)
+            (out / "SHA256SUMS").unlink()
             (out / "run.jsonl").write_text(self.run.read_text())
             (out / "slot.json").write_text(json.dumps({
-                "slot": f"gate-{model}", "attempt": 1, "kind": "gate", "commit": "head",
-                "cpu_model": model,
-                "calibrated": model != "C", "raw_file": "run.jsonl"}))
+                "slot": f"gate-{index:02d}", "attempt": 1, "kind": "gate", "commit": "head",
+                "cpu_model": model, "calibrated": model != "C", "raw_file": "run.jsonl"}))
             with patch("gate.run_compare", fake_compare), patch("gate.BUDGETS", budgets):
                 verdicts[model] = gate.check(out)
             (out / "SHA256SUMS").write_text("".join(
@@ -229,59 +243,58 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(verdicts["B"]["passed"])
         self.assertIsNone(verdicts["C"]["passed"])
         self.assertNotIn("budget_file", verdicts["C"])
-        overall = gate.verdict(self.root, PLANNED, "success")
+        overall = self.verdict(["gate-01", "gate-02", "gate-03"])
         self.assertEqual(overall["checked"], 2)
         self.assertFalse(overall["passed"])
-        (self.root / "bench-gate-A" / "gate.json").write_text('{"passed": true}')
+        (self.root / "artifacts" / "bench-gate-gate-01-head-41-1" / "gate.json").write_text(
+            '{"slot": "gate-01", "attempt": 1, "passed": true}')
         with self.assertRaisesRegex(ValueError, "hash mismatch"):
-            gate.verdict(self.root, PLANNED, "success")
+            self.verdict(["gate-01"])
 
-    def test_verdict_needs_a_calibrated_slot(self):
-        for name, passed in (("one", None), ("two", True)):
-            directory = self.root / name
-            directory.mkdir()
-            (directory / "gate.json").write_text(
-                json.dumps({"slot": name, "attempt": 1, "passed": passed}))
-            (directory / "SHA256SUMS").write_text(
-                f"{digest(directory / 'gate.json')}  ./gate.json\n")
-            result = gate.verdict(self.root, PLANNED, "success")
-        self.assertTrue(result["passed"])
-        # A rerun attempt of slot "two" that landed on an uncalibrated model.
-        rerun = self.root / "two-rerun"
-        rerun.mkdir()
-        (rerun / "gate.json").write_text(json.dumps({"slot": "two", "attempt": 2, "passed": None}))
-        (rerun / "SHA256SUMS").write_text(f"{digest(rerun / 'gate.json')}  ./gate.json\n")
-        result = gate.verdict(self.root, PLANNED, "success")
+    def test_verdict_needs_a_calibrated_slot_and_uses_each_slots_newest_attempt(self):
+        self.artifact("gate-01", 1, {"passed": None})
+        self.artifact("gate-02", 1, {"passed": True})
+        self.assertTrue(self.verdict(["gate-01", "gate-02"])["passed"])
+        # A rerun of gate-02 that landed on an uncalibrated model.
+        self.artifact("gate-02", 2, {"passed": None})
+        result = self.verdict(["gate-01", "gate-02"])
         self.assertEqual([entry["attempt"] for entry in result["verdicts"]], [1, 2])
         self.assertFalse(result["passed"])
 
     def test_a_planned_slot_without_a_verdict_fails_the_gate(self):
-        directory = self.root / "one"
-        directory.mkdir()
-        (directory / "gate.json").write_text(
-            json.dumps({"slot": "gate-01", "attempt": 1, "passed": True}))
-        (directory / "SHA256SUMS").write_text(f"{digest(directory / 'gate.json')}  ./gate.json\n")
-        self.assertTrue(gate.verdict(self.root, ["gate-01"], "success")["passed"])
-        result = gate.verdict(self.root, ["gate-01", "gate-02"], "success")
+        self.artifact("gate-01", 1, {"passed": True})
+        self.assertTrue(self.verdict(["gate-01"])["passed"])
+        result = self.verdict(["gate-01", "gate-02"])
         self.assertEqual(result["missing"], ["gate-02"])
         self.assertFalse(result["passed"])
 
     def test_a_failed_rerun_cannot_hide_behind_an_earlier_passing_verdict(self):
-        # Attempt 1 passed gate-01; attempt 2 of gate-01 failed before writing
-        # a verdict, and gate-02 recovered in attempt 2.
-        for name, slot, attempt, passed in (("a1", "gate-01", 1, True),
-                                            ("b2", "gate-02", 2, True)):
-            directory = self.root / name
-            directory.mkdir()
-            (directory / "gate.json").write_text(
-                json.dumps({"slot": slot, "attempt": attempt, "passed": passed}))
-            (directory / "SHA256SUMS").write_text(
-                f"{digest(directory / 'gate.json')}  ./gate.json\n")
+        # Attempt 1 of gate-01 passed; its attempt 2 (a rerun of that job
+        # alone) failed before checking and uploaded partial evidence.
+        self.artifact("gate-01", 1, {"passed": True})
+        self.artifact("gate-02", 1, {"passed": True})
+        self.artifact("gate-01", 2)
         planned = ["gate-01", "gate-02"]
-        self.assertTrue(gate.verdict(self.root, planned, "success")["passed"])
-        result = gate.verdict(self.root, planned, "failure")
-        self.assertEqual(result["missing"], [])
+        result = self.verdict(planned)  # even when the jobs' result says success
+        self.assertEqual(result["missing"], ["gate-01"])
         self.assertFalse(result["passed"])
+        self.artifact("gate-01", 3, {"passed": True})
+        self.assertTrue(self.verdict(planned)["passed"])
+        self.assertFalse(self.verdict(planned, "failure")["passed"])
+
+    def test_verdict_rejects_foreign_or_mismatched_artifacts(self):
+        directory = self.artifact("gate-01", 2, {"passed": True})
+        gate_json = json.loads((directory / "gate.json").read_text())
+        gate_json["attempt"] = 1
+        (directory / "gate.json").write_text(json.dumps(gate_json))
+        (directory / "SHA256SUMS").write_text("".join(
+            f"{digest(path)}  ./{path.name}\n" for path in sorted(directory.iterdir())
+            if path.name != "SHA256SUMS"))
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.verdict(["gate-01"])
+        (self.root / "artifacts" / "bench-gate-gate-02-other-41-1").mkdir()
+        with self.assertRaisesRegex(ValueError, "unexpected artifact"):
+            self.verdict(["gate-01"])
 
     def test_gate_collect_runs_nothing_on_an_uncalibrated_model(self):
         budgets = self.gate_budgets()

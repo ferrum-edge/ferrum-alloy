@@ -528,22 +528,36 @@ def check(out):
     return verdict
 
 
-def verdict(root, planned, collected):
-    """The gate passes when every slot job succeeded, every planned slot has a
-    verdict, at least one ran on a calibrated model, and none regressed.
+def verdict(root, planned, collected, sha, run_id):
+    """The gate passes when every slot job succeeded, each planned slot's
+    latest attempt has a verdict, at least one ran on a calibrated model, and
+    none regressed.
 
-    `collected` is the workflow's result for the slot jobs (in a rerun, of
-    their latest attempts), so a later attempt that failed before writing its
-    verdict cannot be hidden behind an earlier attempt's. A rerun's later
-    verdict of a slot replaces the earlier one.
+    Every attempt of a slot job uploads an artifact, even a failed one, named
+    `bench-gate-<slot>-<sha>-<run id>-<attempt>`. Each slot's newest artifact
+    must hold that attempt's verdict, so a later attempt that failed before
+    writing one cannot be hidden behind an earlier attempt's, however the
+    jobs were rerun. `collected`, the workflow's result for the slot jobs,
+    must also be success.
     """
+    name = re.compile(rf"bench-gate-(.+)-{re.escape(sha)}-{re.escape(str(run_id))}-([0-9]+)")
+    newest = {}
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        match = name.fullmatch(directory.name)
+        require(match is not None, f"unexpected artifact {directory.name}")
+        slot, attempt = match[1], int(match[2])
+        if slot not in newest or attempt > newest[slot][0]:
+            newest[slot] = (attempt, directory)
     latest = {}
-    for path in sorted(root.glob("*/gate.json")):
-        verify_manifest(path.parent)
+    for slot, (attempt, directory) in newest.items():
+        path = directory / "gate.json"
+        if not path.is_file():
+            continue  # That attempt failed before checking: the slot has no verdict.
+        verify_manifest(directory)
         entry = json.loads(path.read_text())
-        previous = latest.get(entry["slot"])
-        if previous is None or entry["attempt"] > previous["attempt"]:
-            latest[entry["slot"]] = entry
+        require(entry["slot"] == slot and entry["attempt"] == attempt,
+                f"verdict does not match its artifact {directory.name}")
+        latest[slot] = entry
     verdicts = [latest[slot] for slot in sorted(latest)]
     checked = [entry for entry in verdicts if entry["passed"] is not None]
     missing = sorted(set(planned) - set(latest))
@@ -590,7 +604,8 @@ def main(command, *args):
     if command == "verdict":
         (root,) = args
         planned = json.loads(os.environ["GATE_SLOTS"])
-        result = verdict(Path(root), planned, os.environ["GATE_COLLECT_RESULT"])
+        result = verdict(Path(root), planned, os.environ["GATE_COLLECT_RESULT"], sha,
+                         os.environ["GITHUB_RUN_ID"])
         write_json(out / "verdict.json", result)
         summary(f"### Regression gate: {'pass' if result['passed'] else 'FAIL'}\n\n"
                 f"{result['checked']} of {len(planned)} slots ran on a calibrated CPU model; "
