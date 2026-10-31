@@ -316,6 +316,106 @@ mod tests {
         drop(data);
     }
 
+    /// Serves `/small` through `service` `count` times, in process, on this
+    /// thread, reading every response body to its end.
+    async fn serve_small(
+        service: &hyper_util::service::TowerToHyperService<axum::Router>,
+        count: usize,
+    ) {
+        use http_body_util::BodyExt as _;
+        use hyper::service::Service as _;
+
+        for _ in 0..count {
+            let request = http::Request::get("/small")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = service.call(request).await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            response.into_body().collect().await.unwrap();
+        }
+    }
+
+    /// `AlloyApp`'s defaults around the benchmark's routes. The caller keeps
+    /// the parts alive while it serves their router.
+    fn alloy_parts() -> ferrum_alloy::AlloyParts {
+        ferrum_alloy::AlloyApp::new("bench")
+            .config(ferrum_alloy::config::AlloyConfig::default())
+            .telemetry(ferrum_alloy::TelemetryInit::ApplicationOwned)
+            .router(crate::server::router())
+            .into_parts()
+            .unwrap()
+    }
+
+    /// Allocations per request after a warm-up.
+    async fn allocations_per_request(router: axum::Router) -> f64 {
+        const REQUESTS: usize = 256;
+        let service = hyper_util::service::TowerToHyperService::new(router);
+        serve_small(&service, 16).await;
+        let scope = observation::Scope::enter();
+        serve_small(&service, REQUESTS).await;
+        let counted = scope.snapshot()[Role::Service as usize];
+        drop(scope);
+        counted.calls as f64 / REQUESTS as f64
+    }
+
+    /// Each `Router::layer` call boxes every route again, and a boxed route
+    /// is cloned, with every box under it, on every request. Alloy composes
+    /// its middleware into one stack per router instead. When this test was
+    /// added, the defaults added 30 allocations per request over the bare
+    /// router here with the benchmark's `ferrum-alloy` features, and 34 under
+    /// `cargo test --workspace --all-features`, where the `edge` feature adds
+    /// its layer; applied one layer at a time, they added 70.
+    #[tokio::test(flavor = "current_thread")]
+    async fn alloy_defaults_add_a_bounded_number_of_allocations_per_request() {
+        const MAX_ADDED: f64 = 45.0;
+        // Scenario runs install a process-wide subscriber; this thread's
+        // default keeps spans disabled whichever test ran first.
+        let _no_subscriber = tracing::dispatcher::set_default(&tracing::Dispatch::none());
+        let plain = allocations_per_request(crate::server::router()).await;
+        let parts = alloy_parts();
+        let alloy = allocations_per_request(parts.router.clone()).await;
+        let added = alloy - plain;
+        assert!(
+            added <= MAX_ADDED,
+            "Alloy's defaults added {added} allocations per request over the bare router \
+             ({alloy} against {plain}); the limit is {MAX_ADDED}"
+        );
+    }
+
+    /// Service time per request in process, for comparing builds by hand:
+    /// `cargo test --release -p example-bench in_process_service_time --
+    /// --ignored --nocapture`. Each measurement serves 400 batches of 100
+    /// requests and reports the fastest batch, the one least disturbed by
+    /// other load, and the tenth percentile, in nanoseconds per request.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "timing; run by hand to compare builds (docs/benchmarks.md)"]
+    async fn in_process_service_time() {
+        const BATCHES: usize = 400;
+        const PER_BATCH: usize = 100;
+        async fn measure(router: axum::Router) -> (u128, u128) {
+            let service = hyper_util::service::TowerToHyperService::new(router);
+            serve_small(&service, 200).await;
+            let mut batches = Vec::with_capacity(BATCHES);
+            for _ in 0..BATCHES {
+                let started = std::time::Instant::now();
+                serve_small(&service, PER_BATCH).await;
+                batches.push(started.elapsed().as_nanos() / PER_BATCH as u128);
+            }
+            batches.sort_unstable();
+            (batches[0], batches[BATCHES / 10])
+        }
+        let _no_subscriber = tracing::dispatcher::set_default(&tracing::Dispatch::none());
+        for round in 0..3 {
+            let (plain_min, plain_p10) = measure(crate::server::router()).await;
+            let parts = alloy_parts();
+            let (alloy_min, alloy_p10) = measure(parts.router.clone()).await;
+            eprintln!(
+                "round {round}: plain min {plain_min} p10 {plain_p10}, \
+                 alloy min {alloy_min} p10 {alloy_p10} ns/request"
+            );
+        }
+    }
+
     /// The manifest restates `[workspace.lints]` with `unsafe_code` lowered
     /// from `forbid` to `deny`, so that this module alone can expect it. Any
     /// other difference is drift.
