@@ -909,8 +909,11 @@ pub(crate) mod tests {
                 for _ in 0..=(50 + LATE) {
                     assert_eq!(exchange(&mut sender, &target).await.unwrap(), 1024);
                 }
+                // Keep the connection open until the peer's final writes are
+                // done: dropping the last sender shuts the connection down.
+                let late_resets = servers.join_next().await.unwrap().unwrap();
                 drop(sender);
-                servers.join_next().await.unwrap().unwrap()
+                late_resets
             })
             .await
         });
