@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- The benchmark client disables h2's local error-reset limit. Sustained
+  `cancel` load over HTTP/2 made late DATA on forgotten streams exhaust
+  its default of 1,024 resets, so the client ended its own connections:
+  the first full matrix on `main` failed validation with client errors in
+  46 of 1,080 runs, all `cancel` over `h2c`, `h2-tls`, or `h2-mtls`. A
+  wire-level test covers the production handshake, and the regression
+  gate's pull-request smoke matrix now runs `cancel`.
 - Benchmark policy (#15, #16, owner decision of 2026-10-31): regression
   budgets come from a measured noise model of shared GitHub-hosted
   runners instead of a dedicated host. The new `Benchmark regression gate`
