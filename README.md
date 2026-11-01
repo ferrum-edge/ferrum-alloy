@@ -99,7 +99,7 @@ Detailed health, metrics, and management OpenAPI/UI always require a configured 
 | [Architecture decisions](docs/adr/README.md) | ADRs |
 | [Implementation status](docs/implementation-status.md) | What is built and tested |
 | [Testing](docs/testing.md) | Property tests and fuzz targets for untrusted input |
-| [Benchmarks](docs/benchmarks.md) | Local, same-host overhead measurements and their limits |
+| [Benchmarks](docs/benchmarks.md) | Overhead measurements, the hosted regression gate and its budgets, and their limits |
 | [Release readiness](docs/release.md) | The Git-only distribution decision, packaging checks, the release checklist, and deferred registry decisions |
 
 ## Contracts

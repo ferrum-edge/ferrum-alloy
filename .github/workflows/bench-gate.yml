@@ -8,6 +8,10 @@ on:
       - '.github/workflows/bench-gate.yml'
       - 'examples/bench/hosted/**'
       - 'examples/bench/budgets/**'
+  # The gate, weekly on main (Wednesdays 04:37 UTC, away from the Monday
+  # hosted qualification run).
+  schedule:
+    - cron: '37 4 * * 3'
   # Main only, with no ref/URL inputs: `gate` holds one fresh full matrix to
   # the committed budgets; `calibrate` collects unchanged-code runs and
   # derives new budgets (docs/benchmarks.md#regression-gate).
@@ -63,7 +67,7 @@ jobs:
               # slots for the common models to reach the minimum run count.
               slots=$(printf '"calibration-%02d",' $(seq 1 18))
               echo "slots=[${slots}\"allocations\"]" >> "$GITHUB_OUTPUT" ;;
-            workflow_dispatch:gate)
+            workflow_dispatch:gate | schedule:)
               # Five runners: a slot on an uncalibrated CPU model runs nothing.
               echo 'mode=gate' >> "$GITHUB_OUTPUT"
               echo 'profile=full' >> "$GITHUB_OUTPUT"

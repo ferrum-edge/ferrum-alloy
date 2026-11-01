@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Regression budgets are committed (#15, #16). The calibration of `main`
+  at `2d0b8a8` (run 41250532573) was accepted for AMD EPYC 7763, the only
+  runner CPU model with at least five of its eighteen runs: limits on 540
+  of 576 cell metrics, a median throughput margin of about 7.5%, and all
+  nine positive controls caught. An earlier accepted calibration of
+  `bea5e73` was superseded because #269 lowered Alloy's measured cost
+  before its budgets were committed. `examples/bench/budgets/` holds the
+  budgets and their derivation, `examples/bench/results/` the raw
+  calibration results and the hosted formatter profiles. The regression
+  gate now runs weekly on `main`. On the same runs, Alloy's JSON layer
+  beats the tracing-subscriber formatter it replaced by more than measured
+  noise in 14 of 24 cells (by 16% to 52% in `small` and `large`), and is
+  within noise in `cancel`, HTTP/2 `stream`, and `stream` over `h1-tls`;
+  `docs/benchmarks.md` records both.
 - `AlloyApp` applies its middleware as one composed stack per router
   instead of one `Router::layer` call per layer. Each call boxed every
   route again, and axum clones a boxed route, with every box under it, on

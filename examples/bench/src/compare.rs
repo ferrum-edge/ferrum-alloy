@@ -874,4 +874,52 @@ mod tests {
         let twice = json!({ "schema": BUDGET_SCHEMA, "budgets": [entry, entry] });
         assert!(parse_budgets(&twice.to_string()).is_err());
     }
+
+    /// The committed budgets are what the regression gate reads: every file
+    /// the index names must parse, and every budget file must be named.
+    #[test]
+    fn committed_budgets_parse_and_match_their_index() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("budgets");
+        let index: Value = serde_json::from_str(&read(&dir.join("index.json")).unwrap()).unwrap();
+        assert_eq!(index["schema"], "alloy-bench-budget-index/1");
+        let commit = index["commit"].as_str().unwrap();
+        assert_eq!(commit.len(), 40, "{commit}");
+        let models = index["models"].as_object().unwrap();
+        assert!(!models.is_empty());
+        let mut named = Vec::new();
+        for (model, file) in models {
+            let file = file.as_str().unwrap();
+            let budgets = parse_budgets(&read(&dir.join(file)).unwrap())
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+            assert!(!budgets.is_empty(), "{model}: {file} has no budgets");
+            assert!(
+                budgets.iter().all(|budget| !budget.alloc_counting),
+                "{file}"
+            );
+            named.push(file.to_owned());
+        }
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("model-") || name.starts_with("any-model"))
+            .collect();
+        named.sort();
+        on_disk.sort();
+        assert_eq!(named, on_disk);
+
+        let derivation = index["derivation"].as_str().unwrap();
+        let report: Value = serde_json::from_str(&read(&dir.join(derivation)).unwrap()).unwrap();
+        assert_eq!(report["commit"], commit);
+        assert_eq!(report["accepted"], true);
+        let mut published: Vec<&str> = report["published"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model.as_str().unwrap())
+            .collect();
+        let mut indexed: Vec<&str> = models.keys().map(String::as_str).collect();
+        published.sort_unstable();
+        indexed.sort_unstable();
+        assert_eq!(published, indexed);
+    }
 }
