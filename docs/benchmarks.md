@@ -13,7 +13,7 @@ A run measures one *cell*: one scenario, one workload, and one transport.
 | `plain` | hyper-util's automatic HTTP/1.1 + HTTP/2 connection builder (what `axum::serve` uses) serving the same router, with `TCP_NODELAY` as Alloy sets it, and rustls for TLS. No Alloy. |
 | `alloy` | `AlloyApp` defaults (Alloy's server loop, limits, admission, request id, route labels, metrics, telemetry layer); subscriber with no layers |
 | `alloy-logs` | As `alloy`, with Alloy's JSON log layer at `info` writing to a sink. The historical 2026-09-26 results predate that layer and used tracing-subscriber's JSON `fmt` layer instead; the hosted 2026-10-04 sample uses the typed layer. |
-| `alloy-logs-fmt` | As `alloy-logs`, formatted by tracing-subscriber's JSON `fmt` layer with the same line layout. Profiled and compared in the bounded shared hosted sample; dedicated before/after acceptance remains open. |
+| `alloy-logs-fmt` | As `alloy-logs`, formatted by tracing-subscriber's JSON `fmt` layer with the same line layout. The before of [logging cost on hosted runners](#logging-cost-on-hosted-runners-2026-10-31). |
 | `alloy-diagnostics` | Authorized diagnostic mode: as `alloy`, with a `DiagnosticsAuthorizer` installed and every request tagged with a tenant, so each request's evidence is retained in the bounded ring (default bounds, so steady-state runs evict on every request). The management router is built but not served, and retrieval itself is not measured. Added with diagnostic retrieval (#13); first measured in the [calibration](#calibration-2026-10-31). |
 | `otel-sampled` | OpenTelemetry bridge, sampling ratio 1.0, exporter that discards batches in process |
 | `otel-unsampled` | OpenTelemetry bridge, sampling ratio 0.0 |
@@ -342,7 +342,7 @@ The budgeted workers previously sent one more request on each retained H2 sender
 
 ## External unblock checklist
 
-**Status (2026-10-31).** Item 1 is superseded by the [shared-runner policy](#regression-gate). Items 2 to 4 are met: the regression gate runs on `main` only, and the [accepted calibration](#calibration-2026-10-31) is committed with its raw results. Item 5 is met by [logging cost on hosted runners](#logging-cost-on-hosted-runners-2026-10-31). The items below are kept as written for the record.
+**Status (2026-10-31).** Item 1 is superseded by the [shared-runner policy](#regression-gate). Items 2 and 3 are met: the regression gate runs on `main` only. Item 4 is met by the [accepted calibration](#calibration-2026-10-31), committed with its raw results, once the first gate run on `main` against it has passed (tracked in [#15](https://github.com/ferrum-edge/ferrum-alloy/issues/15)). Item 5 is met, as mapped there, by [logging cost on hosted runners](#logging-cost-on-hosted-runners-2026-10-31). The items below are kept as written for the record.
 
 The owner/root must provide these concrete inputs and evidence before dedicated baseline acceptance or a budget can be proposed. All execution remains in GitHub-hosted CI; no local or self-hosted repository execution is an alternative:
 
@@ -424,7 +424,12 @@ The results table above predates this change, and its `alloy-logs` row used trac
 
 ## Logging cost on hosted runners (2026-10-31)
 
-This is the evidence for [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16) under the [2026-10-31 policy](#regression-gate): the before is tracing-subscriber's JSON formatter (`alloy-logs-fmt`), the after is Alloy's layer (`alloy-logs`), both in one binary, interleaved in every repetition, on shared hosted runners, with the noise measured on unchanged code.
+This is the evidence for [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16). The [2026-10-31 policy](#regression-gate) measures logging cost the same way as the regression gate, on shared hosted runners with the noise measured on unchanged code. Under it, #16's recorded criteria are met as follows, including what is not provided:
+
+- **Pre-change baseline:** the formatter the layer replaced in [#47](https://github.com/ferrum-edge/ferrum-alloy/pull/47), still in the same binary as `alloy-logs-fmt` and interleaved with `alloy-logs` in every repetition. No build from before #47 was measured.
+- **Profiles:** hosted Callgrind profiles of both formatters, below. Callgrind counts simulated instructions; no native (sampled CPU time) call-stack profile was taken.
+- **Schema and byte compatibility:** `lines_match_the_tracing_subscriber_json_formatter` (see [Alloy JSON layer](#alloy-json-layer)) and the access-line snapshot in `json_log.rs`.
+- **Gain beyond measured noise:** the throughput table below.
 
 **Profiles.** Callgrind profiles of both formatters (`small`, `h1`, eight concurrent requests, 1-second window) from hosted qualification [run 41180529588](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41180529588) on `main` at `cd5edac` (AMD EPYC 7763). That predates [#269](https://github.com/ferrum-edge/ferrum-alloy/pull/269), which changed the middleware stack but neither formatter, so the formatters' own costs are those at the calibration commit; the shares outside them would differ there. Share of each profile's instructions, across its ten threads:
 
@@ -436,9 +441,9 @@ This is the evidence for [#16](https://github.com/ferrum-edge/ferrum-alloy/issue
 | UTF-8 validation (`core::str::converts::from_utf8`) | 10.9% | 0.4% |
 | `ferrum_alloy_telemetry::json` | 0.0% | 21.6% |
 | malloc/free | 7.7% | 9.0% |
-| memcpy/memmove/memcmp | 10.1% | 10.8% |
+| memcpy/memmove/memcmp/memset | 10.1% | 10.8% |
 
-About 41% of the formatter's instructions went to parsing and re-serializing span fields and validating the result; the layer spends none there. Its own rendering, 21.6%, is now the largest logging cost. Shares, not totals, are comparable: each profile serves as many requests as its window allows. Hosted run [41002220361](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41002220361) on an Intel Xeon Platinum 8370C gave the same shares within 0.1 point. Callgrind counts simulated instructions, including the client and teardown, not native time. The annotations, the run's `SHA256SUMS`, environment, and commands are in `examples/bench/results/2026-10-31-hosted-profiles/`.
+Rows are self-instruction buckets matched by source path or symbol. About 41% of the formatter's instructions fall in the serde_json, tracing-subscriber `fmt`, and UTF-8 validation buckets; this is mostly the re-parsing and re-serializing of span fields described [above](#alloy-json-layer), plus tracing-subscriber's general output formatting. The layer spends about 0.6% in those buckets. Its own rendering, 21.6%, is now the largest logging cost. Shares, not totals, are comparable: each profile serves as many requests as its window allows. Hosted run [41002220361](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41002220361) on an Intel Xeon Platinum 8370C gave the same shares within 0.1 point. Callgrind counts simulated instructions, including the client and teardown, not native time. The annotations, the run's `SHA256SUMS`, environment, and commands are in `examples/bench/results/2026-10-31-hosted-profiles/`, with `buckets.py`, which computes this table from them.
 
 **Throughput.** In each of the nine AMD EPYC 7763 runs of the [calibration](#calibration-2026-10-31), the median over five repetitions of `alloy-logs` throughput divided by `alloy-logs-fmt` throughput, per cell. The noise floor is e^margin of that model's `alloy-logs` `throughput_ratio` in the same cell, the [derived](#deriving-budgets) bound on unchanged-code variation; a cell counts as beyond noise when even its lowest run median exceeds it. This rule was fixed before the calibration's results were read.
 
@@ -470,7 +475,7 @@ About 41% of the formatter's instructions went to parsing and re-serializing spa
 | `cancel` | `h2-mtls` | 1.057 (1.042 – 1.127) | 1.065 | no |
 
 - **Supported:** Alloy's layer raises throughput beyond measured noise in 14 of 24 cells: every `small` and `large` cell (by 16% to 52% at the median), and `stream` over `h1` and `h1-mtls`.
-- **Not shown:** a gain in `cancel` cells, in `stream` over HTTP/2, or in `stream` over `h1-tls`. Their medians (1.02 to 1.06, and 1.13 for `h1-tls`, whose noise floor is 1.21) are within the noise floor, so the only supported claim there is that the layer is not measurably slower.
+- **Not shown:** a gain in `cancel` cells, in `stream` over HTTP/2, or in `stream` over `h1-tls`. In each of them at least one run's median is within the noise floor (the medians of runs are 1.02 to 1.06, and 1.13 for `h1-tls`, whose floor is 1.21), so the only supported claim there is that the layer is not measurably slower.
 - The [superseded calibration](#calibration-2026-10-31), with the same rule, gave the same verdict in every cell except `stream` over `h1-tls`, which it found beyond noise (15 of 24).
 - This is one CPU model with co-located client and service; it is not a statement about production throughput.
 
