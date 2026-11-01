@@ -6,9 +6,9 @@
       "workload": "cancel",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8566,
-      "max_latency_p50_ratio": 1.2767,
-      "max_latency_p99_ratio": 1.0356
+      "min_throughput_ratio": 0.8769,
+      "max_latency_p50_ratio": 1.2016,
+      "max_latency_p99_ratio": 1.0345
     },
     {
       "scenario": "alloy",
@@ -16,679 +16,665 @@
       "transport": "h1-mtls",
       "alloc_counting": false,
       "min_throughput_ratio": 0.6939,
-      "max_latency_p50_ratio": 1.2072,
-      "max_latency_p99_ratio": 1.3312
+      "max_latency_p50_ratio": 1.1968,
+      "max_latency_p99_ratio": 1.292
     },
     {
       "scenario": "alloy",
       "workload": "cancel",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8909,
-      "max_latency_p50_ratio": 0.9427,
-      "max_latency_p99_ratio": 1.1329
+      "min_throughput_ratio": 0.9019,
+      "max_latency_p50_ratio": 0.941,
+      "max_latency_p99_ratio": 1.049
     },
     {
       "scenario": "alloy",
       "workload": "cancel",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.2497,
-      "max_latency_p50_ratio": 2.7725
+      "min_throughput_ratio": 0.2503,
+      "max_latency_p50_ratio": 2.8364,
+      "max_latency_p99_ratio": 19.6914
     },
     {
       "scenario": "alloy",
       "workload": "cancel",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.2526,
-      "max_latency_p50_ratio": 2.8224,
-      "max_latency_p99_ratio": 18.7308
+      "min_throughput_ratio": 0.2639,
+      "max_latency_p50_ratio": 2.8161,
+      "max_latency_p99_ratio": 20.3634
     },
     {
       "scenario": "alloy",
       "workload": "cancel",
       "transport": "h2c",
       "alloc_counting": false,
-      "max_latency_p50_ratio": 2.9701,
-      "max_latency_p99_ratio": 23.3409
+      "max_latency_p50_ratio": 3.035,
+      "max_latency_p99_ratio": 23.4761
     },
     {
       "scenario": "alloy",
       "workload": "large",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6363,
-      "max_latency_p50_ratio": 1.5936,
-      "max_latency_p99_ratio": 1.5715
+      "min_throughput_ratio": 0.676,
+      "max_latency_p50_ratio": 1.4619,
+      "max_latency_p99_ratio": 1.5162
     },
     {
       "scenario": "alloy",
       "workload": "large",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7794,
-      "max_latency_p50_ratio": 1.2739,
-      "max_latency_p99_ratio": 1.2865
+      "min_throughput_ratio": 0.7896,
+      "max_latency_p50_ratio": 1.245,
+      "max_latency_p99_ratio": 1.3152
     },
     {
       "scenario": "alloy",
       "workload": "large",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7763,
-      "max_latency_p50_ratio": 1.3001,
-      "max_latency_p99_ratio": 1.3476
+      "min_throughput_ratio": 0.813,
+      "max_latency_p50_ratio": 1.2104,
+      "max_latency_p99_ratio": 1.2588
     },
     {
       "scenario": "alloy",
       "workload": "large",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7007,
-      "max_latency_p50_ratio": 1.3758,
-      "max_latency_p99_ratio": 1.3374
+      "min_throughput_ratio": 0.6586,
+      "max_latency_p50_ratio": 1.4334,
+      "max_latency_p99_ratio": 1.4076
     },
     {
       "scenario": "alloy",
       "workload": "large",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6932,
-      "max_latency_p50_ratio": 1.3974
+      "min_throughput_ratio": 0.7196,
+      "max_latency_p50_ratio": 1.38,
+      "max_latency_p99_ratio": 1.3514
     },
     {
       "scenario": "alloy",
       "workload": "large",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5712,
-      "max_latency_p50_ratio": 1.6973,
-      "max_latency_p99_ratio": 1.5552
+      "min_throughput_ratio": 0.6204,
+      "max_latency_p50_ratio": 1.569,
+      "max_latency_p99_ratio": 1.4814
     },
     {
       "scenario": "alloy",
       "workload": "small",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5345,
-      "max_latency_p50_ratio": 1.9177,
-      "max_latency_p99_ratio": 1.9983
+      "min_throughput_ratio": 0.5755,
+      "max_latency_p50_ratio": 1.7774,
+      "max_latency_p99_ratio": 1.8436
     },
     {
       "scenario": "alloy",
       "workload": "small",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4956,
-      "max_latency_p50_ratio": 2.1206,
-      "max_latency_p99_ratio": 1.8291
+      "min_throughput_ratio": 0.5462,
+      "max_latency_p50_ratio": 1.8196,
+      "max_latency_p99_ratio": 1.7542
     },
     {
       "scenario": "alloy",
       "workload": "small",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5144,
-      "max_latency_p50_ratio": 1.9932,
-      "max_latency_p99_ratio": 1.9831
+      "min_throughput_ratio": 0.534,
+      "max_latency_p50_ratio": 1.9003,
+      "max_latency_p99_ratio": 1.8161
     },
     {
       "scenario": "alloy",
       "workload": "small",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4488,
-      "max_latency_p50_ratio": 2.2394,
-      "max_latency_p99_ratio": 1.8789
+      "min_throughput_ratio": 0.4766,
+      "max_latency_p50_ratio": 2.0795,
+      "max_latency_p99_ratio": 1.7692
     },
     {
       "scenario": "alloy",
       "workload": "small",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4507,
+      "min_throughput_ratio": 0.4678,
+      "max_latency_p50_ratio": 2.0898,
+      "max_latency_p99_ratio": 1.7596
+    },
+    {
+      "scenario": "alloy",
+      "workload": "small",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4188,
+      "max_latency_p50_ratio": 2.1822,
+      "max_latency_p99_ratio": 1.8498
+    },
+    {
+      "scenario": "alloy",
+      "workload": "stream",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7831,
+      "max_latency_p50_ratio": 1.3228,
+      "max_latency_p99_ratio": 1.2385
+    },
+    {
+      "scenario": "alloy",
+      "workload": "stream",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7968,
+      "max_latency_p50_ratio": 1.2918,
+      "max_latency_p99_ratio": 1.1546
+    },
+    {
+      "scenario": "alloy",
+      "workload": "stream",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7964,
+      "max_latency_p50_ratio": 1.2862,
+      "max_latency_p99_ratio": 1.1559
+    },
+    {
+      "scenario": "alloy",
+      "workload": "stream",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5911,
+      "max_latency_p50_ratio": 1.5037
+    },
+    {
+      "scenario": "alloy",
+      "workload": "stream",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5732,
+      "max_latency_p50_ratio": 1.5079
+    },
+    {
+      "scenario": "alloy",
+      "workload": "stream",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5831,
+      "max_latency_p50_ratio": 1.5108
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "cancel",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8279,
+      "max_latency_p50_ratio": 1.2857,
+      "max_latency_p99_ratio": 1.0781
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "cancel",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6955,
+      "max_latency_p50_ratio": 1.225,
+      "max_latency_p99_ratio": 1.3225
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "cancel",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8451,
+      "max_latency_p50_ratio": 0.9576,
+      "max_latency_p99_ratio": 1.0408
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "cancel",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "max_latency_p50_ratio": 2.8709
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "cancel",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.2528,
+      "max_latency_p50_ratio": 2.8107
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "cancel",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.2457,
+      "max_latency_p50_ratio": 3.0043
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "large",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5838,
+      "max_latency_p50_ratio": 1.6502,
+      "max_latency_p99_ratio": 1.8206
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "large",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7552,
+      "max_latency_p50_ratio": 1.3269,
+      "max_latency_p99_ratio": 1.3355
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "large",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7583,
+      "max_latency_p50_ratio": 1.2814,
+      "max_latency_p99_ratio": 1.3404
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "large",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6362,
+      "max_latency_p50_ratio": 1.4895,
+      "max_latency_p99_ratio": 1.4731
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "large",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6529,
+      "max_latency_p50_ratio": 1.4827,
+      "max_latency_p99_ratio": 1.4368
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "large",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5474,
+      "max_latency_p50_ratio": 1.7341,
+      "max_latency_p99_ratio": 1.6385
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "small",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.434,
+      "max_latency_p50_ratio": 2.2202
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "small",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4281,
+      "max_latency_p50_ratio": 2.3437,
+      "max_latency_p99_ratio": 2.3434
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "small",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4296,
+      "max_latency_p50_ratio": 2.2774,
+      "max_latency_p99_ratio": 2.2663
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "small",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3878,
+      "max_latency_p50_ratio": 2.5491
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "small",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3942,
+      "max_latency_p50_ratio": 2.5093,
+      "max_latency_p99_ratio": 2.0368
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "small",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3938,
+      "max_latency_p50_ratio": 2.6366
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "stream",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7208,
+      "max_latency_p50_ratio": 1.3987,
+      "max_latency_p99_ratio": 1.4938
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "stream",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7495,
+      "max_latency_p50_ratio": 1.3788,
+      "max_latency_p99_ratio": 1.2224
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "stream",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7561,
+      "max_latency_p50_ratio": 1.3598,
+      "max_latency_p99_ratio": 1.319
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "stream",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5903,
+      "max_latency_p50_ratio": 1.5118
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "stream",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5686,
+      "max_latency_p50_ratio": 1.5027
+    },
+    {
+      "scenario": "alloy-diagnostics",
+      "workload": "stream",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5863,
+      "max_latency_p50_ratio": 1.5511
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "cancel",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8357,
+      "max_latency_p50_ratio": 1.2681,
+      "max_latency_p99_ratio": 1.0831
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "cancel",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6593,
+      "max_latency_p50_ratio": 1.2563,
+      "max_latency_p99_ratio": 1.3211
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "cancel",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8907,
+      "max_latency_p50_ratio": 0.9388,
+      "max_latency_p99_ratio": 1.0691
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "cancel",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8418,
+      "max_latency_p50_ratio": 1.1861,
+      "max_latency_p99_ratio": 1.2475
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "cancel",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8374,
+      "max_latency_p50_ratio": 1.1741,
+      "max_latency_p99_ratio": 1.2481
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "cancel",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "max_latency_p99_ratio": 1.3457
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "large",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6081,
+      "max_latency_p50_ratio": 1.6622,
+      "max_latency_p99_ratio": 1.6893
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "large",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.711,
+      "max_latency_p50_ratio": 1.3942,
+      "max_latency_p99_ratio": 1.3689
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "large",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7346,
+      "max_latency_p50_ratio": 1.3443,
+      "max_latency_p99_ratio": 1.2955
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "large",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8184,
+      "max_latency_p50_ratio": 1.2763,
+      "max_latency_p99_ratio": 1.1183
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "large",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8299,
+      "max_latency_p50_ratio": 1.2763,
+      "max_latency_p99_ratio": 1.0555
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "large",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7171,
+      "max_latency_p50_ratio": 1.4275,
+      "max_latency_p99_ratio": 1.3399
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "small",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4859,
+      "max_latency_p50_ratio": 2.1687,
+      "max_latency_p99_ratio": 2.1658
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "small",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4713,
+      "max_latency_p50_ratio": 2.227,
+      "max_latency_p99_ratio": 2.0346
+    },
+    {
+      "scenario": "alloy-logs",
+      "workload": "small",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4709,
       "max_latency_p50_ratio": 2.186,
-      "max_latency_p99_ratio": 1.884
-    },
-    {
-      "scenario": "alloy",
-      "workload": "small",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4341,
-      "max_latency_p50_ratio": 2.291,
-      "max_latency_p99_ratio": 1.9723
-    },
-    {
-      "scenario": "alloy",
-      "workload": "stream",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7625,
-      "max_latency_p50_ratio": 1.3622
-    },
-    {
-      "scenario": "alloy",
-      "workload": "stream",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7794,
-      "max_latency_p50_ratio": 1.3021,
-      "max_latency_p99_ratio": 1.1602
-    },
-    {
-      "scenario": "alloy",
-      "workload": "stream",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7485,
-      "max_latency_p50_ratio": 1.354,
-      "max_latency_p99_ratio": 1.1276
-    },
-    {
-      "scenario": "alloy",
-      "workload": "stream",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5979,
-      "max_latency_p50_ratio": 1.4736
-    },
-    {
-      "scenario": "alloy",
-      "workload": "stream",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.585,
-      "max_latency_p50_ratio": 1.5932
-    },
-    {
-      "scenario": "alloy",
-      "workload": "stream",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5779,
-      "max_latency_p50_ratio": 1.5251
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "cancel",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.865,
-      "max_latency_p50_ratio": 1.263,
-      "max_latency_p99_ratio": 1.0977
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "cancel",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6843,
-      "max_latency_p50_ratio": 1.2197
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "cancel",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8765,
-      "max_latency_p50_ratio": 0.9771,
-      "max_latency_p99_ratio": 1.0655
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "cancel",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.2511,
-      "max_latency_p50_ratio": 2.7731,
-      "max_latency_p99_ratio": 19.7471
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "cancel",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.2524,
-      "max_latency_p50_ratio": 2.9666,
-      "max_latency_p99_ratio": 18.8554
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "cancel",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "max_latency_p50_ratio": 3.2007,
-      "max_latency_p99_ratio": 22.2747
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "large",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5775,
-      "max_latency_p50_ratio": 1.7189,
-      "max_latency_p99_ratio": 1.8642
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "large",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.718,
-      "max_latency_p50_ratio": 1.3789,
-      "max_latency_p99_ratio": 1.3884
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "large",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7421,
-      "max_latency_p50_ratio": 1.3298,
-      "max_latency_p99_ratio": 1.3376
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "large",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6379,
-      "max_latency_p50_ratio": 1.499,
-      "max_latency_p99_ratio": 1.4683
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "large",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6606,
-      "max_latency_p50_ratio": 1.4672,
-      "max_latency_p99_ratio": 1.3994
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "large",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5133,
-      "max_latency_p50_ratio": 1.8702,
-      "max_latency_p99_ratio": 1.7995
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "small",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4444,
-      "max_latency_p50_ratio": 2.3015,
-      "max_latency_p99_ratio": 2.3938
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "small",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4261,
-      "max_latency_p50_ratio": 2.4025,
-      "max_latency_p99_ratio": 2.3386
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "small",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4339,
-      "max_latency_p50_ratio": 2.3883,
-      "max_latency_p99_ratio": 2.2769
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "small",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3692,
-      "max_latency_p50_ratio": 2.6938,
-      "max_latency_p99_ratio": 2.0702
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "small",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3786,
-      "max_latency_p50_ratio": 2.6192,
-      "max_latency_p99_ratio": 2.11
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "small",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3631,
-      "max_latency_p50_ratio": 2.8261,
-      "max_latency_p99_ratio": 2.1256
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "stream",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7187,
-      "max_latency_p50_ratio": 1.4072,
-      "max_latency_p99_ratio": 1.5239
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "stream",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7482,
-      "max_latency_p50_ratio": 1.3792,
-      "max_latency_p99_ratio": 1.2593
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "stream",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7388,
-      "max_latency_p50_ratio": 1.3927,
-      "max_latency_p99_ratio": 1.3302
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "stream",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6052,
-      "max_latency_p50_ratio": 1.4866
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "stream",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.548,
-      "max_latency_p50_ratio": 1.5296
-    },
-    {
-      "scenario": "alloy-diagnostics",
-      "workload": "stream",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.583,
-      "max_latency_p50_ratio": 1.5414
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "cancel",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8295,
-      "max_latency_p50_ratio": 1.3097,
-      "max_latency_p99_ratio": 1.0739
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "cancel",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6945,
-      "max_latency_p50_ratio": 1.2293,
-      "max_latency_p99_ratio": 1.3434
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "cancel",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.872,
-      "max_latency_p50_ratio": 0.9521,
-      "max_latency_p99_ratio": 1.0923
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "cancel",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8327,
-      "max_latency_p50_ratio": 1.2006,
-      "max_latency_p99_ratio": 1.1957
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "cancel",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7998,
-      "max_latency_p50_ratio": 1.2518,
-      "max_latency_p99_ratio": 1.1677
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "cancel",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8049,
-      "max_latency_p50_ratio": 1.2624,
-      "max_latency_p99_ratio": 1.1627
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "large",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5762,
-      "max_latency_p50_ratio": 1.7556,
-      "max_latency_p99_ratio": 1.7505
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "large",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7349,
-      "max_latency_p50_ratio": 1.3856,
-      "max_latency_p99_ratio": 1.3298
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "large",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7111,
-      "max_latency_p50_ratio": 1.4646,
-      "max_latency_p99_ratio": 1.3035
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "large",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7768,
-      "max_latency_p50_ratio": 1.2732,
-      "max_latency_p99_ratio": 1.1185
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "large",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7922,
-      "max_latency_p50_ratio": 1.2931,
-      "max_latency_p99_ratio": 1.1464
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "large",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.673,
-      "max_latency_p50_ratio": 1.4888,
-      "max_latency_p99_ratio": 1.2696
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "small",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4597,
-      "max_latency_p50_ratio": 2.2749,
-      "max_latency_p99_ratio": 2.1975
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "small",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4333,
-      "max_latency_p50_ratio": 2.4444,
-      "max_latency_p99_ratio": 2.1533
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "small",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4648,
-      "max_latency_p50_ratio": 2.2303,
-      "max_latency_p99_ratio": 2.0834
+      "max_latency_p99_ratio": 1.9769
     },
     {
       "scenario": "alloy-logs",
       "workload": "small",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5293,
-      "max_latency_p50_ratio": 1.9445,
-      "max_latency_p99_ratio": 2.1122
+      "min_throughput_ratio": 0.5632,
+      "max_latency_p50_ratio": 1.8479,
+      "max_latency_p99_ratio": 1.8652
     },
     {
       "scenario": "alloy-logs",
       "workload": "small",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5312,
-      "max_latency_p50_ratio": 1.9027,
-      "max_latency_p99_ratio": 2.055
+      "min_throughput_ratio": 0.5549,
+      "max_latency_p50_ratio": 1.8295,
+      "max_latency_p99_ratio": 1.8627
     },
     {
       "scenario": "alloy-logs",
       "workload": "small",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5068,
-      "max_latency_p50_ratio": 1.981,
-      "max_latency_p99_ratio": 2.2471
+      "min_throughput_ratio": 0.5363,
+      "max_latency_p50_ratio": 1.9221,
+      "max_latency_p99_ratio": 2.0037
     },
     {
       "scenario": "alloy-logs",
       "workload": "stream",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6783,
-      "max_latency_p50_ratio": 1.4692
+      "min_throughput_ratio": 0.7117,
+      "max_latency_p50_ratio": 1.4285,
+      "max_latency_p99_ratio": 1.3289
     },
     {
       "scenario": "alloy-logs",
       "workload": "stream",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7308,
-      "max_latency_p50_ratio": 1.3952,
-      "max_latency_p99_ratio": 1.1764
-    },
-    {
-      "scenario": "alloy-logs",
-      "workload": "stream",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7197,
-      "max_latency_p50_ratio": 1.4424,
-      "max_latency_p99_ratio": 1.1492
+      "min_throughput_ratio": 0.7536,
+      "max_latency_p50_ratio": 1.3678,
+      "max_latency_p99_ratio": 1.1255
     },
     {
       "scenario": "alloy-logs",
       "workload": "stream",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8832,
-      "max_latency_p50_ratio": 1.1218,
-      "max_latency_p99_ratio": 1.3332
+      "min_throughput_ratio": 0.8947,
+      "max_latency_p50_ratio": 1.1092,
+      "max_latency_p99_ratio": 1.2545
     },
     {
       "scenario": "alloy-logs",
       "workload": "stream",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8985,
-      "max_latency_p50_ratio": 1.1351,
-      "max_latency_p99_ratio": 1.2438
+      "min_throughput_ratio": 0.9196,
+      "max_latency_p50_ratio": 1.1091,
+      "max_latency_p99_ratio": 1.1755
     },
     {
       "scenario": "alloy-logs",
       "workload": "stream",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.9147,
-      "max_latency_p50_ratio": 1.1008,
-      "max_latency_p99_ratio": 1.2018
+      "min_throughput_ratio": 0.9225,
+      "max_latency_p50_ratio": 1.1029,
+      "max_latency_p99_ratio": 1.1775
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "cancel",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.802,
-      "max_latency_p50_ratio": 1.3472,
-      "max_latency_p99_ratio": 1.1944
+      "min_throughput_ratio": 0.8118,
+      "max_latency_p50_ratio": 1.3475,
+      "max_latency_p99_ratio": 1.1291
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "cancel",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6626,
-      "max_latency_p50_ratio": 1.307,
-      "max_latency_p99_ratio": 1.4031
+      "min_throughput_ratio": 0.6638,
+      "max_latency_p50_ratio": 1.2894,
+      "max_latency_p99_ratio": 1.3666
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "cancel",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8478,
-      "max_latency_p50_ratio": 1.0159,
-      "max_latency_p99_ratio": 1.1264
+      "min_throughput_ratio": 0.8162,
+      "max_latency_p50_ratio": 1.0218,
+      "max_latency_p99_ratio": 1.102
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "cancel",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7791,
-      "max_latency_p50_ratio": 1.3041,
-      "max_latency_p99_ratio": 1.2182
+      "min_throughput_ratio": 0.719,
+      "max_latency_p99_ratio": 1.2269
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "cancel",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7844,
-      "max_latency_p50_ratio": 1.2892,
-      "max_latency_p99_ratio": 1.2587
+      "min_throughput_ratio": 0.7571,
+      "max_latency_p50_ratio": 1.3293,
+      "max_latency_p99_ratio": 1.3229
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "cancel",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7887,
-      "max_latency_p50_ratio": 1.3005,
-      "max_latency_p99_ratio": 1.2972
+      "min_throughput_ratio": 0.7303,
+      "max_latency_p50_ratio": 1.3078
     },
     {
       "scenario": "alloy-logs-fmt",
@@ -696,1014 +682,1010 @@
       "transport": "h1",
       "alloc_counting": false,
       "min_throughput_ratio": 0.4461,
-      "max_latency_p50_ratio": 2.3413,
-      "max_latency_p99_ratio": 2.167
+      "max_latency_p50_ratio": 2.3044,
+      "max_latency_p99_ratio": 2.0961
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "large",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5966,
-      "max_latency_p50_ratio": 1.6911,
-      "max_latency_p99_ratio": 1.4976
+      "min_throughput_ratio": 0.6025,
+      "max_latency_p50_ratio": 1.7123,
+      "max_latency_p99_ratio": 1.5419
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "large",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6138,
-      "max_latency_p50_ratio": 1.7129,
-      "max_latency_p99_ratio": 1.547
+      "min_throughput_ratio": 0.6099,
+      "max_latency_p50_ratio": 1.6963,
+      "max_latency_p99_ratio": 1.5717
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "large",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6727,
-      "max_latency_p50_ratio": 1.4679,
-      "max_latency_p99_ratio": 1.519
+      "min_throughput_ratio": 0.6268,
+      "max_latency_p50_ratio": 1.5609,
+      "max_latency_p99_ratio": 1.3413
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "large",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6986,
-      "max_latency_p50_ratio": 1.4272,
-      "max_latency_p99_ratio": 1.5513
+      "min_throughput_ratio": 0.7001,
+      "max_latency_p50_ratio": 1.4591,
+      "max_latency_p99_ratio": 1.3506
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "large",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5636,
-      "max_latency_p50_ratio": 1.7969,
-      "max_latency_p99_ratio": 1.801
+      "min_throughput_ratio": 0.6044,
+      "max_latency_p50_ratio": 1.6347,
+      "max_latency_p99_ratio": 1.8106
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "small",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.2951,
-      "max_latency_p50_ratio": 3.4732,
-      "max_latency_p99_ratio": 3.2379
+      "min_throughput_ratio": 0.3228,
+      "max_latency_p50_ratio": 3.1977,
+      "max_latency_p99_ratio": 3.1474
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "small",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.2965,
-      "max_latency_p50_ratio": 3.3606,
-      "max_latency_p99_ratio": 3.0396
+      "min_throughput_ratio": 0.3101,
+      "max_latency_p50_ratio": 3.2988,
+      "max_latency_p99_ratio": 2.8807
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "small",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.311,
-      "max_latency_p50_ratio": 3.3276,
-      "max_latency_p99_ratio": 3.139
+      "min_throughput_ratio": 0.3373,
+      "max_latency_p50_ratio": 3.0344,
+      "max_latency_p99_ratio": 2.8445
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "small",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.3693,
-      "max_latency_p50_ratio": 2.931,
-      "max_latency_p99_ratio": 2.2148
+      "min_throughput_ratio": 0.3888,
+      "max_latency_p50_ratio": 2.8144,
+      "max_latency_p99_ratio": 2.2185
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "small",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.37,
-      "max_latency_p50_ratio": 2.9093,
-      "max_latency_p99_ratio": 2.2634
+      "min_throughput_ratio": 0.3794,
+      "max_latency_p50_ratio": 2.8517,
+      "max_latency_p99_ratio": 2.1609
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "small",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.3496,
-      "max_latency_p50_ratio": 3.1567,
-      "max_latency_p99_ratio": 2.2247
+      "min_throughput_ratio": 0.3609,
+      "max_latency_p50_ratio": 3.0429,
+      "max_latency_p99_ratio": 2.0999
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "stream",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6068,
-      "max_latency_p50_ratio": 1.6744,
-      "max_latency_p99_ratio": 1.7777
+      "min_throughput_ratio": 0.6204,
+      "max_latency_p50_ratio": 1.6428,
+      "max_latency_p99_ratio": 1.7549
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "stream",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6431,
-      "max_latency_p50_ratio": 1.6166,
-      "max_latency_p99_ratio": 1.292
+      "min_throughput_ratio": 0.6501,
+      "max_latency_p50_ratio": 1.6067,
+      "max_latency_p99_ratio": 1.2536
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "stream",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6342,
-      "max_latency_p50_ratio": 1.6619,
-      "max_latency_p99_ratio": 1.2753
+      "min_throughput_ratio": 0.6607,
+      "max_latency_p50_ratio": 1.5586,
+      "max_latency_p99_ratio": 1.3764
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "stream",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8738,
-      "max_latency_p50_ratio": 1.1406,
-      "max_latency_p99_ratio": 1.3246
+      "min_throughput_ratio": 0.8652,
+      "max_latency_p50_ratio": 1.1457,
+      "max_latency_p99_ratio": 1.2766
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "stream",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7984,
-      "max_latency_p50_ratio": 1.1908
+      "min_throughput_ratio": 0.883,
+      "max_latency_p50_ratio": 1.1492,
+      "max_latency_p99_ratio": 1.2924
     },
     {
       "scenario": "alloy-logs-fmt",
       "workload": "stream",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8498,
-      "max_latency_p50_ratio": 1.1896,
-      "max_latency_p99_ratio": 1.2429
+      "min_throughput_ratio": 0.8876,
+      "max_latency_p50_ratio": 1.141,
+      "max_latency_p99_ratio": 1.2316
     },
     {
       "scenario": "otel-collector",
       "workload": "cancel",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7858,
-      "max_latency_p50_ratio": 1.3621,
-      "max_latency_p99_ratio": 1.3511
+      "min_throughput_ratio": 0.7658,
+      "max_latency_p50_ratio": 1.3902,
+      "max_latency_p99_ratio": 1.2349
     },
     {
       "scenario": "otel-collector",
       "workload": "cancel",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6662,
-      "max_latency_p50_ratio": 1.2564,
-      "max_latency_p99_ratio": 1.4551
+      "min_throughput_ratio": 0.6494,
+      "max_latency_p50_ratio": 1.2793,
+      "max_latency_p99_ratio": 1.4591
     },
     {
       "scenario": "otel-collector",
       "workload": "cancel",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8639,
-      "max_latency_p50_ratio": 0.9958,
-      "max_latency_p99_ratio": 1.176
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "cancel",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6442,
-      "max_latency_p50_ratio": 1.5598,
-      "max_latency_p99_ratio": 1.515
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "cancel",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.625,
-      "max_latency_p50_ratio": 1.599,
-      "max_latency_p99_ratio": 1.5077
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "cancel",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6428,
-      "max_latency_p50_ratio": 1.6283
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "large",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4713,
-      "max_latency_p50_ratio": 2.1056,
-      "max_latency_p99_ratio": 2.5072
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "large",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6046,
-      "max_latency_p50_ratio": 1.6139,
-      "max_latency_p99_ratio": 1.7073
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "large",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6128,
-      "max_latency_p50_ratio": 1.6177,
-      "max_latency_p99_ratio": 1.7706
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "large",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6925,
-      "max_latency_p50_ratio": 1.4729,
-      "max_latency_p99_ratio": 1.4894
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "large",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6774,
-      "max_latency_p50_ratio": 1.5343,
-      "max_latency_p99_ratio": 1.5122
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "large",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5878,
-      "max_latency_p50_ratio": 1.6788,
-      "max_latency_p99_ratio": 1.7974
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "small",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3426,
-      "max_latency_p50_ratio": 2.7075,
-      "max_latency_p99_ratio": 4.0848
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "small",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3256,
-      "max_latency_p50_ratio": 2.9025
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "small",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3622,
-      "max_latency_p50_ratio": 2.6923,
-      "max_latency_p99_ratio": 3.8203
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "small",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3937,
-      "max_latency_p50_ratio": 2.4979,
-      "max_latency_p99_ratio": 2.8563
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "small",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3989,
-      "max_latency_p50_ratio": 2.4342,
-      "max_latency_p99_ratio": 2.8982
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "small",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3638,
-      "max_latency_p50_ratio": 2.7146,
-      "max_latency_p99_ratio": 2.9807
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "stream",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5634,
-      "max_latency_p50_ratio": 1.7592,
-      "max_latency_p99_ratio": 2.1482
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "stream",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.598,
-      "max_latency_p50_ratio": 1.6821,
-      "max_latency_p99_ratio": 1.6127
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "stream",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6039,
-      "max_latency_p50_ratio": 1.6849,
-      "max_latency_p99_ratio": 1.6685
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "stream",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8265,
-      "max_latency_p50_ratio": 1.2111,
-      "max_latency_p99_ratio": 1.3796
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "stream",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.822,
-      "max_latency_p50_ratio": 1.2214
-    },
-    {
-      "scenario": "otel-collector",
-      "workload": "stream",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8302,
-      "max_latency_p50_ratio": 1.2072,
-      "max_latency_p99_ratio": 1.502
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "cancel",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8048,
-      "max_latency_p50_ratio": 1.3594,
-      "max_latency_p99_ratio": 1.1705
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "cancel",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6599,
-      "max_latency_p50_ratio": 1.2776,
-      "max_latency_p99_ratio": 1.4525
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "cancel",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8836,
-      "max_latency_p50_ratio": 0.9561,
-      "max_latency_p99_ratio": 1.1492
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "cancel",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6691,
-      "max_latency_p50_ratio": 1.5022,
-      "max_latency_p99_ratio": 1.4488
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "cancel",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6757,
-      "max_latency_p50_ratio": 1.4928,
-      "max_latency_p99_ratio": 1.4477
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "cancel",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6496,
-      "max_latency_p50_ratio": 1.6045,
-      "max_latency_p99_ratio": 1.4312
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "large",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5145,
-      "max_latency_p50_ratio": 1.9489,
-      "max_latency_p99_ratio": 2.0519
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "large",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6818,
-      "max_latency_p50_ratio": 1.4646,
-      "max_latency_p99_ratio": 1.3712
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "large",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6708,
-      "max_latency_p50_ratio": 1.4743
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "large",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7315,
-      "max_latency_p50_ratio": 1.3797,
-      "max_latency_p99_ratio": 1.2367
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "large",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7452,
-      "max_latency_p50_ratio": 1.3577,
+      "min_throughput_ratio": 0.8663,
+      "max_latency_p50_ratio": 0.9559,
       "max_latency_p99_ratio": 1.1994
     },
     {
+      "scenario": "otel-collector",
+      "workload": "cancel",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.651,
+      "max_latency_p50_ratio": 1.5235,
+      "max_latency_p99_ratio": 1.5483
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "cancel",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6535,
+      "max_latency_p50_ratio": 1.5336,
+      "max_latency_p99_ratio": 1.5169
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "cancel",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5878,
+      "max_latency_p50_ratio": 1.5844
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "large",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4743,
+      "max_latency_p50_ratio": 2.0807,
+      "max_latency_p99_ratio": 2.4627
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "large",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.643,
+      "max_latency_p50_ratio": 1.5429,
+      "max_latency_p99_ratio": 1.6826
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "large",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6266,
+      "max_latency_p50_ratio": 1.5367,
+      "max_latency_p99_ratio": 1.7042
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "large",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6958,
+      "max_latency_p50_ratio": 1.4371,
+      "max_latency_p99_ratio": 1.518
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "large",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7041,
+      "max_latency_p50_ratio": 1.4501,
+      "max_latency_p99_ratio": 1.462
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "large",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6468,
+      "max_latency_p50_ratio": 1.4905,
+      "max_latency_p99_ratio": 1.7755
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "small",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3731,
+      "max_latency_p50_ratio": 2.5622,
+      "max_latency_p99_ratio": 3.9092
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "small",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3737,
+      "max_latency_p50_ratio": 2.6313,
+      "max_latency_p99_ratio": 3.3385
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "small",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3694,
+      "max_latency_p50_ratio": 2.6938,
+      "max_latency_p99_ratio": 3.4511
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "small",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4089,
+      "max_latency_p50_ratio": 2.3388,
+      "max_latency_p99_ratio": 3.0157
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "small",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4084,
+      "max_latency_p50_ratio": 2.3794,
+      "max_latency_p99_ratio": 2.9331
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "small",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.3813,
+      "max_latency_p50_ratio": 2.5398,
+      "max_latency_p99_ratio": 3.0814
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "stream",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5539,
+      "max_latency_p50_ratio": 1.7693
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "stream",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6316,
+      "max_latency_p50_ratio": 1.5926,
+      "max_latency_p99_ratio": 1.5425
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "stream",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6277,
+      "max_latency_p50_ratio": 1.594,
+      "max_latency_p99_ratio": 1.6062
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "stream",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8343,
+      "max_latency_p50_ratio": 1.2173,
+      "max_latency_p99_ratio": 1.3967
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "stream",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8371,
+      "max_latency_p50_ratio": 1.2147,
+      "max_latency_p99_ratio": 1.4249
+    },
+    {
+      "scenario": "otel-collector",
+      "workload": "stream",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8044,
+      "max_latency_p50_ratio": 1.2865,
+      "max_latency_p99_ratio": 1.5014
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "cancel",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7298,
+      "max_latency_p50_ratio": 1.4582
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "cancel",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6616,
+      "max_latency_p50_ratio": 1.28,
+      "max_latency_p99_ratio": 1.3832
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "cancel",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8692,
+      "max_latency_p50_ratio": 0.9623,
+      "max_latency_p99_ratio": 1.1232
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "cancel",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6508,
+      "max_latency_p50_ratio": 1.5644,
+      "max_latency_p99_ratio": 1.4746
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "cancel",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6565,
+      "max_latency_p50_ratio": 1.5556,
+      "max_latency_p99_ratio": 1.4622
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "cancel",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6503,
+      "max_latency_p50_ratio": 1.5559,
+      "max_latency_p99_ratio": 1.4786
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "large",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5502,
+      "max_latency_p50_ratio": 1.7823,
+      "max_latency_p99_ratio": 1.9134
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "large",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7113,
+      "max_latency_p50_ratio": 1.3854,
+      "max_latency_p99_ratio": 1.4126
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "large",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6543,
+      "max_latency_p50_ratio": 1.5
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "large",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7498,
+      "max_latency_p50_ratio": 1.371,
+      "max_latency_p99_ratio": 1.1403
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "large",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7274,
+      "max_latency_p50_ratio": 1.4248,
+      "max_latency_p99_ratio": 1.2262
+    },
+    {
       "scenario": "otel-sampled",
       "workload": "large",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5899,
-      "max_latency_p99_ratio": 1.4281
+      "min_throughput_ratio": 0.6879,
+      "max_latency_p50_ratio": 1.4372,
+      "max_latency_p99_ratio": 1.3336
     },
     {
       "scenario": "otel-sampled",
       "workload": "small",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4304,
-      "max_latency_p50_ratio": 2.3383,
-      "max_latency_p99_ratio": 2.696
+      "min_throughput_ratio": 0.4419,
+      "max_latency_p50_ratio": 2.2279,
+      "max_latency_p99_ratio": 2.6834
     },
     {
       "scenario": "otel-sampled",
       "workload": "small",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4211,
-      "max_latency_p50_ratio": 2.4745,
-      "max_latency_p99_ratio": 2.5224
+      "min_throughput_ratio": 0.4498,
+      "max_latency_p50_ratio": 2.3192,
+      "max_latency_p99_ratio": 2.4355
     },
     {
       "scenario": "otel-sampled",
       "workload": "small",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.418,
-      "max_latency_p50_ratio": 2.4676,
-      "max_latency_p99_ratio": 2.5754
+      "min_throughput_ratio": 0.4257,
+      "max_latency_p50_ratio": 2.3879,
+      "max_latency_p99_ratio": 2.5174
     },
     {
       "scenario": "otel-sampled",
       "workload": "small",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4625,
-      "max_latency_p50_ratio": 2.1979,
-      "max_latency_p99_ratio": 2.1344
+      "min_throughput_ratio": 0.4867,
+      "max_latency_p50_ratio": 2.105,
+      "max_latency_p99_ratio": 2.0058
     },
     {
       "scenario": "otel-sampled",
+      "workload": "small",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4505,
+      "max_latency_p50_ratio": 2.1802
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "small",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4719,
+      "max_latency_p50_ratio": 2.1869,
+      "max_latency_p99_ratio": 2.165
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "stream",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6215,
+      "max_latency_p50_ratio": 1.6384,
+      "max_latency_p99_ratio": 1.7278
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "stream",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6667,
+      "max_latency_p50_ratio": 1.543,
+      "max_latency_p99_ratio": 1.2983
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "stream",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6806,
+      "max_latency_p50_ratio": 1.5339
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "stream",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8433,
+      "max_latency_p50_ratio": 1.2056,
+      "max_latency_p99_ratio": 1.4085
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "stream",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8484,
+      "max_latency_p50_ratio": 1.1933,
+      "max_latency_p99_ratio": 1.3568
+    },
+    {
+      "scenario": "otel-sampled",
+      "workload": "stream",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8356,
+      "max_latency_p50_ratio": 1.1948,
+      "max_latency_p99_ratio": 1.2561
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "cancel",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8444,
+      "max_latency_p50_ratio": 1.2902,
+      "max_latency_p99_ratio": 1.1428
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "cancel",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6465,
+      "max_latency_p50_ratio": 1.3026,
+      "max_latency_p99_ratio": 1.3619
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "cancel",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.8652,
+      "max_latency_p50_ratio": 0.9805,
+      "max_latency_p99_ratio": 1.1279
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "cancel",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6634,
+      "max_latency_p50_ratio": 1.5419,
+      "max_latency_p99_ratio": 1.5392
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "cancel",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6528,
+      "max_latency_p50_ratio": 1.5291,
+      "max_latency_p99_ratio": 1.5537
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "cancel",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.5963,
+      "max_latency_p50_ratio": 1.6752
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "large",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.511,
+      "max_latency_p50_ratio": 1.8782
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "large",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.682,
+      "max_latency_p50_ratio": 1.4452,
+      "max_latency_p99_ratio": 1.4474
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "large",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6922,
+      "max_latency_p50_ratio": 1.4219,
+      "max_latency_p99_ratio": 1.4058
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "large",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7205,
+      "max_latency_p50_ratio": 1.4164,
+      "max_latency_p99_ratio": 1.2628
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "large",
+      "transport": "h2-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.7417,
+      "max_latency_p50_ratio": 1.3717
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "large",
+      "transport": "h2c",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.6835,
+      "max_latency_p50_ratio": 1.494,
+      "max_latency_p99_ratio": 1.4462
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "small",
+      "transport": "h1",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4186,
+      "max_latency_p50_ratio": 2.3129,
+      "max_latency_p99_ratio": 2.9234
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "small",
+      "transport": "h1-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4359,
+      "max_latency_p50_ratio": 2.4457,
+      "max_latency_p99_ratio": 2.6441
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "small",
+      "transport": "h1-tls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.4034,
+      "max_latency_p50_ratio": 2.4947
+    },
+    {
+      "scenario": "otel-unreachable",
+      "workload": "small",
+      "transport": "h2-mtls",
+      "alloc_counting": false,
+      "min_throughput_ratio": 0.473,
+      "max_latency_p50_ratio": 2.1295,
+      "max_latency_p99_ratio": 2.3834
+    },
+    {
+      "scenario": "otel-unreachable",
       "workload": "small",
       "transport": "h2-tls",
       "alloc_counting": false,
       "min_throughput_ratio": 0.465,
-      "max_latency_p50_ratio": 2.232,
-      "max_latency_p99_ratio": 2.1088
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "small",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4398,
-      "max_latency_p50_ratio": 2.3856,
-      "max_latency_p99_ratio": 2.2693
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "stream",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6167,
-      "max_latency_p50_ratio": 1.6209,
-      "max_latency_p99_ratio": 1.7431
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "stream",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6184,
-      "max_latency_p50_ratio": 1.5899,
-      "max_latency_p99_ratio": 1.3735
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "stream",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6488,
-      "max_latency_p50_ratio": 1.593,
-      "max_latency_p99_ratio": 1.3587
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "stream",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8206,
-      "max_latency_p50_ratio": 1.2534,
-      "max_latency_p99_ratio": 1.3929
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "stream",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8263,
-      "max_latency_p50_ratio": 1.1921
-    },
-    {
-      "scenario": "otel-sampled",
-      "workload": "stream",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.822,
-      "max_latency_p50_ratio": 1.2426,
-      "max_latency_p99_ratio": 1.367
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "cancel",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7949,
-      "max_latency_p50_ratio": 1.338,
-      "max_latency_p99_ratio": 1.2321
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "cancel",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.661,
-      "max_latency_p50_ratio": 1.312,
-      "max_latency_p99_ratio": 1.4197
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "cancel",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.8585,
-      "max_latency_p50_ratio": 0.9679,
-      "max_latency_p99_ratio": 1.1698
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "cancel",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6534,
-      "max_latency_p50_ratio": 1.5557,
-      "max_latency_p99_ratio": 1.4833
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "cancel",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6713,
-      "max_latency_p50_ratio": 1.5186,
-      "max_latency_p99_ratio": 1.4572
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "cancel",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6342,
-      "max_latency_p50_ratio": 1.5985,
-      "max_latency_p99_ratio": 1.4351
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "large",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.5148,
-      "max_latency_p50_ratio": 1.9175,
-      "max_latency_p99_ratio": 2.0319
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "large",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6666,
-      "max_latency_p50_ratio": 1.4693,
-      "max_latency_p99_ratio": 1.4189
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "large",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6558,
-      "max_latency_p50_ratio": 1.5693,
-      "max_latency_p99_ratio": 1.4829
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "large",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.6974,
-      "max_latency_p50_ratio": 1.4199,
-      "max_latency_p99_ratio": 1.3187
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "large",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.7235,
-      "max_latency_p50_ratio": 1.4429,
-      "max_latency_p99_ratio": 1.3148
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "large",
-      "transport": "h2c",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.638,
-      "max_latency_p50_ratio": 1.567,
-      "max_latency_p99_ratio": 1.5009
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "small",
-      "transport": "h1",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4072,
-      "max_latency_p50_ratio": 2.4272,
-      "max_latency_p99_ratio": 3.0601
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "small",
-      "transport": "h1-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3892,
-      "max_latency_p50_ratio": 2.5779
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "small",
-      "transport": "h1-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.3936,
-      "max_latency_p50_ratio": 2.4805,
-      "max_latency_p99_ratio": 3.0381
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "small",
-      "transport": "h2-mtls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4525,
-      "max_latency_p50_ratio": 2.202,
-      "max_latency_p99_ratio": 2.4256
-    },
-    {
-      "scenario": "otel-unreachable",
-      "workload": "small",
-      "transport": "h2-tls",
-      "alloc_counting": false,
-      "min_throughput_ratio": 0.4365,
-      "max_latency_p50_ratio": 2.3354,
-      "max_latency_p99_ratio": 2.459
+      "max_latency_p50_ratio": 2.1284,
+      "max_latency_p99_ratio": 2.3879
     },
     {
       "scenario": "otel-unreachable",
       "workload": "small",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4283,
-      "max_latency_p50_ratio": 2.3261,
-      "max_latency_p99_ratio": 2.7068
+      "min_throughput_ratio": 0.4417,
+      "max_latency_p50_ratio": 2.3542,
+      "max_latency_p99_ratio": 2.6413
     },
     {
       "scenario": "otel-unreachable",
       "workload": "stream",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5915,
-      "max_latency_p50_ratio": 1.6896,
-      "max_latency_p99_ratio": 1.9389
+      "min_throughput_ratio": 0.6165,
+      "max_latency_p50_ratio": 1.6279,
+      "max_latency_p99_ratio": 1.7541
     },
     {
       "scenario": "otel-unreachable",
       "workload": "stream",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.627,
-      "max_latency_p50_ratio": 1.6408,
-      "max_latency_p99_ratio": 1.3914
+      "min_throughput_ratio": 0.6623,
+      "max_latency_p50_ratio": 1.5392,
+      "max_latency_p99_ratio": 1.3641
     },
     {
       "scenario": "otel-unreachable",
       "workload": "stream",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6011,
-      "max_latency_p50_ratio": 1.6537
+      "min_throughput_ratio": 0.6136,
+      "max_latency_p50_ratio": 1.5586
     },
     {
       "scenario": "otel-unreachable",
       "workload": "stream",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8386,
-      "max_latency_p50_ratio": 1.1869,
-      "max_latency_p99_ratio": 1.47
+      "min_throughput_ratio": 0.8254,
+      "max_latency_p50_ratio": 1.2301,
+      "max_latency_p99_ratio": 1.4071
     },
     {
       "scenario": "otel-unreachable",
       "workload": "stream",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8163,
-      "max_latency_p50_ratio": 1.2282,
-      "max_latency_p99_ratio": 1.4319
+      "min_throughput_ratio": 0.8489,
+      "max_latency_p50_ratio": 1.2011,
+      "max_latency_p99_ratio": 1.4466
     },
     {
       "scenario": "otel-unreachable",
       "workload": "stream",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8382,
-      "max_latency_p50_ratio": 1.214,
-      "max_latency_p99_ratio": 1.3315
+      "min_throughput_ratio": 0.8388,
+      "max_latency_p50_ratio": 1.209,
+      "max_latency_p99_ratio": 1.3578
     },
     {
       "scenario": "otel-unsampled",
       "workload": "cancel",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8409,
-      "max_latency_p50_ratio": 1.2733,
-      "max_latency_p99_ratio": 1.0808
+      "min_throughput_ratio": 0.7848,
+      "max_latency_p50_ratio": 1.3731,
+      "max_latency_p99_ratio": 1.1105
     },
     {
       "scenario": "otel-unsampled",
       "workload": "cancel",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "max_latency_p50_ratio": 1.3383
+      "min_throughput_ratio": 0.6423,
+      "max_latency_p50_ratio": 1.2918,
+      "max_latency_p99_ratio": 1.4444
     },
     {
       "scenario": "otel-unsampled",
       "workload": "cancel",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8601,
-      "max_latency_p50_ratio": 0.9907,
-      "max_latency_p99_ratio": 1.1914
+      "min_throughput_ratio": 0.8497,
+      "max_latency_p50_ratio": 1.012,
+      "max_latency_p99_ratio": 1.1595
     },
     {
       "scenario": "otel-unsampled",
       "workload": "cancel",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6657,
-      "max_latency_p50_ratio": 1.5476,
-      "max_latency_p99_ratio": 1.3938
+      "min_throughput_ratio": 0.6658,
+      "max_latency_p50_ratio": 1.5199,
+      "max_latency_p99_ratio": 1.4824
     },
     {
       "scenario": "otel-unsampled",
       "workload": "cancel",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6801,
-      "max_latency_p50_ratio": 1.5243,
-      "max_latency_p99_ratio": 1.4138
+      "min_throughput_ratio": 0.6773,
+      "max_latency_p50_ratio": 1.5048,
+      "max_latency_p99_ratio": 1.3664
     },
     {
       "scenario": "otel-unsampled",
       "workload": "cancel",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6443,
-      "max_latency_p50_ratio": 1.6055,
-      "max_latency_p99_ratio": 1.4842
+      "max_latency_p50_ratio": 1.7125
     },
     {
       "scenario": "otel-unsampled",
       "workload": "large",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5479,
-      "max_latency_p50_ratio": 1.8205,
-      "max_latency_p99_ratio": 1.7636
+      "min_throughput_ratio": 0.5723,
+      "max_latency_p50_ratio": 1.7164,
+      "max_latency_p99_ratio": 1.7576
     },
     {
       "scenario": "otel-unsampled",
       "workload": "large",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7155,
-      "max_latency_p50_ratio": 1.3995,
-      "max_latency_p99_ratio": 1.299
+      "min_throughput_ratio": 0.7262,
+      "max_latency_p50_ratio": 1.3745,
+      "max_latency_p99_ratio": 1.2898
     },
     {
       "scenario": "otel-unsampled",
       "workload": "large",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.75,
-      "max_latency_p50_ratio": 1.3443,
-      "max_latency_p99_ratio": 1.3171
+      "min_throughput_ratio": 0.7393,
+      "max_latency_p50_ratio": 1.3725
     },
     {
       "scenario": "otel-unsampled",
       "workload": "large",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7878,
-      "max_latency_p50_ratio": 1.2964,
-      "max_latency_p99_ratio": 1.1575
+      "min_throughput_ratio": 0.7884,
+      "max_latency_p50_ratio": 1.2988,
+      "max_latency_p99_ratio": 1.0877
     },
     {
       "scenario": "otel-unsampled",
       "workload": "large",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.7797,
-      "max_latency_p50_ratio": 1.3063,
-      "max_latency_p99_ratio": 1.1607
+      "min_throughput_ratio": 0.8158,
+      "max_latency_p50_ratio": 1.2758,
+      "max_latency_p99_ratio": 1.1902
     },
     {
       "scenario": "otel-unsampled",
       "workload": "large",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6285,
-      "max_latency_p50_ratio": 1.633,
-      "max_latency_p99_ratio": 1.4447
+      "min_throughput_ratio": 0.7016,
+      "max_latency_p50_ratio": 1.4233,
+      "max_latency_p99_ratio": 1.291
     },
     {
       "scenario": "otel-unsampled",
       "workload": "small",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4691,
-      "max_latency_p50_ratio": 2.2192,
-      "max_latency_p99_ratio": 2.1491
+      "min_throughput_ratio": 0.484,
+      "max_latency_p50_ratio": 2.1061,
+      "max_latency_p99_ratio": 2.1047
     },
     {
       "scenario": "otel-unsampled",
       "workload": "small",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4525,
-      "max_latency_p50_ratio": 2.2662,
-      "max_latency_p99_ratio": 2.0537
+      "min_throughput_ratio": 0.4802,
+      "max_latency_p50_ratio": 2.1412,
+      "max_latency_p99_ratio": 1.9591
     },
     {
       "scenario": "otel-unsampled",
       "workload": "small",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.4438,
-      "max_latency_p50_ratio": 2.3824,
-      "max_latency_p99_ratio": 2.1256
+      "min_throughput_ratio": 0.472,
+      "max_latency_p50_ratio": 2.1756,
+      "max_latency_p99_ratio": 2.0263
     },
     {
       "scenario": "otel-unsampled",
       "workload": "small",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5065,
-      "max_latency_p50_ratio": 2.0069,
-      "max_latency_p99_ratio": 1.9376
+      "min_throughput_ratio": 0.531,
+      "max_latency_p50_ratio": 1.962,
+      "max_latency_p99_ratio": 1.7933
     },
     {
       "scenario": "otel-unsampled",
       "workload": "small",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5139,
-      "max_latency_p50_ratio": 1.9977,
-      "max_latency_p99_ratio": 1.9581
+      "min_throughput_ratio": 0.5343,
+      "max_latency_p50_ratio": 1.9173,
+      "max_latency_p99_ratio": 1.7867
     },
     {
       "scenario": "otel-unsampled",
       "workload": "small",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.5036,
-      "max_latency_p50_ratio": 2.0523,
-      "max_latency_p99_ratio": 2.1398
+      "min_throughput_ratio": 0.5215,
+      "max_latency_p50_ratio": 1.9801,
+      "max_latency_p99_ratio": 1.8917
     },
     {
       "scenario": "otel-unsampled",
       "workload": "stream",
       "transport": "h1",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6412,
-      "max_latency_p50_ratio": 1.602,
-      "max_latency_p99_ratio": 1.5711
+      "min_throughput_ratio": 0.6254,
+      "max_latency_p50_ratio": 1.6299,
+      "max_latency_p99_ratio": 1.4624
     },
     {
       "scenario": "otel-unsampled",
       "workload": "stream",
       "transport": "h1-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6838,
-      "max_latency_p50_ratio": 1.5078,
-      "max_latency_p99_ratio": 1.2339
+      "min_throughput_ratio": 0.6808,
+      "max_latency_p50_ratio": 1.5086,
+      "max_latency_p99_ratio": 1.2724
     },
     {
       "scenario": "otel-unsampled",
       "workload": "stream",
       "transport": "h1-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.6802,
-      "max_latency_p50_ratio": 1.5409,
-      "max_latency_p99_ratio": 1.23
+      "min_throughput_ratio": 0.6385,
+      "max_latency_p50_ratio": 1.5106
     },
     {
       "scenario": "otel-unsampled",
       "workload": "stream",
       "transport": "h2-mtls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8588,
-      "max_latency_p50_ratio": 1.1742,
-      "max_latency_p99_ratio": 1.2323
+      "min_throughput_ratio": 0.8593,
+      "max_latency_p50_ratio": 1.1936,
+      "max_latency_p99_ratio": 1.3122
     },
     {
       "scenario": "otel-unsampled",
       "workload": "stream",
       "transport": "h2-tls",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8492,
-      "max_latency_p50_ratio": 1.1902,
-      "max_latency_p99_ratio": 1.3123
+      "min_throughput_ratio": 0.863,
+      "max_latency_p50_ratio": 1.147,
+      "max_latency_p99_ratio": 1.2976
     },
     {
       "scenario": "otel-unsampled",
       "workload": "stream",
       "transport": "h2c",
       "alloc_counting": false,
-      "min_throughput_ratio": 0.8451,
-      "max_latency_p50_ratio": 1.1632,
-      "max_latency_p99_ratio": 1.2662
+      "min_throughput_ratio": 0.8542,
+      "max_latency_p50_ratio": 1.1834,
+      "max_latency_p99_ratio": 1.2596
     }
   ]
 }

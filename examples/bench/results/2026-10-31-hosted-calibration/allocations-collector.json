@@ -1,17 +1,17 @@
 {
   "classification": "shared GitHub-hosted experimental; not dedicated baseline acceptance",
   "raw_file": "allocations.jsonl",
-  "raw_sha256": "bfb0880f70f40db432716046fceb33a706fd7e948c19e195e620c4d0d069f007",
+  "raw_sha256": "f92ae0b4fb802da0224611ee24e1b95ecc2d38ed1a0e723e0930659881bd5bac",
   "endpoint": "http://127.0.0.1:4318/v1/traces",
   "co_located": true,
   "receiver_spans_delta": {
-    "accepted": 10526720,
+    "accepted": 10880512,
     "refused": 0,
     "failed": 0
   },
-  "window_spans_exported": 8789504,
-  "accepted_outside_windows": 1737216,
-  "collector_cpu_usec_delta": 153325920,
-  "collector_memory_peak_bytes_before": 32972800,
-  "collector_memory_peak_bytes_after": 58855424
+  "window_spans_exported": 9083392,
+  "accepted_outside_windows": 1797120,
+  "collector_cpu_usec_delta": 155979008,
+  "collector_memory_peak_bytes_before": 34275328,
+  "collector_memory_peak_bytes_after": 59846656
 }

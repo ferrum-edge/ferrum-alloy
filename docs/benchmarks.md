@@ -178,38 +178,41 @@ A budget computed from result lines must use only lines with `errors == 0`, beca
 
 ### Calibration (2026-10-31)
 
-[Run 41192218581](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41192218581) calibrated `main` at [`bea5e73`](https://github.com/ferrum-edge/ferrum-alloy/commit/bea5e7386986a9cc6a1ce140bf9f85b05115c4e8). Every slot succeeded on its first attempt: eighteen full matrices of 1,080 runs each with zero client errors and passing Collector accounting, eighteen positive controls, and the allocation-counting slot. The derivation was **accepted**, with one model published.
+[Run 41250532573](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41250532573) calibrated `main` at [`2d0b8a8`](https://github.com/ferrum-edge/ferrum-alloy/commit/2d0b8a843be7885e9222ab1598ad2b7f22ea24d7). Every slot succeeded on its first attempt: eighteen full matrices of 1,080 runs each with zero client errors and passing Collector accounting, eighteen positive controls, and the allocation-counting slot. The derivation was **accepted**, with one model published.
 
 | CPU model | Calibration runs | Outcome |
 |---|---:|---|
 | AMD EPYC 7763 64-Core Processor | 9 | Published: `examples/bench/budgets/model-amd-epyc-7763-64-core-processor.json` |
-| AMD EPYC 9V74 80-Core Processor | 3 | Uncalibrated (fewer than five runs) |
-| AMD EPYC 9V45 96-Core Processor | 3 | Uncalibrated |
-| Intel Xeon 6975P-C | 3 | Uncalibrated |
+| AMD EPYC 9V45 96-Core Processor | 4 | Uncalibrated (fewer than five runs) |
+| AMD EPYC 9V74 80-Core Processor | 3 | Uncalibrated |
+| Intel Xeon Platinum 8573C | 1 | Uncalibrated |
+| Intel Xeon Platinum 8370C | 1 | Uncalibrated |
 
-The Intel Xeon Platinum 8370C and 8573C models seen in earlier runs drew no slot this time. The gate checks only AMD EPYC 7763 runners. In this calibration half the slots landed on one, so all five gate slots miss one about one run in thirty, and that gate run fails for want of a calibrated run, as described above.
+The gate checks only AMD EPYC 7763 runners. Half of the calibration slots landed on one, so all five gate slots miss one about one run in thirty, and that gate run fails for want of a calibrated run, as described above.
 
 For AMD EPYC 7763:
 
-- **Coverage:** 552 of 576 cell metrics (95.8%) have a limit. 23 were too noisy (their nine-run spread put the margin above the cap; 20 of them are p99 latency, mostly in `stream` and `cancel` cells), and screening removed 1.
-- **Held-out screening:** five of the nine runs passed limits derived from the other eight. Four exceeded six limits in all; five of those six were already without a limit in the full derivation, because adding the held-out run took their spread past the cap. Screening removed the sixth, `otel-unsampled` `cancel` `h1-mtls` `min_throughput_ratio`.
-- **Positive controls:** all nine were caught. Each exceeded four or five of the six control cells' screened limits.
-- **Resolution:** the margin in log space has a median of 0.080 for `throughput_ratio` (0.037 to 0.195), 0.083 for `latency_p50_ratio`, and 0.111 for `latency_p99_ratio`. A margin of 0.080 means a cell's throughput ratio must fall by about 7.7% before its limit fails. Each cell's own margin is in `derivation.json`.
+- **Coverage:** 540 of 576 cell metrics (93.8%) have a limit. 33 were too noisy (their nine-run spread put the margin above the cap; 28 of them are p99 latency, mostly in `stream` and `cancel` cells), and screening removed 3.
+- **Held-out screening:** seven of the nine runs passed limits derived from the other eight. Two exceeded seven limits in all. Four of them, all p99 latency, were already without a limit in the full derivation, because adding the held-out run took their spread past the cap. Screening removed the other three, all `alloy-logs`: `min_throughput_ratio` and `max_latency_p50_ratio` in `stream` `h1-tls`, and `max_latency_p50_ratio` in `cancel` `h2c`.
+- **Positive controls:** all nine were caught. Each exceeded three to five of the six control cells' screened limits.
+- **Resolution:** the margin in log space has a median of 0.078 for `throughput_ratio` (0.034 to 0.193), 0.077 for `latency_p50_ratio`, and 0.114 for `latency_p99_ratio`. A margin of 0.078 means a cell's throughput ratio must fall by about 7.5% before its limit fails. Each cell's own margin is in `derivation.json`.
 
 Centers (the median of the nine run medians) and limits for `small` over `h1`, for reference:
 
 | Scenario | Throughput / `plain` | Limit | p50 latency / `plain` | Limit |
 |---|---:|---:|---:|---:|
-| `alloy` | 0.572 | ≥ 0.5345 | 1.794 | ≤ 1.9177 |
-| `alloy-logs` | 0.496 | ≥ 0.4597 | 2.092 | ≤ 2.2749 |
-| `alloy-logs-fmt` | 0.327 | ≥ 0.2951 | 3.146 | ≤ 3.4732 |
-| `alloy-diagnostics` | 0.468 | ≥ 0.4444 | 2.158 | ≤ 2.3015 |
-| `otel-unsampled` | 0.495 | ≥ 0.4691 | 2.104 | ≤ 2.2192 |
-| `otel-sampled` | 0.460 | ≥ 0.4304 | 2.174 | ≤ 2.3383 |
-| `otel-unreachable` | 0.441 | ≥ 0.4072 | 2.235 | ≤ 2.4272 |
-| `otel-collector` | 0.376 | ≥ 0.3426 | 2.462 | ≤ 2.7075 |
+| `alloy` | 0.602 | ≥ 0.5755 | 1.688 | ≤ 1.7774 |
+| `alloy-logs` | 0.517 | ≥ 0.4859 | 2.018 | ≤ 2.1687 |
+| `alloy-logs-fmt` | 0.343 | ≥ 0.3228 | 3.000 | ≤ 3.1977 |
+| `alloy-diagnostics` | 0.493 | ≥ 0.4340 | 2.073 | ≤ 2.2202 |
+| `otel-unsampled` | 0.514 | ≥ 0.4840 | 2.020 | ≤ 2.1061 |
+| `otel-sampled` | 0.480 | ≥ 0.4419 | 2.112 | ≤ 2.2279 |
+| `otel-unreachable` | 0.463 | ≥ 0.4186 | 2.164 | ≤ 2.3129 |
+| `otel-collector` | 0.396 | ≥ 0.3731 | 2.365 | ≤ 2.5622 |
 
 These ratios are measured with the service, the client, and (for `otel-collector`) the Collector sharing four vCPUs, against a handler that does no work. They are a regression baseline, not a statement of Alloy's cost under production load.
+
+**An earlier calibration, superseded.** [Run 41192218581](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41192218581) calibrated `bea5e73` with the same rule. It was also accepted, for AMD EPYC 7763 only (nine runs; limits on 552 of 576 cell metrics; all nine controls caught). Before its budgets were committed, [#269](https://github.com/ferrum-edge/ferrum-alloy/pull/269) changed `AlloyApp`'s middleware composition. That raised every Alloy scenario's ratios, so budgets from the older code would have let a regression of the same size pass. Between the two calibrations, the median change per scenario across its 24 cells was +1.4% to +2.2% in `throughput_ratio` and −1.3% to −2.1% in `latency_p50_ratio`; for `alloy` `small` `h1` the throughput ratio went from 0.572 to 0.602. In each scenario, two to five cells per metric moved by more than the two calibrations' spreads combined, all toward lower cost; none moved that far toward higher cost. Only the newer calibration's budgets and raw results are committed. The older run's artifacts are retained by GitHub until 2027-01-29.
 
 The budgets, their index, and `derivation.json` are in `examples/bench/budgets/`. Every slot's raw result lines and control lines (gzipped; `slot.json` records the SHA-256 of the uncompressed file), Collector accounting, and environment are in `examples/bench/results/2026-10-31-hosted-calibration/`. `committed_budgets_parse_and_match_their_index` in `examples/bench/src/compare.rs` checks that every budget file the index names parses and that the index matches the derivation.
 
@@ -423,7 +426,7 @@ The results table above predates this change, and its `alloy-logs` row used trac
 
 This is the evidence for [#16](https://github.com/ferrum-edge/ferrum-alloy/issues/16) under the [2026-10-31 policy](#regression-gate): the before is tracing-subscriber's JSON formatter (`alloy-logs-fmt`), the after is Alloy's layer (`alloy-logs`), both in one binary, interleaved in every repetition, on shared hosted runners, with the noise measured on unchanged code.
 
-**Profiles.** Callgrind profiles of both formatters (`small`, `h1`, eight concurrent requests, 1-second window) from hosted qualification [run 41180529588](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41180529588) on `main` at `cd5edac` (AMD EPYC 7763). Between `cd5edac` and the calibration commit `bea5e73` only a test changed under `crates/`. Share of each profile's instructions, across its ten threads:
+**Profiles.** Callgrind profiles of both formatters (`small`, `h1`, eight concurrent requests, 1-second window) from hosted qualification [run 41180529588](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41180529588) on `main` at `cd5edac` (AMD EPYC 7763). That predates [#269](https://github.com/ferrum-edge/ferrum-alloy/pull/269), which changed the middleware stack but neither formatter, so the formatters' own costs are those at the calibration commit; the shares outside them would differ there. Share of each profile's instructions, across its ten threads:
 
 | Where | tracing-subscriber JSON (`alloy-logs-fmt`) | Alloy JSON layer (`alloy-logs`) |
 |---|---:|---:|
@@ -437,37 +440,38 @@ This is the evidence for [#16](https://github.com/ferrum-edge/ferrum-alloy/issue
 
 About 41% of the formatter's instructions went to parsing and re-serializing span fields and validating the result; the layer spends none there. Its own rendering, 21.6%, is now the largest logging cost. Shares, not totals, are comparable: each profile serves as many requests as its window allows. Hosted run [41002220361](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41002220361) on an Intel Xeon Platinum 8370C gave the same shares within 0.1 point. Callgrind counts simulated instructions, including the client and teardown, not native time. The annotations, the run's `SHA256SUMS`, environment, and commands are in `examples/bench/results/2026-10-31-hosted-profiles/`.
 
-**Throughput.** In each of the nine AMD EPYC 7763 calibration runs, the median over five repetitions of `alloy-logs` throughput divided by `alloy-logs-fmt` throughput, per cell. The noise floor is e^margin of that model's `alloy-logs` `throughput_ratio` in the same cell, the [derived](#deriving-budgets) bound on unchanged-code variation; a cell counts as beyond noise when even its lowest run median exceeds it. This rule was fixed before the calibration's results were read.
+**Throughput.** In each of the nine AMD EPYC 7763 runs of the [calibration](#calibration-2026-10-31), the median over five repetitions of `alloy-logs` throughput divided by `alloy-logs-fmt` throughput, per cell. The noise floor is e^margin of that model's `alloy-logs` `throughput_ratio` in the same cell, the [derived](#deriving-budgets) bound on unchanged-code variation; a cell counts as beyond noise when even its lowest run median exceeds it. This rule was fixed before the calibration's results were read.
 
 | Workload | Transport | Typed / fmt, median of runs (lowest – highest) | Noise floor | Beyond noise |
 |---|---|---:|---:|---|
-| `small` | `h1` | 1.523 (1.495 – 1.545) | 1.079 | yes |
-| `small` | `h1-tls` | 1.429 (1.413 – 1.445) | 1.072 | yes |
-| `small` | `h1-mtls` | 1.422 (1.410 – 1.441) | 1.151 | yes |
-| `small` | `h2c` | 1.510 (1.492 – 1.522) | 1.081 | yes |
-| `small` | `h2-tls` | 1.465 (1.453 – 1.479) | 1.065 | yes |
-| `small` | `h2-mtls` | 1.458 (1.434 – 1.471) | 1.064 | yes |
-| `large` | `h1` | 1.275 (1.256 – 1.301) | 1.090 | yes |
-| `large` | `h1-tls` | 1.194 (1.183 – 1.207) | 1.099 | yes |
-| `large` | `h1-mtls` | 1.193 (1.184 – 1.202) | 1.071 | yes |
-| `large` | `h2c` | 1.206 (1.167 – 1.230) | 1.149 | yes |
-| `large` | `h2-tls` | 1.164 (1.159 – 1.214) | 1.104 | yes |
-| `large` | `h2-mtls` | 1.165 (1.154 – 1.179) | 1.124 | yes |
-| `stream` | `h1` | 1.149 (1.132 – 1.156) | 1.087 | yes |
-| `stream` | `h1-tls` | 1.127 (1.119 – 1.140) | 1.071 | yes |
-| `stream` | `h1-mtls` | 1.131 (1.111 – 1.143) | 1.055 | yes |
-| `stream` | `h2c` | 1.043 (1.035 – 1.046) | 1.048 | no |
-| `stream` | `h2-tls` | 1.041 (1.035 – 1.085) | 1.058 | no |
-| `stream` | `h2-mtls` | 1.041 (1.030 – 1.048) | 1.072 | no |
-| `cancel` | `h1` | 1.045 (1.024 – 1.067) | 1.089 | no |
-| `cancel` | `h1-tls` | 1.021 (0.992 – 1.033) | 1.086 | no |
-| `cancel` | `h1-mtls` | 1.020 (1.013 – 1.027) | 1.038 | no |
-| `cancel` | `h2c` | 1.055 (1.045 – 1.065) | 1.084 | no |
-| `cancel` | `h2-tls` | 1.053 (1.040 – 1.066) | 1.107 | no |
-| `cancel` | `h2-mtls` | 1.055 (1.042 – 1.073) | 1.060 | no |
+| `small` | `h1` | 1.516 (1.496 – 1.520) | 1.064 | yes |
+| `small` | `h1-tls` | 1.420 (1.396 – 1.434) | 1.101 | yes |
+| `small` | `h1-mtls` | 1.419 (1.409 – 1.443) | 1.101 | yes |
+| `small` | `h2c` | 1.508 (1.495 – 1.514) | 1.067 | yes |
+| `small` | `h2-tls` | 1.460 (1.436 – 1.476) | 1.058 | yes |
+| `small` | `h2-mtls` | 1.467 (1.451 – 1.471) | 1.042 | yes |
+| `large` | `h1` | 1.278 (1.242 – 1.322) | 1.082 | yes |
+| `large` | `h1-tls` | 1.193 (1.174 – 1.208) | 1.091 | yes |
+| `large` | `h1-mtls` | 1.198 (1.186 – 1.210) | 1.128 | yes |
+| `large` | `h2c` | 1.189 (1.132 – 1.205) | 1.101 | yes |
+| `large` | `h2-tls` | 1.164 (1.156 – 1.170) | 1.075 | yes |
+| `large` | `h2-mtls` | 1.163 (1.152 – 1.172) | 1.079 | yes |
+| `stream` | `h1` | 1.148 (1.139 – 1.159) | 1.053 | yes |
+| `stream` | `h1-tls` | 1.131 (1.071 – 1.134) | 1.212 | no |
+| `stream` | `h1-mtls` | 1.128 (1.122 – 1.153) | 1.041 | yes |
+| `stream` | `h2c` | 1.042 (1.034 – 1.052) | 1.046 | no |
+| `stream` | `h2-tls` | 1.039 (1.033 – 1.046) | 1.038 | no |
+| `stream` | `h2-mtls` | 1.037 (1.017 – 1.053) | 1.067 | no |
+| `cancel` | `h1` | 1.047 (1.032 – 1.063) | 1.089 | no |
+| `cancel` | `h1-tls` | 1.020 (1.012 – 1.029) | 1.074 | no |
+| `cancel` | `h1-mtls` | 1.017 (1.009 – 1.026) | 1.088 | no |
+| `cancel` | `h2c` | 1.057 (1.031 – 1.080) | 1.226 | no |
+| `cancel` | `h2-tls` | 1.052 (1.040 – 1.058) | 1.063 | no |
+| `cancel` | `h2-mtls` | 1.057 (1.042 – 1.127) | 1.065 | no |
 
-- **Supported:** Alloy's layer raises throughput beyond measured noise in 15 of 24 cells: every `small` and `large` cell (by 16% to 52% at the median) and `stream` over HTTP/1.
-- **Not shown:** a gain in `cancel` cells or in `stream` over HTTP/2. Their medians (1.02 to 1.06) are within the noise floor, so the only supported claim there is that the layer is not measurably slower.
+- **Supported:** Alloy's layer raises throughput beyond measured noise in 14 of 24 cells: every `small` and `large` cell (by 16% to 52% at the median), and `stream` over `h1` and `h1-mtls`.
+- **Not shown:** a gain in `cancel` cells, in `stream` over HTTP/2, or in `stream` over `h1-tls`. Their medians (1.02 to 1.06, and 1.13 for `h1-tls`, whose noise floor is 1.21) are within the noise floor, so the only supported claim there is that the layer is not measurably slower.
+- The [superseded calibration](#calibration-2026-10-31), with the same rule, gave the same verdict in every cell except `stream` over `h1-tls`, which it found beyond noise (15 of 24).
 - This is one CPU model with co-located client and service; it is not a statement about production throughput.
 
 No further logging change is proposed from this evidence. The profile shows no re-parse cost left to remove; a future optimization would target the layer's own rendering and needs its own before/after measurement through the [regression gate](#regression-gate).

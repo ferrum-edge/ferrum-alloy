@@ -1,8 +1,8 @@
 {
   "schema": "alloy-bench-budget-index/1",
-  "commit": "bea5e7386986a9cc6a1ce140bf9f85b05115c4e8",
+  "commit": "2d0b8a843be7885e9222ab1598ad2b7f22ea24d7",
   "classification": "shared GitHub-hosted; regression budgets per CPU model from unchanged-code calibration",
-  "calibration_run": "https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41192218581",
+  "calibration_run": "https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41250532573",
   "rule": {
     "metrics": [
       "throughput_ratio",

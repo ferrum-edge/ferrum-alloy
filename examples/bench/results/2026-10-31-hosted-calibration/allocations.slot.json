@@ -3,13 +3,13 @@
   "slot": "allocations",
   "kind": "allocations",
   "profile": "full",
-  "commit": "bea5e7386986a9cc6a1ce140bf9f85b05115c4e8",
+  "commit": "2d0b8a843be7885e9222ab1598ad2b7f22ea24d7",
   "attempt": 1,
-  "run_id": "41192218581-1-allocations",
+  "run_id": "41250532573-1-allocations",
   "cpu_model": "AMD EPYC 7763 64-Core Processor",
   "calibrated": true,
   "raw_file": "allocations.jsonl",
-  "raw_sha256": "bfb0880f70f40db432716046fceb33a706fd7e948c19e195e620c4d0d069f007",
-  "binary_sha256": "db818d52919adfb60a2aeeed453fc1adb2146b30033eb35dd2aa3b826662ea9f",
+  "raw_sha256": "f92ae0b4fb802da0224611ee24e1b95ecc2d38ed1a0e723e0930659881bd5bac",
+  "binary_sha256": "e7484f695938eb71d9bc19f54faeb2bf2a980b310b9a4263232b52f239859efb",
   "alloc_counting": true
 }

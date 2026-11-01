@@ -48,7 +48,7 @@ Vulnerability Srbds:                     Not affected
 Vulnerability Tsa:                       Vulnerable: No microcode
 Vulnerability Tsx async abort:           Not affected
 Vulnerability Vmscape:                   Not affected
-0.76 0.19 0.06 1/272 2362
+0.61 0.15 0.05 1/277 2361
 rustc 1.98.1 (48a229cea 2026-09-01)
 binary: rustc
 commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
