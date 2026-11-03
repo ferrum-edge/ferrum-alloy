@@ -49,5 +49,9 @@ services:
       # X-Ferrum-Diagnostic-Ref, which edge-e2e checks on the refused
       # connection. v0.9.8 does not read this variable.
       FERRUM_DIAGNOSTIC_REFS: errors
+      # The otel_tracing exporter verifies the Collector's demo certificate
+      # with the global outbound trust bundle (it ignores per-proxy backend
+      # TLS settings). This bundle becomes Edge's only trust anchor.
+      FERRUM_TLS_CA_BUNDLE_PATH: /certs/ca.pem
     ports:
       - "127.0.0.1:18000:8000"

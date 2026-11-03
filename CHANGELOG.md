@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- Adopt `contracts-edge-0.9.19` at `d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b`
+  and pin Ferrum Edge v0.9.19 at `510ce7121c3d9754110d330a30a3bd9b7a7b278e`,
+  with v0.9.17 as the previous supported release; v0.9.15 leaves the window
+  (`contracts-edge-0.9.18` does not exist: Edge v0.9.18 was never published).
+  Only the two gateway vocabularies changed. `connection_failure` can now
+  arrive with `504` (connect timeout) or `503` (the gateway's own
+  per-destination connection limit), so its catalog explanation is broadened
+  and `alloy.r007` no longer lets it imply that the backend refused the
+  connection. The new pre-upstream `query_trigger_admission` rejection phase
+  is admission evidence; `gateway_closed_h3_upload` and the client-abort
+  phases are not mapped. The gateway-owned `x-ferrum-peer-spiffe-id` is not
+  consumer identity and is reserved from request-ID configuration.
+  **Behavior change:** `ferrum-alloy edge export` refuses an `http://`
+  `gateway.otel_endpoint` unless its host is a loopback IP literal
+  (`localhost` included in the refusal), because v0.9.19 drops such a
+  cleartext exporter and v0.9.17 refuses its `allow_plaintext` opt-in; use
+  `https://`. The end-to-end stack now sends Edge's spans to the Collector
+  over TLS.
 - Regression budgets are committed (#15, #16). The calibration of `main`
   at `2d0b8a8` (run 41250532573) was accepted for AMD EPYC 7763, the only
   runner CPU model with at least five of its eighteen runs: limits on 540

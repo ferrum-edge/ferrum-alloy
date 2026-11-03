@@ -13,7 +13,7 @@ plugin_configs:
     proxy_id: "orders-api"
     scope: "proxy"
   - config:
-      endpoint: "http://otel-collector:4318/v1/traces"
+      endpoint: "https://otel-collector:4318/v1/traces"
       include_url_path: false
       service_name: "ferrum-edge-ferrum"
       trace_context_trust: "untrusted"

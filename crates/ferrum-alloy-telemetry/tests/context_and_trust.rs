@@ -593,6 +593,7 @@ fn reserved_request_id_headers_are_rejected() {
         "traceparent",
         "x-consumer-username",
         "x-authenticated-identity",
+        "x-ferrum-peer-spiffe-id",
         // Caching/security policy the echo would replace after the
         // cache-safety decision read the original value (#215).
         "cache-control",

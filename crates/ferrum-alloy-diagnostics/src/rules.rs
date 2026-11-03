@@ -903,6 +903,7 @@ fn does_not_prove_for_token(token: &str) -> &'static [&'static str] {
             "that DNS resolution failed",
             "that TLS failed",
             "that the service is down",
+            "that the backend refused or failed the connection: the gateway's own connection limit can refuse first",
         ],
         "backend_timeout" => &[
             "that the service received the request",

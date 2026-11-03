@@ -34,4 +34,5 @@ COPY --from=build --chown=65532:65532 /out/edge.yaml /config/edge.yaml
 
 FROM otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1 AS collector
 COPY --from=build --chown=10001:10001 /out/collector /out
+COPY --from=build --chown=10001:10001 /out/certs /certs
 COPY examples/edge-observability/collector.yaml /etc/otelcol-contrib/config.yaml

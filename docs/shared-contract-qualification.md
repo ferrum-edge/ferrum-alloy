@@ -6,13 +6,23 @@
 at `390edbd5b2485af0988e02f7827fde778d76ae0a` marks `ferrum.diagnostic_report` v1
 and `ferrum.service_manifest` v1 EXISTING/implemented. This branch then adopted
 `contracts-edge-0.9.12` and verified Edge v0.9.12 (the dated qualification
-record below); the current adoption on `main` is
+record below); `main` then adopted
 [`contracts-edge-0.9.17`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
 at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` with Edge v0.9.17 (baseline) and
-v0.9.15 (previous), as recorded in [compatibility.json](compatibility.json) and
-`contracts/ferrum-contracts/PIN`.
+v0.9.15 (previous). The current adoption candidate is
+[`contracts-edge-0.9.19`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.19)
+at `d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b` with Edge v0.9.19 (baseline) and
+v0.9.17 (previous), as recorded in [compatibility.json](compatibility.json) and
+`contracts/ferrum-contracts/PIN`; hosted CI qualification of the
+`contracts-edge-0.9.19` adoption is pending (this pull request's CI). Only the
+two gateway vocabularies change; the report and diagnostic-ref schemas and all
+12 diagnostic fixtures are byte-identical to `contracts-edge-0.9.17`, and the
+local report `x-contract` `contracts_tag`/`contracts_commit` name the new pin.
 No producer wire fields, bounds, enums, reader rules or fixture payloads change.
-The only generated snapshot changes are the known Edge release/source headers.
+The only generated snapshot changes are the known Edge release/source headers,
+plus the `orders-api` manifest fixture and its snapshot moving the OTLP endpoint
+to `https://otel-collector:4318`, because Edge v0.9.19 drops a cleartext
+exporter to a host that is not a loopback IP literal.
 
 ## v0.9.12 adoption (2026-10-05, historical)
 

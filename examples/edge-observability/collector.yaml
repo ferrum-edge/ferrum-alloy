@@ -1,11 +1,20 @@
 # OpenTelemetry Collector (contrib 0.161.0) for the end-to-end demo.
-# Both Ferrum Edge (OTLP/HTTP JSON) and Alloy (OTLP/HTTP protobuf) export
-# here; spans are written as OTLP/JSON lines for offline verification.
+# Ferrum Edge (OTLP/HTTP JSON, over TLS on 4319) and Alloy (OTLP/HTTP
+# protobuf, cleartext on 4318 inside the compose network) export here; spans
+# are written as OTLP/JSON lines for offline verification. Edge v0.9.19 drops
+# a cleartext exporter to a host that is not a loopback IP literal.
 receivers:
   otlp:
     protocols:
       http:
         endpoint: 0.0.0.0:4318
+  otlp/edge:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4319
+        tls:
+          cert_file: /certs/collector.pem
+          key_file: /certs/collector.key
 processors:
   batch:
     timeout: 500ms
@@ -18,6 +27,6 @@ exporters:
 service:
   pipelines:
     traces:
-      receivers: [otlp]
+      receivers: [otlp, otlp/edge]
       processors: [batch]
       exporters: [file, debug]

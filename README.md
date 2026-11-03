@@ -106,11 +106,11 @@ Detailed health, metrics, and management OpenAPI/UI always require a configured 
 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
 This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures.
-The adopted tag is [`contracts-edge-0.9.17`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17) at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8`.
+The adopted tag is [`contracts-edge-0.9.19`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.19) at `d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b`.
 Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented (see the [owner/adoption record](docs/shared-contract-qualification.md)). Alloy remains unreleased (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
-The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema, and the diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
+The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema; 0.9.19 changes only the two gateway vocabularies, and the schemas and diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
 Earlier owner/consumer qualification does not qualify this adoption on `main` or close [#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 

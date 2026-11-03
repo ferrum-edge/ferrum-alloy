@@ -307,7 +307,7 @@ fn each_generated_id_suffix_is_checked_at_its_boundary() {
             manifest.health = None;
         }
         manifest.gateway.correlation_id = family == "correlation";
-        manifest.gateway.otel_endpoint = (family == "otel").then(|| "http://otel".to_owned());
+        manifest.gateway.otel_endpoint = (family == "otel").then(|| "https://otel".to_owned());
         manifest.gateway.proxy_id = Some("a".repeat(base_length));
         manifest.validate().unwrap();
 
@@ -536,5 +536,33 @@ fn yaml_nested_sequences_are_valid_block_sequences() {
         ),
     ] {
         assert_eq!(yaml::to_string(&value), expected, "{value}");
+    }
+}
+
+#[test]
+fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
+    let with_endpoint = |endpoint: &str| {
+        let mut manifest = manifest();
+        manifest.gateway.otel_endpoint = Some(endpoint.to_owned());
+        manifest.validate().map_err(|error| error.to_string())
+    };
+    for accepted in [
+        "https://otel-collector:4318/v1/traces",
+        "https://10.0.0.5/v1/traces",
+        "http://127.0.0.1:4318/v1/traces",
+        "http://127.8.9.10/v1/traces",
+        "http://[::1]:4318/v1/traces",
+    ] {
+        assert!(with_endpoint(accepted).is_ok(), "{accepted} was refused");
+    }
+    for refused in [
+        "http://otel-collector:4318/v1/traces",
+        "http://localhost:4318/v1/traces",
+        "http://10.0.0.5:4318/v1/traces",
+        "http://[::2]:4318/v1/traces",
+        "http://[::1/v1/traces",
+    ] {
+        let error = with_endpoint(refused).unwrap_err();
+        assert!(error.contains("loopback IP literal"), "{refused}: {error}");
     }
 }

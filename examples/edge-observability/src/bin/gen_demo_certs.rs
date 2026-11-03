@@ -5,7 +5,9 @@
 //!   (DNS `alloy`, `alloy-reuse`, `localhost`, IP `127.0.0.1`; `alloy-reuse`
 //!   is a compose network alias for the connection-reuse case);
 //! * `edge-client.pem` / `edge-client.key`: the certificate Edge presents to
-//!   Alloy, with the SPIFFE URI SAN `spiffe://ferrum.demo/ns/edge/sa/gateway`.
+//!   Alloy, with the SPIFFE URI SAN `spiffe://ferrum.demo/ns/edge/sa/gateway`;
+//! * `collector.pem` / `collector.key`: the Collector's server certificate
+//!   (DNS `otel-collector`) for Edge's OTLP/HTTPS exporter.
 //!
 //! Demo only: keys are written world-readable so container users can read
 //! them. Never use these files outside a disposable environment.
@@ -68,5 +70,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_cert = client.signed_by(&client_key, &issuer)?;
     std::fs::write(out.join("edge-client.pem"), client_cert.pem())?;
     std::fs::write(out.join("edge-client.key"), client_key.serialize_pem())?;
+
+    let mut collector = CertificateParams::default();
+    collector
+        .distinguished_name
+        .push(DnType::CommonName, "otel-collector");
+    collector.subject_alt_names = vec![SanType::DnsName("otel-collector".try_into()?)];
+    collector.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    collector.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    let collector_key = KeyPair::generate()?;
+    let collector_cert = collector.signed_by(&collector_key, &issuer)?;
+    std::fs::write(out.join("collector.pem"), collector_cert.pem())?;
+    std::fs::write(out.join("collector.key"), collector_key.serialize_pem())?;
     Ok(())
 }
