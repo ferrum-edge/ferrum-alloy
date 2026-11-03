@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -69,9 +70,17 @@ impl hyper::body::Body for Frames {
     }
 }
 
-async fn small() -> axum::Json<serde_json::Value> {
-    let body = serde_json::json!({ "id": 42, "name": "tea", "quantity": 2, "tags": ["a", "b"] });
-    axum::Json(body)
+/// The `small` workload's response body: the bytes `axum::Json` produced
+/// for `{"id": 42, "name": "tea", "quantity": 2, "tags": ["a", "b"]}`, kept
+/// static so that the handler builds no JSON value and serializes nothing
+/// per request.
+pub(crate) const SMALL_BODY: &str = r#"{"id":42,"name":"tea","quantity":2,"tags":["a","b"]}"#;
+
+/// Serves [`SMALL_BODY`] with `axum::Json`'s content type. Both values are
+/// static, so neither is copied.
+async fn small() -> ([(http::HeaderName, http::HeaderValue); 1], &'static str) {
+    let json = http::HeaderValue::from_static("application/json");
+    ([(http::header::CONTENT_TYPE, json)], SMALL_BODY)
 }
 
 async fn stream() -> Body {
@@ -89,6 +98,26 @@ pub(crate) fn router() -> Router {
         .route("/large", get(move || std::future::ready(large.clone())))
         .route("/stream", get(stream))
         .route("/stream-long", get(stream_long))
+}
+
+/// Busy-waits `nanos` on the serving thread before every request reaches
+/// the router: a synthetic per-request regression for checking that the
+/// regression gate detects one (`--inject-service-ns`). Zero leaves the
+/// router unchanged.
+fn inject(router: Router, nanos: u64) -> Router {
+    if nanos == 0 {
+        return router;
+    }
+    let cost = Duration::from_nanos(nanos);
+    router.layer(middleware::from_fn(
+        move |request: Request, next: Next| async move {
+            let start = Instant::now();
+            while start.elapsed() < cost {
+                std::hint::spin_loop();
+            }
+            next.run(request).await
+        },
+    ))
 }
 
 /// Attributes every request to one tenant, so its evidence is retained.
@@ -184,11 +213,13 @@ where
 }
 
 /// Starts the server for `scenario`. `pipeline` is kept alive for as long
-/// as the server runs.
+/// as the server runs. Every scenario but `plain` busy-waits `inject_ns`
+/// per request; see [`inject`].
 pub(crate) fn start(
     scenario: Scenario,
     tls: Option<ServerTls>,
-    pipeline: Option<OtelPipeline>,
+    pipeline: Option<Arc<OtelPipeline>>,
+    inject_ns: u64,
 ) -> Result<Server, Failure> {
     spawn(
         SERVER_THREAD,
@@ -212,11 +243,12 @@ pub(crate) fn start(
                 .config(config)
                 .telemetry(TelemetryInit::ApplicationOwned)
                 .shutdown_signal(stopped(stop));
+            let router = inject(router(), inject_ns);
             let app = if diagnostics {
-                let router = router().layer(middleware::from_fn(tag_tenant));
+                let router = router.layer(middleware::from_fn(tag_tenant));
                 app.router(router).diagnostics_authorizer(deny)
             } else {
-                app.router(router())
+                app.router(router)
             };
             let parts = app.into_parts();
             match parts {
@@ -315,4 +347,31 @@ pub(crate) fn start_collector() -> Result<Collector, Failure> {
         stats,
         _server: server,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    /// Both stacks serve `small` from the same router, so this pins the
+    /// bytes and the content type that each of them sends.
+    #[tokio::test]
+    async fn small_serves_the_json_bytes_it_always_served() {
+        let response = small().await.into_response();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let headers = response.headers();
+        let content_types = headers.get_all(http::header::CONTENT_TYPE);
+        assert_eq!(content_types.iter().count(), 1);
+        assert_eq!(headers[http::header::CONTENT_TYPE], "application/json");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let value =
+            serde_json::json!({ "id": 42, "name": "tea", "quantity": 2, "tags": ["a", "b"] });
+        assert_eq!(body, serde_json::to_vec(&value).unwrap());
+        assert_eq!(body, SMALL_BODY.as_bytes());
+        assert_eq!(body.len(), 52);
+    }
 }

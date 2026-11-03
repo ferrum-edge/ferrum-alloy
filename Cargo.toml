@@ -22,7 +22,7 @@ edition = "2024"
 rust-version = "1.94"
 license = "PolyForm-Noncommercial-1.0.0"
 repository = "https://github.com/ferrum-edge/ferrum-alloy"
-# Nothing is published until licensing, naming, and release decisions are approved.
+# Git-only distribution: nothing is published to a registry (docs/release.md).
 publish = false
 
 [workspace.dependencies]

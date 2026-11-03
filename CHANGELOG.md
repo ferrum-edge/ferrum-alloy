@@ -2,6 +2,125 @@
 
 ## [Unreleased]
 
+- Regression budgets are committed (#15, #16). The calibration of `main`
+  at `2d0b8a8` (run 41250532573) was accepted for AMD EPYC 7763, the only
+  runner CPU model with at least five of its eighteen runs: limits on 540
+  of 576 cell metrics, a median throughput margin of about 7.5%, and all
+  nine positive controls caught. An earlier accepted calibration of
+  `bea5e73` was superseded because #269 lowered Alloy's measured cost
+  before its budgets were committed. `examples/bench/budgets/` holds the
+  budgets and their derivation, `examples/bench/results/` the raw
+  calibration results and the hosted formatter profiles. The regression
+  gate now runs weekly on `main`. On the same runs, Alloy's JSON layer
+  beats the tracing-subscriber formatter it replaced by more than measured
+  noise in 14 of 24 cells (by 16% to 52% in `small` and `large`), and is
+  within noise in `cancel`, HTTP/2 `stream`, and `stream` over `h1-tls`;
+  `docs/benchmarks.md` records both.
+- `AlloyApp` applies its middleware as one composed stack per router
+  instead of one `Router::layer` call per layer. Each call boxed every
+  route again, and axum clones a boxed route, with every box under it, on
+  every request. The default stack made 88 allocations per small HTTP/1.1
+  request, against 15 for plain hyper; it now makes 48, and every
+  measured Alloy scenario makes 40 fewer. In-process service time for the
+  default stack falls from about 5.0 to 4.0 µs per request. Layer order
+  and behavior are unchanged. A bench test bounds the allocations the
+  defaults add per request, and `docs/benchmarks.md` records the
+  measurements.
+- The benchmark client disables h2's local error-reset limit. Sustained
+  `cancel` load over HTTP/2 made late DATA on forgotten streams exhaust
+  its default of 1,024 resets, so the client ended its own connections:
+  the first full matrix on `main` failed validation with client errors in
+  46 of 1,080 runs, all `cancel` over `h2c`, `h2-tls`, or `h2-mtls`. A
+  wire-level test covers the production handshake, and the regression
+  gate's pull-request smoke matrix now runs `cancel`.
+- Benchmark policy (#15, #16, owner decision of 2026-10-31): regression
+  budgets come from a measured noise model of shared GitHub-hosted
+  runners instead of a dedicated host. The new `Benchmark regression gate`
+  workflow (`.github/workflows/bench-gate.yml`, `examples/bench/hosted/gate.py`)
+  calibrates on `main` with eighteen independent unchanged-code full-matrix
+  runs, derives per-cell limits on the ratios to `plain` for each runner
+  CPU model with at least five runs, drops every limit that one of the
+  model's runs exceeds when held out, and publishes a model's limits only
+  when at least half of its cell metrics keep one and a synthetic
+  regression on each of its runners fails them. Its `gate` mode checks a
+  fresh full matrix on up to five runners against their CPU models'
+  committed budgets; pull requests run the pipeline on a tiny matrix.
+  `alloy-bench` gains `--inject-service-ns N`, a busy-wait per request in
+  every scenario but `plain` for that check, and records it as
+  `injected_service_ns`.
+- Distribution decision (#24): Alloy stays Git-only. No crate is
+  published to crates.io or any other registry, `publish = false` stays,
+  and the PolyForm Noncommercial license is unchanged. `docs/release.md`
+  records the decision, marks the release checklist's registry-only
+  items, and moves crate names, trademark, registry and license policy,
+  homepage, and publisher to deferred registry decisions, with crate-name
+  availability, related-name, and Swagger UI license evidence refreshed
+  on 2026-10-29.
+- Hosted benchmark qualification (#15, #16) exports to a real
+  OpenTelemetry Collector: the pinned demo image
+  (`otel/opentelemetry-collector-contrib:0.161.0`, by digest) runs beside
+  the benchmark with `examples/bench/hosted/collector.yaml`. A new
+  `collector` stage runs `plain`, `alloy`, and `otel-collector` for five
+  interleaved repetitions, and the full matrix's `otel-collector` cells
+  use the same Collector. The stage fails unless the Collector stays
+  healthy and unrestarted, and its receiver accepted at least every span
+  the exporter reported exported, with none refused or failed. Its raw
+  metrics and logs are retained, and so are its cgroup CPU and peak
+  memory when the runner exposes them (`null` otherwise). The weekly
+  collection step's limit rises from 15 to 20 minutes, and the workflow
+  also runs on pull requests that change `examples/bench/hosted/`.
+- `docs/benchmarks.md` records the 2026-10-29 infrastructure
+  qualification: no existing resource provides the isolated GitHub-hosted
+  environment that the dedicated baseline needs, so that acceptance, the
+  regression budgets and gate, and further logging optimization are
+  deferred explicitly. The benchmark policy is unchanged.
+- `cargo deny` now denies duplicate crate versions instead of warning.
+  The older version lines of the 19 crates duplicated today are listed in
+  `deny.toml` under `[bans] skip`, each with the dependency split that
+  causes it (the RustCrypto digest 0.10/0.11 and rand 0.8/0.9/0.10
+  generations, syn 2/3, and splits in base64, hashbrown, tower-http,
+  io-lifetimes and windows-sys); the newest line of each stays unskipped.
+  A dependency update that adds a duplicate, including a further version
+  line of an allowlisted crate, fails the `Dependency policy` check until
+  it is reviewed. Crates reached only through dev-dependencies are
+  checked too (#197).
+- Documented as a known gap: on Windows, `diagnose --write-report` files
+  inherit their directory's ACL rather than being owner-only, since an
+  explicit DACL would need unsafe Win32 calls or a wrapper dependency, and
+  the permissions of secret files (`--token-file`, `FERRUM_ALLOY_*_FILE`,
+  the TLS private key) are not checked on any platform (#197).
+- Benchmark harness (`examples/bench`), host-independent gaps from #197
+  toward #15 and #16:
+  - OpenTelemetry result lines add `otel.spans_queued_at_start`,
+    `otel.spans_queued_at_end`, and `otel.spans_queued_bytes_at_end`, the
+    exporter queue at the window's edges, read before shutdown, so spans
+    still queued are no longer missing from the accounting. Other
+    scenarios still have `otel: null`. The hosted qualification validator
+    requires the new fields for OTEL rows.
+  - `matrix` runs each repetition in a seeded SplitMix64 shuffle, the one
+    of up to 64 that repeats the fewest neighbor pairs from earlier
+    repetitions, instead of rotating the previous order by one cell. The order is reproducible, and
+    `--dry-run` prints the method and seed.
+  - The `small` handler serves a static JSON body instead of building and
+    serializing a `serde_json::Value` per request. The bytes and content
+    type are unchanged, but `small` results from before and after this
+    change measure different handlers.
+  - New `alloy-bench compare` reports each cell's throughput and latency
+    ratios to `plain` (median and range), pairing only error-free lines of
+    the same `run_id`, repetition, and allocation mode. `--budget FILE`
+    checks those ratios against per-cell limits and exits nonzero when one
+    is exceeded. No budgets are defined yet.
+
+- **Breaking:** `ferrum-alloy edge export` refuses a manifest with
+  `auth.mode = "gateway"` (exit 3) instead of warning and writing
+  configuration that authenticates nobody. Export cannot generate Edge
+  authentication yet. The refusal comes before any output, so no stdout
+  document, file, or GitForgeOps directory is written, and `--force` leaves
+  an existing file untouched. In the library, `export::resources` returns
+  `Result<EdgeResources, ExportError>` and `export_warnings` is removed. To
+  export, set `auth.mode` to `"service"` when the service verifies
+  credentials itself, or to `"none"` and configure Edge authentication by
+  hand (#197).
 - Minimal readiness (`/readyz` and the management readiness probe) reads
   the draining flag again after waiting for a readiness refresh, as
   detailed health already did. A probe that was waiting when shutdown
@@ -145,10 +264,7 @@
   with full-value digests instead of source prefixes, so `diagnose --otlp`
   cannot retain a partial reflected credential before output redaction.
   Text up to 512 bytes and the instance-identity domain rules are unchanged.
-- `ferrum-alloy edge export` now warns when `auth.mode` is `gateway`:
-  no Edge authentication plugin is exported yet, so the generated
-  configuration authenticates nobody until authentication is configured
-  in Edge. Also in this batch: atomic CLI writes create the temporary
+- CLI and Edge export hardening: atomic CLI writes create the temporary
   file with its final mode (replaced private files are never briefly
   world-readable), `--alloy-git` is URL-parsed and credentialed URLs
   are refused instead of being baked into the generated `Cargo.toml`,

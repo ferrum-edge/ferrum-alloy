@@ -1,0 +1,18 @@
+{
+  "schema": "alloy-bench-slot/1",
+  "slot": "calibration-08",
+  "kind": "calibration",
+  "profile": "full",
+  "commit": "2d0b8a843be7885e9222ab1598ad2b7f22ea24d7",
+  "attempt": 1,
+  "run_id": "41250532573-1-calibration-08",
+  "cpu_model": "AMD EPYC 7763 64-Core Processor",
+  "calibrated": true,
+  "raw_file": "calibration-08.jsonl",
+  "raw_sha256": "e6e55e0fde74b45ec0a82aa51f722924503f2231e6b6a058ce68c014323f136c",
+  "binary_sha256": "e7484f695938eb71d9bc19f54faeb2bf2a980b310b9a4263232b52f239859efb",
+  "alloc_counting": false,
+  "control_file": "calibration-08-control.jsonl",
+  "control_sha256": "bbf8fdc172f08e3213d70871ca72b82f3caab13cc81a4cf5aad568ab1f4dfecd",
+  "control_injected_service_ns": 5000
+}

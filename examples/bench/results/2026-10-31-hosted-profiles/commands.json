@@ -1,0 +1,556 @@
+[
+  {
+    "name": "profile-alloy-logs-fmt",
+    "argv": [
+      "valgrind",
+      "--tool=callgrind",
+      "--dump-instr=yes",
+      "--collect-jumps=yes",
+      "--separate-threads=yes",
+      "--callgrind-out-file=/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.%p",
+      "target/release/alloy-bench",
+      "run",
+      "--scenario",
+      "alloy-logs-fmt",
+      "--workload",
+      "small",
+      "--transport",
+      "h1",
+      "--seconds",
+      "1",
+      "--warmup",
+      "0.2",
+      "--concurrency",
+      "8",
+      "--rep",
+      "1",
+      "--run-id",
+      "profile-alloy-logs-fmt",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance"
+    ],
+    "timeout_seconds": 90,
+    "started_unix_seconds": 1793431878.247104,
+    "status": "complete",
+    "pid": 10440,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431881.3182554
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-0",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-01"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431881.679821,
+    "status": "complete",
+    "pid": 10450,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431881.9950972
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-1",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-02"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431881.9959948,
+    "status": "complete",
+    "pid": 10452,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431882.311148
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-2",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-03"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431882.3125744,
+    "status": "complete",
+    "pid": 10454,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431882.677946
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-3",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-04"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431882.6792397,
+    "status": "complete",
+    "pid": 10456,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431882.9945204
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-4",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-05"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431882.9957285,
+    "status": "complete",
+    "pid": 10458,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431883.3109033
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-5",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-06"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431883.312143,
+    "status": "complete",
+    "pid": 10460,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431883.6273532
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-6",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-07"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431883.628666,
+    "status": "complete",
+    "pid": 10462,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431883.7934108
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-7",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-08"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431883.7942343,
+    "status": "complete",
+    "pid": 10464,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431883.9590554
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-8",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-09"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431883.95994,
+    "status": "complete",
+    "pid": 10466,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431884.1246824
+  },
+  {
+    "name": "profile-alloy-logs-fmt-annotate-9",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs-fmt.callgrind.10440-10"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431884.1255317,
+    "status": "complete",
+    "pid": 10468,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431884.2902446
+  },
+  {
+    "name": "profile-alloy-logs",
+    "argv": [
+      "valgrind",
+      "--tool=callgrind",
+      "--dump-instr=yes",
+      "--collect-jumps=yes",
+      "--separate-threads=yes",
+      "--callgrind-out-file=/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.%p",
+      "target/release/alloy-bench",
+      "run",
+      "--scenario",
+      "alloy-logs",
+      "--workload",
+      "small",
+      "--transport",
+      "h1",
+      "--seconds",
+      "1",
+      "--warmup",
+      "0.2",
+      "--concurrency",
+      "8",
+      "--rep",
+      "1",
+      "--run-id",
+      "profile-alloy-logs",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance"
+    ],
+    "timeout_seconds": 90,
+    "started_unix_seconds": 1793431884.2915623,
+    "status": "complete",
+    "pid": 10470,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431887.2124622
+  },
+  {
+    "name": "profile-alloy-logs-annotate-0",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-01"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431887.5384922,
+    "status": "complete",
+    "pid": 10481,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431887.8536532
+  },
+  {
+    "name": "profile-alloy-logs-annotate-1",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-02"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431887.8546286,
+    "status": "complete",
+    "pid": 10483,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431888.1697114
+  },
+  {
+    "name": "profile-alloy-logs-annotate-2",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-03"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431888.171037,
+    "status": "complete",
+    "pid": 10485,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431888.4359524
+  },
+  {
+    "name": "profile-alloy-logs-annotate-3",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-04"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431888.4371674,
+    "status": "complete",
+    "pid": 10487,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431888.752241
+  },
+  {
+    "name": "profile-alloy-logs-annotate-4",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-05"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431888.7535803,
+    "status": "complete",
+    "pid": 10489,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431889.0688496
+  },
+  {
+    "name": "profile-alloy-logs-annotate-5",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-06"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431889.0703647,
+    "status": "complete",
+    "pid": 10491,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431889.3860357
+  },
+  {
+    "name": "profile-alloy-logs-annotate-6",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-07"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431889.3874087,
+    "status": "complete",
+    "pid": 10493,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431889.552214
+  },
+  {
+    "name": "profile-alloy-logs-annotate-7",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-08"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431889.5530362,
+    "status": "complete",
+    "pid": 10495,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431889.7177975
+  },
+  {
+    "name": "profile-alloy-logs-annotate-8",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-09"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431889.7185845,
+    "status": "complete",
+    "pid": 10497,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431889.8833666
+  },
+  {
+    "name": "profile-alloy-logs-annotate-9",
+    "argv": [
+      "callgrind_annotate",
+      "--auto=no",
+      "--show-percs=no",
+      "/home/runner/work/_temp/alloy-benchmark/profile-alloy-logs.callgrind.10470-10"
+    ],
+    "timeout_seconds": 15,
+    "started_unix_seconds": 1793431889.8842635,
+    "status": "complete",
+    "pid": 10499,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793431890.0490537
+  },
+  {
+    "name": "comparison",
+    "argv": [
+      "target/release/alloy-bench",
+      "matrix",
+      "--scenarios",
+      "plain,alloy,alloy-logs,alloy-logs-fmt",
+      "--workloads",
+      "small",
+      "--transports",
+      "h1",
+      "--reps",
+      "5",
+      "--run-id",
+      "41180529588-1-comparison",
+      "--out",
+      "/home/runner/work/_temp/alloy-benchmark/comparison.jsonl",
+      "--seconds",
+      "5",
+      "--warmup",
+      "1",
+      "--concurrency",
+      "32",
+      "--streams",
+      "8",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance"
+    ],
+    "timeout_seconds": 300,
+    "started_unix_seconds": 1793431890.050435,
+    "status": "complete",
+    "pid": 10501,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793432010.5001152
+  },
+  {
+    "name": "allocations",
+    "argv": [
+      "target/release/alloy-bench",
+      "matrix",
+      "--scenarios",
+      "plain,alloy,alloy-logs,alloy-logs-fmt",
+      "--workloads",
+      "small",
+      "--transports",
+      "h1",
+      "--reps",
+      "5",
+      "--run-id",
+      "41180529588-1-allocations",
+      "--out",
+      "/home/runner/work/_temp/alloy-benchmark/allocations.jsonl",
+      "--seconds",
+      "5",
+      "--warmup",
+      "1",
+      "--concurrency",
+      "32",
+      "--streams",
+      "8",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance",
+      "--alloc-counting"
+    ],
+    "timeout_seconds": 300,
+    "started_unix_seconds": 1793432010.5019836,
+    "status": "complete",
+    "pid": 10729,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793432130.9197888
+  },
+  {
+    "name": "otel-smoke",
+    "argv": [
+      "target/release/alloy-bench",
+      "matrix",
+      "--scenarios",
+      "otel-sampled,otel-unsampled,otel-unreachable,otel-collector",
+      "--workloads",
+      "small",
+      "--transports",
+      "h1",
+      "--reps",
+      "1",
+      "--run-id",
+      "41180529588-1-otel-smoke",
+      "--out",
+      "/home/runner/work/_temp/alloy-benchmark/otel-smoke.jsonl",
+      "--seconds",
+      "5",
+      "--warmup",
+      "1",
+      "--concurrency",
+      "32",
+      "--streams",
+      "8",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance"
+    ],
+    "timeout_seconds": 90,
+    "started_unix_seconds": 1793432130.9218063,
+    "status": "complete",
+    "pid": 10947,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793432155.0253713
+  },
+  {
+    "name": "collector",
+    "argv": [
+      "target/release/alloy-bench",
+      "matrix",
+      "--scenarios",
+      "plain,alloy,otel-collector",
+      "--workloads",
+      "small",
+      "--transports",
+      "h1",
+      "--reps",
+      "5",
+      "--run-id",
+      "41180529588-1-collector",
+      "--out",
+      "/home/runner/work/_temp/alloy-benchmark/collector.jsonl",
+      "--seconds",
+      "5",
+      "--warmup",
+      "1",
+      "--concurrency",
+      "32",
+      "--streams",
+      "8",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance",
+      "--collector-endpoint",
+      "http://127.0.0.1:4318/v1/traces"
+    ],
+    "timeout_seconds": 300,
+    "started_unix_seconds": 1793432155.055083,
+    "status": "complete",
+    "pid": 11010,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793432245.419393
+  },
+  {
+    "name": "full-matrix",
+    "argv": [
+      "target/release/alloy-bench",
+      "matrix",
+      "--scenarios",
+      "plain,alloy,alloy-logs,alloy-logs-fmt,alloy-diagnostics,otel-sampled,otel-unsampled,otel-unreachable,otel-collector",
+      "--workloads",
+      "small,large,stream,cancel",
+      "--transports",
+      "h1,h2c,h1-tls,h2-tls,h1-mtls,h2-mtls",
+      "--reps",
+      "5",
+      "--run-id",
+      "41180529588-1-full-matrix",
+      "--out",
+      "/home/runner/work/_temp/alloy-benchmark/full-matrix.jsonl",
+      "--seconds",
+      "5",
+      "--warmup",
+      "1",
+      "--concurrency",
+      "32",
+      "--streams",
+      "8",
+      "--label",
+      "shared GitHub-hosted experimental; not dedicated baseline acceptance",
+      "--collector-endpoint",
+      "http://127.0.0.1:4318/v1/traces"
+    ],
+    "timeout_seconds": 9000,
+    "started_unix_seconds": 1793432245.4582772,
+    "status": "complete",
+    "pid": 11200,
+    "exit_code": 0,
+    "ended_unix_seconds": 1793438789.8846846
+  }
+]

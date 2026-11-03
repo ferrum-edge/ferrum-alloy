@@ -80,7 +80,52 @@ exceptions = [
 ignore = true
 
 [bans]
-multiple-versions = "warn"
+# A crate in the graph at two or more versions fails the check, so a new
+# duplicate is a reviewed decision rather than a silent warning. Each
+# accepted duplicate below skips only its older version lines, as caret
+# requirements (`base64:0.22` matches every 0.22.x), and leaves the newest
+# line unskipped. Patch bumps need no edit, but a further version line of
+# an allowlisted crate (base64 0.24, rand 0.11) fails until it is reviewed.
+# Remove an entry once the workspace graph no longer holds that line
+# (cargo-deny warns about an entry that no longer matches). The fuzz
+# crate's smaller graph shares this file, so it reports unmatched and
+# unnecessary skips as warnings; only the workspace check decides when to
+# remove an entry. Crates reached only through dev-dependencies count too.
+# Re-check with `cargo deny check bans`.
+multiple-versions = "deny"
+multiple-versions-include-dev = true
+skip = [
+    # RustCrypto generation split: jsonwebtoken's rust_crypto backend (rsa,
+    # p256/p384 0.13, ed25519-dalek), sha1 and sqlx-core stay on digest
+    # 0.10, sha2 0.10, hmac 0.12 and hkdf 0.12; sqlx-postgres (feature
+    # `postgres`) uses digest 0.11, sha2 0.11, hmac 0.13 and hkdf 0.13.
+    { crate = "block-buffer:0.10", reason = "digest 0.10 generation (jsonwebtoken rust_crypto, sha1, sqlx-core); sqlx-postgres on digest 0.11" },
+    { crate = "cpufeatures:0.2", reason = "digest 0.10 generation (curve25519-dalek, sha1, sha2 0.10); sha2 0.11 and chacha20 on 0.3" },
+    { crate = "crypto-common:0.1", reason = "digest 0.10 generation (jsonwebtoken rust_crypto, sha1, sqlx-core); sqlx-postgres on digest 0.11" },
+    { crate = "digest:0.10", reason = "jsonwebtoken rust_crypto, sha1 and sqlx-core on digest 0.10; sqlx-postgres on 0.11" },
+    { crate = "hkdf:0.12", reason = "elliptic-curve 0.13 (jsonwebtoken p256/p384) on hkdf 0.12; sqlx-postgres on 0.13" },
+    { crate = "hmac:0.12", reason = "jsonwebtoken, rfc6979 and hkdf 0.12 on hmac 0.12; sqlx-postgres on 0.13" },
+    { crate = "sha2:0.10", reason = "jsonwebtoken, ed25519-dalek, p256/p384 and sqlx-core on sha2 0.10; sqlx-postgres on 0.11" },
+    # rand generation split: jsonwebtoken and rsa on rand 0.8, opentelemetry
+    # and tungstenite (via axum) on 0.9, sqlx-postgres and proptest on 0.10;
+    # Alloy itself uses getrandom 0.4.
+    { crate = "getrandom:0.2", reason = "jsonwebtoken, ring and rand_core 0.6 on getrandom 0.2; Alloy and rand 0.10 on 0.4" },
+    { crate = "getrandom:0.3", reason = "rand_core 0.9 (opentelemetry, tungstenite) on getrandom 0.3; Alloy and rand 0.10 on 0.4" },
+    { crate = "r-efi:5", reason = "getrandom 0.3 on r-efi 5; getrandom 0.4 on 6" },
+    { crate = "rand:0.8", reason = "jsonwebtoken and rsa on rand 0.8; sqlx-postgres and proptest on 0.10" },
+    { crate = "rand:0.9", reason = "opentelemetry_sdk and tungstenite on rand 0.9; sqlx-postgres and proptest on 0.10" },
+    { crate = "rand_chacha:0.3", reason = "rand 0.8 on rand_chacha 0.3; rand 0.9 on 0.9" },
+    { crate = "rand_core:0.6", reason = "rand 0.8 and older RustCrypto on rand_core 0.6; rand 0.10 on 0.10" },
+    { crate = "rand_core:0.9", reason = "rand 0.9 on rand_core 0.9; rand 0.10 on 0.10" },
+    # Proc-macro crates still on syn 2 while most derives use syn 3.
+    { crate = "syn:2", reason = "ASN.1, SQLx, tracing and other derives on syn 2; serde, clap, tokio and others on 3" },
+    { crate = "synstructure:0.13", reason = "asn1-rs-derive and yoke-derive on synstructure 0.13; zerofrom-derive on 0.14" },
+    { crate = "base64:0.22", reason = "axum, jsonwebtoken and SQLx on base64 0.22; hyper-util, reqwest and pem (rcgen) on 0.23" },
+    { crate = "hashbrown:0.16", reason = "sqlx-core and its hashlink on hashbrown 0.16; indexmap on 0.17" },
+    { crate = "tower-http:0.6", reason = "reqwest (also via opentelemetry-otlp) on tower-http 0.6; Alloy on 0.7" },
+    { crate = "io-lifetimes:2", reason = "fs-set-times (via cap-primitives) on io-lifetimes 2; cap-std crates on 3" },
+    { crate = "windows-sys:0.52", reason = "errno, ring, rustix, tempfile and winx on windows-sys 0.52; tokio, mio, socket2 and cap-std on 0.61" },
+]
 wildcards = "deny"
 allow-wildcard-paths = true
 # Keep the crypto stack on ring; OpenSSL and aws-lc are not used.

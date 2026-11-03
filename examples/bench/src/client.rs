@@ -148,7 +148,18 @@ where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
     if h2 {
-        let (sender, connection) = http2::handshake(TokioExecutor::new(), io).await?;
+        // h2 counts every reset it sends for DATA on a stream it has already
+        // forgotten, and ends the connection after 1,024 of them
+        // (`too_many_internal_resets`): a guard against a hostile server.
+        // Sustained `cancel` load produces exactly that DATA, already in
+        // flight when each stream was cancelled and arriving after the 50
+        // retained resets moved on, so the guard would fail the load
+        // generator's own connections. The server under test is not a peer
+        // to defend against here; its frames are what is being measured.
+        let (sender, connection) = http2::Builder::new(TokioExecutor::new())
+            .max_local_error_reset_streams(None)
+            .handshake(io)
+            .await?;
         tokio::spawn(connection);
         Ok(Sender::H2(sender))
     } else {
@@ -828,6 +839,89 @@ pub(crate) mod tests {
             runtime.shutdown();
             result.unwrap();
         }
+    }
+
+    /// Answers the next GET with headers and one data frame that ends the
+    /// stream. Resets the client sends meanwhile, for late frames on streams
+    /// it has released, are counted; a GOAWAY fails the test.
+    async fn h2_complete_counting_resets(stream: &TcpStream, late_resets: &mut usize) -> u32 {
+        loop {
+            let (kind, flags, id, payload) = h2_frame(stream).await;
+            match kind {
+                1 => {
+                    assert_eq!(flags & 5, 5); // END_STREAM | END_HEADERS on the empty GET.
+                    h2_write(stream, 1, 4, id, &[0x88]).await; // HPACK static :status 200.
+                    h2_write(stream, 0, 1, id, &[b'x'; FRAME_BYTES]).await; // END_STREAM.
+                    return id;
+                }
+                3 => *late_resets += 1,
+                4 if flags == 0 => h2_write(stream, 4, 1, 0, &[]).await,
+                4 | 8 => {}
+                7 => panic!("client ended the connection: {:?}", &payload[8..]),
+                _ => panic!("unexpected H2 frame {kind}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sustained_late_frames_never_trip_the_clients_reset_limit() {
+        // Through the production handshake: more resets for late DATA than
+        // h2's default limit of 1,024. Under sustained `cancel` load the late
+        // frames are on cancelled streams h2 no longer retains; here they are
+        // on streams that ended and were released, which draws the same
+        // library reset every time, independent of h2's one-second reset
+        // retention and so of how fast this test runs.
+        const LATE: usize = 1_300;
+        let runtime = CancellationRuntime::new();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let target = Target {
+                    addr: listener.local_addr().unwrap(),
+                    transport: Transport::H2c,
+                    workload: Workload::Cancel,
+                    tls: None,
+                };
+                let mut servers = JoinSet::new();
+                servers.spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    stream.set_nodelay(true).unwrap();
+                    let mut preface = [0; 24];
+                    wire_read(&stream, &mut preface).await;
+                    assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+                    h2_write(&stream, 4, 0, 0, &[]).await;
+                    let mut late_resets = 0;
+                    let mut previous = None;
+                    for _ in 0..=LATE {
+                        let id = h2_complete_counting_resets(&stream, &mut late_resets).await;
+                        // The client released the previous stream before it
+                        // sent this request.
+                        if let Some(released) = previous.replace(id) {
+                            h2_write(&stream, 0, 0, released, &[b'x'; 16]).await;
+                        }
+                    }
+                    late_resets
+                });
+                let stream = TcpStream::connect(target.addr).await.unwrap();
+                stream.set_nodelay(true).unwrap();
+                let mut sender = handshake(TokioIo::new(stream), true).await.unwrap();
+                for _ in 0..=LATE {
+                    assert_eq!(exchange(&mut sender, &target).await.unwrap(), 1024);
+                }
+                // Keep the connection open until the peer's final writes are
+                // done: dropping the last sender shuts the connection down.
+                let late_resets = servers.join_next().await.unwrap().unwrap();
+                drop(sender);
+                late_resets
+            })
+            .await
+        });
+        runtime.shutdown();
+        // More resets than the default limit allows, yet the connection
+        // served every exchange. (The last late frame's reset arrives after
+        // the peer stops reading.)
+        let late = result.unwrap();
+        assert!(late > 1_024, "only {late} late resets reached the server");
     }
 
     struct Cancellation {

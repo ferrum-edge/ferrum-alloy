@@ -1,0 +1,18 @@
+{
+  "schema": "alloy-bench-slot/1",
+  "slot": "calibration-18",
+  "kind": "calibration",
+  "profile": "full",
+  "commit": "2d0b8a843be7885e9222ab1598ad2b7f22ea24d7",
+  "attempt": 1,
+  "run_id": "41250532573-1-calibration-18",
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "calibrated": true,
+  "raw_file": "calibration-18.jsonl",
+  "raw_sha256": "79886175fdf3619d466c5e0a0c40406d386f7811af298e1bd37847fe0ebbc5dc",
+  "binary_sha256": "e7484f695938eb71d9bc19f54faeb2bf2a980b310b9a4263232b52f239859efb",
+  "alloc_counting": false,
+  "control_file": "calibration-18-control.jsonl",
+  "control_sha256": "a5506618c0dc162e0154c68f6a35346cc90d95074dd2b46d8feb8a1b55c541df",
+  "control_injected_service_ns": 5000
+}

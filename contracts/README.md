@@ -15,16 +15,10 @@
 
 A parity test (`crates/ferrum-alloy-diagnostics/tests/schema_parity.rs`) fails when the Rust enums and the JSON Schema disagree.
 
-The [consumer evidence ledger](../docs/implementation-status.md#cross-repository-dependencies)
-records immutable heads, hosted gates and consumer boundaries. Anvil qualification includes
-the shared fixtures and a real hosted Alloy exporter golden; its preview grants no trust or
-confidence authority. Foundry and Nexus qualification covers authenticated, namespace-authorized,
-redacted previews, without production apply. Both strict consumers test the shared manifest
-fixtures. GitForgeOps separately qualifies generated resource trees. The
-[accepted owner qualification and adoption record](../docs/shared-contract-qualification.md)
-records qualified owner `81cbb410`, canonical publication and this adoption candidate.
-Fresh hosted owner/consumer adoption checks and root disposition remain for #27/#28;
-the earlier qualified consumer slices are not relabeled as new-tag qualification.
+Owner and consumer qualification, the shared v1 freeze and the remaining adoption
+gates for #27/#28 are recorded in the
+[owner/adoption record](../docs/shared-contract-qualification.md) and the
+[consumer evidence ledger](../docs/implementation-status.md#cross-repository-dependencies).
 
 ## Ferrum contracts pin
 
@@ -58,13 +52,10 @@ recorded pinned meanings.
 The adopted report is byte-identical to the v0.9.11 pin and differs from r2 only
 in `x-contract`. Its `coordinated_release.contracts_tag` records the original
 v0.9.11 freeze, while local `contracts_tag`/`contracts_commit` track this adoption.
-The diagnostic-ref schema changes only provenance; all 12 diagnostic fixtures
-remain byte-identical. X-Gateway-Error token meanings, diagnostic header
-availability and reference grammar are unchanged; admin ETag/If-Match descriptions
-add the released deployment profile. Its new schemas/fixtures are outside this same
-16-file scope and grant Alloy no deployment capability. All descriptions outside
-`$id`/`x-contract`, including historical PROPOSED/incomplete-import wording, remain
-exactly paired with the qualified owner. Current status is in `x-contract`; the
+All 12 diagnostic fixtures remain byte-identical. Canonical deployment
+schemas/fixtures are outside this 16-file scope and grant Alloy no deployment
+capability. All descriptions outside `$id`/`x-contract`, including historical
+PROPOSED/incomplete-import wording, remain exactly paired with the qualified owner. Current status is in `x-contract`; the
 tagged metadata's prepared/pending-publication text records the pre-publication
 state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
 published at 22:41:21 UTC on 2026-10-04. Never rewrite canonical-owned bytes or
@@ -73,8 +64,8 @@ pin and local metadata together. The current
 [contracts-edge-0.9.17 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
 was published on 2026-10-10. Its gateway-errors vocabulary adds the ninth
 client-facing token, `loop_detected`, and clarifies the timeout meanings; the
-diagnostic-ref schema adds the matching rejection phase, and the
-gateway-headers vocabulary adds the `X-Ferrum-Hops` assertion (not consumed by
+diagnostic-ref schema adds `loop_detected` to both its `gateway_error` and
+`rejection_phase` enums, and the gateway-headers vocabulary adds the `X-Ferrum-Hops` assertion (not consumed by
 Alloy). The `contracts-edge-0.9.15` release it supersedes confirmed the eight
 client-facing tokens unchanged and added the released
 `X-Authenticated-Identity` assertion.

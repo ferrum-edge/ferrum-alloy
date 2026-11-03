@@ -991,6 +991,70 @@ fn edge_export_writes_reviewable_artifacts_without_overwriting() {
     assert_eq!(code(&run(&["edge", "export", "--manifest", &bad])), 3);
 }
 
+/// Export cannot generate Edge authentication yet, so `auth.mode =
+/// "gateway"` is refused before anything is written: no stdout document, no
+/// new or replaced file, and no GitForgeOps directory.
+#[test]
+fn edge_export_refuses_gateway_auth_without_writing_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = std::fs::read_to_string(fixture("manifests/orders-api.toml")).unwrap();
+    let text = original.replace("mode = \"service\"", "mode = \"gateway\"");
+    assert_ne!(text, original);
+    let manifest = write(dir.path(), "gateway.toml", &text);
+    let refused = |output: &Output| {
+        assert_eq!(code(output), 3, "{}", stderr(output));
+        assert!(output.stdout.is_empty(), "{}", stdout(output));
+        let message = stderr(output);
+        assert!(message.contains("auth.mode is \"gateway\""), "{message}");
+        assert!(!message.contains("wrote "), "{message}");
+    };
+
+    refused(&run(&["edge", "export", "--manifest", &manifest]));
+
+    let out = dir.path().join("edge.yaml");
+    refused(&run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--output",
+        out.to_str().unwrap(),
+    ]));
+    assert!(!out.exists());
+
+    std::fs::write(&out, "previous\n").unwrap();
+    refused(&run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--output",
+        out.to_str().unwrap(),
+        "--force",
+    ]));
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "previous\n");
+
+    let tree = dir.path().join("gitops");
+    refused(&run(&[
+        "edge",
+        "export",
+        "--manifest",
+        &manifest,
+        "--format",
+        "gitforgeops",
+        "--output",
+        tree.to_str().unwrap(),
+    ]));
+    assert!(!tree.exists());
+
+    let mut entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["edge.yaml", "gateway.toml"], "no temporary files");
+}
+
 #[cfg(unix)]
 #[test]
 fn output_writers_replace_or_refuse_symlinks_without_following_them() {

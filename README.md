@@ -19,7 +19,7 @@ Ferrum Alloy is a batteries-included toolkit for Rust API services built on [Axu
 
 Alloy works on its own. Behind [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge), it also shows a verified request story shared with the gateway. You can see which gateway span each service span belongs to and whether the gateway's identity was cryptographically verified. You can also see what the evidence does and does not prove about where the time went.
 
-> **Pre-release.** Nothing is published to crates.io yet (see [release readiness](docs/release.md)), and Rust APIs may change. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
+> **Pre-release, Git-only.** Alloy is distributed from Git and is not published to crates.io or any other registry (see the [distribution decision](docs/release.md#distribution-decision)), and Rust APIs may change. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
 
 ## Quick start
 
@@ -61,7 +61,7 @@ To go further, read [Getting started](docs/getting-started.md).
 | **Truthful telemetry** | Request ids and route-template metrics. W3C trace context is accepted only from trusted transport peers. Accounting ends exactly once, when the response *body* ends. OTLP export is bounded and counts any loss. |
 | **Optional batteries** | Cargo features: `otel`, `tls` (rustls with verified client identity), `edge`, `postgres` (SQLx), `openapi` (utoipa), `openapi-ui` (Swagger UI from embedded assets, following the document's listener and token policy), `jwt` (JWKS), `http-client`, `compression`, `cors`, and `diagnostics` (tenant-scoped retrieval of one request's evidence from a running service). |
 
-The management listener binds to loopback by default, but loopback does not authenticate an operator: local users and containers or sidecars in the same pod share it, and Kubernetes NetworkPolicy does not isolate containers sharing loopback. Detailed health, metrics, and management OpenAPI/UI always require a configured `management.token` of at least 32 characters. Without one, these routes return `401`, even on loopback; `/livez` and `/readyz` remain minimal, status-only and token-free. Prefer `FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE` to supply the secret from a file readable only by the service account (for example, mode `0600` on Unix); never put a live token in a URL. Browsers do not add bearer tokens automatically, so use a local proxy or a carefully scoped header-injecting extension backed by a protected secret for the management UI. Diagnostic retrieval retains its separate tenant authorizer; the management token is neither required nor sufficient. See [configuration](docs/configuration.md#secrets) and [security](docs/security.md#management-surface).
+Detailed health, metrics, and management OpenAPI/UI always require a configured `management.token` of at least 32 characters, even on loopback; diagnostic retrieval keeps its separate tenant authorizer. See [security](docs/security.md#management-surface).
 
 ### CLI
 
@@ -99,20 +99,20 @@ The management listener binds to loopback by default, but loopback does not auth
 | [Architecture decisions](docs/adr/README.md) | ADRs |
 | [Implementation status](docs/implementation-status.md) | What is built and tested |
 | [Testing](docs/testing.md) | Property tests and fuzz targets for untrusted input |
-| [Benchmarks](docs/benchmarks.md) | Local, same-host overhead measurements and their limits |
-| [Release readiness](docs/release.md) | Packaging checks, the release checklist, and open owner decisions |
+| [Benchmarks](docs/benchmarks.md) | Overhead measurements, the hosted regression gate and its budgets, and their limits |
+| [Release readiness](docs/release.md) | The Git-only distribution decision, packaging checks, the release checklist, and deferred registry decisions |
 
 ## Contracts
 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
 This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures.
 The adopted tag is [`contracts-edge-0.9.17`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17) at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8`.
-Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented with root's accepted unchanged wire freeze at qualified owner `81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e`. Alloy remains unreleased (`publish = false`).
+Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented (see the [owner/adoption record](docs/shared-contract-qualification.md)). Alloy remains unreleased (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
-The report retains its original v0.9.11 shared-freeze metadata; the diagnostic-ref schema refreshes only Edge provenance, and the diagnostic fixtures are unchanged. The new canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
+The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema, and the diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
-The canonical report preserves historical `PROPOSED` descriptions byte for byte outside `$id`/`x-contract`; current shared status lives in `x-contract`. Tagged prepared/pending-publication wording records the source's pre-publication state. This adoption requires fresh hosted CI; earlier owner/consumer qualification does not qualify this branch or close [#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
+Earlier owner/consumer qualification does not qualify this adoption on `main` or close [#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
 
 ## Development
 
@@ -134,6 +134,6 @@ The Ferrum Edge end-to-end stack is defined in [`examples/edge-observability/com
 
 ## License
 
-Ferrum Alloy is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), and commercial licensing is available ([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). "Ferrum Alloy" and the crate and command names are working names. Registry and trademark availability has not been verified.
+Ferrum Alloy is licensed under [PolyForm Noncommercial 1.0.0](LICENSE), and commercial licensing is available ([LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)). "Ferrum Alloy" and the crate and command names are working names. Alloy is distributed from Git only; registry and trademark availability are [deferred decisions](docs/release.md#deferred-registry-decisions), and no trademark search has been done.
 
 Files under [`crates/ferrum-alloy/assets/swagger-ui/`](crates/ferrum-alloy/assets/swagger-ui/) are third-party code (Swagger UI, feature `openapi-ui`) and are licensed only under their own terms: Apache-2.0, with the bundled MIT, BSD-3-Clause, and DOMPurify notices in that directory. They are not covered by the repository's PolyForm Noncommercial or commercial licensing.

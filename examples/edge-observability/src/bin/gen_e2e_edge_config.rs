@@ -51,7 +51,7 @@ fn main() -> Result<(), Failure> {
     };
     let manifest_text = std::fs::read_to_string(manifest_path)?;
     let manifest = ServiceManifest::from_toml(&manifest_text).map_err(|e| e.to_string())?;
-    let resources = export::resources(&manifest);
+    let resources = export::resources(&manifest).map_err(|e| e.to_string())?;
     let base = export::file_mode_yaml(&resources);
     if std::fs::read_to_string(cli_path)? != base {
         let message = format!("{cli_path} differs from the library export of {manifest_path}");
