@@ -213,7 +213,7 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.17`. They are
+/// `contracts-edge-0.9.19`. They are
 /// recorded here only to detect drift and are never rendered: rule
 /// `alloy.r007` renders the version-neutral explanations in
 /// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
@@ -223,7 +223,7 @@ const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-f
 const PINNED_GATEWAY_ERROR_MEANINGS: &[(&str, &str)] = &[
     (
         "connection_failure",
-        "Pre-wire connect, DNS or TLS failure: the gateway could not set up a connection to the backend. Also the token for every ErrorClass whose request_reached_wire is false.",
+        "Pre-wire connect-refused, DNS, TLS or pool failure (502), connect timeout (504; Edge #6770), or a pooled-transport (direct H2, native H3, HBONE, sidecar mTLS) DestinationRule maxConnections refusal before dialing (503; Edge #6771). Also the token for every ErrorClass whose request_reached_wire is false.",
     ),
     (
         "backend_timeout",
@@ -307,8 +307,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.17");
-    assert_eq!(pin["commit"], "f7ba1a9b9885900d1e110f76d38e37a02eda13c8");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.19");
+    assert_eq!(pin["commit"], "d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
@@ -475,6 +475,23 @@ fn external_authenticated_identity_is_not_a_consumer_identity_header() {
     assert!(
         !ferrum_alloy_edge::contract::IDENTITY_HEADERS.contains(&"x-authenticated-identity"),
         "external authentication identity is not a mapped Consumer assertion"
+    );
+}
+
+#[test]
+fn forwarded_peer_spiffe_id_is_not_a_consumer_identity_header() {
+    let headers = pinned_json("vocabularies/gateway-headers.json");
+    let peer = headers["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "x-ferrum-peer-spiffe-id")
+        .expect("Edge v0.9.19 publishes x-ferrum-peer-spiffe-id");
+    assert_eq!(peer["availability"], "v0.9.19");
+    assert_eq!(peer["direction"], "gateway_to_backend");
+    assert!(
+        !ferrum_alloy_edge::contract::IDENTITY_HEADERS.contains(&"x-ferrum-peer-spiffe-id"),
+        "a forwarded mesh peer identity is not a mapped Consumer assertion"
     );
 }
 

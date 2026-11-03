@@ -8,7 +8,7 @@
 //! `ferrum-alloy edge export` turns the manifest into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing*
 //! file-mode schema; hosted CI validates exports against supported Edge
-//! v0.9.17 and v0.9.15.
+//! v0.9.19 and v0.9.17.
 //! Edge does not consume the manifest. See `docs/shared-contract-qualification.md`;
 //! current wire fields and validation bounds are unchanged.
 //!
@@ -424,6 +424,12 @@ impl ServiceManifest {
                 errors.push(
                     "gateway.otel_endpoint must be an http(s) URL without credentials".into(),
                 );
+            } else if endpoint.starts_with("http://")
+                && !authority.is_some_and(is_loopback_ip_literal_authority)
+            {
+                errors.push(
+                    "gateway.otel_endpoint must use https:// unless its host is a loopback IP literal: Ferrum Edge v0.9.19 drops a cleartext exporter to any other host".into(),
+                );
             }
         }
         if let Some(ratio) = self.gateway.otel_root_sampling_ratio
@@ -457,4 +463,21 @@ impl ServiceManifest {
             Err(ManifestError(errors))
         }
     }
+}
+
+/// Whether a URL authority (`host[:port]`, without user information) names a
+/// loopback IP literal, the only host Ferrum Edge v0.9.19 accepts an
+/// `http://` OTLP exporter for without its `allow_plaintext` opt-in, which
+/// v0.9.17 refuses as an unknown key.
+fn is_loopback_ip_literal_authority(authority: &str) -> bool {
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map(|(host, _)| host),
+        None => Some(
+            authority
+                .rsplit_once(':')
+                .map_or(authority, |(host, _)| host),
+        ),
+    };
+    host.and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|ip| ip.is_loopback())
 }

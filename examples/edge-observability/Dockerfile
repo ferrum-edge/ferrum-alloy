@@ -3,10 +3,10 @@
 # Every base image is pinned by digest; see docs/compatibility.md.
 
 # Ferrum Edge image for the edge stage. The default is the contract baseline:
-# Ferrum Edge v0.9.17 (published multi-arch index).
+# Ferrum Edge v0.9.19 (published multi-arch index).
 # CI sets EDGE_IMAGE through compose.yaml to test every release in the support
 # window (docs/compatibility.json).
-ARG EDGE_IMAGE=ferrumedge/ferrum-edge@sha256:f8942bed8d3b77c257d7266c9227450dd3d8c139759a07c47d060521a5fd41d1
+ARG EDGE_IMAGE=ferrumedge/ferrum-edge@sha256:0e2ed6d720cbc474e29cfa6bcd3945db010674d69988e2bd795a26399c3cb80e
 
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 WORKDIR /src
@@ -34,4 +34,5 @@ COPY --from=build --chown=65532:65532 /out/edge.yaml /config/edge.yaml
 
 FROM otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1 AS collector
 COPY --from=build --chown=10001:10001 /out/collector /out
+COPY --from=build --chown=10001:10001 /out/certs /certs
 COPY examples/edge-observability/collector.yaml /etc/otelcol-contrib/config.yaml

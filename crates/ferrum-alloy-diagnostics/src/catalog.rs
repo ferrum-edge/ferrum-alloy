@@ -261,8 +261,14 @@ pub fn is_known(name: &str) -> bool {
 /// Ferrum Edge `rejection_phase` values that run before any upstream attempt
 /// (Edge `docs/plugin_execution_order.md`; the HTTP/3-only
 /// `route_request_timeout_h3_upload` is not mapped). `h1_framing_unverified` and
-/// `client_trust_withdrawn` are recorded only in Edge's diagnostic reference, and
+/// `client_trust_withdrawn` are recorded only in Edge's diagnostic reference,
+/// v0.9.19's `gateway_closed_h3_upload` is not mapped because it does not say
+/// whether an upstream attempt began, and
 /// `websocket_permessage_deflate` rejects a backend's answer after the upstream attempt.
+/// v0.9.19's client-abort phases (`client_disconnect_before_response`,
+/// `protocol_error_before_response`, `connection_closed_before_response` and
+/// the `gateway_close_*` phases) can fire while Edge awaits backend response
+/// headers, so they are not pre-upstream either.
 pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "allowed_methods",
     "on_request_received",
@@ -277,6 +283,7 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "grpc_deadline_preflight",
     "route_request_timeout_early_upload",
     "route_protocol_admission",
+    "query_trigger_admission",
     "backend_max_connections",
     "websocket_connection_limit",
     "adaptive_concurrency",
@@ -297,7 +304,7 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
 pub const EDGE_GATEWAY_ERROR_TOKENS: &[(&str, &str)] = &[
     (
         "connection_failure",
-        "The gateway could not set up a connection to the configured backend (DNS, TCP, TLS, or pool).",
+        "The gateway did not get a connection to the configured backend: DNS, TCP connect (refused or timed out), TLS, or pool failure, or the gateway's own per-destination connection limit refused a new one. The request did not reach the service.",
     ),
     (
         "backend_timeout",

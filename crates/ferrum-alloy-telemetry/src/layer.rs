@@ -183,6 +183,7 @@ const RESERVED_ID_HEADERS: &[&str] = &[
     "x-consumer-username",
     "x-consumer-custom-id",
     "x-authenticated-identity",
+    "x-ferrum-peer-spiffe-id",
     // Caching policy and validators: replacing one reclassifies storage.
     "cache-control",
     "expires",

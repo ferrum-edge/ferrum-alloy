@@ -2,15 +2,15 @@
 
 | Path | Contract | Status |
 |---|---|---|
-| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.17` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
-| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.17`; Alloy validates and binds authenticated lookup records per ADR 0009 |
-| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten selected released lookup record fixtures | Byte-exact from `contracts-edge-0.9.17`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
+| `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.19` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
+| `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.19` (byte-identical to `contracts-edge-0.9.17`); Alloy validates and binds authenticated lookup records per ADR 0009 |
+| `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten selected released lookup record fixtures | Byte-exact from `contracts-edge-0.9.19`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
 | `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007 (including an observed Ferrum Edge diagnostic reference), a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests; `fixtures/reports/gateway-diagnostic-ref.json` is a candidate for upstreaming to ferrum-contracts |
 | `fixtures/reports/*.expected.txt` | Deterministic rendering snapshots | Regenerate with `UPDATE_SNAPSHOTS=1` and review the diff |
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
 | `fixtures/manifests/*.toml` | `ferrum.service_manifest` v1 examples | **EXISTING**/implemented with root's accepted unchanged v1 freeze published in `contracts-edge-0.9.11`; fixture comments retain historical PROPOSED text. Foundry [#540](https://github.com/ferrum-edge/ferrum-foundry/pull/540) and Nexus [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) have merged, qualified authenticated previews as of 2026-10-04. |
-| `fixtures/manifests/*.edge.yaml` | Generated Ferrum Edge file-mode configuration | Snapshots; regenerate with `UPDATE_SNAPSHOTS=1` in hosted CI. CI validates `plain-http.edge.yaml` with `ferrum-edge validate` on every supported Edge release (v0.9.17 and v0.9.15). |
-| `fixtures/openapi/orders-api.{toml,input.json}` | A manifest with the `[agents]` section and a utoipa-style document declaring agent tools (`x-ferrum-mcp`) | `[agents]` is included in the shared service-manifest schema as of ferrum-contracts #8 (`contracts-edge-0.9.9-r2`); the extension is unchanged in supported Edge v0.9.17 and v0.9.15 |
+| `fixtures/manifests/*.edge.yaml` | Generated Ferrum Edge file-mode configuration | Snapshots; regenerate with `UPDATE_SNAPSHOTS=1` in hosted CI. CI validates `plain-http.edge.yaml` with `ferrum-edge validate` on every supported Edge release (v0.9.19 and v0.9.17). `orders-api.toml` and its snapshot export to `https://otel-collector:4318`, because Edge v0.9.19 drops a cleartext OTLP exporter to a host that is not a loopback IP literal. |
+| `fixtures/openapi/orders-api.{toml,input.json}` | A manifest with the `[agents]` section and a utoipa-style document declaring agent tools (`x-ferrum-mcp`) | `[agents]` is included in the shared service-manifest schema as of ferrum-contracts #8 (`contracts-edge-0.9.9-r2`); the extension is unchanged in supported Edge v0.9.19 and v0.9.17 |
 | `fixtures/openapi/orders-api.openapi.json` | What `openapi export` writes for them | Snapshot; regenerate with `UPDATE_SNAPSHOTS=1`. CI submits it to the real `POST /api-specs` on every supported Edge release (`edge-config` job). |
 
 A parity test (`crates/ferrum-alloy-diagnostics/tests/schema_parity.rs`) fails when the Rust enums and the JSON Schema disagree.
@@ -24,8 +24,8 @@ gates for #27/#28 are recorded in the
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
 diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures from the tag recorded
-in `ferrum-contracts/PIN`: `contracts-edge-0.9.17` at
-`f7ba1a9b9885900d1e110f76d38e37a02eda13c8`. Both shared v1 contracts are now
+in `ferrum-contracts/PIN`: `contracts-edge-0.9.19` at
+`d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b`. Both shared v1 contracts are now
 EXISTING/implemented; Alloy owner availability remains unreleased. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in
@@ -61,12 +61,22 @@ state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-
 published at 22:41:21 UTC on 2026-10-04. Never rewrite canonical-owned bytes or
 weaken full schema parity to change those descriptions. This adoption updates the
 pin and local metadata together. The current
+[contracts-edge-0.9.19 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.19)
+changes only the two gateway vocabularies; the diagnostic-ref and
+diagnostic-report schemas and all 12 vendored fixtures are byte-identical to
+`contracts-edge-0.9.17` (there is no `contracts-edge-0.9.18`: Edge v0.9.18 was
+never published). Its gateway-errors vocabulary keeps the nine tokens and says
+`connection_failure` also arrives with `504` (connect timeout) or `503` (a
+pooled-transport DestinationRule `maxConnections` refusal before dialing),
+and adds a client-abort terminal source. The gateway-headers vocabulary adds `x-ferrum-peer-spiffe-id`
+and the mesh ext-authz `x-ferrum-source-*`/`x-ferrum-request-principal`
+headers, none consumed by Alloy. The
 [contracts-edge-0.9.17 release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
-was published on 2026-10-10. Its gateway-errors vocabulary adds the ninth
+it supersedes was published on 2026-10-10. Its gateway-errors vocabulary adds the ninth
 client-facing token, `loop_detected`, and clarifies the timeout meanings; the
 diagnostic-ref schema adds `loop_detected` to both its `gateway_error` and
 `rejection_phase` enums, and the gateway-headers vocabulary adds the `X-Ferrum-Hops` assertion (not consumed by
-Alloy). The `contracts-edge-0.9.15` release it supersedes confirmed the eight
+Alloy). The `contracts-edge-0.9.15` release that one superseded confirmed the eight
 client-facing tokens unchanged and added the released
 `X-Authenticated-Identity` assertion.
 
