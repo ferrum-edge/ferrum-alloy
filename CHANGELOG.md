@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Adopt `contracts-edge-0.9.20` at `39da322083044c2e92617209e62983c92387f0ad`
+  (SSH-signed tag object `82b277b495e73cfadfacb6f3123de02a984658e4`) and pin
+  Ferrum Edge v0.9.20 at `e4a606a00352674daaef08636e3e359e6c48ba18`, with
+  v0.9.19 as the previous supported release; v0.9.17 leaves the window. Only
+  the two gateway vocabularies changed, and no `X-Gateway-Error` token, token
+  meaning or header entry changed, so Alloy's token lists, catalog
+  explanations and `alloy.r007` are unchanged. The item-by-item
+  `v0.9.19..v0.9.20` source re-audit found no change to anything Alloy reads
+  or exports.
 - Adopt `contracts-edge-0.9.19` at `d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b`
   and pin Ferrum Edge v0.9.19 at `510ce7121c3d9754110d330a30a3bd9b7a7b278e`,
   with v0.9.17 as the previous supported release; v0.9.15 leaves the window
