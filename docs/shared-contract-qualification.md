@@ -9,20 +9,29 @@ and `ferrum.service_manifest` v1 EXISTING/implemented. This branch then adopted
 record below); `main` then adopted
 [`contracts-edge-0.9.17`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.17)
 at `f7ba1a9b9885900d1e110f76d38e37a02eda13c8` with Edge v0.9.17 (baseline) and
-v0.9.15 (previous). The current adoption candidate is
+v0.9.15 (previous), then
 [`contracts-edge-0.9.19`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.19)
 at `d96b0292a0f87647f7552f25e0e5ce1b4ae30f8b` with Edge v0.9.19 (baseline) and
-v0.9.17 (previous), as recorded in [compatibility.json](compatibility.json) and
-`contracts/ferrum-contracts/PIN`; hosted CI qualification of the
-`contracts-edge-0.9.19` adoption is pending (this pull request's CI). Only the
-two gateway vocabularies change; the report and diagnostic-ref schemas and all
-12 diagnostic fixtures are byte-identical to `contracts-edge-0.9.17`, and the
-local report `x-contract` `contracts_tag`/`contracts_commit` name the new pin.
-No producer wire fields, bounds, enums, reader rules or fixture payloads change.
-The only generated snapshot changes are the known Edge release/source headers,
-plus the `orders-api` manifest fixture and its snapshot moving the OTLP endpoint
-to `https://otel-collector:4318`, because Edge v0.9.19 drops a cleartext
-exporter to a host that is not a loopback IP literal.
+v0.9.17 (previous); both pairings passed on `main` at `322a5f1` by
+[push CI 41588507875](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41588507875).
+That adoption moved the `orders-api` manifest fixture and its snapshot to
+`https://otel-collector:4318`, because Edge v0.9.19 drops a cleartext exporter
+to a host that is not a loopback IP literal. The current adoption candidate is
+[`contracts-edge-0.9.20`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20)
+at `39da322083044c2e92617209e62983c92387f0ad` (SSH-signed tag object
+`82b277b495e73cfadfacb6f3123de02a984658e4`) with Edge v0.9.20 (baseline) and
+v0.9.19 (previous), as recorded in [compatibility.json](compatibility.json) and
+`contracts/ferrum-contracts/PIN`; the v0.9.20 bump's pull-request CI is its
+hosted qualification. Only the two gateway vocabularies change: their
+`edge_release` and Edge provenance, Edge's notes, a new `docs/size_limits.md`
+source, and the `protocol_error` `ErrorClass` meaning (a gRPC backend failure
+seen at or after the client deadline now settles as that deadline). No
+`X-Gateway-Error` token, token meaning, header or availability changes. The report and diagnostic-ref schemas
+and all 12 diagnostic fixtures are byte-identical to `contracts-edge-0.9.19`,
+and the local report `x-contract` `contracts_tag`/`contracts_commit` name the
+new pin. No producer wire fields, bounds, enums, reader rules or fixture
+payloads change. The only generated snapshot changes are the known Edge
+release/source headers.
 
 ## v0.9.12 adoption (2026-10-05, historical)
 

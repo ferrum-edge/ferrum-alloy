@@ -87,7 +87,7 @@ rolls to v0.9.11/v0.9.10 and requires fresh hosted pairing and HTTP fixture chec
 The 2026-10-05 adoption pins `contracts-edge-0.9.12` at
 `31f0a21d707795be293d15837c2f77c3d84219d8`. The lookup schema refreshes only
 Edge source provenance; its constraints and ten fixture payloads are unchanged.
-The current window is v0.9.19/v0.9.17 with the `contracts-edge-0.9.19` pin
+The current window is v0.9.20/v0.9.19 with the `contracts-edge-0.9.20` pin
 (see [compatibility](../compatibility.md)); that pin keeps the lookup schema
 and its fixtures byte-identical.
 Edge's new admin deployment profile is outside this explicit G01 lookup.

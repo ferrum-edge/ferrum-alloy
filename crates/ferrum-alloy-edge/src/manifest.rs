@@ -8,7 +8,7 @@
 //! `ferrum-alloy edge export` turns the manifest into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing*
 //! file-mode schema; hosted CI validates exports against supported Edge
-//! v0.9.19 and v0.9.17.
+//! v0.9.20 and v0.9.19.
 //! Edge does not consume the manifest. See `docs/shared-contract-qualification.md`;
 //! current wire fields and validation bounds are unchanged.
 //!
@@ -466,9 +466,9 @@ impl ServiceManifest {
 }
 
 /// Whether a URL authority (`host[:port]`, without user information) names a
-/// loopback IP literal, the only host Ferrum Edge v0.9.19 accepts an
-/// `http://` OTLP exporter for without its `allow_plaintext` opt-in, which
-/// v0.9.17 refuses as an unknown key.
+/// loopback IP literal, the only host Ferrum Edge v0.9.19 and later accept an
+/// `http://` OTLP exporter for without the `allow_plaintext` opt-in, which
+/// the export never writes (v0.9.17 refused it as an unknown key).
 fn is_loopback_ip_literal_authority(authority: &str) -> bool {
     let host = match authority.strip_prefix('[') {
         Some(rest) => rest.split_once(']').map(|(host, _)| host),
