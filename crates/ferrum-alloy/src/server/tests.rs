@@ -426,14 +426,14 @@ async fn finished_connection(body_size: usize, write_stall_timeout: Duration) ->
             async move { Body::new(body) }
         }),
     );
-    let lifecycle = Lifecycle::new(Arc::default());
+    let drain = CancellationToken::new();
     let peer = PeerInfo {
         remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
         tls: None,
     };
     let (mut client, server) = tokio::io::duplex(CAPACITY);
     let task = tokio::spawn(async move {
-        serve_io(server, peer, active, builder, routes, &options, &lifecycle).await;
+        serve_io(server, peer, active, builder, routes, &options, &drain).await;
     });
     client
         .write_all(b"GET /big HTTP/1.1\r\nhost: t\r\n\r\n")
@@ -726,7 +726,7 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
             }
         }),
     );
-    let lifecycle = Lifecycle::new(Arc::default());
+    let drain = CancellationToken::new();
     let peer = PeerInfo {
         remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
         tls: None,
@@ -738,7 +738,7 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
         blocked: Arc::clone(&blocked),
     };
     let task = tokio::spawn(async move {
-        serve_io(io, peer, active, builder, routes, &options, &lifecycle).await;
+        serve_io(io, peer, active, builder, routes, &options, &drain).await;
     });
     let receive = async {
         client
@@ -1133,4 +1133,117 @@ async fn an_accept_loop_panic_closes_upgrades_and_cancels_stream_tasks() {
         2,
         "both open connections were force-closed"
     );
+}
+
+/// An accept-loop panic on one listener drains only that listener. Another
+/// listener sharing the lifecycle is still in the readiness grace (it stops
+/// accepting only when the grace ends), so it keeps serving keep-alive
+/// connections, those open before the panic and those accepted after it,
+/// while readiness reports draining.
+#[tokio::test]
+async fn an_accept_loop_panic_does_not_drain_another_listener_in_the_readiness_grace() {
+    use hyper::client::conn::http1;
+
+    /// Two requests on one connection: a drained HTTP/1 connection closes
+    /// instead of serving the second.
+    async fn keeps_alive(sender: &mut http1::SendRequest<http_body_util::Empty<Bytes>>) {
+        for _ in 0..2 {
+            sender.ready().await.expect("the connection stays open");
+            let request = http::Request::get("/")
+                .header("host", "t")
+                .body(http_body_util::Empty::<Bytes>::new())
+                .unwrap();
+            let response = tokio::time::timeout(WITHIN, sender.send_request(request))
+                .await
+                .unwrap()
+                .expect("the request is served");
+            assert_eq!(response.status(), 200);
+            http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn connect(
+        addr: SocketAddr,
+    ) -> (
+        http1::SendRequest<http_body_util::Empty<Bytes>>,
+        JoinHandle<hyper::Result<()>>,
+    ) {
+        let io = hyper_util::rt::TokioIo::new(TcpStream::connect(addr).await.unwrap());
+        let (sender, connection) = http1::handshake(io).await.unwrap();
+        (sender, tokio::spawn(connection))
+    }
+
+    let options = |name, drain_timeout| ServeOptions {
+        name,
+        classifier: None,
+        max_connections: 8,
+        max_header_count: 100,
+        max_header_bytes: 8192,
+        http2_max_concurrent_streams: 8,
+        header_read_timeout: WITHIN,
+        idle_timeout: WITHIN,
+        write_stall_timeout: WITHIN,
+        body_read_stall_timeout: WITHIN,
+        drain_timeout,
+        #[cfg(feature = "tls")]
+        tls: None,
+    };
+    let routes = Router::new().route("/", get(|| async { "ok" }));
+    let lifecycle = Lifecycle::new(Arc::default());
+
+    let panicking = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let panicking_addr = panicking.local_addr().unwrap();
+    let panicking_state = AcceptState::new(8);
+    let accept_panic = Arc::clone(&panicking_state.accept_panic);
+    let panicking_task = tokio::spawn(serve_with_state(
+        panicking,
+        routes.clone(),
+        // Short, so its idle trigger connection cannot hold the panic back.
+        options("app", Duration::from_millis(500)),
+        lifecycle.clone(),
+        Arc::new(ServerStats::default()),
+        panicking_state,
+    ));
+    let surviving = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let surviving_addr = surviving.local_addr().unwrap();
+    let surviving_task = tokio::spawn(serve_with_state(
+        surviving,
+        routes,
+        options("management", WITHIN),
+        lifecycle.clone(),
+        Arc::new(ServerStats::default()),
+        AcceptState::new(8),
+    ));
+
+    // A keep-alive connection to the surviving listener, open and idle
+    // when the other listener's accept loop panics.
+    let (mut before, before_connection) = connect(surviving_addr).await;
+    keeps_alive(&mut before).await;
+
+    accept_panic.store(true, Ordering::Relaxed);
+    let _trigger = TcpStream::connect(panicking_addr).await.unwrap();
+    let joined = tokio::time::timeout(WITHIN, panicking_task).await.unwrap();
+    assert!(joined.as_ref().err().is_some_and(JoinError::is_panic));
+    assert!(lifecycle.is_draining(), "readiness reports draining");
+    // Time for a drain signal, had one reached the surviving listener, to
+    // close its idle connection.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    keeps_alive(&mut before).await;
+    let (mut after, after_connection) = connect(surviving_addr).await;
+    keeps_alive(&mut after).await;
+    assert!(!surviving_task.is_finished(), "it still accepts");
+
+    // The grace ends: the surviving listener stops accepting and drains.
+    drop((before, after));
+    lifecycle.stop_accepting().cancel();
+    tokio::time::timeout(WITHIN, surviving_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let _ = tokio::time::timeout(WITHIN, before_connection).await;
+    let _ = tokio::time::timeout(WITHIN, after_connection).await;
 }

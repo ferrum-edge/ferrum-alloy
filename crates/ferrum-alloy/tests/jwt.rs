@@ -888,6 +888,38 @@ async fn a_failed_refresh_reports_an_unknown_kid_as_unavailable() {
 }
 
 #[tokio::test]
+async fn a_jwks_with_no_usable_key_keeps_the_cached_keys_like_a_failed_refresh() {
+    let old = SigningKey::new("old");
+    let rotated = SigningKey::new("new");
+    let mut unusable = rotated.jwk();
+    unusable["use"] = json!("enc");
+    let bodies = [
+        json!({ "keys": [] }).to_string(),
+        json!({ "keys": [unusable] }).to_string(),
+    ];
+    for body in bodies {
+        let jwks = jwks_server(&[&old]).await;
+        // No rate limit, so every unknown kid refreshes. The key set stays
+        // fresh for five minutes.
+        let verifier = JwtVerifier::new(&settings(jwks.addr, 0)).unwrap();
+        let known = || old.sign(&claims(), Some("old"));
+        let unknown = || rotated.sign(&claims(), Some("new"));
+        assert_eq!(status_of(&verifier, &known()).await, 200, "{body}");
+
+        // A 200 whose key set holds no usable key is an outage, not a
+        // replacement key set.
+        jwks.serve_body(&body);
+        let (status, response, _) = call(&protected(&verifier), Some(&unknown())).await;
+        assert_eq!(status, 503, "{body}: {response}");
+        assert_eq!(jwks.fetches(), 2, "{body}: the refresh was attempted");
+
+        // The cached keys survive it, exactly as they survive a 5xx.
+        assert_eq!(status_of(&verifier, &known()).await, 200, "{body}");
+        assert_eq!(jwks.fetches(), 2, "{body}: answered from the cache");
+    }
+}
+
+#[tokio::test]
 async fn a_rate_limited_retry_after_a_failed_refresh_stays_unavailable() {
     let old = SigningKey::new("old");
     let rotated = SigningKey::new("new");

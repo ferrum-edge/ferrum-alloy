@@ -241,9 +241,65 @@ struct KeyState {
     latest: Option<watch::Receiver<Outcome>>,
 }
 
-/// The outcome of one refresh, published to every caller waiting on it:
-/// the fetched keys, or why there are none. `None` until it completes.
-type Outcome = Option<Result<Arc<Vec<Key>>, AuthError>>;
+/// The outcome of one refresh, published to every caller waiting on it.
+/// `None` until it completes.
+type Outcome = Option<RefreshOutcome>;
+
+/// How a finished refresh ended. Built only by [`KeyState::complete`].
+#[derive(Clone)]
+enum RefreshOutcome {
+    /// The JWKS held usable keys; they replaced the cached set.
+    Keys(UsableKeys),
+    /// The JWKS parsed but held no usable key (none at all, or only keys
+    /// this verifier cannot use). An outage, like `Failed`: the cached keys
+    /// are kept.
+    Unusable,
+    /// The fetch failed. The cached keys are kept.
+    Failed(AuthError),
+}
+
+impl RefreshOutcome {
+    /// Whether the refresh left the cached keys in place because the key
+    /// source could not supply usable ones.
+    fn failed(&self) -> bool {
+        match self {
+            Self::Keys(_) => false,
+            Self::Unusable | Self::Failed(_) => true,
+        }
+    }
+}
+
+/// A key set holding at least one usable key.
+#[derive(Clone)]
+struct UsableKeys(Arc<Vec<Key>>);
+
+impl UsableKeys {
+    fn new(keys: Vec<Key>) -> Option<Self> {
+        (!keys.is_empty()).then(|| Self(Arc::new(keys)))
+    }
+}
+
+impl KeyState {
+    /// The one transition out of a refresh. Only usable keys replace the
+    /// cached set and its fetch time; an unusable set or a failure keeps
+    /// both, so the previous keys age out on schedule.
+    fn complete(
+        &mut self,
+        started: Instant,
+        fetched: Result<(Vec<Key>, Duration), AuthError>,
+    ) -> RefreshOutcome {
+        match fetched.map(|(keys, lifetime)| (UsableKeys::new(keys), lifetime)) {
+            Ok((Some(keys), lifetime)) => {
+                self.keys = Arc::clone(&keys.0);
+                self.fetched_at = Some(started);
+                self.lifetime = lifetime;
+                RefreshOutcome::Keys(keys)
+            }
+            Ok((None, _)) => RefreshOutcome::Unusable,
+            Err(error) => RefreshOutcome::Failed(error),
+        }
+    }
+}
 
 /// What [`JwtVerifier::refresh`] did.
 enum Refresh {
@@ -637,32 +693,28 @@ impl JwtVerifier {
         }
     }
 
-    /// Records a finished refresh and publishes its outcome to the callers
-    /// waiting on it. A failed refresh keeps the previous keys and their
-    /// fetch time, so they age out on schedule.
+    /// Records a finished refresh (see [`KeyState::complete`]) and
+    /// publishes its outcome to the callers waiting on it.
     fn record(
         &self,
         started: Instant,
         fetched: Result<(Vec<Key>, Duration), AuthError>,
         sender: &watch::Sender<Outcome>,
     ) {
-        let outcome = match fetched {
-            Ok((keys, lifetime)) => match self.inner.state.write() {
-                Ok(mut state) => {
-                    let keys = Arc::new(keys);
-                    state.keys = Arc::clone(&keys);
-                    state.fetched_at = Some(started);
-                    state.lifetime = lifetime;
-                    Ok(keys)
-                }
-                // A poisoned lock fails closed, as in `cached`.
-                Err(_) => Err(AuthError::KeysUnavailable),
-            },
-            Err(error) => {
-                tracing::warn!(target: "ferrum_alloy::jwt", "JWKS refresh failed");
-                Err(error)
-            }
+        let outcome = match self.inner.state.write() {
+            Ok(mut state) => state.complete(started, fetched),
+            // A poisoned lock fails closed, as in `cached`.
+            Err(_) => RefreshOutcome::Failed(AuthError::KeysUnavailable),
         };
+        match &outcome {
+            RefreshOutcome::Keys(_) => {}
+            RefreshOutcome::Unusable => {
+                tracing::warn!(target: "ferrum_alloy::jwt", "JWKS refresh returned no usable keys");
+            }
+            RefreshOutcome::Failed(_) => {
+                tracing::warn!(target: "ferrum_alloy::jwt", "JWKS refresh failed");
+            }
+        }
         sender.send_replace(Some(outcome));
     }
 
@@ -686,10 +738,9 @@ impl JwtVerifier {
                     self.clear_abandoned();
                 }
                 match outcome {
-                    Some(Ok(keys)) if !keys.is_empty() => return Ok(Keys::current(keys)),
-                    Some(Ok(_)) => return Err(AuthError::KeysUnavailable),
-                    Some(Err(error)) => (false, error),
-                    None => (false, AuthError::KeysUnavailable),
+                    Some(RefreshOutcome::Keys(keys)) => return Ok(Keys::current(keys.0)),
+                    Some(RefreshOutcome::Unusable) | None => (false, AuthError::KeysUnavailable),
+                    Some(RefreshOutcome::Failed(error)) => (false, error),
                 }
             }
         };
@@ -910,7 +961,7 @@ fn decode_base64url(segment: &str) -> Option<Vec<u8>> {
 
 /// Whether a refresh completed and failed.
 fn refresh_failed(latest: &watch::Receiver<Outcome>) -> bool {
-    matches!(*latest.borrow(), Some(Err(_)))
+    latest.borrow().as_ref().is_some_and(RefreshOutcome::failed)
 }
 
 fn unauthorized(error: Option<&AuthError>) -> Problem {

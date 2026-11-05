@@ -702,6 +702,23 @@ async fn a_readiness_probe_pending_when_draining_starts_reports_draining() {
     }
 }
 
+/// Cancelling the shared shutdown token begins shutdown as far as
+/// readiness is concerned, without a call to `trigger_shutdown`: there is
+/// one record of whether shutdown has begun.
+#[tokio::test]
+async fn cancelling_the_shutdown_token_reports_draining() {
+    let readiness = Readiness::new(Vec::new(), Duration::from_secs(60), Duration::from_secs(5));
+    let lifecycle = Lifecycle::new(Arc::default());
+    assert!(!lifecycle.is_draining());
+    lifecycle.shutdown_token().cancel();
+    assert!(lifecycle.is_draining(), "the cancelled token is shutdown");
+    let response = health::readiness(&readiness, &lifecycle).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json, serde_json::json!({ "status": "draining" }));
+}
+
 /// A failed `prepare()` keeps the explicit configuration: retrying
 /// reports the same validation error instead of loading a file or the
 /// environment.
