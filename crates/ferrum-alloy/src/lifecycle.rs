@@ -1,7 +1,6 @@
 //! Shutdown coordination shared by listeners, health, and applications.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use ferrum_alloy_telemetry::Metrics;
@@ -22,10 +21,10 @@ pub struct Lifecycle {
 #[derive(Debug)]
 struct Inner {
     started: Instant,
-    draining: AtomicBool,
+    /// Cancelled when shutdown begins: the one record of whether it has,
+    /// whoever cancels it.
     shutdown: CancellationToken,
     stop_accepting: CancellationToken,
-    drain_connections: CancellationToken,
     metrics: Arc<Metrics>,
 }
 
@@ -35,10 +34,8 @@ impl Lifecycle {
         Self {
             inner: Arc::new(Inner {
                 started: Instant::now(),
-                draining: AtomicBool::new(false),
                 shutdown: CancellationToken::new(),
                 stop_accepting: CancellationToken::new(),
-                drain_connections: CancellationToken::new(),
                 metrics,
             }),
         }
@@ -46,17 +43,17 @@ impl Lifecycle {
 
     /// `true` once shutdown has begun; readiness then reports `draining`.
     pub fn is_draining(&self) -> bool {
-        self.inner.draining.load(Ordering::Acquire)
+        self.inner.shutdown.is_cancelled()
     }
 
-    /// Cancelled when shutdown begins.
+    /// Cancelled when shutdown begins. Cancelling it begins shutdown, as
+    /// [`Lifecycle::trigger_shutdown`] does.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.inner.shutdown.clone()
     }
 
     /// Begins shutdown programmatically (as if a signal arrived).
     pub fn trigger_shutdown(&self) {
-        self.inner.draining.store(true, Ordering::Release);
         self.inner.shutdown.cancel();
     }
 
@@ -72,10 +69,6 @@ impl Lifecycle {
 
     pub(crate) fn stop_accepting(&self) -> &CancellationToken {
         &self.inner.stop_accepting
-    }
-
-    pub(crate) fn drain_connections(&self) -> &CancellationToken {
-        &self.inner.drain_connections
     }
 }
 

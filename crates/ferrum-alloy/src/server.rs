@@ -645,6 +645,11 @@ async fn serve_with_state(
     // it or Hyper has handed it over to the application for an upgrade.
     let sockets = TaskTracker::new();
     let mut connections = JoinSet::new();
+    // This listener's drain signal, cancelled only once its own accept loop
+    // has ended. It is not process-wide: a listener whose accept loop
+    // panics drains its own connections at once, while another listener
+    // keeps serving through the readiness grace until it stops accepting.
+    let drain = CancellationToken::new();
     let accepting = std::panic::AssertUnwindSafe(async {
         loop {
             let accepted = tokio::select! {
@@ -696,14 +701,14 @@ async fn serve_with_state(
             let executor = streams.executor(&close);
             let socket = sockets.token();
             let app = app.clone();
-            let lifecycle = lifecycle.clone();
+            let drain = drain.clone();
             let stats = Arc::clone(&stats);
             let options = options.clone();
             connections.spawn(async move {
                 let active =
                     ActiveConnection::open(stats, close, permit, socket, Some(registration));
                 let builder = builder(&options, executor);
-                handle(stream, remote, active, builder, app, &options, &lifecycle).await;
+                handle(stream, remote, active, builder, app, &options, &drain).await;
             });
         }
     });
@@ -717,7 +722,7 @@ async fn serve_with_state(
         lifecycle.trigger_shutdown();
     }
     drop(listener);
-    lifecycle.drain_connections().cancel();
+    drain.cancel();
     let drained = tokio::time::timeout(options.drain_timeout, async {
         while connections.join_next().await.is_some() {}
         // Every connection task has ended, so no stream task can start now,
@@ -795,7 +800,7 @@ async fn handle(
     builder: Builder<StreamExecutor>,
     app: Router,
     options: &ServeOptions,
-    lifecycle: &Lifecycle,
+    drain: &CancellationToken,
 ) {
     #[cfg(feature = "tls")]
     if let Some(tls) = &options.tls {
@@ -804,7 +809,7 @@ async fn handle(
         // request, so stop waiting for it.
         let handshake = tokio::select! {
             biased;
-            () = lifecycle.drain_connections().cancelled() => {
+            () = drain.cancelled() => {
                 tracing::debug!(target: "ferrum_alloy::tls", %remote, "TLS handshake abandoned at shutdown");
                 return;
             }
@@ -833,14 +838,14 @@ async fn handle(
             remote_addr: Some(remote),
             tls: crate::tls::peer_identity(stream.get_ref().1),
         };
-        serve_io(stream, peer, active, builder, app, options, lifecycle).await;
+        serve_io(stream, peer, active, builder, app, options, drain).await;
         return;
     }
     let peer = PeerInfo {
         remote_addr: Some(remote),
         tls: None,
     };
-    serve_io(stream, peer, active, builder, app, options, lifecycle).await;
+    serve_io(stream, peer, active, builder, app, options, drain).await;
 }
 
 /// Request activity on one connection, shared by the connection task with
@@ -1741,7 +1746,7 @@ async fn serve_io<I>(
     builder: Builder<StreamExecutor>,
     app: Router,
     options: &ServeOptions,
-    lifecycle: &Lifecycle,
+    drain: &CancellationToken,
 ) where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -1961,7 +1966,7 @@ async fn serve_io<I>(
                     body_stall_timer.as_mut().reset(Instant::now() + body_stall_check);
                 }
             }
-            () = lifecycle.drain_connections().cancelled(), if !draining => {
+            () = drain.cancelled(), if !draining => {
                 draining = true;
                 connection.as_mut().graceful_shutdown();
             }

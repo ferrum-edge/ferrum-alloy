@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Fix: a JWKS refresh that returns `200` with no usable key (for example
+  `{"keys":[]}` or only `use: enc` keys) is now an outage like any failed
+  refresh. It keeps the cached keys until they age out instead of replacing
+  them with an empty set that answered every token with `503`.
+- Fix: an accept-loop panic on one listener no longer drains the other
+  listener's connections while it is still in `shutdown.readiness_grace_ms`;
+  each listener drains its own connections once it stops accepting.
+- Fix: `Lifecycle::is_draining` is `true` once `Lifecycle::shutdown_token`
+  is cancelled by any caller, not only through `trigger_shutdown`.
 - Adopt `contracts-edge-0.9.20` at `39da322083044c2e92617209e62983c92387f0ad`
   (SSH-signed tag object `82b277b495e73cfadfacb6f3123de02a984658e4`) and pin
   Ferrum Edge v0.9.20 at `e4a606a00352674daaef08636e3e359e6c48ba18`, with
