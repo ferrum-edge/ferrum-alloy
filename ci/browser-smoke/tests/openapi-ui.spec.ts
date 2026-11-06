@@ -16,6 +16,9 @@ const OPERATIONS = 2;
 
 const REPOSITORY = join(__dirname, '..', '..', '..');
 const SCREENSHOTS = join(__dirname, '..', 'screenshots');
+const CSP_LITERAL_RE = /const CONTENT_SECURITY_POLICY_VALUE: &str = "((?:[^"\\]|\\.)*)";/s;
+const RUST_LINE_CONTINUATION_RE = /\\\n\s*/g;
+const SCRIPT_SRC_DIRECTIVE_RE = /^script-src(-elem)?$/;
 
 type Violation = {
   directive: string;
@@ -33,13 +36,13 @@ function expectedPolicy(): string {
     join(REPOSITORY, 'crates', 'ferrum-alloy', 'src', 'openapi_ui.rs'),
     'utf8',
   );
-  const literal = /const CONTENT_SECURITY_POLICY_VALUE: &str = "((?:[^"\\]|\\.)*)";/s.exec(source);
+  const literal = CSP_LITERAL_RE.exec(source);
   if (!literal) {
     throw new Error('CONTENT_SECURITY_POLICY_VALUE not found in openapi_ui.rs');
   }
   // A backslash at the end of a line continues a Rust string literal and
   // skips the next line's leading whitespace. No other escape is expected.
-  const policy = literal[1].replace(/\\\n\s*/g, '');
+  const policy = literal[1].replace(RUST_LINE_CONTINUATION_RE, '');
   if (policy.includes('\\') || !policy.includes("script-src 'self'")) {
     throw new Error(`unexpected policy literal: ${policy}`);
   }
@@ -211,7 +214,7 @@ test('negative control: the browser blocks and reports an injected inline script
 
   await expect.poll(watched.violations).toHaveLength(1);
   const [violation] = await watched.violations();
-  expect(violation.directive).toMatch(/^script-src(-elem)?$/);
+  expect(violation.directive).toMatch(SCRIPT_SRC_DIRECTIVE_RE);
   expect(violation.blockedURI).toBe('inline');
   expect(violation.disposition).toBe('enforce');
   const ran = await page.evaluate(() => '__alloyInlineScriptRan' in window);

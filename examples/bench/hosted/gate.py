@@ -73,6 +73,7 @@ PROFILES = {
                           "transports": ("h1",), "inject_ns": 50000, "timeout": 300}},
 }
 SLOT = re.compile(r"(calibration)-[0-9]{2}|(allocations)|(gate)-[0-9]{2}")
+_NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def slot_kind(slot):
@@ -82,7 +83,7 @@ def slot_kind(slot):
 
 
 def model_slug(model):
-    slug = re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")
+    slug = _NON_SLUG_RE.sub("-", model.lower()).strip("-")
     require(slug, f"CPU model {model!r} has no usable name")
     return slug
 
