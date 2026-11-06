@@ -38,6 +38,16 @@ RECEIVER_COUNTERS = ("accepted", "refused", "failed")
 PROMETHEUS_SAMPLE = re.compile(
     r"([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+-?[0-9]+)?")
 PROMETHEUS_LABEL = re.compile(r'\s*([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"\s*(?:,|$)')
+# Callgrind profile lines (see instruction_profile).
+_CALLGRIND_TIMERANGE_RE = re.compile(r"desc: Timerange: Basic block 0 - [1-9][0-9]*")
+_CALLGRIND_SUMMARY_RE = re.compile(r"summary: ([1-9][0-9]*)")
+_CALLGRIND_TOTALS_RE = re.compile(r"totals: ([1-9][0-9]*)")
+_CALLGRIND_POSITION = r"(?:[+-]?(?:0x[0-9a-fA-F]+|[0-9]+)|\*)"
+_CALLGRIND_COST_RE = re.compile(rf"{_CALLGRIND_POSITION}\s+{_CALLGRIND_POSITION}"
+                                rf"(?:\s+([0-9]+))?\s*")
+_CALLGRIND_ASSOCIATION_RE = re.compile(rf"(?:calls=[1-9][0-9]*|jump=[0-9]+|jcnd=[0-9]+/[0-9]+)"
+                                       rf"\s+{_CALLGRIND_POSITION}\s+{_CALLGRIND_POSITION}\s*")
+_CALLGRIND_SYMBOL_RE = re.compile(r"(?:ob|fl|fi|fe|fn|cob|cfi|cfl|cfn|jfi|jfn)=\S.*")
 
 
 def require(condition, message):
@@ -309,37 +319,32 @@ def instruction_profile(path, pid, thread, command, creator):
     require(header[:len(expected)] == expected, "unsupported/mismatched profile metadata")
     remaining = header[len(expected):]
     require(len(remaining) == 4
-            and re.fullmatch(r"desc: Timerange: Basic block 0 - [1-9][0-9]*", remaining[0])
+            and _CALLGRIND_TIMERANGE_RE.fullmatch(remaining[0])
             and remaining[1:] == ["desc: Trigger: Program termination",
                                   "positions: instr line", "events: Ir"],
             "unsupported profile range/trigger/positions/events")
-    summary = re.fullmatch(r"summary: ([1-9][0-9]*)", lines[end])
-    footer = re.fullmatch(r"totals: ([1-9][0-9]*)", lines[-1])
+    summary = _CALLGRIND_SUMMARY_RE.fullmatch(lines[end])
+    footer = _CALLGRIND_TOTALS_RE.fullmatch(lines[-1])
     require(summary is not None and footer is not None, "invalid/zero summary or missing totals")
     instructions = int(summary[1])
     require(int(footer[1]) == instructions, "profile summary/totals differ")
 
-    position = r"(?:[+-]?(?:0x[0-9a-fA-F]+|[0-9]+)|\*)"
-    cost = re.compile(rf"{position}\s+{position}(?:\s+([0-9]+))?\s*")
-    association = re.compile(rf"(?:calls=[1-9][0-9]*|jump=[0-9]+|jcnd=[0-9]+/[0-9]+)"
-                             rf"\s+{position}\s+{position}\s*")
-    symbol = re.compile(r"(?:ob|fl|fi|fe|fn|cob|cfi|cfl|cfn|jfi|jfn)=\S.*")
     self_cost = 0
     pending_call = False
     has_function = False
     for line in lines[end + 1:-1]:
         if not line.strip():
             continue
-        entry = cost.fullmatch(line)
+        entry = _CALLGRIND_COST_RE.fullmatch(line)
         require(not pending_call or entry is not None, "call missing profile cost line")
         if entry is not None:
             require(has_function, "profile cost missing function")
             if not pending_call:
                 self_cost += int(entry[1] or "0")
             pending_call = False
-        elif symbol.fullmatch(line):
+        elif _CALLGRIND_SYMBOL_RE.fullmatch(line):
             has_function = has_function or line.startswith("fn=")
-        elif association.fullmatch(line):
+        elif _CALLGRIND_ASSOCIATION_RE.fullmatch(line):
             require(has_function, "profile association missing function")
             pending_call = line.startswith("calls=")
         else:
@@ -378,12 +383,13 @@ def instruction_profiles(out, name, pid, command):
     base = f"{name}.callgrind.{pid}"
     paths = sorted(out.glob(f"{name}.callgrind*"))
     profiles = []
+    thread_suffix = re.compile(re.escape(base) + r"-([0-9]+)")
     for path in paths:
         require(path.is_file() and not path.is_symlink(), "unsupported profile file")
         if path.name == base:
             require(path.stat().st_size == 0, "nonempty unsuffixed per-thread profile")
             continue
-        suffix = re.fullmatch(re.escape(base) + r"-([0-9]+)", path.name)
+        suffix = thread_suffix.fullmatch(path.name)
         require(suffix is not None, f"unexpected profile name/PID: {path.name}")
         thread = int(suffix[1])
         require(thread > 0 and suffix[1] == f"{thread:02d}", "noncanonical profile thread")

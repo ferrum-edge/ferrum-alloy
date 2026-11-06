@@ -21,20 +21,22 @@ BUCKETS = [
     ("malloc/free", r"malloc\.c"),
     ("memcpy/memmove/memcmp/memset", r"multiarch/mem"),
 ]
+_BUCKET_RES = [(bucket, re.compile(pattern)) for bucket, pattern in BUCKETS]
+_ANNOTATION_LINE_RE = re.compile(r"\s*([0-9,]+)\s+(.*)")
 
 for scenario in ("alloy-logs-fmt", "alloy-logs"):
     total, shares = 0, collections.Counter()
     for path in glob.glob(f"{sys.argv[1]}/profile-{scenario}-annotate-*.stdout"):
         for line in open(path):
-            match = re.match(r"\s*([0-9,]+)\s+(.*)", line)
+            match = _ANNOTATION_LINE_RE.match(line)
             if not match:
                 continue
             value, name = int(match[1].replace(",", "")), match[2]
             if "PROGRAM TOTALS" in name:
                 total += value
             elif "file:function" not in name:
-                for bucket, pattern in BUCKETS:
-                    if re.search(pattern, name):
+                for bucket, pattern in _BUCKET_RES:
+                    if pattern.search(name):
                         shares[bucket] += value
                         break
     print(f"{scenario}: {total:,} instructions")
