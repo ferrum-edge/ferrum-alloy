@@ -2118,12 +2118,18 @@ impl AlloyConfig {
     }
 }
 
+/// A `propagate_trace_context_to` host rule as it is judged and matched:
+/// trimmed and ASCII-lowercased.
+pub(crate) fn normalize_host_rule(rule: &str) -> String {
+    rule.trim().to_ascii_lowercase()
+}
+
 /// Whether `rule` is a host rule `AlloyClient::new` accepts (an exact host
-/// or a `.suffix`). Mirrors `HostRule::parse` in `http_client.rs`, which is
-/// feature-gated, so `check` accepts precisely what client construction
-/// accepts, with or without the `http-client` feature.
-fn host_rule_valid(rule: &str) -> bool {
-    let rule = rule.trim().to_ascii_lowercase();
+/// or a `.suffix`). `HostRule::parse` in `http_client.rs` (feature-gated)
+/// applies this same predicate, so `check` accepts precisely what client
+/// construction accepts, with or without the `http-client` feature.
+pub(crate) fn host_rule_valid(rule: &str) -> bool {
+    let rule = normalize_host_rule(rule);
     !rule.is_empty() && !rule.contains(['/', ':', ' ', '*', '@'])
 }
 
