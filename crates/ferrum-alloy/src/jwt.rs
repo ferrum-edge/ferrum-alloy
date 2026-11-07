@@ -364,6 +364,25 @@ impl std::fmt::Debug for JwtVerifier {
     }
 }
 
+/// The JWKS client's policy for an unavailable platform trust store: an
+/// `https` JWKS needs it, so construction fails at startup; a loopback
+/// `http` JWKS uses the empty root store and never needs it.
+fn jwks_tls(
+    platform: crate::http_client::PlatformTls,
+    jwks_url: &url::Url,
+) -> Result<rustls::ClientConfig, AlloyError> {
+    use crate::http_client::PlatformTls;
+    match platform {
+        PlatformTls::Verified(config) => Ok(config),
+        PlatformTls::Unavailable { error, .. } if jwks_url.scheme() == "https" => {
+            Err(AlloyError::Integration(format!(
+                "JWKS TLS: platform trust store unavailable: {error}"
+            )))
+        }
+        PlatformTls::Unavailable { empty_roots, .. } => Ok(empty_roots),
+    }
+}
+
 fn parse_algorithm(name: &str) -> Result<Algorithm, AlloyError> {
     let algorithm = match name {
         "RS256" => Algorithm::RS256,
@@ -451,26 +470,11 @@ impl JwtVerifier {
                 "auth.jwt.algorithms must not be empty".into(),
             ));
         }
-        let tls = {
-            use rustls_platform_verifier::BuilderVerifierExt;
-            let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| AlloyError::Integration(format!("JWKS TLS: {e}")))?;
-            match builder.clone().with_platform_verifier() {
-                Ok(builder) => builder.with_no_client_auth(),
-                // An https JWKS needs the platform trust store: fail at startup.
-                Err(error) if jwks_url.scheme() == "https" => {
-                    return Err(AlloyError::Integration(format!(
-                        "JWKS TLS: platform trust store unavailable: {error}"
-                    )));
-                }
-                Err(_) => builder
-                    .with_root_certificates(rustls::RootCertStore::empty())
-                    .with_no_client_auth(),
-            }
-        };
+        let tls = jwks_tls(
+            crate::http_client::platform_tls()
+                .map_err(|e| AlloyError::Integration(format!("JWKS TLS: {e}")))?,
+            &jwks_url,
+        )?;
         let mut client = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .timeout(Duration::from_millis(settings.jwks_timeout_ms))
@@ -1085,5 +1089,29 @@ impl JwtSettings {
     /// Builds a [`JwtVerifier`].
     pub fn verifier(&self) -> Result<JwtVerifier, AlloyError> {
         JwtVerifier::new(self)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::jwks_tls;
+    use crate::http_client::tests::unavailable;
+
+    /// Intentional difference from `AlloyClient`: an `https` JWKS needs the
+    /// platform trust store, so its absence fails construction; a loopback
+    /// `http` JWKS never needs it and gets the empty root store.
+    #[test]
+    fn only_an_https_jwks_requires_the_platform_trust_store() {
+        let https = url::Url::parse("https://idp.example/jwks").unwrap();
+        let error = jwks_tls(unavailable(), &https).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "JWKS TLS: platform trust store unavailable: unexpected error: no platform roots"
+            ),
+            "{error}"
+        );
+        let http = url::Url::parse("http://127.0.0.1:8080/jwks").unwrap();
+        assert!(jwks_tls(unavailable(), &http).is_ok());
     }
 }
