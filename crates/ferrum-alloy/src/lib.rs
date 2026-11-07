@@ -28,6 +28,7 @@ pub mod normalize;
 pub mod problem;
 
 mod app;
+mod bearer;
 mod management;
 mod rate_limit;
 

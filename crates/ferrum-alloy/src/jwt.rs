@@ -41,7 +41,7 @@ use axum::extract::FromRequestParts;
 use axum::response::{IntoResponse, Response};
 use futures_util::future::BoxFuture;
 use http::Request;
-use http::header::{AUTHORIZATION, HeaderValue, WWW_AUTHENTICATE};
+use http::header::{HeaderValue, WWW_AUTHENTICATE};
 use http::request::Parts;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
@@ -1053,13 +1053,7 @@ where
         let verifier = self.verifier.clone();
         let authorizer = self.authorizer.clone();
         Box::pin(async move {
-            let token = request
-                .headers()
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.split_once(' '))
-                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-                .map(|(_, token)| token.trim().to_owned());
+            let token = crate::bearer::first(request.headers()).map(str::to_owned);
             let Some(token) = token else {
                 return Ok(rejection(&AuthError::Missing));
             };

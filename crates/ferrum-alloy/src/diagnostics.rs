@@ -83,7 +83,7 @@ use ferrum_alloy_telemetry::evidence::{
 use ferrum_alloy_telemetry::trace_context::{SpanId, TraceId};
 use ferrum_alloy_telemetry::{PeerInfo, RequestId, TraceDecision};
 use futures_util::FutureExt as _;
-use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
+use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
 
 pub use ferrum_alloy_telemetry::evidence::TenantTag;
 
@@ -200,13 +200,7 @@ impl DiagnosticsRequest {
     /// request has exactly one `Authorization` header and it is a non-empty
     /// bearer credential.
     pub fn bearer_token(&self) -> Option<&str> {
-        let mut values = self.headers.get_all(AUTHORIZATION).iter();
-        let (Some(value), None) = (values.next(), values.next()) else {
-            return None;
-        };
-        let (scheme, token) = value.to_str().ok()?.split_once(' ')?;
-        let token = token.trim();
-        (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+        crate::bearer::sole(&self.headers).filter(|token| !token.is_empty())
     }
 }
 
@@ -1375,6 +1369,7 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
 mod tests {
     use ferrum_alloy_diagnostics::parse::{Limits, parse_offline};
     use ferrum_alloy_telemetry::BodyOutcome;
+    use http::header::AUTHORIZATION;
 
     use super::*;
 
