@@ -1096,7 +1096,7 @@ impl JwtSettings {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::jwks_tls;
-    use crate::http_client::tests::unavailable;
+    use crate::http_client::tests::{handshake, unavailable, verified_by_test_ca};
 
     /// Intentional difference from `AlloyClient`: an `https` JWKS needs the
     /// platform trust store, so its absence fails construction; a loopback
@@ -1113,5 +1113,16 @@ mod tests {
         );
         let http = url::Url::parse("http://127.0.0.1:8080/jwks").unwrap();
         assert!(jwks_tls(unavailable(), &http).is_ok());
+    }
+
+    /// A working platform verifier is used as is, for an `https` or a
+    /// loopback `http` JWKS.
+    #[test]
+    fn a_working_platform_verifier_is_used_for_any_jwks() {
+        for url in ["https://idp.example/jwks", "http://127.0.0.1:8080/jwks"] {
+            let (platform, server) = verified_by_test_ca();
+            let config = jwks_tls(platform, &url::Url::parse(url).unwrap()).unwrap();
+            handshake(config, server).expect(url);
+        }
     }
 }

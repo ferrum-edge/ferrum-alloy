@@ -357,25 +357,68 @@ pub(crate) mod tests {
         assert_eq!(suites(config.crypto_provider()), suites(&ring));
     }
 
-    /// An in-memory handshake from `client` to a server presenting a
-    /// self-signed certificate for `localhost`; returns the client's error.
-    fn handshake_error(client: rustls::ClientConfig) -> rustls::Error {
-        let key = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
+    fn server_config(
+        chain: Vec<rustls_pki_types::CertificateDer<'static>>,
+        key: &rcgen::KeyPair,
+    ) -> rustls::ServerConfig {
         let key = rustls_pki_types::PrivateKeyDer::Pkcs8(
             rustls_pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()),
         );
-        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
-        .with_single_cert(vec![cert.der().clone()], key)
-        .unwrap();
+        .with_single_cert(chain, key)
+        .unwrap()
+    }
+
+    /// A server presenting a self-signed certificate for `localhost`.
+    pub(crate) fn self_signed_server() -> rustls::ServerConfig {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        server_config(vec![cert.der().clone()], &key)
+    }
+
+    /// A successful platform verifier whose only root is a generated CA,
+    /// and a server presenting a `localhost` certificate that CA signed.
+    /// The fallback builder stays empty, so only the verified configuration
+    /// can trust that server.
+    pub(crate) fn verified_by_test_ca() -> (PlatformTls, rustls::ServerConfig) {
+        let mut ca = rcgen::CertificateParams::default();
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        // A name of its own: it must not look like the issuer of
+        // `self_signed_server`, which carries rcgen's default name.
+        ca.distinguished_name
+            .push(rcgen::DnType::CommonName, "Alloy test CA");
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_cert = ca.self_signed(&ca_key).unwrap();
+        let issuer = rcgen::Issuer::new(ca, ca_key);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let leaf = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+            .unwrap()
+            .signed_by(&key, &issuer)
+            .unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca_cert.der().clone()).unwrap();
+        let platform = platform_or_empty_roots(
+            ring_builder(),
+            Ok(ring_builder().with_root_certificates(roots)),
+        );
+        (platform, server_config(vec![leaf.der().clone()], &key))
+    }
+
+    /// Runs a handshake between `client` and `server` in memory, for
+    /// `localhost`; returns the client's error, if any.
+    pub(crate) fn handshake(
+        client: rustls::ClientConfig,
+        server: rustls::ServerConfig,
+    ) -> Result<(), rustls::Error> {
         let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
         let mut client = rustls::ClientConnection::new(Arc::new(client), name).unwrap();
         let mut server = rustls::ServerConnection::new(Arc::new(server)).unwrap();
@@ -396,17 +439,27 @@ pub(crate) mod tests {
             let mut flight = flight.as_slice();
             while !flight.is_empty() {
                 client.read_tls(&mut flight).unwrap();
-                if let Err(error) = client.process_new_packets() {
-                    return error;
-                }
+                client.process_new_packets()?;
+            }
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return Ok(());
             }
         }
-        panic!("the client accepted a certificate no root vouches for");
+        panic!("the handshake neither completed nor failed");
+    }
+
+    fn unknown_issuer(result: Result<(), rustls::Error>) -> bool {
+        matches!(
+            result,
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer
+            ))
+        )
     }
 
     /// Shared invariant: without a platform trust store the fallback keeps
-    /// the shared provider and versions and trusts no certificate, and the
-    /// platform's error is handed to the caller.
+    /// the shared provider and trusts no certificate, and the platform's
+    /// error is handed to the caller.
     #[test]
     fn an_unavailable_platform_trust_store_falls_back_to_trusting_nothing() {
         let PlatformTls::Unavailable { error, empty_roots } = unavailable() else {
@@ -415,22 +468,26 @@ pub(crate) mod tests {
         assert_eq!(error, rustls::Error::General("no platform roots".into()));
         assert_shared_core(&empty_roots);
         assert!(
-            matches!(
-                handshake_error(empty_roots),
-                rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)
-            ),
+            unknown_issuer(handshake(empty_roots, self_signed_server())),
             "the empty root store refuses the self-signed server"
         );
     }
 
+    /// Shared invariant: a successful platform verifier is the one used. Its
+    /// configuration trusts what its roots vouch for and nothing else.
     #[test]
     fn a_working_platform_verifier_is_used() {
-        let builder = ring_builder();
-        let platform = platform_or_empty_roots(
-            builder.clone(),
-            Ok(builder.with_root_certificates(rustls::RootCertStore::empty())),
+        let (platform, server) = verified_by_test_ca();
+        let PlatformTls::Verified(config) = platform else {
+            panic!("a successful platform verifier is reported as verified");
+        };
+        assert_shared_core(&config);
+        handshake(config.clone(), server).expect("the verifier's roots are trusted");
+        let refused = handshake(config, self_signed_server());
+        assert!(
+            unknown_issuer(refused.clone()),
+            "an unknown issuer is still refused: {refused:?}"
         );
-        assert!(matches!(platform, PlatformTls::Verified(_)));
         // On this host, whichever trust store it has.
         match platform_tls().unwrap() {
             PlatformTls::Verified(config)
@@ -489,6 +546,21 @@ pub(crate) mod tests {
             warned[0].contains("platform trust store unavailable"),
             "{warned:?}"
         );
+    }
+
+    /// `AlloyClient` uses a working platform verifier as is, without a
+    /// warning.
+    #[test]
+    fn the_client_uses_a_working_platform_verifier_unchanged() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let warnings = Warnings::default();
+        let subscriber = tracing_subscriber::registry().with(warnings.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (platform, server) = verified_by_test_ca();
+        let config = client_tls(platform);
+        handshake(config, server).expect("the verifier's roots are trusted");
+        assert!(warnings.0.lock().unwrap().is_empty());
     }
 
     /// Shared invariant: client construction accepts precisely the host
