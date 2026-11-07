@@ -35,9 +35,12 @@ enum HostRule {
 }
 
 impl HostRule {
-    fn parse(rule: &str) -> Result<Self, AlloyError> {
-        let rule = rule.trim().to_ascii_lowercase();
-        if rule.is_empty() || rule.contains(['/', ':', ' ', '*', '@']) {
+    /// Validity is configuration's predicate, so `check` and client
+    /// construction accept the same rules; classifying a valid rule as an
+    /// exact host or a `.suffix` happens only here.
+    fn parse(raw: &str) -> Result<Self, AlloyError> {
+        let rule = crate::config::normalize_host_rule(raw);
+        if !crate::config::host_rule_valid(raw) {
             return Err(AlloyError::Integration(format!(
                 "http_client.propagate_trace_context_to: invalid host rule {rule:?} (use host or .suffix)"
             )));
@@ -486,5 +489,63 @@ pub(crate) mod tests {
             warned[0].contains("platform trust store unavailable"),
             "{warned:?}"
         );
+    }
+
+    /// Shared invariant: client construction accepts precisely the host
+    /// rules configuration validation accepts.
+    #[test]
+    fn host_rules_are_judged_by_the_configuration_predicate() {
+        for rule in [
+            "api.example",
+            ".example",
+            ".",
+            "",
+            "  ",
+            "a:1",
+            "*.x",
+            "u@h",
+            "a/b",
+            "a b",
+            "UPPER.Example",
+            "  api.example  ",
+            "\tapi.example\n",
+            "https://api.example",
+        ] {
+            assert_eq!(
+                crate::config::host_rule_valid(rule),
+                HostRule::parse(rule).is_ok(),
+                "{rule:?}"
+            );
+        }
+    }
+
+    /// Intentional difference: only the client classifies a valid rule, on
+    /// its normalized form, as an exact host or a `.suffix`.
+    #[test]
+    fn valid_host_rules_are_classified_as_exact_or_suffix() {
+        let classify = |rule: &str| match HostRule::parse(rule).unwrap() {
+            HostRule::Exact(host) => format!("exact {host}"),
+            HostRule::Suffix(suffix) => format!("suffix {suffix}"),
+        };
+        assert_eq!(classify(" API.Example "), "exact api.example");
+        assert_eq!(classify(".Internal.Example"), "suffix .internal.example");
+        // A bare dot has no suffix to match: it stays an exact rule.
+        assert_eq!(classify("."), "exact .");
+        let suffix = HostRule::parse(".example").unwrap();
+        assert!(suffix.matches("api.example"));
+        assert!(!suffix.matches("example"));
+        assert!(
+            HostRule::parse("api.example")
+                .unwrap()
+                .matches("api.example")
+        );
+    }
+
+    /// The client's error names the normalized rule (configuration's names
+    /// the rule as written).
+    #[test]
+    fn an_invalid_host_rule_error_names_the_normalized_rule() {
+        let error = HostRule::parse(" A/B ").unwrap_err().to_string();
+        assert!(error.contains("invalid host rule \"a/b\""), "{error}");
     }
 }
