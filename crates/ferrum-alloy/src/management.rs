@@ -28,7 +28,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
+use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::config::Secret;
@@ -100,14 +100,8 @@ pub(crate) fn authorized(headers: &HeaderMap, token: Option<&Secret>) -> bool {
         // Binding there does not authenticate an operator.
         return false;
     };
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .is_some_and(|(_, presented)| {
-            constant_time_eq(presented.trim().as_bytes(), token.expose().as_bytes())
-        })
+    crate::bearer::first(headers)
+        .is_some_and(|presented| constant_time_eq(presented.as_bytes(), token.expose().as_bytes()))
 }
 
 fn unauthorized() -> Response {
@@ -259,6 +253,8 @@ pub(crate) fn openapi_response(document: Option<&Vec<u8>>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use http::header::AUTHORIZATION;
+
     use super::*;
 
     #[test]
@@ -294,5 +290,32 @@ mod tests {
         assert!(authorized(&headers, Some(&token)));
         assert!(!authorized(&HeaderMap::new(), None));
         assert!(!authorized(&headers, None));
+    }
+
+    /// Characterizes which `Authorization` header is checked: the first
+    /// one, trimmed. Later headers are not read (JWT verification does the
+    /// same; diagnostic retrieval refuses several).
+    #[test]
+    fn only_the_first_authorization_header_is_checked() {
+        let token = Secret::new("0123456789abcdef0123456789abcdef");
+        let valid = "Bearer 0123456789abcdef0123456789abcdef";
+        let headers = |values: &[&'static str]| {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(AUTHORIZATION, HeaderValue::from_static(value));
+            }
+            headers
+        };
+        assert!(authorized(
+            &headers(&["Bearer   0123456789abcdef0123456789abcdef  "]),
+            Some(&token)
+        ));
+        assert!(authorized(&headers(&[valid, "Bearer wrong"]), Some(&token)));
+        assert!(!authorized(
+            &headers(&["Bearer wrong", valid]),
+            Some(&token)
+        ));
+        assert!(!authorized(&headers(&["Basic abc", valid]), Some(&token)));
+        assert!(!authorized(&headers(&["Bearer"]), Some(&token)));
     }
 }
