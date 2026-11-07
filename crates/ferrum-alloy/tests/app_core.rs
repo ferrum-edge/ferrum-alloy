@@ -643,62 +643,141 @@ async fn concurrent_waiters_resumed_after_expiry_share_their_refresh() {
     );
 }
 
+/// Which readiness response a probe asks for.
+#[derive(Clone, Copy, Debug)]
+enum Probe {
+    Minimal,
+    Detailed,
+}
+
+impl Probe {
+    async fn call(self, readiness: &Readiness, lifecycle: &Lifecycle) -> Response {
+        match self {
+            Self::Minimal => health::readiness(readiness, lifecycle).await,
+            Self::Detailed => health::detailed(readiness, lifecycle, "orders", None).await,
+        }
+    }
+}
+
+/// Starts `probe` on a cold cache whose one check is held, begins shutdown
+/// while the probe waits for the refresh, then releases the check, which
+/// passes when `healthy`. Returns the probe's status and body.
+async fn probe_pending_when_draining_starts(
+    probe: Probe,
+    healthy: bool,
+) -> (StatusCode, serde_json::Value) {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let check: Arc<dyn HealthCheck> = {
+        let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+        Arc::new(move || {
+            let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                if healthy {
+                    Ok::<(), CheckError>(())
+                } else {
+                    Err(CheckError::new("connection refused"))
+                }
+            }
+        })
+    };
+    let readiness = Arc::new(Readiness::new(
+        vec![("db".to_owned(), check)],
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+    ));
+    let lifecycle = Lifecycle::new(Arc::default());
+    let task = tokio::spawn({
+        let (readiness, lifecycle) = (Arc::clone(&readiness), lifecycle.clone());
+        async move { probe.call(&readiness, &lifecycle).await }
+    });
+    // The probe passed any draining check and waits on the cold cache.
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the check starts");
+    assert!(!task.is_finished(), "the probe waits for the refresh");
+    lifecycle.trigger_shutdown();
+    release.notify_one();
+    let response = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the probe returns")
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
 /// Shutdown that begins while a readiness probe waits for a refresh is
 /// reported by that probe: it answers `draining`, whether the held check
 /// then passes or fails.
 #[tokio::test]
 async fn a_readiness_probe_pending_when_draining_starts_reports_draining() {
     for healthy in [true, false] {
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let check: Arc<dyn HealthCheck> = {
-            let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
-            Arc::new(move || {
-                let (entered, release) = (Arc::clone(&entered), Arc::clone(&release));
-                async move {
-                    entered.notify_one();
-                    release.notified().await;
-                    if healthy {
-                        Ok::<(), CheckError>(())
-                    } else {
-                        Err(CheckError::new("connection refused"))
-                    }
-                }
-            })
-        };
-        let readiness = Arc::new(Readiness::new(
-            vec![("db".to_owned(), check)],
-            Duration::from_secs(60),
-            Duration::from_secs(5),
-        ));
-        let lifecycle = Lifecycle::new(Arc::default());
-        let probe = tokio::spawn({
-            let (readiness, lifecycle) = (Arc::clone(&readiness), lifecycle.clone());
-            async move { health::readiness(&readiness, &lifecycle).await }
-        });
-        // The probe passed its draining check and waits on the cold cache.
-        tokio::time::timeout(Duration::from_secs(5), entered.notified())
-            .await
-            .expect("the check starts");
-        assert!(!probe.is_finished(), "the probe waits for the refresh");
-        lifecycle.trigger_shutdown();
-        release.notify_one();
-        let response = tokio::time::timeout(Duration::from_secs(5), probe)
-            .await
-            .expect("the probe returns")
-            .unwrap();
+        let (status, json) = probe_pending_when_draining_starts(Probe::Minimal, healthy).await;
         assert_eq!(
-            response.status(),
+            status,
             StatusCode::SERVICE_UNAVAILABLE,
             "healthy: {healthy}"
         );
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
             json,
             serde_json::json!({ "status": "draining" }),
             "healthy: {healthy}"
         );
+    }
+}
+
+/// Detailed health shares that decision: a pending refresh during which
+/// shutdown begins answers `draining`, and still renders the checks it
+/// waited for.
+#[tokio::test]
+async fn a_detailed_health_probe_pending_when_draining_starts_reports_draining() {
+    for healthy in [true, false] {
+        let (status, json) = probe_pending_when_draining_starts(Probe::Detailed, healthy).await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "healthy: {healthy}"
+        );
+        assert_eq!(json["status"], "draining", "healthy: {healthy}");
+        assert_eq!(json["draining"], true, "healthy: {healthy}");
+        assert_eq!(json["readiness"]["ready"], healthy, "healthy: {healthy}");
+    }
+}
+
+/// Once draining, minimal readiness answers without probing any
+/// dependency; detailed health still runs the checks, because it renders
+/// them. Both report `draining`.
+#[tokio::test]
+async fn only_detailed_health_probes_dependencies_once_draining() {
+    for (probe, probes) in [(Probe::Minimal, 0), (Probe::Detailed, 1)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check: Arc<dyn HealthCheck> = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Ok::<(), CheckError>(()) }
+            })
+        };
+        let readiness = Readiness::new(
+            vec![("db".to_owned(), check)],
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        );
+        let lifecycle = Lifecycle::new(Arc::default());
+        lifecycle.trigger_shutdown();
+        let response = probe.call(&readiness, &lifecycle).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{probe:?}"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "draining", "{probe:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), probes, "{probe:?}");
     }
 }
 

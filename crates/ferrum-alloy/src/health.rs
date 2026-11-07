@@ -272,55 +272,83 @@ pub fn liveness() -> Response {
     no_store(Json(serde_json::json!({ "status": "ok" })).into_response())
 }
 
-/// Minimal readiness response: status only.
-pub async fn readiness(readiness: &Readiness, lifecycle: &Lifecycle) -> Response {
-    if lifecycle.is_draining() {
-        return no_store(
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "status": "draining" })),
-            )
-                .into_response(),
-        );
-    }
-    let snapshot = readiness.snapshot().await;
-    // Shutdown can begin while a refresh is pending; the probe then
-    // reports draining, whatever the refresh found.
-    let (status, label) = if lifecycle.is_draining() {
-        (StatusCode::SERVICE_UNAVAILABLE, "draining")
-    } else if snapshot.ready {
-        (StatusCode::OK, "ready")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "not_ready")
-    };
-    no_store((status, Json(serde_json::json!({ "status": label }))).into_response())
+/// What a readiness probe reports. Draining wins over the checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessStatus {
+    Ready,
+    NotReady,
+    Draining,
 }
 
-/// Detailed health for the protected management listener.
+impl ReadinessStatus {
+    fn of(draining: bool, ready: bool) -> Self {
+        match (draining, ready) {
+            (true, _) => Self::Draining,
+            (false, true) => Self::Ready,
+            (false, false) => Self::NotReady,
+        }
+    }
+
+    fn code(self) -> StatusCode {
+        match self {
+            Self::Ready => StatusCode::OK,
+            Self::NotReady | Self::Draining => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NotReady => "not_ready",
+            Self::Draining => "draining",
+        }
+    }
+}
+
+/// Awaits the readiness snapshot, then reads the draining flag: shutdown
+/// can begin while a refresh is pending, and the probe then reports
+/// draining, whatever the refresh found (#252).
+async fn evaluate(readiness: &Readiness, lifecycle: &Lifecycle) -> (ReadinessStatus, Snapshot) {
+    let snapshot = readiness.snapshot().await;
+    let status = ReadinessStatus::of(lifecycle.is_draining(), snapshot.ready);
+    (status, snapshot)
+}
+
+fn minimal(status: ReadinessStatus) -> Response {
+    no_store(
+        (
+            status.code(),
+            Json(serde_json::json!({ "status": status.label() })),
+        )
+            .into_response(),
+    )
+}
+
+/// Minimal readiness response: status only.
+pub async fn readiness(readiness: &Readiness, lifecycle: &Lifecycle) -> Response {
+    // Already draining: answer without probing any dependency.
+    if lifecycle.is_draining() {
+        return minimal(ReadinessStatus::Draining);
+    }
+    let (status, _) = evaluate(readiness, lifecycle).await;
+    minimal(status)
+}
+
+/// Detailed health for the protected management listener. It always runs
+/// (or reuses) the checks, draining or not, because it renders them.
 pub async fn detailed(
     readiness: &Readiness,
     lifecycle: &Lifecycle,
     service: &str,
     version: Option<&str>,
 ) -> Response {
-    let snapshot = readiness.snapshot().await;
-    let draining = lifecycle.is_draining();
-    let status = match (draining, snapshot.ready) {
-        (true, _) => "draining",
-        (false, true) => "ready",
-        (false, false) => "not_ready",
-    };
-    let code = if status == "ready" {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
+    let (status, snapshot) = evaluate(readiness, lifecycle).await;
     no_store(
         (
-            code,
+            status.code(),
             Json(serde_json::json!({
-                "status": status,
-                "draining": draining,
+                "status": status.label(),
+                "draining": status == ReadinessStatus::Draining,
                 "service": { "name": service, "version": version },
                 "uptime_seconds": lifecycle.uptime().as_secs(),
                 "in_flight_requests": lifecycle.metrics().in_flight(),
@@ -329,4 +357,26 @@ pub async fn detailed(
         )
             .into_response(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadinessStatus;
+    use http::StatusCode;
+
+    /// Shared invariant of minimal and detailed readiness: draining wins
+    /// over the checks, and only `ready` answers 200.
+    #[test]
+    fn readiness_status_maps_draining_first_then_the_checks() {
+        for (draining, ready, code, label) in [
+            (false, true, StatusCode::OK, "ready"),
+            (false, false, StatusCode::SERVICE_UNAVAILABLE, "not_ready"),
+            (true, true, StatusCode::SERVICE_UNAVAILABLE, "draining"),
+            (true, false, StatusCode::SERVICE_UNAVAILABLE, "draining"),
+        ] {
+            let status = ReadinessStatus::of(draining, ready);
+            assert_eq!(status.code(), code, "draining {draining}, ready {ready}");
+            assert_eq!(status.label(), label, "draining {draining}, ready {ready}");
+        }
+    }
 }
