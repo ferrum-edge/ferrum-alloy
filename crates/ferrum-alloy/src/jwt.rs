@@ -26,7 +26,10 @@
 //!   `jwks_max_stale_ms` while it is revalidated in the background or while
 //!   refreshes fail, then verification fails closed;
 //! * a JWKS outage is `503 auth-unavailable`, not `401`, also when a failed
-//!   refresh leaves a cached key set that holds no key for the token.
+//!   refresh leaves a cached key set that holds no key for the token;
+//! * the token comes from the request's only `Authorization` header: several
+//!   are refused (`401`, `error="invalid_request"`) without verifying any,
+//!   and `Bearer` with an empty credential counts as no token.
 //!
 //! Authentication proves who the caller is; [`Authorize`] is where the
 //! application decides what they may do. Forwarded identity headers never
@@ -978,6 +981,19 @@ fn unauthorized(error: Option<&AuthError>) -> Problem {
         .with_header(WWW_AUTHENTICATE, challenge)
 }
 
+/// Several `Authorization` headers: refused without verifying any of them,
+/// with the RFC 6750 `invalid_request` challenge ("uses more than one method
+/// for including an access token"). The status stays `401 unauthorized`, so
+/// clients see one problem type for every authentication failure.
+fn ambiguous() -> Problem {
+    Problem::new(ProblemKind::Unauthorized)
+        .with_detail("Send exactly one Authorization header.")
+        .with_header(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer error=\"invalid_request\""),
+        )
+}
+
 fn rejection(error: &AuthError) -> Response {
     match error {
         AuthError::KeysUnavailable => Problem::new(ProblemKind::AuthUnavailable)
@@ -1053,9 +1069,16 @@ where
         let verifier = self.verifier.clone();
         let authorizer = self.authorizer.clone();
         Box::pin(async move {
-            let token = crate::bearer::first(request.headers()).map(str::to_owned);
-            let Some(token) = token else {
-                return Ok(rejection(&AuthError::Missing));
+            let token = match crate::bearer::sole(request.headers()) {
+                Ok(Some(token)) => token.to_owned(),
+                Ok(None) => return Ok(rejection(&AuthError::Missing)),
+                Err(crate::bearer::Ambiguous) => {
+                    tracing::debug!(
+                        target: "ferrum_alloy::jwt",
+                        "several Authorization headers rejected"
+                    );
+                    return Ok(ambiguous().into_response());
+                }
             };
             let principal = match verifier.verify(&token).await {
                 Ok(principal) => principal,

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Behavior change:** JWT verification and the management token check
+  refuse a request with more than one `Authorization` header instead of
+  reading the first, as diagnostic retrieval's
+  `DiagnosticsRequest::bearer_token` already did (#278). JWT answers `401`
+  with `WWW-Authenticate: Bearer error="invalid_request"` (RFC 6750,
+  section 3.1) without verifying any copy; management answers its usual
+  `401`. A client that sent duplicate headers and relied on the first one
+  must send exactly one. Ferrum Edge refuses such requests at ingress, so
+  traffic through Edge is unaffected. `Authorization: Bearer ` with an empty
+  credential now counts as no token in JWT verification, whose challenge
+  then carries no error code, instead of `invalid_token`.
 - Fix: a JWKS refresh that returns `200` with no usable key (for example
   `{"keys":[]}` or only `use: enc` keys) is now an outage like any failed
   refresh. It keeps the cached keys until they age out instead of replacing

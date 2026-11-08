@@ -420,12 +420,13 @@ async fn call_with(router: &Router, authorization: &[&str]) -> (StatusCode, http
     (response.status(), response.headers().clone())
 }
 
-/// Characterizes which `Authorization` header JWT verification reads: the
-/// first one, with a case-insensitive `Bearer` scheme and a trimmed
-/// credential. Later headers are not read (management does the same;
-/// diagnostic retrieval refuses several).
+/// JWT verification reads the request's only `Authorization` header, with a
+/// case-insensitive `Bearer` scheme and a trimmed credential. Several
+/// `Authorization` headers are refused with `invalid_request` before any is
+/// verified (management and diagnostic retrieval refuse them too), and an
+/// empty credential is no credential.
 #[tokio::test]
-async fn the_first_bearer_authorization_header_is_verified() {
+async fn exactly_one_bearer_authorization_header_is_verified() {
     let key = SigningKey::new("k1");
     let jwks = jwks_server(&[&key]).await;
     let router = protected(&JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap());
@@ -441,21 +442,27 @@ async fn the_first_bearer_authorization_header_is_verified() {
     let (status, headers) = call_with(&router, &[&basic]).await;
     assert_eq!(status, 401, "only the bearer scheme");
     assert_eq!(headers["www-authenticate"], "Bearer", "reported as missing");
-    let (status, headers) = call_with(&router, &["Bearer"]).await;
-    assert_eq!(status, 401);
-    assert_eq!(headers["www-authenticate"], "Bearer", "no credential");
+    for empty in ["Bearer", "Bearer ", "Bearer    "] {
+        let (status, headers) = call_with(&router, &[empty]).await;
+        assert_eq!(status, 401, "{empty:?}");
+        assert_eq!(
+            headers["www-authenticate"], "Bearer",
+            "{empty:?} is missing"
+        );
+    }
 
-    assert_eq!(
-        call_with(&router, &[&bearer, "Bearer not-a-token"]).await.0,
-        200,
-        "a later header is not read"
-    );
-    let (status, headers) = call_with(&router, &["Bearer not-a-token", &bearer]).await;
-    assert_eq!(status, 401, "only the first header is verified");
-    assert_eq!(headers["www-authenticate"], INVALID_TOKEN);
-    let (status, headers) = call_with(&router, &[&basic, &bearer]).await;
-    assert_eq!(status, 401, "a non-bearer first header hides a later one");
-    assert_eq!(headers["www-authenticate"], "Bearer");
+    let invalid_request = "Bearer error=\"invalid_request\"";
+    for pair in [
+        [bearer.as_str(), "Bearer not-a-token"],
+        ["Bearer not-a-token", bearer.as_str()],
+        [bearer.as_str(), bearer.as_str()],
+        [basic.as_str(), bearer.as_str()],
+        [bearer.as_str(), basic.as_str()],
+    ] {
+        let (status, headers) = call_with(&router, &pair).await;
+        assert_eq!(status, 401, "several Authorization headers are refused");
+        assert_eq!(headers["www-authenticate"], invalid_request);
+    }
 }
 
 #[tokio::test]
