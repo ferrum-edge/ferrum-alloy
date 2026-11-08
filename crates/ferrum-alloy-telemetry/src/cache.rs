@@ -203,7 +203,7 @@ mod tests {
         assert!(parsed.is_malformed());
         assert!(parsed.has("max-age"));
 
-        let parsed = CacheControl::parse(&HeaderMap::new());
-        assert_eq!(parsed, CacheControl::default());
+        let empty = HeaderMap::new();
+        assert_eq!(CacheControl::parse(&empty), CacheControl::default());
     }
 }
