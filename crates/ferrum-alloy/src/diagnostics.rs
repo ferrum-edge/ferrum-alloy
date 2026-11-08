@@ -200,7 +200,7 @@ impl DiagnosticsRequest {
     /// request has exactly one `Authorization` header and it is a non-empty
     /// bearer credential.
     pub fn bearer_token(&self) -> Option<&str> {
-        crate::bearer::sole(&self.headers).filter(|token| !token.is_empty())
+        crate::bearer::sole(&self.headers).ok().flatten()
     }
 }
 

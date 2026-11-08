@@ -1,38 +1,41 @@
-//! The `Authorization: Bearer` credential, parsed one way for every check
+//! The `Authorization: Bearer` credential, read one way for every check
 //! Alloy makes: the management token, JWT verification, and
 //! `DiagnosticsRequest::bearer_token` for diagnostic retrieval authorizers.
 //!
-//! Which `Authorization` header is read is each caller's choice, named at
-//! the call site: [`first`] reads the first one, as `HeaderMap::get` does,
-//! and [`sole`] requires exactly one.
+//! A request with more than one `Authorization` header is ambiguous and is
+//! refused rather than picking one, matching the rule for every other
+//! singleton request header (see `ferrum_alloy_telemetry::trace_context`)
+//! and Ferrum Edge, which refuses such a request at ingress. Another
+//! component, such as a proxy that authorizes on the last copy, could
+//! otherwise act on a different credential than the one Alloy verified.
 
 use http::HeaderMap;
 use http::header::{AUTHORIZATION, HeaderValue};
 
+/// The request has more than one `Authorization` header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ambiguous;
+
 /// The credential of one `Authorization` value whose scheme is `Bearer`
-/// (case-insensitive, RFC 9110), with surrounding whitespace trimmed. The
-/// credential may be empty.
+/// (case-insensitive, RFC 9110), with surrounding whitespace trimmed. An
+/// empty credential is no credential (RFC 6750, section 3.1: a request
+/// without authentication information).
 pub(crate) fn credential(value: &HeaderValue) -> Option<&str> {
     let (scheme, credential) = value.to_str().ok()?.split_once(' ')?;
-    scheme
-        .eq_ignore_ascii_case("bearer")
-        .then(|| credential.trim())
+    let credential = credential.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !credential.is_empty()).then_some(credential)
 }
 
-/// The bearer credential of the first `Authorization` header. Later
-/// `Authorization` headers are not read.
-pub(crate) fn first(headers: &HeaderMap) -> Option<&str> {
-    headers.get(AUTHORIZATION).and_then(credential)
-}
-
-/// The bearer credential when the request has exactly one `Authorization`
-/// header. Several are ambiguous and yield `None`.
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
-pub(crate) fn sole(headers: &HeaderMap) -> Option<&str> {
+/// The bearer credential of the request's only `Authorization` header.
+/// `Ok(None)` when there is no `Authorization` header, or its single value
+/// is not a non-empty bearer credential; `Err(Ambiguous)` when there are
+/// several, whatever their values.
+pub(crate) fn sole(headers: &HeaderMap) -> Result<Option<&str>, Ambiguous> {
     let mut values = headers.get_all(AUTHORIZATION).iter();
     match (values.next(), values.next()) {
-        (Some(value), None) => credential(value),
-        _ => None,
+        (None, _) => Ok(None),
+        (Some(value), None) => Ok(credential(value)),
+        (Some(_), Some(_)) => Err(Ambiguous),
     }
 }
 
@@ -54,13 +57,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_bearer_scheme_yields_a_trimmed_credential() {
+    fn only_the_bearer_scheme_yields_a_trimmed_non_empty_credential() {
         assert_eq!(credential(&value("Bearer abc")), Some("abc"));
         assert_eq!(credential(&value("bearer abc")), Some("abc"));
         assert_eq!(credential(&value("BEARER abc")), Some("abc"));
         assert_eq!(credential(&value("Bearer   abc  ")), Some("abc"));
         assert_eq!(credential(&value("Bearer a b")), Some("a b"));
-        assert_eq!(credential(&value("Bearer  ")), Some(""), "may be empty");
+        assert_eq!(credential(&value("Bearer  ")), None, "empty is none");
         assert_eq!(credential(&value("Bearer")), None, "no separator");
         assert_eq!(credential(&value("Basic abc")), None);
         assert_eq!(credential(&value("Bearerabc")), None);
@@ -71,19 +74,21 @@ mod tests {
     }
 
     #[test]
-    fn first_reads_only_the_first_authorization_header() {
-        assert_eq!(first(&HeaderMap::new()), None);
-        assert_eq!(first(&headers(&["Bearer abc"])), Some("abc"));
-        assert_eq!(first(&headers(&["Bearer abc", "Bearer def"])), Some("abc"));
-        assert_eq!(first(&headers(&["Basic abc", "Bearer def"])), None);
-    }
-
-    #[test]
     fn sole_requires_exactly_one_authorization_header() {
-        assert_eq!(sole(&HeaderMap::new()), None);
-        assert_eq!(sole(&headers(&["bearer abc "])), Some("abc"));
-        assert_eq!(sole(&headers(&["Bearer abc", "Bearer def"])), None);
-        assert_eq!(sole(&headers(&["Bearer abc", "Basic def"])), None);
-        assert_eq!(sole(&headers(&["Basic abc"])), None);
+        assert_eq!(sole(&HeaderMap::new()), Ok(None));
+        assert_eq!(sole(&headers(&["bearer abc "])), Ok(Some("abc")));
+        assert_eq!(sole(&headers(&["Basic abc"])), Ok(None));
+        assert_eq!(sole(&headers(&["Bearer  "])), Ok(None));
+        assert_eq!(
+            sole(&headers(&["Bearer abc", "Bearer def"])),
+            Err(Ambiguous)
+        );
+        assert_eq!(
+            sole(&headers(&["Bearer abc", "Bearer abc"])),
+            Err(Ambiguous)
+        );
+        assert_eq!(sole(&headers(&["Bearer abc", "Basic def"])), Err(Ambiguous));
+        assert_eq!(sole(&headers(&["Basic abc", "Bearer def"])), Err(Ambiguous));
+        assert_eq!(sole(&headers(&["Bearer abc", "Bearer  "])), Err(Ambiguous));
     }
 }

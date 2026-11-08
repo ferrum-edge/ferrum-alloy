@@ -100,7 +100,10 @@ pub(crate) fn authorized(headers: &HeaderMap, token: Option<&Secret>) -> bool {
         // Binding there does not authenticate an operator.
         return false;
     };
-    crate::bearer::first(headers)
+    // Several `Authorization` headers are refused, whatever their values.
+    crate::bearer::sole(headers)
+        .ok()
+        .flatten()
         .is_some_and(|presented| constant_time_eq(presented.as_bytes(), token.expose().as_bytes()))
 }
 
@@ -292,11 +295,11 @@ mod tests {
         assert!(!authorized(&headers, None));
     }
 
-    /// Characterizes which `Authorization` header is checked: the first
-    /// one, trimmed. Later headers are not read (JWT verification does the
-    /// same; diagnostic retrieval refuses several).
+    /// Several `Authorization` headers are refused, whatever their values,
+    /// like diagnostic retrieval and JWT verification: another component
+    /// could act on a different copy than the one checked here.
     #[test]
-    fn only_the_first_authorization_header_is_checked() {
+    fn several_authorization_headers_are_refused() {
         let token = Secret::new("0123456789abcdef0123456789abcdef");
         let valid = "Bearer 0123456789abcdef0123456789abcdef";
         let headers = |values: &[&'static str]| {
@@ -306,16 +309,22 @@ mod tests {
             }
             headers
         };
+        assert!(authorized(&headers(&[valid]), Some(&token)));
         assert!(authorized(
             &headers(&["Bearer   0123456789abcdef0123456789abcdef  "]),
             Some(&token)
         ));
-        assert!(authorized(&headers(&[valid, "Bearer wrong"]), Some(&token)));
+        assert!(!authorized(
+            &headers(&[valid, "Bearer wrong"]),
+            Some(&token)
+        ));
         assert!(!authorized(
             &headers(&["Bearer wrong", valid]),
             Some(&token)
         ));
+        assert!(!authorized(&headers(&[valid, valid]), Some(&token)));
         assert!(!authorized(&headers(&["Basic abc", valid]), Some(&token)));
         assert!(!authorized(&headers(&["Bearer"]), Some(&token)));
+        assert!(!authorized(&headers(&["Bearer  "]), Some(&token)));
     }
 }
