@@ -29,15 +29,15 @@ pub fn is_shared_cacheable(
     status: StatusCode,
     response_headers: &HeaderMap,
 ) -> bool {
-    let (dirs, malformed) = directives(response_headers);
+    let dirs = CacheControl::parse(response_headers);
     // An ambiguous value (an unterminated quoted string) is treated as
     // storable, which only withholds Alloy's request-specific headers.
     // This precedes the prohibition checks below: `no-store="unterminated`
     // must not be read as a prohibition on a guess.
-    if malformed {
+    if dirs.is_malformed() {
         return true;
     }
-    let has = |name: &str| dirs.iter().any(|d| directive_is(d, name));
+    let has = |name: &str| dirs.has(name);
 
     // A qualified `private="field"` still lets a shared cache store the rest
     // of the response (RFC 9111 §5.2.2.7), so only the bare form prohibits it.
@@ -66,14 +66,56 @@ pub fn is_shared_cacheable(
     }
 }
 
-/// Trimmed response `Cache-Control` directives, borrowed from the header
-/// values (no lowercasing copies; comparisons are ASCII-insensitive), and
-/// whether any value was malformed (an unterminated quoted string).
+/// The `Cache-Control` directives of a header map: every directive of every
+/// `Cache-Control` value, trimmed and borrowed from the header values (no
+/// lowercasing copies; comparisons are ASCII-insensitive), and whether any
+/// value was malformed (an unterminated quoted string).
 ///
 /// Commas separate directives only outside quoted strings (RFC 9110
 /// §5.6.4): splitting inside `ext="x, private, y"` would invent a bare
 /// `private` directive the sender never sent (#217). Quoted pairs (`\"`,
-/// `\\`) do not end the quoted string.
+/// `\\`) do not end the quoted string. Values that are not visible ASCII
+/// are skipped.
+///
+/// Every `Cache-Control` reader in Alloy uses this split, so a quoted value
+/// never reads as a directive anywhere. What a malformed value means is the
+/// caller's decision; each should pick the reading that fails safe for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheControl<'h> {
+    directives: Vec<&'h str>,
+    malformed: bool,
+}
+
+impl<'h> CacheControl<'h> {
+    /// Splits every `Cache-Control` value in `headers`.
+    pub fn parse(headers: &'h HeaderMap) -> Self {
+        let (directives, malformed) = directives(headers);
+        Self {
+            directives,
+            malformed,
+        }
+    }
+
+    /// Whether any value had an unterminated quoted string, so its
+    /// directives after the opening quote could not be told apart.
+    pub fn is_malformed(&self) -> bool {
+        self.malformed
+    }
+
+    /// The directives in order, each trimmed, with its argument when it has
+    /// one (`max-age=60`, `ext="a, b"`). Empty list members are omitted.
+    pub fn iter(&self) -> impl Iterator<Item = &'h str> + '_ {
+        self.directives.iter().copied()
+    }
+
+    /// Whether a directive is exactly `name` (ASCII case-insensitive) or
+    /// `name=argument`. A directive whose name merely contains `name`, or
+    /// a quoted argument that mentions it, does not count.
+    pub fn has(&self, name: &str) -> bool {
+        self.directives.iter().any(|d| directive_is(d, name))
+    }
+}
+
 fn directives(headers: &HeaderMap) -> (Vec<&str>, bool) {
     let mut out = Vec::new();
     let mut malformed = false;
@@ -121,4 +163,47 @@ fn directive_is(directive: &str, name: &str) -> bool {
     d.len() >= n.len()
         && d[..n.len()].eq_ignore_ascii_case(n)
         && (d.len() == n.len() || d[n.len()] == b'=')
+}
+
+#[cfg(test)]
+mod tests {
+    use http::header::{CACHE_CONTROL, HeaderMap, HeaderValue};
+
+    use super::CacheControl;
+
+    fn headers(values: &[&'static str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(CACHE_CONTROL, HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    #[test]
+    fn directives_split_only_outside_quoted_strings() {
+        let map = headers(&["public, ext=\"a, max-age=1\", max-age=600", " , no-cache"]);
+        let parsed = CacheControl::parse(&map);
+        assert!(!parsed.is_malformed());
+        assert_eq!(
+            parsed.iter().collect::<Vec<_>>(),
+            ["public", "ext=\"a, max-age=1\"", "max-age=600", "no-cache"]
+        );
+        assert!(parsed.has("MAX-AGE"));
+        assert!(parsed.has("no-cache"));
+        assert!(!parsed.has("max"), "a prefix is not a name");
+        assert!(!parsed.has("no-store"));
+
+        let map = headers(&["ext=\"a\\\", no-store\""]);
+        let parsed = CacheControl::parse(&map);
+        assert!(!parsed.is_malformed());
+        assert!(!parsed.has("no-store"), "an escaped quote stays quoted");
+
+        let map = headers(&["max-age=60", "ext=\"open, no-store"]);
+        let parsed = CacheControl::parse(&map);
+        assert!(parsed.is_malformed());
+        assert!(parsed.has("max-age"));
+
+        let empty = HeaderMap::new();
+        assert_eq!(CacheControl::parse(&empty), CacheControl::default());
+    }
 }

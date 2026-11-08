@@ -19,6 +19,7 @@ mod error;
 mod fsout;
 mod input;
 mod live;
+mod loopback;
 mod new;
 mod openapi;
 mod output;
