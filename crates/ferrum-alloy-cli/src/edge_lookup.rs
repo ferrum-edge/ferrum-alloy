@@ -3,7 +3,6 @@
 //! admin channel does so. ADR 0009 defines the limited claim it supports.
 
 use std::io::Read as _;
-use std::net::IpAddr;
 use std::time::Duration;
 
 use ferrum_alloy_diagnostics::edge_record::{self, BoundRecord, ClientObservation};
@@ -171,7 +170,8 @@ impl CredentialRedactor {
 }
 
 /// Validate the base and reference before constructing the request target.
-/// HTTP must use a literal loopback address; DNS localhost is refused.
+/// HTTP must use a canonical literal loopback address
+/// ([`crate::loopback::is_canonical_loopback`]); DNS localhost is refused.
 fn lookup_url(base: &str, reference: &str) -> Result<Url, CliError> {
     let invalid = |message: &str| CliError::Invalid(message.to_owned());
     if !ferrum_alloy_diagnostics::catalog::is_edge_diagnostic_ref(reference) {
@@ -191,32 +191,10 @@ fn lookup_url(base: &str, reference: &str) -> Result<Url, CliError> {
             "--edge-admin-url must use https or literal-loopback http",
         ));
     }
-    if url.scheme() == "http" {
-        let host = url.host_str().unwrap_or_default();
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        if !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
-            return Err(invalid(
-                "plain HTTP Edge lookup requires a literal loopback IP; use https",
-            ));
-        }
-        // URL parsing normalizes shorthand, octal and integer IPv4 hosts.
-        // Require the original authority to contain the canonical literal.
-        let authority = base
-            .split_once("://")
-            .map(|(_, rest)| rest)
-            .unwrap_or_default();
-        let authority = authority.split('/').next().unwrap_or_default();
-        let canonical = if host.contains(':') {
-            format!("[{host}]")
-        } else {
-            host.to_owned()
-        };
-        let suffix = authority.strip_prefix(&canonical);
-        if !suffix.is_some_and(|s| s.is_empty() || s.starts_with(':')) {
-            return Err(invalid(
-                "plain HTTP Edge lookup requires a canonical literal loopback IP",
-            ));
-        }
+    if url.scheme() == "http" && !crate::loopback::is_canonical_loopback(base, &url) {
+        return Err(invalid(
+            "plain HTTP Edge lookup requires a canonical literal loopback IP; use https",
+        ));
     }
     let path = url.path().trim_end_matches('/').to_owned();
     url.set_path(&format!("{path}/diagnostics/v1/refs/{reference}"));

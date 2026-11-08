@@ -61,6 +61,7 @@ use crate::config::{
 };
 use crate::error::AlloyError;
 use crate::problem::{Problem, ProblemKind, sanitize_detail};
+use ferrum_alloy_telemetry::cache::CacheControl;
 
 /// A verified caller.
 #[derive(Debug, Clone, PartialEq)]
@@ -538,45 +539,9 @@ impl JwtVerifier {
         }
     }
 
-    /// The freshness lifetime of a JWKS response: `Cache-Control: max-age`
-    /// minus `Age` when present, else `jwks_max_age_ms`, bounded below by
-    /// `jwks_min_refresh_interval_ms` and above by `jwks_max_age_ms`.
-    /// `no-cache` and `no-store` count as `max-age=0`.
+    /// The freshness lifetime of a JWKS response; see [`jwks_lifetime`].
     fn lifetime(&self, headers: &http::HeaderMap) -> Duration {
-        let mut max_age: Option<u64> = None;
-        for value in headers.get_all(http::header::CACHE_CONTROL) {
-            let Ok(value) = value.to_str() else {
-                continue;
-            };
-            for directive in value.split(',').map(str::trim) {
-                let seconds = if directive.eq_ignore_ascii_case("no-cache")
-                    || directive.eq_ignore_ascii_case("no-store")
-                {
-                    Some(0)
-                } else {
-                    match directive.split_once('=') {
-                        Some((name, seconds)) if name.trim().eq_ignore_ascii_case("max-age") => {
-                            seconds.trim().trim_matches('"').parse::<u64>().ok()
-                        }
-                        _ => None,
-                    }
-                };
-                // Several directives: the most conservative wins.
-                if let Some(seconds) = seconds {
-                    max_age = Some(max_age.map_or(seconds, |current| current.min(seconds)));
-                }
-            }
-        }
-        let age = headers
-            .get(http::header::AGE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(Duration::ZERO, Duration::from_secs);
-        let lifetime = max_age.map_or(self.inner.max_age, Duration::from_secs);
-        lifetime
-            .saturating_sub(age)
-            .min(self.inner.max_age)
-            .max(self.inner.min_refresh)
+        jwks_lifetime(headers, self.inner.min_refresh, self.inner.max_age)
     }
 
     async fn fetch(&self) -> Result<(Vec<Key>, Duration), AuthError> {
@@ -966,6 +931,50 @@ fn decode_base64url(segment: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The freshness lifetime of a JWKS response: `Cache-Control: max-age`
+/// minus `Age` when present, else `max_age`, bounded below by `min_refresh`
+/// and above by `max_age`. `no-cache` and `no-store` count as `max-age=0`,
+/// and with several the most conservative wins.
+///
+/// Directives are split like every other `Cache-Control` reader in Alloy
+/// ([`CacheControl`]): a comma inside a quoted string does not end a
+/// directive, so `ext="a, max-age=1"` holds no `max-age`. An unterminated
+/// quoted string could hide any directive, so it counts as `max-age=0`: the
+/// keys are revalidated as soon as `min_refresh` allows, never kept longer
+/// on a guess.
+fn jwks_lifetime(headers: &http::HeaderMap, min_refresh: Duration, max_age: Duration) -> Duration {
+    let directives = CacheControl::parse(headers);
+    let mut fresh_for: Option<u64> = directives.is_malformed().then_some(0);
+    for directive in directives.iter() {
+        let seconds = if directive.eq_ignore_ascii_case("no-cache")
+            || directive.eq_ignore_ascii_case("no-store")
+        {
+            Some(0)
+        } else {
+            match directive.split_once('=') {
+                Some((name, seconds)) if name.trim().eq_ignore_ascii_case("max-age") => {
+                    seconds.trim().trim_matches('"').parse::<u64>().ok()
+                }
+                _ => None,
+            }
+        };
+        // Several directives: the most conservative wins.
+        if let Some(seconds) = seconds {
+            fresh_for = Some(fresh_for.map_or(seconds, |current| current.min(seconds)));
+        }
+    }
+    let age = headers
+        .get(http::header::AGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(Duration::ZERO, Duration::from_secs);
+    fresh_for
+        .map_or(max_age, Duration::from_secs)
+        .saturating_sub(age)
+        .min(max_age)
+        .max(min_refresh)
+}
+
 /// Whether a refresh completed and failed.
 fn refresh_failed(latest: &watch::Receiver<Outcome>) -> bool {
     latest.borrow().as_ref().is_some_and(RefreshOutcome::failed)
@@ -1112,7 +1121,11 @@ impl JwtSettings {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::jwks_tls;
+    use std::time::Duration;
+
+    use http::header::{AGE, CACHE_CONTROL, HeaderMap, HeaderValue};
+
+    use super::{jwks_lifetime, jwks_tls};
     use crate::http_client::tests::{handshake, unavailable, verified_by_test_ca};
 
     /// Intentional difference from `AlloyClient`: an `https` JWKS needs the
@@ -1141,5 +1154,63 @@ mod tests {
             let config = jwks_tls(platform, &url::Url::parse(url).unwrap()).unwrap();
             handshake(config, server).expect(url);
         }
+    }
+
+    fn lifetime_of(cache_control: &[&'static str], age: Option<&'static str>) -> Duration {
+        let mut headers = HeaderMap::new();
+        for value in cache_control {
+            headers.append(CACHE_CONTROL, HeaderValue::from_static(value));
+        }
+        if let Some(age) = age {
+            headers.insert(AGE, HeaderValue::from_static(age));
+        }
+        jwks_lifetime(&headers, Duration::from_secs(5), Duration::from_secs(3_600))
+    }
+
+    /// `max-age` shortens the configured maximum but never extends it, and
+    /// never goes below the refresh interval; `no-cache`, `no-store`, and
+    /// several directives take the most conservative reading.
+    #[test]
+    fn jwks_lifetime_is_bounded_by_the_settings() {
+        let secs = Duration::from_secs;
+        assert_eq!(lifetime_of(&[], None), secs(3_600), "no header");
+        assert_eq!(lifetime_of(&["max-age=600"], None), secs(600));
+        assert_eq!(lifetime_of(&["public, MAX-AGE=600"], None), secs(600));
+        assert_eq!(lifetime_of(&["max-age=\"600\""], None), secs(600));
+        assert_eq!(lifetime_of(&["max-age=600"], Some("100")), secs(500));
+        assert_eq!(lifetime_of(&["max-age=86400"], None), secs(3_600));
+        assert_eq!(lifetime_of(&["max-age=1"], None), secs(5));
+        assert_eq!(lifetime_of(&["no-store"], None), secs(5));
+        assert_eq!(lifetime_of(&["max-age=600, no-cache"], None), secs(5));
+        assert_eq!(lifetime_of(&["max-age=600", "max-age=60"], None), secs(60));
+        assert_eq!(lifetime_of(&["max-age=junk"], None), secs(3_600));
+    }
+
+    /// A comma inside a quoted string does not end a directive (#279, the
+    /// split #236 gave the telemetry cache check): the quoted text is no
+    /// `max-age`, and an unterminated quote revalidates early.
+    #[test]
+    fn jwks_lifetime_ignores_directives_inside_quoted_strings() {
+        let secs = Duration::from_secs;
+        assert_eq!(
+            lifetime_of(&["ext=\"a, max-age=1\", max-age=600"], None),
+            secs(600)
+        );
+        assert_eq!(lifetime_of(&["ext=\"a, no-store\""], None), secs(3_600));
+        assert_eq!(
+            lifetime_of(&["ext=\"a\\\", max-age=1\", max-age=600"], None),
+            secs(600),
+            "an escaped quote does not end the quoted string"
+        );
+        assert_eq!(
+            lifetime_of(&["max-age=600, ext=\"a, max-age=900"], None),
+            secs(5),
+            "unterminated: the most conservative lifetime"
+        );
+        assert_eq!(
+            lifetime_of(&["max-age=600", "ext=\"open"], None),
+            secs(5),
+            "a malformed value in any Cache-Control header"
+        );
     }
 }

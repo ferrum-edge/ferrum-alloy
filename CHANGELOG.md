@@ -13,6 +13,24 @@
   traffic through Edge is unaffected. `Authorization: Bearer ` with an empty
   credential now counts as no token in JWT verification, whose challenge
   then carries no error code, instead of `invalid_token`.
+- Every `Cache-Control` reader now splits directives the way the telemetry
+  cache check has since #236: commas inside quoted strings do not separate
+  directives, and an unterminated quoted string is malformed (#279). The
+  splitter is public as `ferrum_alloy_telemetry::cache::CacheControl`.
+  **Behavior changes:** the JWKS key-set lifetime no longer reads a
+  `max-age` inside a quoted value (for example `ext="a, max-age=1",
+  max-age=600` now gives 600 s, still bounded by `jwks_min_refresh_interval_ms`
+  and `jwks_max_age_ms`), and a malformed `Cache-Control` counts as
+  `max-age=0`, so the keys are revalidated as early as the refresh interval
+  allows. Response compression matches `no-store` as a directive name, not a
+  substring, so `Cache-Control: private, ext="no-store"` is now compressed;
+  a malformed `Cache-Control` is not compressed.
+- **Behavior change:** `ferrum-alloy diagnose --url` sends a credential over
+  plain `http` only to a canonical literal loopback address, the rule
+  `diagnose --edge-admin-url` already applied (#279). Spellings that the URL
+  parser normalizes to a loopback address, such as `http://127.1`,
+  `http://2130706433` or `http://[0:0:0:0:0:0:0:1]`, are refused with a
+  credential; write `http://127.0.0.1` or `http://[::1]`.
 - Fix: a JWKS refresh that returns `200` with no usable key (for example
   `{"keys":[]}` or only `use: enc` keys) is now an outage like any failed
   refresh. It keeps the cached keys until they age out instead of replacing

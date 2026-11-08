@@ -6,10 +6,10 @@
 //! the whole request, and the response size, and writes nothing anywhere,
 //! gateways included. The credential comes from
 //! `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or a file, never from an argument, and
-//! goes over plain `http` only to a loopback address.
+//! goes over plain `http` only to a canonical literal loopback address
+//! (`crate::loopback`), the rule the Edge lookup applies too.
 
 use std::io::Read as _;
-use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,20 +63,6 @@ pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliErro
     Ok(Some(token.to_owned()))
 }
 
-/// Whether `url` names this host by a literal loopback address. DNS names,
-/// `localhost` included, do not qualify: the resolver decides where they
-/// connect, and a credential sent over plain http must not leave this host.
-fn is_loopback(url: &Url) -> bool {
-    // The parser canonicalizes IP hosts (dotted-quad IPv4, bracketed IPv6);
-    // a domain never parses as an address.
-    url.host_str().is_some_and(|host| {
-        host.trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-    })
-}
-
 /// The report URL of `request_id` under the management listener at `base`.
 pub(crate) fn report_url(base: &str, request_id: &str, has_token: bool) -> Result<Url, CliError> {
     let mut url = Url::parse(base).map_err(|e| CliError::Invalid(format!("--url: {e}")))?;
@@ -93,9 +79,10 @@ pub(crate) fn report_url(base: &str, request_id: &str, has_token: bool) -> Resul
             "--url must not have a query or fragment".into(),
         ));
     }
-    if has_token && url.scheme() == "http" && !is_loopback(&url) {
+    // The same rule as the Edge lookup: a canonical literal loopback IP.
+    if has_token && url.scheme() == "http" && !crate::loopback::is_canonical_loopback(base, &url) {
         return Err(CliError::Invalid(
-            "the credential is sent over plain http only to a loopback address; use https".into(),
+            "the credential is sent over plain http only to a canonical literal loopback address; use https".into(),
         ));
     }
     if RequestId::parse(request_id).is_none() {
@@ -211,6 +198,19 @@ mod tests {
         assert_eq!(proxied, expected);
         assert!(url("http://[::1]:9090", true).is_ok());
         assert!(url("http://127.0.0.2:9090", true).is_ok());
+        // Non-canonical spellings the parser normalizes to loopback are
+        // refused with a credential, like the Edge lookup does (#279).
+        for host in ["127.1", "2130706433", "0x7f.1", "[0:0:0:0:0:0:0:1]"] {
+            let error = url(&format!("http://{host}:9090"), true).unwrap_err();
+            assert!(
+                error.contains("canonical literal loopback"),
+                "{host}: {error}"
+            );
+            assert!(
+                url(&format!("http://{host}:9090"), false).is_ok(),
+                "{host}: no credential"
+            );
+        }
         assert!(url("https://localhost:9090", true).is_ok());
         // A DNS name never receives the credential over plain http (#181).
         for host in ["localhost", "LocalHost", "localhost.", "api.localhost"] {

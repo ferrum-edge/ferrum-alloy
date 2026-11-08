@@ -49,6 +49,12 @@ pub(crate) fn cors(settings: &CorsSettings) -> Result<tower_http::cors::CorsLaye
 
 /// Builds a compression layer that never compresses event streams or
 /// responses marked `no-store` or carrying `Set-Cookie`.
+///
+/// `no-store` is a directive name ([`CacheControl::has`]), not a substring:
+/// `ext="no-store"` is not a prohibition. A `Cache-Control` value with an
+/// unterminated quoted string could hide one, so it is not compressed.
+///
+/// [`CacheControl::has`]: ferrum_alloy_telemetry::cache::CacheControl::has
 #[cfg(feature = "compression")]
 pub(crate) fn compression(
     settings: &CompressionSettings,
@@ -63,14 +69,74 @@ pub(crate) fn compression(
             |_: http::StatusCode,
              _: http::Version,
              headers: &http::HeaderMap,
-             _: &http::Extensions| {
-                !headers.contains_key(http::header::SET_COOKIE)
-                    && !headers
-                        .get_all(http::header::CACHE_CONTROL)
-                        .iter()
-                        .filter_map(|v| v.to_str().ok())
-                        .any(|v| v.to_ascii_lowercase().contains("no-store"))
-            },
+             _: &http::Extensions| { compressible(headers) },
         );
     CompressionLayer::new().compress_when(predicate)
+}
+
+/// The response-header part of the compression predicate: no `Set-Cookie`,
+/// and a `Cache-Control` that is well formed and has no `no-store`.
+#[cfg(feature = "compression")]
+fn compressible(headers: &http::HeaderMap) -> bool {
+    use ferrum_alloy_telemetry::cache::CacheControl;
+
+    let cache_control = CacheControl::parse(headers);
+    !headers.contains_key(http::header::SET_COOKIE)
+        && !cache_control.is_malformed()
+        && !cache_control.has("no-store")
+}
+
+#[cfg(all(test, feature = "compression"))]
+mod tests {
+    use http::HeaderMap;
+    use http::header::{CACHE_CONTROL, HeaderValue, SET_COOKIE};
+
+    use super::compressible;
+
+    fn headers(cache_control: &[&'static str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in cache_control {
+            headers.append(CACHE_CONTROL, HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    /// `no-store` is matched as a directive name, never as a substring of
+    /// another directive or of a quoted value (#279).
+    #[test]
+    fn only_a_no_store_directive_prevents_compression() {
+        let compressed: [&[&'static str]; 6] = [
+            &[],
+            &["private, max-age=60"],
+            &["private, ext=\"no-store\""],
+            &["ext=\"a, no-store, b\""],
+            &["no-storey"],
+            &["x-no-store"],
+        ];
+        for compressed in compressed {
+            assert!(compressible(&headers(compressed)), "{compressed:?}");
+        }
+        let skipped: [&[&'static str]; 6] = [
+            &["no-store"],
+            &["NO-STORE"],
+            &["private, no-store"],
+            &["ext=\"a, b\", no-store"],
+            &["max-age=60", "no-store"],
+            &["no-store=\"x\""],
+        ];
+        for skipped in skipped {
+            assert!(!compressible(&headers(skipped)), "{skipped:?}");
+        }
+    }
+
+    /// An unterminated quoted string could hide `no-store`, and `Set-Cookie`
+    /// always prevents compression.
+    #[test]
+    fn malformed_cache_control_and_set_cookie_prevent_compression() {
+        assert!(!compressible(&headers(&["ext=\"a, no-store"])));
+        assert!(!compressible(&headers(&["public", "ext=\"open"])));
+        let mut cookie = headers(&["public"]);
+        cookie.insert(SET_COOKIE, HeaderValue::from_static("id=1"));
+        assert!(!compressible(&cookie));
+    }
 }
