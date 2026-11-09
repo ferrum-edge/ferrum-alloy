@@ -80,7 +80,12 @@ jobs:
         run: cargo test --workspace --all-features --locked
       - name: Tests (default features)
         if: ${{ !cancelled() }}
-        run: cargo test --workspace --locked
+        # The benchmark's fixed-window real-service tests (about 145 s, the
+        # longest in the workspace) ran in the step above. `plain` has no
+        # Alloy code, and the default `alloy` stack enables none of the
+        # features this step drops, so a second run tests the same code
+        # (docs/benchmarks.md#functional-health-tests).
+        run: cargo test --workspace --locked -- --skip run::tests::plain_serves_every_workload_over_every_transport --skip run::tests::alloy_serves_every_workload_over_every_transport --skip run::tests::cancellation_remains_healthy_after_normal_warmup
       - name: Doc tests
         run: cargo test --workspace --all-features --doc --locked
 
