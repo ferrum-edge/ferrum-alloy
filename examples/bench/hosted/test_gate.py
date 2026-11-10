@@ -241,6 +241,11 @@ class CheckTests(unittest.TestCase):
                 f"{digest(path)}  ./{path.name}\n" for path in sorted(out.iterdir())))
         self.assertFalse(verdicts["A"]["passed"])
         self.assertEqual(verdicts["A"]["budget_file"], "model-a.json")
+        self.assertEqual(gate.exceeded_report(verdicts["A"]), [
+            "3 of 3 budgeted cells exceeded a limit in model-a.json:",
+            "  alloy small h1: min_throughput_ratio",
+            "  alloy small h2c: min_throughput_ratio",
+            "  otel-collector small h1: min_throughput_ratio"])
         self.assertTrue(verdicts["B"]["passed"])
         self.assertIsNone(verdicts["C"]["passed"])
         self.assertNotIn("budget_file", verdicts["C"])
