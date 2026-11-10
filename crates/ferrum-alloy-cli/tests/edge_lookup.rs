@@ -206,6 +206,7 @@ fn an_authenticated_bound_record_confirms_only_the_new_record_finding() {
         .collect::<Vec<_>>();
     assert_eq!(confirmed.len(), 1);
     assert_eq!(confirmed[0]["code"], "alloy.edge.bound_diagnostic_record");
+    assert_eq!(confirmed[0]["rule_id"], "alloy.r009");
     let offline = bin()
         .args([
             "diagnose",

@@ -232,7 +232,7 @@ pub const EVENTS: &[&str] = &[
 ];
 
 /// Evidence keys of the authenticated, response-bound Edge record finding
-/// (`alloy.r008`, ADR 0009). These are classifications and identity checks,
+/// (`alloy.r009`, ADR 0009). These are classifications and identity checks,
 /// not measurements. Creation/expiry times only bind a response window;
 /// duration buckets are never converted into numeric durations. Raw records
 /// and operator configuration are not report observations.

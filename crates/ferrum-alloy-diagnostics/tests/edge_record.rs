@@ -52,6 +52,19 @@ fn released_valid_records_bind_but_cannot_authenticate_themselves() {
 }
 
 #[test]
+fn record_finding_has_its_own_rule_id() {
+    // `alloy.r008` belongs to `alloy.response.body_incomplete`; the record
+    // finding must not share it (#287).
+    let record = fixture("valid/connection-failure.json");
+    let observation = parse_observation(&observation(&record)).unwrap();
+    let bytes = serde_json::to_vec(&record).unwrap();
+    let finding = bind_record(&bytes, &observation).unwrap().finding();
+    assert_eq!(finding.code, "alloy.edge.bound_diagnostic_record");
+    assert_eq!(finding.rule_id, "alloy.r009");
+    assert_eq!(finding.rule_version, 1);
+}
+
+#[test]
 fn every_released_invalid_fixture_is_refused() {
     let valid = fixture("valid/connection-failure.json");
     let observation = parse_observation(&observation(&valid)).unwrap();

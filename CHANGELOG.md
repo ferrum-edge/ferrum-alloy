@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Behavior change:** the authenticated Edge-record finding
+  `alloy.edge.bound_diagnostic_record` now reports rule id `alloy.r009`
+  (version 1) instead of `alloy.r008`, which it shared by accident with
+  `alloy.response.body_incomplete` (`alloy.r008`, version 2) (#287). A
+  consumer that groups, suppresses or version-gates findings by `rule_id`
+  no longer conflates the two. Finding codes are unchanged.
 - Fix: `ferrum-alloy check` (and `AlloyConfig::check`) now refuses the
   enabled `[otlp]` settings that made startup fail with an OpenTelemetry
   configuration error (#289): a zero `timeout_ms`, `scheduled_delay_ms`,
