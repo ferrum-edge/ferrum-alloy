@@ -49,9 +49,10 @@ pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Upper bound, in milliseconds, of the connection timeouts
 /// (`server.header_read_timeout_ms`, `server.idle_timeout_ms`,
-/// `server.write_stall_timeout_ms`, `server.request_timeout_ms`,
-/// `server.admission_wait_timeout_ms`, `server.tls.handshake_timeout_ms`,
-/// and `shutdown.drain_timeout_ms`): 24 hours. It exists so a units typo
+/// `server.write_stall_timeout_ms`, `server.body_read_stall_timeout_ms`,
+/// `server.request_timeout_ms`, `server.admission_wait_timeout_ms`,
+/// `server.tls.handshake_timeout_ms`, and `shutdown.drain_timeout_ms`):
+/// 24 hours. It exists so a units typo
 /// cannot silently negate a timeout; it is far above every default.
 pub const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 

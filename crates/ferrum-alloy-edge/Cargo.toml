@@ -29,7 +29,6 @@ thiserror = { workspace = true }
 tower-layer = { workspace = true }
 tower-service = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
-ipnet = { workspace = true, features = ["serde"] }
 axum = { workspace = true, optional = true }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
 

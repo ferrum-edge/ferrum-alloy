@@ -20,9 +20,9 @@ default = ["axum", "subscriber"]
 axum = ["dep:axum"]
 # Explicit, application-invoked global subscriber initialization helpers.
 subscriber = ["dep:tracing-subscriber", "dep:serde_json"]
-# OpenTelemetry bridge and bounded OTLP/HTTP export.
 # Extract SPIFFE / DNS SAN identity from verified peer certificates.
 x509 = ["dep:x509-parser"]
+# OpenTelemetry bridge and bounded OTLP/HTTP export.
 otel = [
     "subscriber",
     "dep:opentelemetry",

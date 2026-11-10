@@ -18,7 +18,7 @@
 //! event copies the stored bytes. Each event is rendered into a reused
 //! per-thread buffer and written with one `write_all`.
 //!
-//! Two deliberate differences from tracing-subscriber:
+//! Three deliberate differences from tracing-subscriber:
 //! - A float span field is written from the recorded value. tracing-subscriber
 //!   re-parses it, which can change the last digit of a 16- or 17-digit value.
 //! - A span field whose `Debug` implementation returns an error is skipped.

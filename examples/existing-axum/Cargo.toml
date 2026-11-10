@@ -11,7 +11,6 @@ publish.workspace = true
 # Only the telemetry crate: no AlloyApp, no config system, no Alloy server.
 ferrum-alloy-telemetry = { workspace = true, features = ["axum"] }
 axum = { workspace = true, features = ["tokio", "http1", "json", "matched-path"] }
-serde = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal"] }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
