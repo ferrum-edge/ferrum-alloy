@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- The benchmark regression gate no longer runs weekly on `main` (#291). The
+  owner closed #15 as not planned on 2026-11-04 (budgets need an isolated
+  benchmark host, and none is planned), so shared-runner results are
+  diagnostic only; the gate still runs on manual dispatch and as the
+  pull-request smoke. `docs/benchmarks.md`, `docs/implementation-status.md`
+  and `docs/release.md` no longer say #15 closes when a gate run passes.
 - The management listener's connection counters now reach `/metrics`,
   labelled `listener="management"` next to the application listener's
   `listener="app"` (#290). Before, the listener counted into a
