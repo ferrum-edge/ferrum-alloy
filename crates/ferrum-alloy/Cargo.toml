@@ -35,7 +35,7 @@ full = ["otel", "edge", "tls", "postgres", "openapi", "openapi-ui", "jwt", "http
 
 [dependencies]
 ferrum-alloy-telemetry = { workspace = true, features = ["axum", "subscriber"] }
-axum = { workspace = true, features = ["tokio", "http1", "http2", "json", "query", "matched-path", "original-uri", "form"] }
+axum = { workspace = true, features = ["tokio", "http1", "http2", "json", "query", "matched-path"] }
 bytes = { workspace = true }
 # `std`: `FutureExt::catch_unwind` in the accept loop, readiness checks, TLS
 # reload, and diagnostic authorizers.
