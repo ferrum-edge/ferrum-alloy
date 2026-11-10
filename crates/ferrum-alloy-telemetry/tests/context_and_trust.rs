@@ -622,20 +622,35 @@ fn reserved_request_id_headers_are_rejected() {
 /// again. One produced by a different classifier is recomputed under
 /// the layer's rules (#214).
 #[tokio::test]
-async fn a_preclassified_peer_is_used_without_classifying_again() {
+async fn a_preclassified_peer_is_reused_only_from_the_layers_classifier() {
     let classifier: ferrum_alloy_telemetry::peer::SharedClassifier =
         Arc::new(ferrum_alloy_telemetry::peer::TrustNobody);
     let layer = TelemetryLayer::new(TelemetryConfig::default())
         .unwrap()
         .with_classifier(Arc::clone(&classifier));
+    let gateway = || PeerTrust::VerifiedIdentity("spiffe://ferrum.test/ns/edge/sa/gateway".into());
     let mut request = request_from("203.0.113.9:4000", None, &[("traceparent", INCOMING)]);
-    request.extensions_mut().insert(ClassifiedPeer::new(
-        classifier,
-        PeerTrust::VerifiedIdentity("spiffe://ferrum.test/ns/edge/sa/gateway".into()),
-    ));
-    let (seen, _) = run(layer, request, &[]).await;
+    request
+        .extensions_mut()
+        .insert(ClassifiedPeer::new(classifier, gateway()));
+    let (seen, _) = run(layer.clone(), request, &[]).await;
     assert_eq!(seen.context.trace_decision, TraceDecision::AcceptedRemote);
     assert!(seen.context.peer_trust.is_verified_identity());
+
+    // The same verdict from another classifier handle, even one of the same
+    // type, is not this layer's: TrustNobody reclassifies the peer.
+    let other: ferrum_alloy_telemetry::peer::SharedClassifier =
+        Arc::new(ferrum_alloy_telemetry::peer::TrustNobody);
+    let mut request = request_from("203.0.113.9:4000", None, &[("traceparent", INCOMING)]);
+    request
+        .extensions_mut()
+        .insert(ClassifiedPeer::new(other, gateway()));
+    let (seen, _) = run(layer, request, &[]).await;
+    assert_eq!(seen.context.peer_trust, PeerTrust::Untrusted);
+    assert_eq!(
+        seen.context.trace_decision,
+        TraceDecision::RerootedUntrusted
+    );
 }
 
 #[test]

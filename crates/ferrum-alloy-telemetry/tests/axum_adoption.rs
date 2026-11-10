@@ -15,6 +15,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use ferrum_alloy_telemetry::route::ExplicitRoute;
 use ferrum_alloy_telemetry::{
     AcceptPolicy, RecordRouteLayer, RequestContext, TelemetryConfig, TelemetryLayer,
 };
@@ -255,9 +256,40 @@ async fn metric_series_are_capped() {
 }
 
 #[test]
-fn prometheus_rendering_escapes_labels() {
+fn prometheus_rendering_of_empty_metrics_lists_the_families() {
     let metrics = ferrum_alloy_telemetry::Metrics::default();
     let text = metrics.render_prometheus();
     assert!(text.contains("# TYPE http_server_request_duration_seconds histogram"));
     assert!(text.contains("ferrum_alloy_duplicate_instrumentation_total 0"));
+}
+
+/// A route template that contains a backslash, a double quote and a newline
+/// (set here through `ExplicitRoute`, as a non-axum router would) renders as
+/// one escaped `http_route` label value, so `/metrics` stays parseable.
+#[tokio::test]
+async fn prometheus_rendering_escapes_labels() {
+    let route = "/q\"uote\\slash\nline";
+    let telemetry = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let metrics = telemetry.metrics();
+    let service = telemetry.layer(RecordRouteLayer.layer(service_fn(
+        |_request: Request<Body>| async { Ok::<_, Infallible>(StatusCode::OK.into_response()) },
+    )));
+    let mut request = Request::builder().uri("/q").body(Body::empty()).unwrap();
+    request
+        .extensions_mut()
+        .insert(ExplicitRoute(Arc::from(route)));
+    let response = service.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    assert_eq!(metrics.request_count("GET", route, 200), 1);
+
+    let text = metrics.render_prometheus();
+    assert!(
+        text.contains(r#"http_route="/q\"uote\\slash\nline""#),
+        "{text}"
+    );
+    assert!(
+        !text.contains("slash\nline"),
+        "a raw newline split a line: {text}"
+    );
 }
