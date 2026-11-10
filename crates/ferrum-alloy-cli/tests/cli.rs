@@ -2377,7 +2377,10 @@ fn new_generates_a_complete_project() {
         assert!(!text.contains("{{"), "{file} has an unreplaced placeholder");
     }
     let cargo = std::fs::read_to_string(target.join("Cargo.toml")).unwrap();
-    assert!(cargo.contains(r#"features = ["openapi", "edge"]"#), "{cargo}");
+    assert!(
+        cargo.contains(r#"features = ["openapi", "edge"]"#),
+        "{cargo}"
+    );
     assert!(
         std::fs::read_to_string(target.join("src/main.rs"))
             .unwrap()
