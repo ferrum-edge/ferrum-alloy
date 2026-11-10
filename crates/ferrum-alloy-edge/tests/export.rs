@@ -36,10 +36,11 @@ fn generated_ids(resources: &ferrum_alloy_edge::export::EdgeResources) -> Vec<&s
     ids
 }
 
-/// Field names of Ferrum Edge v0.9.12 and v0.9.11 resources
-/// (`src/config/types.rs`, `deny_unknown_fields`) that the generator may emit.
-/// v0.9.9's `allow_path_parameters` and `websocket_permessage_deflate` are
-/// deliberately absent: v0.9.8 rejects them, and their defaults are wanted.
+/// Field names of the supported Ferrum Edge releases' resources
+/// (`docs/compatibility.json`; `src/config/types.rs`, `deny_unknown_fields`)
+/// that the generator may emit. `allow_path_parameters` and
+/// `websocket_permessage_deflate` are deliberately absent: their defaults are
+/// wanted (see `src/export.rs`).
 const PROXY_FIELDS: &[&str] = &[
     "id",
     "name",
@@ -83,7 +84,7 @@ const PLUGIN_CONFIG_FIELDS: &[&str] = &[
     "proxy_id",
     "enabled",
 ];
-/// `otel_tracing` ALLOWED_CONFIG_KEYS in Edge v0.9.12 and v0.9.11 (unchanged).
+/// `otel_tracing` ALLOWED_CONFIG_KEYS in the supported Edge releases.
 const OTEL_TRACING_KEYS: &[&str] = &[
     "endpoint",
     "service_name",
@@ -119,7 +120,7 @@ fn generated_resources_use_only_existing_edge_fields() {
     for key in keys(&resources.proxy) {
         assert!(
             PROXY_FIELDS.contains(&key),
-            "proxy field {key} is not an Edge v0.9.12 and v0.9.11 field"
+            "proxy field {key} is not a field of the supported Edge releases"
         );
     }
     let upstream = resources.upstream.as_ref().unwrap();

@@ -836,7 +836,8 @@ fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// The header alone is never gateway evidence: it is not authenticated, and a
 /// server that is not Ferrum Edge can send it. A well-formed reference is
 /// therefore at most `likely`, names the lookup that would resolve it, and
-/// raises no other finding. Alloy does not resolve it. A malformed value is
+/// raises no other finding. The rules never resolve it; the CLI's explicit
+/// `diagnose --edge-admin-url` lookup does (ADR 0009). A malformed value is
 /// `unknown`, is not interpreted, and is never put into a lookup.
 fn diagnostic_ref_finding(observation: &Observation, rule: &str, version: u32) -> Finding {
     let value = observation.attr("value").unwrap_or_default();
