@@ -119,13 +119,17 @@ pub(crate) struct Expiry {
     crl_next_update: Option<i64>,
 }
 
+/// One expiry gauge: name, help text, and the time it reads from an
+/// [`Expiry`].
+type ExpiryGauge = (&'static str, &'static str, fn(&Expiry) -> Option<i64>);
+
 impl Expiry {
     /// Prometheus text for the known times of one or more listeners. A
     /// family is written once, with a sample for each listener whose time is
     /// known, and left out when no listener's time is known.
     pub(crate) fn render_prometheus(listeners: &[(&str, Expiry)]) -> String {
         let mut out = String::new();
-        let families: [(&str, &str, fn(&Expiry) -> Option<i64>); 2] = [
+        let families: [ExpiryGauge; 2] = [
             (
                 "ferrum_alloy_tls_server_cert_not_after_timestamp_seconds",
                 "notAfter time of the serving TLS certificate, in Unix seconds.",
