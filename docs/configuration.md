@@ -315,7 +315,7 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Export traces over OTLP/HTTP protobuf. |
-| `endpoint` | see `OTEL_*` | Full traces URL. Must be `http(s)` with no credentials in the URL. |
+| `endpoint` | see `OTEL_*` | Full traces URL. Must be `http(s)`, at most 2048 bytes, with no credentials in the URL. |
 | `timeout_ms` | `10000` | Per-request export timeout. Retries only start (and back off) within this budget, but an in-flight retry is not cancelled when the budget ends, so one export can take up to roughly twice as long; it is not a hard whole-export maximum. |
 | `max_export_retries` | `2` | Retries for retryable failures (exponential backoff). |
 | `sampling_ratio` | `1.0` | Root trace sampling. Accepted remote parents keep their own decision. |
@@ -324,6 +324,8 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 | `max_export_batch` | `512` | Spans per request. |
 | `max_request_bytes` | `4194304` | Encoded bytes per export request. Batches are split by the processor's size estimate (the queue budget's estimate; resource and instrumentation-scope encoding are not in it) to stay within this budget on a best-effort basis; a single span larger than it is sent alone. |
 | `scheduled_delay_ms` | `1000` | Export interval. |
+
+With `enabled = true`, `timeout_ms`, `scheduled_delay_ms`, `max_queue_spans`, `max_queue_bytes`, `max_export_batch` and `max_request_bytes` must be greater than zero, `max_export_batch` must not exceed `max_queue_spans`, and a configured `endpoint` must pass the rule above. Startup and `ferrum-alloy check` refuse the same values; with export disabled neither checks them.
 
 ### `[trust]`
 

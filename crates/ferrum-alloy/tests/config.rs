@@ -957,6 +957,68 @@ fn unsafe_combinations_fail_validation() {
 }
 
 #[test]
+fn enabled_otlp_export_is_checked_as_startup_checks_it() {
+    let errors = |mutate: &dyn Fn(&mut AlloyConfig)| -> Vec<String> {
+        let mut config = AlloyConfig::default();
+        config.otlp.enabled = true;
+        mutate(&mut config);
+        config
+            .check(&["otel"])
+            .into_iter()
+            .filter(|issue| issue.error)
+            .map(|issue| issue.message)
+            .collect()
+    };
+    let check = |mutate: &dyn Fn(&mut AlloyConfig), expect: &str| {
+        let errors = errors(mutate);
+        assert!(
+            errors.iter().any(|message| message == expect),
+            "expected {expect:?} in {errors:?}"
+        );
+        assert!(
+            errors.iter().all(|message| !message.contains("secret")),
+            "{errors:?}"
+        );
+    };
+    let defaults = errors(&|_| {});
+    assert!(defaults.is_empty(), "{defaults:?}");
+    check(
+        &|c| c.otlp.timeout_ms = 0,
+        "otlp.timeout_ms must be greater than zero",
+    );
+    check(
+        &|c| c.otlp.scheduled_delay_ms = 0,
+        "otlp.scheduled_delay_ms must be greater than zero",
+    );
+    check(
+        &|c| c.otlp.max_queue_bytes = 0,
+        "otlp.max_queue_bytes must be greater than zero",
+    );
+    check(
+        &|c| c.otlp.max_request_bytes = 0,
+        "otlp.max_request_bytes must be greater than zero",
+    );
+    check(
+        &|c| c.otlp.max_export_batch = c.otlp.max_queue_spans + 1,
+        "otlp.max_export_batch must not exceed otlp.max_queue_spans",
+    );
+    check(
+        &|c| c.otlp.endpoint = Some("grpc://collector:4317".into()),
+        "otlp.endpoint must be a valid http(s) URL without credentials",
+    );
+    check(
+        &|c| c.otlp.endpoint = Some("https://user:secret@collector/v1/traces".into()),
+        "otlp.endpoint must be a valid http(s) URL without credentials",
+    );
+
+    // Startup validates these only when export is enabled.
+    let mut disabled = AlloyConfig::default();
+    disabled.otlp.timeout_ms = 0;
+    disabled.otlp.endpoint = Some("grpc://collector:4317".into());
+    disabled.validate(NO_FEATURES).unwrap();
+}
+
+#[test]
 fn semaphore_capacities_are_bounded_before_construction() {
     // Both counts become Tokio semaphore permits; above MAX_PERMITS the
     // semaphore constructor would panic, so validation must reject them.

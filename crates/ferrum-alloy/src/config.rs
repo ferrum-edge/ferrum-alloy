@@ -1900,6 +1900,31 @@ impl AlloyConfig {
         if !(0.0..=1.0).contains(&self.otlp.sampling_ratio) {
             error("otlp.sampling_ratio must be within 0.0..=1.0".into());
         }
+        // Startup refuses these only when export is enabled
+        // (`OtlpConfig::validate`), so the check does the same.
+        if self.otlp.enabled {
+            let otlp = &self.otlp;
+            for (name, value) in [
+                ("otlp.timeout_ms", otlp.timeout_ms),
+                ("otlp.scheduled_delay_ms", otlp.scheduled_delay_ms),
+                ("otlp.max_queue_spans", otlp.max_queue_spans as u64),
+                ("otlp.max_queue_bytes", otlp.max_queue_bytes as u64),
+                ("otlp.max_export_batch", otlp.max_export_batch as u64),
+                ("otlp.max_request_bytes", otlp.max_request_bytes as u64),
+            ] {
+                if value == 0 {
+                    error(format!("{name} must be greater than zero"));
+                }
+            }
+            if otlp.max_export_batch > otlp.max_queue_spans {
+                error("otlp.max_export_batch must not exceed otlp.max_queue_spans".into());
+            }
+            if let Some(endpoint) = &otlp.endpoint
+                && let Err(reason) = ferrum_alloy_telemetry::otlp_endpoint::validate(endpoint)
+            {
+                error(format!("otlp.{reason}"));
+            }
+        }
         if self.edge.mode != EdgeMode::Standalone && !has("edge") {
             error("edge.mode requires the `edge` feature".into());
         }

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Fix: `ferrum-alloy check` (and `AlloyConfig::check`) now refuses the
+  enabled `[otlp]` settings that made startup fail with an OpenTelemetry
+  configuration error (#289): a zero `timeout_ms`, `scheduled_delay_ms`,
+  `max_queue_spans`, `max_queue_bytes`, `max_export_batch` or
+  `max_request_bytes`, `max_export_batch` above `max_queue_spans`, and an
+  `endpoint` that is not an `http(s)` URL, carries credentials or exceeds
+  2048 bytes. The endpoint rule is shared as
+  `ferrum_alloy_telemetry::otlp_endpoint::validate`, available without the
+  `otel` feature.
 - Rules `alloy.r003` (now version 4) and `alloy.r007` (now version 4) no
   longer deny capabilities Alloy has (#288). Without a timed gateway backend
   attempt span, `alloy.gateway.multiple_service_attempts` says the report has

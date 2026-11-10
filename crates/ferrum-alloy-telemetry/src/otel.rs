@@ -38,8 +38,6 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::metrics::Metrics;
 
-const MAX_OTLP_ENDPOINT_LENGTH: usize = 2_048;
-
 /// OTLP trace export configuration.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -355,25 +353,7 @@ fn validate_environment_endpoint() -> Result<(), String> {
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<(), OtelError> {
-    if endpoint.len() > MAX_OTLP_ENDPOINT_LENGTH {
-        return Err(OtelError::Config(
-            "endpoint must not exceed 2048 bytes".into(),
-        ));
-    }
-    let scheme_ok = endpoint.starts_with("http://") || endpoint.starts_with("https://");
-    let has_userinfo = endpoint
-        .split_once("://")
-        .map(|(_, rest)| {
-            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            rest[..authority_end].contains('@')
-        })
-        .unwrap_or(false);
-    if !scheme_ok || has_userinfo || endpoint.parse::<http::Uri>().is_err() {
-        return Err(OtelError::Config(
-            "endpoint must be a valid http(s) URL without credentials".into(),
-        ));
-    }
-    Ok(())
+    crate::otlp_endpoint::validate(endpoint).map_err(|reason| OtelError::Config(reason.into()))
 }
 
 /// TLS for the OTLP client: the platform trust store. A configured
