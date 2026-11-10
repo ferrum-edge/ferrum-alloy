@@ -28,6 +28,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use bytes::Bytes;
 use http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE};
 use tower_http::catch_panic::CatchPanicLayer;
 
@@ -65,7 +66,7 @@ pub(crate) struct ManagementState {
     pub(crate) service: String,
     pub(crate) version: Option<String>,
     pub(crate) app_stats: Arc<ServerStats>,
-    pub(crate) openapi: Option<Arc<Vec<u8>>>,
+    pub(crate) openapi: Option<Bytes>,
     #[cfg(feature = "openapi-ui")]
     pub(crate) openapi_ui: Option<crate::openapi_ui::DocsUi>,
     pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
@@ -189,7 +190,7 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
                     if !authorized(&headers, state.token.as_ref()) {
                         return unauthorized();
                     }
-                    openapi_response(state.openapi.as_deref())
+                    openapi_response(state.openapi)
                 },
             ),
         );
@@ -240,13 +241,15 @@ async fn require_token(
     next.run(request).await
 }
 
-pub(crate) fn openapi_response(document: Option<&Vec<u8>>) -> Response {
+/// Serves the OpenAPI document. `Bytes` is reference-counted, so a request
+/// shares the registered document instead of copying it.
+pub(crate) fn openapi_response(document: Option<Bytes>) -> Response {
     match document {
         Some(bytes) => no_store(
             (
                 StatusCode::OK,
                 [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
-                bytes.clone(),
+                bytes,
             )
                 .into_response(),
         ),

@@ -44,10 +44,9 @@ services:
       # connection that concurrent requests multiplex over.
       FERRUM_POOL_WARMUP_ENABLED: "false"
       FERRUM_POOL_HTTP2_CONNECTIONS_PER_HOST: "1"
-      # Gateway diagnostic references (Edge v0.9.9 and later; off by default):
-      # every response with a gateway X-Gateway-Error token carries
-      # X-Ferrum-Diagnostic-Ref, which edge-e2e checks on the refused
-      # connection. v0.9.8 does not read this variable.
+      # Gateway diagnostic references (off by default): every response with a
+      # gateway X-Gateway-Error token carries X-Ferrum-Diagnostic-Ref, which
+      # edge-e2e checks on the refused connection.
       FERRUM_DIAGNOSTIC_REFS: errors
       # The otel_tracing exporter verifies the Collector's demo certificate
       # with the global outbound trust bundle (it ignores per-proxy backend

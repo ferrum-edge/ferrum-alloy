@@ -71,7 +71,7 @@ pub struct AlloyApp {
     telemetry_init: TelemetryInit,
     classifier: Option<SharedClassifier>,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
-    openapi: Option<Arc<Vec<u8>>>,
+    openapi: Option<bytes::Bytes>,
     #[cfg(feature = "diagnostics")]
     diagnostics: Option<Arc<dyn crate::diagnostics::DiagnosticsAuthorizer>>,
     prepared: Option<Prepared>,
@@ -196,10 +196,7 @@ impl AlloyApp {
     /// Registers the OpenAPI document served on the management listener.
     #[cfg(feature = "openapi")]
     pub fn openapi(mut self, document: &utoipa::openapi::OpenApi) -> Self {
-        self.openapi = document
-            .to_json()
-            .ok()
-            .map(|json| Arc::new(json.into_bytes()));
+        self.openapi = document.to_json().ok().map(bytes::Bytes::from);
         self
     }
 
@@ -388,12 +385,12 @@ impl AlloyApp {
             );
         }
         if let Some(document) = public_document {
-            let document = Arc::clone(document);
+            let document = document.clone();
             app = app.route(
                 &config.openapi.path,
                 get(move || {
-                    let document = Arc::clone(&document);
-                    async move { management::openapi_response(Some(&document)) }
+                    let document = document.clone();
+                    async move { management::openapi_response(Some(document)) }
                 }),
             );
             #[cfg(feature = "openapi-ui")]

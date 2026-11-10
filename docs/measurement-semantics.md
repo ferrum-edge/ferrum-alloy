@@ -116,9 +116,9 @@ Every request finalizes **exactly once**, with one of these outcomes:
 
 Dropping a future cancels cooperative local work only. It cannot guarantee that a remote database statement or HTTP side effect was cancelled.
 
-## Ferrum Edge measurements (supported v0.9.20 and v0.9.19; legacy v0.9.8 input)
+## Ferrum Edge measurements
 
-These come from Edge's own spans and logs. Alloy interprets only the documented attempt and timing fields. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
+These apply to the supported Edge releases ([compatibility.md](compatibility.md)) and to legacy v0.9.8 input. They come from Edge's own spans and logs. Alloy interprets only the documented attempt and timing fields. See [edge-contract-inventory.md](edge-contract-inventory.md) for sources.
 
 | Name | Start | End | Scope | Limitations |
 |---|---|---|---|---|
@@ -160,7 +160,7 @@ Diagnosis rule `alloy.r003` subtracts a service measurement from a gateway measu
 2. **Attempt linkage.** With Edge v0.9.9 attempt spans, each service SERVER span is matched to the CLIENT span it names as parent, and r003 compares that attempt's duration with the matching service measurement. This holds even when Edge's aggregate `backend_ttfb` is unknown (`-1`). With several linked services, `alloy.gateway.multiple_service_attempts` lists one residual per compared attempt and names each attempt it did not compare, and why. With Edge v0.9.8 input, attempt spans are absent: one linked service is compared with the gateway aggregate, while multiple linked services produce `alloy.gateway.multiple_service_attempts` with no invented per-attempt breakdown.
 3. **Matching boundaries.**
    - A streamed attempt ends at the response head and is compared with Alloy `time_to_headers`.
-   - A buffered attempt ends with the complete response and is compared with Alloy `duration`, but only when it carries the `gateway.backend.connection.reused` attribute (see [Buffered attempts on the HTTP/3 bridge](#ferrum-edge-measurements-supported-v0920-and-v0919-legacy-v098-input)). Otherwise a single linked service falls back to the aggregate comparison and lists the missing end boundary as missing evidence.
+   - A buffered attempt ends with the complete response and is compared with Alloy `duration`, but only when it carries the `gateway.backend.connection.reused` attribute (see [Buffered attempts on the HTTP/3 bridge](#ferrum-edge-measurements)). Otherwise a single linked service falls back to the aggregate comparison and lists the missing end boundary as missing evidence.
    - Without an attempt span, streamed responses use Edge `backend_ttfb` against Alloy `time_to_headers`.
    - Without an attempt span, buffered responses use Edge `backend_ttfb` (which includes the body) against Alloy `duration`.
    - Unknown buffering mode: no comparison (`alloy.gateway.timings_not_comparable`). With several attempts, each one is listed as not compared and the buffering mode as missing evidence.
