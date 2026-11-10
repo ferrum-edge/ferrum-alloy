@@ -507,7 +507,7 @@ fn unrecognized_observation_kind_is_never_used_as_timing_evidence() {
     // dropped, and the observation of unknown kind supports no timing claim.
     assert_eq!(codes(&findings), ["alloy.gateway.timings_not_comparable"]);
     let only = &findings[0];
-    assert_eq!(only.rule_version, 3);
+    assert_eq!(only.rule_version, 4);
     assert_eq!(only.confidence, Confidence::Unknown);
     assert_eq!(only.supporting_observations, ["alloy-ttfh", "edge-ttfb"]);
     assert!(lists_missing(only, "usable service measurement"));
@@ -544,7 +544,7 @@ fn equal_span_ids_in_different_traces_stay_separate_requests() {
 
     // Same-trace control: the linked gateway and service timings still compare.
     let residual = by_code(&findings, "alloy.gateway.unattributed_interval");
-    assert_eq!(residual.rule_version, 3);
+    assert_eq!(residual.rule_version, 4);
     assert!(
         residual.explanation.contains("780.0 ms"),
         "{}",

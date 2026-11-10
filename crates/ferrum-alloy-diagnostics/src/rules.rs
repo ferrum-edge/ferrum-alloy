@@ -746,7 +746,7 @@ fn rule_edge_rejection(index: &Index<'_>, out: &mut Vec<Finding>) {
 /// class), and the gateway diagnostic reference a client observed.
 fn rule_gateway_error(index: &Index<'_>, out: &mut Vec<Finding>) {
     const RULE: &str = "alloy.r007";
-    const VERSION: u32 = 3;
+    const VERSION: u32 = 4;
     let header_events = index.report.observations.iter().filter(|o| {
         o.name == catalog::CLIENT_RESPONSE_HEADER
             && o.attr("header")
@@ -886,7 +886,7 @@ fn diagnostic_ref_finding(observation: &Observation, rule: &str, version: u32) -
     .confidence(Confidence::Likely)
     .cite(observation, "header.x-ferrum-diagnostic-ref", value)
     .explanation(format!(
-        "X-Ferrum-Diagnostic-Ref: {value}. Ferrum Edge v0.9.9 and later stamp this opaque reference on the error responses the gateway authors when FERRUM_DIAGNOSTIC_REFS is errors or all, and remove any copy a backend or plugin sets. It embeds nothing about the request; only the gateway's authenticated lookup resolves it.{replica} The header itself is not authenticated, so it is not gateway evidence, and Alloy does not resolve it."
+        "X-Ferrum-Diagnostic-Ref: {value}. Ferrum Edge v0.9.9 and later stamp this opaque reference on the error responses the gateway authors when FERRUM_DIAGNOSTIC_REFS is errors or all, and remove any copy a backend or plugin sets. It embeds nothing about the request; only the gateway's authenticated lookup resolves it.{replica} The header itself is not authenticated, so it is not gateway evidence. Diagnosis rules do not resolve it; ferrum-alloy diagnose --edge-admin-url performs the authenticated lookup."
     ))
     .does_not_prove(&[
         "that Ferrum Edge minted the reference: the header is not authenticated",
@@ -1126,7 +1126,7 @@ fn same_instance(a: &Observation, b: &Observation) -> bool {
 /// Rule id of the gateway-to-service timing comparison.
 const R003: &str = "alloy.r003";
 /// Version of [`R003`].
-const R003_VERSION: u32 = 3;
+const R003_VERSION: u32 = 4;
 
 /// Why a service span directly under the gateway span is not compared when
 /// the gateway request has attempt spans.
@@ -1642,7 +1642,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             .confidence(Confidence::Likely)
             .cite(ttfb, "gateway.latency.backend_ttfb_ms", ms(edge_ms))
             .explanation(format!(
-                "{} service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 exports a span per attempt, but Alloy does not interpret per-attempt timing. Gateway and service timings are not compared.",
+                "{} service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 and later export a span per attempt, but this report has no gateway backend attempt span with a duration for this request, so per-attempt timing cannot be compared. Gateway and service timings are not compared.",
                 services.len()
             ))
             .does_not_prove(&["which attempt produced the final response"])
@@ -1837,7 +1837,7 @@ fn rule_unattributed_interval(index: &Index<'_>, thresholds: &Thresholds, out: &
             builder = builder.confirm_with(ATTEMPT_CONFIRM_WITH);
         } else {
             builder = builder.confirm_with(&[
-                "gateway connection-pool reuse and connect timing (not recorded by Ferrum Edge v0.9.8, and not yet read from v0.9.9 attempt spans)",
+                "gateway connection-pool reuse and connect timing from this request's gateway backend attempt span (Ferrum Edge v0.9.8 records neither)",
                 "gateway retry logs (\"Retrying backend request\") for this request",
             ]);
         }

@@ -1214,10 +1214,10 @@ fn multiple_service_spans_without_attempt_spans_keep_the_legacy_r003_output() {
     .unwrap();
     let findings = analyze(&report, &Thresholds::default());
     let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
-    assert_eq!(multiple.rule_version, 3);
+    assert_eq!(multiple.rule_version, 4);
     assert_eq!(
         multiple.explanation,
-        "2 service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 exports a span per attempt, but Alloy does not interpret per-attempt timing. Gateway and service timings are not compared."
+        "2 service server spans are linked to the same gateway span, directly or through gateway backend attempt spans, so these are probably separate attempts. Ferrum Edge v0.9.8 reuses one traceparent for every retry attempt; v0.9.9 and later export a span per attempt, but this report has no gateway backend attempt span with a duration for this request, so per-attempt timing cannot be compared. Gateway and service timings are not compared."
     );
     assert_eq!(
         multiple.missing_evidence,
@@ -1288,7 +1288,7 @@ fn committed_v098_fixture_preserves_multiple_attempt_refusal() {
     assert_eq!(ttfb.producer.version.as_deref(), Some("0.9.8"));
     let findings = analyze(&report, &Thresholds::default());
     let multiple = by_code(&findings, "alloy.gateway.multiple_service_attempts");
-    assert_eq!(multiple.rule_version, 3);
+    assert_eq!(multiple.rule_version, 4);
     assert!(
         multiple
             .explanation
