@@ -531,6 +531,18 @@ def check(out):
     return verdict
 
 
+def exceeded_report(result):
+    """Job-log lines for a failed slot: each cell that exceeded a limit, and
+    which limits it exceeded."""
+    lines = [f"{len(result['exceeded'])} of {result['budgeted']} budgeted cells exceeded a "
+             f"limit in {result['budget_file']}:"]
+    lines.extend(f"  {cell['scenario']} {cell['workload']} {cell['transport']}: "
+                 f"{', '.join(cell['exceeded'])}" for cell in result["exceeded"])
+    if result["compare_stderr"]:
+        lines.append(result["compare_stderr"])
+    return lines
+
+
 def verdict(root, planned, collected, sha, run_id, attempt):
     """The gate passes when every slot job of this attempt succeeded, every
     planned slot has this attempt's verdict, at least one ran on a calibrated
@@ -598,6 +610,8 @@ def main(command, *args):
                 f"`{result['budget_file']}` (budgets from `{result['budgets_commit']}`). "
                 f"{len(result['exceeded'])} of {result['budgeted']} budgeted cells exceeded "
                 "a limit.\n")
+        if not result["passed"]:
+            print("\n".join(exceeded_report(result)), flush=True)
         return 0 if result["passed"] else 1
     if command == "verdict":
         (root,) = args

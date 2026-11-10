@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- Fix: `ferrum-alloy check` (and `AlloyConfig::check`) now refuses the
+  enabled `[otlp]` settings that made startup fail with an OpenTelemetry
+  configuration error (#289): a zero `timeout_ms`, `scheduled_delay_ms`,
+  `max_queue_spans`, `max_queue_bytes`, `max_export_batch` or
+  `max_request_bytes`, `max_export_batch` above `max_queue_spans`, and an
+  `endpoint` that is not an `http(s)` URL, carries credentials or exceeds
+  2048 bytes. The endpoint rule is shared as
+  `ferrum_alloy_telemetry::otlp_endpoint::validate`, available without the
+  `otel` feature.
+- Rules `alloy.r003` (now version 4) and `alloy.r007` (now version 4) no
+  longer deny capabilities Alloy has (#288). Without a timed gateway backend
+  attempt span, `alloy.gateway.multiple_service_attempts` says the report has
+  no such span, not that Alloy does not interpret per-attempt timing, and
+  `alloy.gateway.unattributed_interval` asks for connection reuse and connect
+  timing from the request's attempt span instead of calling them unread.
+  `alloy.edge.diagnostic_ref` says diagnosis rules do not resolve the
+  reference and points to `ferrum-alloy diagnose --edge-admin-url`, instead
+  of saying Alloy does not resolve it. Wording only; no classification,
+  confidence or evidence changes.
 - **Behavior change:** JWT verification and the management token check
   refuse a request with more than one `Authorization` header instead of
   reading the first, as diagnostic retrieval's

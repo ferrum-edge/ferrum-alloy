@@ -104,7 +104,7 @@ fn an_observed_reference_is_recorded_and_capped_at_likely() {
     let findings = findings_with(HEADER, FD1);
     let finding = by_code(&findings, RECORDED);
     assert_eq!(finding.rule_id, "alloy.r007");
-    assert_eq!(finding.rule_version, 3);
+    assert_eq!(finding.rule_version, 4);
     assert_eq!(finding.confidence, Confidence::Likely);
     assert_eq!(finding.severity, Severity::Info);
     assert_eq!(finding.owner, Owner::GatewayOperator);

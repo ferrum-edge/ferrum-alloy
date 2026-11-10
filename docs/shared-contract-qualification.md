@@ -16,13 +16,13 @@ v0.9.17 (previous); both pairings passed on `main` at `322a5f1` by
 [push CI 41588507875](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41588507875).
 That adoption moved the `orders-api` manifest fixture and its snapshot to
 `https://otel-collector:4318`, because Edge v0.9.19 drops a cleartext exporter
-to a host that is not a loopback IP literal. The current adoption candidate is
+to a host that is not a loopback IP literal. `main` then adopted
 [`contracts-edge-0.9.20`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20)
 at `39da322083044c2e92617209e62983c92387f0ad` (SSH-signed tag object
 `82b277b495e73cfadfacb6f3123de02a984658e4`) with Edge v0.9.20 (baseline) and
 v0.9.19 (previous), as recorded in [compatibility.json](compatibility.json) and
-`contracts/ferrum-contracts/PIN`; the v0.9.20 bump's pull-request CI is its
-hosted qualification. Only the two gateway vocabularies change: their
+`contracts/ferrum-contracts/PIN`; both pairings passed on `main` at `3c7a040`
+by [push CI 41809300101](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41809300101). Only the two gateway vocabularies change: their
 `edge_release` and Edge provenance, Edge's notes, a new `docs/size_limits.md`
 source, and the `protocol_error` `ErrorClass` meaning (a gRPC backend failure
 seen at or after the client deadline now settles as that deadline). No
@@ -126,9 +126,9 @@ post-default bounds, derived IDs and endpoint relationships remain owner rules.
    commit; qualified owner/canonical CI does not establish this branch's CI result.
    Preserve immutable earlier consumer slices and qualify each new consumer pin
    separately, including strict manifest/cross-store/HTTP boundaries.
-3. **Tracker disposition (root):** record all qualified coordinated adoptions before
-   deciding #27/#28. This candidate does not close either issue or grant performance,
-   production-apply, trace-store or separate crate publishing acceptance.
+3. **Tracker disposition (root):** #27 closed as completed on 2026-10-06 and #28 on
+   2026-11-05. Neither closure grants performance, production-apply, trace-store or
+   separate crate publishing acceptance.
 
-Alloy #27 and #28 remain open for root disposition. This accepted shared freeze does not grant
+This accepted shared freeze does not grant
 the separate owner publishing approval that any registry release needs; [#24](release.md#distribution-decision) settled on Git-only distribution.

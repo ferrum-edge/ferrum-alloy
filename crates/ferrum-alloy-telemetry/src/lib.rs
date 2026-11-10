@@ -19,6 +19,7 @@ pub mod evidence;
 pub mod layer;
 pub mod metrics;
 pub mod operation;
+pub mod otlp_endpoint;
 pub mod peer;
 pub mod request_id;
 pub mod route;

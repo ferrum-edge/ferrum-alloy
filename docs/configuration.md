@@ -153,7 +153,7 @@ Each section below shows a key, its default, and its meaning.
 | `request_body_limit_bytes` | `2097152` | Maximum request body. A declared `Content-Length` over the limit gets `413` before the handler runs; chunked bodies are capped while streaming. At most 1073741824. |
 | `max_header_count` | `100` | Maximum request headers (HTTP/1.1). Exceeding it returns `431`. At most 10000. |
 | `max_header_bytes` | `65536` | Request-head buffer (HTTP/1.1) and header list size (HTTP/2). Minimum 8192, maximum 16777216. |
-| `max_connections` | `10000` | Further connections are closed immediately. An upgraded (WebSocket) connection keeps its slot after the `101` response until the application drops it, so upgraded sessions count against this limit and in `ferrum_alloy_active_connections`; size it for long-lived sessions as well as requests. |
+| `max_connections` | `10000` | Further connections are closed immediately. An upgraded (WebSocket) connection keeps its slot after the `101` response until the application drops it, so upgraded sessions count against this limit and in `ferrum_alloy_active_connections`; size it for long-lived sessions as well as requests. This setting does not apply to the management listener, which has a fixed limit of 64 connections. |
 | `http2_max_concurrent_streams` | `256` | Per-connection HTTP/2 stream limit. At most 16384. |
 | `header_read_timeout_ms` | `10000` | Time to receive a request head (slow-header protection). It also bounds the time from a ready connection (accepted, and past the TLS handshake if any) to its first complete request head, whatever the protocol: a connection that sends nothing, stops inside the HTTP/2 preface, or opens HTTP/2 without sending a request is closed and frees its `max_connections` slot. An established HTTP/2 connection is sent `GOAWAY` first and dropped after a grace period of at most one second. These closes are counted in `ferrum_alloy_first_request_timeouts_total` (application listener). On HTTP/1.1 keep-alive connections it also bounds the wait for the next request. The management listener uses the same value. Must be greater than zero and at most 86400000. |
 | `idle_timeout_ms` | `60000` | After a connection's first request: how long it may stay open with no request in flight and no response data written. Closes are counted in `ferrum_alloy_idle_timeouts_total`. The management listener uses the same value. Must be greater than zero and at most 86400000. See [connection timeouts](#connection-timeouts). |
@@ -315,7 +315,7 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Export traces over OTLP/HTTP protobuf. |
-| `endpoint` | see `OTEL_*` | Full traces URL. Must be `http(s)` with no credentials in the URL. |
+| `endpoint` | see `OTEL_*` | Full traces URL. Must be `http(s)`, at most 2048 bytes, with no credentials in the URL. |
 | `timeout_ms` | `10000` | Per-request export timeout. Retries only start (and back off) within this budget, but an in-flight retry is not cancelled when the budget ends, so one export can take up to roughly twice as long; it is not a hard whole-export maximum. |
 | `max_export_retries` | `2` | Retries for retryable failures (exponential backoff). |
 | `sampling_ratio` | `1.0` | Root trace sampling. Accepted remote parents keep their own decision. |
@@ -324,6 +324,8 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 | `max_export_batch` | `512` | Spans per request. |
 | `max_request_bytes` | `4194304` | Encoded bytes per export request. Batches are split by the processor's size estimate (the queue budget's estimate; resource and instrumentation-scope encoding are not in it) to stay within this budget on a best-effort basis; a single span larger than it is sent alone. |
 | `scheduled_delay_ms` | `1000` | Export interval. |
+
+With `enabled = true`, `timeout_ms`, `scheduled_delay_ms`, `max_queue_spans`, `max_queue_bytes`, `max_export_batch` and `max_request_bytes` must be greater than zero, `max_export_batch` must not exceed `max_queue_spans`, and a configured `endpoint` must pass the rule above. Startup and `ferrum-alloy check` refuse the same values; with export disabled neither checks them.
 
 ### `[trust]`
 

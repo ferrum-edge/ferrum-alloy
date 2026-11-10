@@ -112,7 +112,7 @@ The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/
 See the [contracts guide](contracts/README.md) for details.
 The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema; 0.9.19 and 0.9.20 change only the two gateway vocabularies, and the schemas and diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
-Earlier owner/consumer qualification does not qualify this adoption on `main` or close [#27](https://github.com/ferrum-edge/ferrum-alloy/issues/27).
+The `contracts-edge-0.9.20` adoption passed on `main` at `3c7a040` by [push CI 41809300101](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41809300101).
 
 ## Development
 
