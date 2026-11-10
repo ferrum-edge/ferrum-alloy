@@ -231,8 +231,8 @@ fn verified_report(value: &str) -> DiagnosticReport {
 #[test]
 fn a_reference_never_raises_confidence_even_from_a_verified_collection() {
     // Only the gateway's own record, bound to this response, could support
-    // more than `likely`. Alloy does not resolve references, so a header is
-    // the most it ever sees.
+    // more than `likely`. The rules never resolve references, so a header is
+    // the most `analyze` ever sees.
     for value in [FD1, FD2] {
         let findings = analyze(&verified_report(value), &Thresholds::default());
         let finding = by_code(&findings, RECORDED);

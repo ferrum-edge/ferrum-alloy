@@ -289,10 +289,10 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "adaptive_concurrency",
 ];
 
-/// The closed `X-Gateway-Error` token vocabulary of Ferrum Edge v0.9.9 and
-/// v0.9.8 (`src/retry.rs`), each token with Alloy's user-facing explanation,
-/// which rule `alloy.r007` renders into findings. v0.9.8 added
-/// `request_timeout`.
+/// The closed `X-Gateway-Error` token vocabulary of the supported Ferrum Edge
+/// releases (`src/retry.rs`), each token with Alloy's user-facing explanation,
+/// which rule `alloy.r007` renders into findings. There are nine tokens since
+/// v0.9.17, which added `loop_detected`; v0.9.8 added `request_timeout`.
 ///
 /// A header names no Edge version, so each explanation holds for every
 /// supported release and is never narrower than an earlier release's meaning:

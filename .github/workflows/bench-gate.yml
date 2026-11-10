@@ -104,7 +104,7 @@ jobs:
           # Publish the path before mkdir so always() steps retain it on failure.
           printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
           mkdir -p "$QUALIFICATION_OUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.QUALIFICATION_SHA }}
           persist-credentials: false
@@ -217,7 +217,7 @@ jobs:
           QUALIFICATION_OUT="$RUNNER_TEMP/bench-derive"
           printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
           mkdir -p "$QUALIFICATION_OUT" "$RUNNER_TEMP/slots"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.QUALIFICATION_SHA }}
           persist-credentials: false
@@ -278,7 +278,7 @@ jobs:
           QUALIFICATION_OUT="$RUNNER_TEMP/bench-verdict"
           printf 'QUALIFICATION_OUT=%s\n' "$QUALIFICATION_OUT" >> "$GITHUB_ENV"
           mkdir -p "$QUALIFICATION_OUT" "$RUNNER_TEMP/slots"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.QUALIFICATION_SHA }}
           persist-credentials: false

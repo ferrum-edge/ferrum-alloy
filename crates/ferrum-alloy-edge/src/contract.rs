@@ -29,7 +29,8 @@ pub const GATEWAY_UPSTREAM_STATUS: &str = "x-gateway-upstream-status";
 /// `FERRUM_DIAGNOSTIC_REFS`), resolved through Edge's admin API. Edge strips a
 /// backend copy. Alloy never emits it; diagnosis records one a client
 /// observed (`ferrum_alloy_diagnostics::catalog::EDGE_DIAGNOSTIC_REF_HEADER`,
-/// rule `alloy.r007`) but does not resolve it.
+/// rule `alloy.r007`), and its rules do not resolve it; the CLI's explicit
+/// `diagnose --edge-admin-url` lookup does (ADR 0009).
 pub const DIAGNOSTIC_REF: &str = "x-ferrum-diagnostic-ref";
 
 /// The closed `X-Gateway-Error` vocabulary (`src/retry.rs`): nine tokens in
