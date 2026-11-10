@@ -130,9 +130,9 @@ Dependabot ignores the Collector, `rust` and `debian` images in `examples/edge-o
 | Platform | Status |
 |---|---|
 | macOS arm64 | Local development. Full workspace tests, clippy, the generator end-to-end, and PostgreSQL tests passed on 2026-09-26. |
-| Linux x86_64 (GitHub `ubuntu-latest`) | CI test matrix and every Docker-based job. Results are in the CI checks. |
+| Linux x86_64 (GitHub `ubuntu-26.04`) | CI test matrix and every Docker-based job. Results are in the CI checks. |
 | Linux arm64 | e2e images built and run under colima (Ubuntu 24.04 VM) |
-| macOS (GitHub `macos-latest`), Windows (`windows-latest`) | CI test matrix. Results are in the CI checks. |
+| macOS (GitHub `macos-26`), Windows (`windows-2025`) | CI test matrix. Results are in the CI checks. |
 
 ## Pairing rules
 
