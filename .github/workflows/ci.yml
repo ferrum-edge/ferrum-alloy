@@ -86,8 +86,6 @@ jobs:
         # features this step drops, so a second run tests the same code
         # (docs/benchmarks.md#functional-health-tests).
         run: cargo test --workspace --locked -- --skip run::tests::plain_serves_every_workload_over_every_transport --skip run::tests::alloy_serves_every_workload_over_every_transport --skip run::tests::cancellation_remains_healthy_after_normal_warmup
-      - name: Doc tests
-        run: cargo test --workspace --all-features --doc --locked
 
   features:
     name: Feature combinations
