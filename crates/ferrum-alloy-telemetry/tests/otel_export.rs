@@ -23,7 +23,8 @@ use bytes::Bytes;
 use ferrum_alloy_telemetry::metrics::Metrics;
 use ferrum_alloy_telemetry::operation::Operation;
 use ferrum_alloy_telemetry::otel::{
-    BoundedSpanProcessor, OtelPipeline, OtlpConfig, ServiceResource, layer_active,
+    BoundedSpanProcessor, MAX_OTLP_TIMEOUT_MS, OtelPipeline, OtlpConfig, ServiceResource,
+    layer_active,
 };
 use ferrum_alloy_telemetry::peer::{PeerInfo, TrustedPeers, TrustedPeersConfig};
 use ferrum_alloy_telemetry::{RecordRouteLayer, RequestContext, TelemetryConfig, TelemetryLayer};
@@ -892,6 +893,23 @@ fn rejected_otlp_endpoints_do_not_appear_in_startup_errors() {
     config.endpoint = Some(format!("http://collector/{}", "x".repeat(2_032)));
     let error = config.validate().unwrap_err();
     assert!(error.to_string().contains("2048 bytes"));
+}
+
+#[test]
+fn otlp_timeout_is_capped_at_24_hours() {
+    // A units typo (seconds as milliseconds times 1000) must not silently
+    // negate the export timeout (#289).
+    let mut config = OtlpConfig::default();
+    config.timeout_ms = MAX_OTLP_TIMEOUT_MS;
+    assert!(config.validate().is_ok());
+    config.timeout_ms = MAX_OTLP_TIMEOUT_MS + 1;
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("timeout_ms must not exceed 24 hours (86400000)"),
+        "{error}"
+    );
 }
 
 #[test]

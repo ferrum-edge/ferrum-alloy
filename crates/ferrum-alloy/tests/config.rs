@@ -987,6 +987,12 @@ fn enabled_otlp_export_is_checked_as_startup_checks_it() {
         "otlp.timeout_ms must be greater than zero",
     );
     check(
+        &|c| c.otlp.timeout_ms = MAX_TIMEOUT_MS + 1,
+        "otlp.timeout_ms must not exceed 24 hours (86400000)",
+    );
+    let at_cap = errors(&|c| c.otlp.timeout_ms = MAX_TIMEOUT_MS);
+    assert!(at_cap.is_empty(), "{at_cap:?}");
+    check(
         &|c| c.otlp.scheduled_delay_ms = 0,
         "otlp.scheduled_delay_ms must be greater than zero",
     );

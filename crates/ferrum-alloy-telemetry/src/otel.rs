@@ -38,6 +38,11 @@ use tracing_subscriber::registry::LookupSpan;
 
 use crate::metrics::Metrics;
 
+/// Upper bound, in milliseconds, of [`OtlpConfig::timeout_ms`]: 24 hours,
+/// the cap `ferrum-alloy` applies to every other timeout. It exists so a
+/// units typo cannot silently negate the export timeout.
+pub const MAX_OTLP_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// OTLP trace export configuration.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -160,6 +165,11 @@ impl OtlpConfig {
             return Err(OtelError::Config(
                 "timeout_ms and scheduled_delay_ms must be greater than zero".into(),
             ));
+        }
+        if self.timeout_ms > MAX_OTLP_TIMEOUT_MS {
+            return Err(OtelError::Config(format!(
+                "timeout_ms must not exceed 24 hours ({MAX_OTLP_TIMEOUT_MS})"
+            )));
         }
         if let Some(endpoint) = &self.endpoint {
             validate_endpoint(endpoint)?;

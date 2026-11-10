@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Behavior change:** with `otlp.enabled = true`, an `otlp.timeout_ms`
+  above 24 hours (`86400000`) is refused by startup
+  (`OtlpConfig::validate`) and by `ferrum-alloy check`, like every other
+  timeout, so a units typo cannot silently negate the export timeout
+  (#289). The bound is public as
+  `ferrum_alloy_telemetry::otel::MAX_OTLP_TIMEOUT_MS`.
 - **Behavior change:** the authenticated Edge-record finding
   `alloy.edge.bound_diagnostic_record` now reports rule id `alloy.r009`
   (version 1) instead of `alloy.r008`, which it shared by accident with

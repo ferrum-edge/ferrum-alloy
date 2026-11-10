@@ -325,7 +325,7 @@ This is the layout tracing-subscriber's JSON formatter produces with flattened e
 | `max_request_bytes` | `4194304` | Encoded bytes per export request. Batches are split by the processor's size estimate (the queue budget's estimate; resource and instrumentation-scope encoding are not in it) to stay within this budget on a best-effort basis; a single span larger than it is sent alone. |
 | `scheduled_delay_ms` | `1000` | Export interval. |
 
-With `enabled = true`, `timeout_ms`, `scheduled_delay_ms`, `max_queue_spans`, `max_queue_bytes`, `max_export_batch` and `max_request_bytes` must be greater than zero, `max_export_batch` must not exceed `max_queue_spans`, and a configured `endpoint` must pass the rule above. Startup and `ferrum-alloy check` refuse the same values; with export disabled neither checks them.
+With `enabled = true`, `timeout_ms`, `scheduled_delay_ms`, `max_queue_spans`, `max_queue_bytes`, `max_export_batch` and `max_request_bytes` must be greater than zero, `timeout_ms` must not exceed 24 hours (`86400000`, like the server timeouts), `max_export_batch` must not exceed `max_queue_spans`, and a configured `endpoint` must pass the rule above. Startup and `ferrum-alloy check` refuse the same values; with export disabled neither checks them.
 
 ### `[trust]`
 
