@@ -619,10 +619,10 @@ jobs:
         # manifest's public_path), and a root server base, since the listen
         # path supplies the mount. /api-specs needs database mode, so Edge
         # runs here with SQLite on a tmpfs and a throwaway admin secret.
-        # x-ferrum-mcp is new in Edge v0.9.9: from v0.9.9 on, the importer must
-        # generate the mcp_gateway with exactly the declared tools (the fixture's
-        # undeclared GET /orders/{id}/status must stay unpublished); an older
-        # release must accept the document and ignore the extension.
+        # Every supported release reads x-ferrum-mcp (Edge #5930, first released
+        # in v0.9.9): the importer must generate the mcp_gateway with exactly the
+        # declared tools (the fixture's undeclared GET /orders/{id}/status must
+        # stay unpublished).
         env:
           EDGE_IMAGE: ${{ matrix.edge.image }}
           EDGE_RELEASE: ${{ matrix.edge.release }}
@@ -690,11 +690,7 @@ jobs:
                 | .config | {endpoint: .endpoint.path, namespace: .servers.openapi.namespace,
                   tools: ([.servers.openapi.openapi.operations[].name] | sort)}]')
           echo "generated mcp_gateway: $generated"
-          if [ "$(printf '%s\n' v0.9.9 "$EDGE_RELEASE" | sort -V | head -n 1)" = v0.9.9 ]; then
-            expected='[{"endpoint":"/shop/mcp","namespace":"orders","tools":["create_order","get_order","list_orders"]}]'
-          else
-            expected='[]'
-          fi
+          expected='[{"endpoint":"/shop/mcp","namespace":"orders","tools":["create_order","get_order","list_orders"]}]'
           if [ "$generated" != "$expected" ]; then
             echo "::error::expected $expected from Edge $EDGE_RELEASE"
             exit 1
