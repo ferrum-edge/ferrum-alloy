@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- `examples/bench` no longer requests axum's `json` feature, which it has
+  not used since #262 (#297). `ferrum-alloy` enables it anyway, so the
+  benchmark binary is unchanged.
 - The benchmark regression gate no longer runs weekly on `main` (#291). The
   owner closed #15 as not planned on 2026-11-04 (budgets need an isolated
   benchmark host, and none is planned), so shared-runner results are
