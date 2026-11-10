@@ -479,6 +479,7 @@ impl AlloyApp {
         }
 
         let app_stats = Arc::new(ServerStats::default());
+        let management_stats = Arc::new(ServerStats::default());
         let management_token = config.management.token.is_some();
         #[cfg(feature = "diagnostics")]
         let diagnostics_retrieval = evidence.is_some();
@@ -500,6 +501,7 @@ impl AlloyApp {
                     service: service_name.clone(),
                     version: config.service.version.clone(),
                     app_stats: Arc::clone(&app_stats),
+                    management_stats: Arc::clone(&management_stats),
                     openapi: self.openapi.clone().filter(|_| config.openapi.serve),
                     #[cfg(feature = "openapi-ui")]
                     openapi_ui,
@@ -534,6 +536,7 @@ impl AlloyApp {
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
             app_stats,
+            management_stats,
             classifier,
             management_token,
             #[cfg(feature = "diagnostics")]
@@ -613,6 +616,9 @@ pub struct AlloyParts {
     service_name: String,
     shutdown_signal: Option<BoxFuture<'static, ()>>,
     app_stats: Arc<ServerStats>,
+    /// Connection counters of the management listener, rendered on
+    /// `/metrics` next to the application listener's.
+    management_stats: Arc<ServerStats>,
     /// The classifier the telemetry layer uses, kept so Alloy's server
     /// can classify each connection once instead of per request.
     classifier: SharedClassifier,
@@ -812,7 +818,7 @@ impl AlloyParts {
                     ..options
                 },
                 self.lifecycle.clone(),
-                Arc::new(ServerStats::default()),
+                Arc::clone(&self.management_stats),
             ))),
             _ => None,
         };

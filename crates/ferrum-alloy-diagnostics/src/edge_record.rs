@@ -219,7 +219,7 @@ impl BoundRecord {
         }
         Finding {
             code: "alloy.edge.bound_diagnostic_record".into(),
-            rule_id: "alloy.r008".into(),
+            rule_id: "alloy.r009".into(),
             rule_version: 1,
             title: "Edge record matches the observed response".into(),
             explanation: "The record matches the explicit client observation's reference, replica, status, X-Gateway-Error, protocol, namespace, and request time window. Detail fields cite the gateway's recorded classifications; they are not independent measurements.".into(),

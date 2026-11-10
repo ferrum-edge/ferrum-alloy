@@ -66,6 +66,9 @@ pub(crate) struct ManagementState {
     pub(crate) service: String,
     pub(crate) version: Option<String>,
     pub(crate) app_stats: Arc<ServerStats>,
+    /// Connection counters of the management listener Alloy serves this
+    /// router on; they stay zero when the router is served elsewhere.
+    pub(crate) management_stats: Arc<ServerStats>,
     pub(crate) openapi: Option<Bytes>,
     #[cfg(feature = "openapi-ui")]
     pub(crate) openapi_ui: Option<crate::openapi_ui::DocsUi>,
@@ -158,7 +161,12 @@ pub(crate) fn router(state: ManagementState, openapi_path: &str) -> Router {
                         return unauthorized();
                     }
                     let mut text = state.lifecycle.metrics().render_prometheus();
-                    text.push_str(&state.app_stats.render_prometheus("app"));
+                    let app: &ServerStats = &state.app_stats;
+                    let management: &ServerStats = &state.management_stats;
+                    text.push_str(&ServerStats::render_prometheus(&[
+                        ("app", app),
+                        ("management", management),
+                    ]));
                     if let Some(limiter) = &state.rate_limiter {
                         text.push_str(&limiter.render_prometheus());
                     }

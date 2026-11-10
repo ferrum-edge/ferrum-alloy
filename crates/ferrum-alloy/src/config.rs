@@ -51,8 +51,8 @@ pub const MAX_JWKS_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 /// (`server.header_read_timeout_ms`, `server.idle_timeout_ms`,
 /// `server.write_stall_timeout_ms`, `server.body_read_stall_timeout_ms`,
 /// `server.request_timeout_ms`, `server.admission_wait_timeout_ms`,
-/// `server.tls.handshake_timeout_ms`, and `shutdown.drain_timeout_ms`):
-/// 24 hours. It exists so a units typo
+/// `server.tls.handshake_timeout_ms`, `shutdown.drain_timeout_ms`, and,
+/// with export enabled, `otlp.timeout_ms`): 24 hours. It exists so a units typo
 /// cannot silently negate a timeout; it is far above every default.
 pub const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -1915,6 +1915,11 @@ impl AlloyConfig {
                 if value == 0 {
                     error(format!("{name} must be greater than zero"));
                 }
+            }
+            if otlp.timeout_ms > MAX_TIMEOUT_MS {
+                error(format!(
+                    "otlp.timeout_ms must not exceed 24 hours ({MAX_TIMEOUT_MS})"
+                ));
             }
             if otlp.max_export_batch > otlp.max_queue_spans {
                 error("otlp.max_export_batch must not exceed otlp.max_queue_spans".into());

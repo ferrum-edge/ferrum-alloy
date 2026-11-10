@@ -49,7 +49,7 @@ fail closed. These times are identity checks, never latency measurements.
 Pure binding returns a non-deserializable `BoundRecord` whose finding is always
 `likely`. Only the CLI's private `AuthenticatedLookup`, constructed by a
 successful GET on the allowed channel followed by binding, can promote the new
-`alloy.r008` finding to `confirmed`. It confirms that this selected Edge admin
+`alloy.r009` finding to `confirmed`. It confirms that this selected Edge admin
 listener recorded the supplied response facts and cited classifications. It
 does not authenticate any other report or raise any existing rule's confidence.
 

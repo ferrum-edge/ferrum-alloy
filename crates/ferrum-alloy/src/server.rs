@@ -141,96 +141,124 @@ pub struct ServerStats {
     pub body_read_stall_timeouts: AtomicU64,
 }
 
+/// One counter family: name, Prometheus type, help text, and value.
+type Family = (&'static str, &'static str, &'static str, u64);
+
 impl ServerStats {
-    /// Prometheus text for these counters.
-    pub fn render_prometheus(&self, listener: &str) -> String {
-        let mut out = String::new();
-        for (name, kind, help, value) in [
+    /// The counter families, with their current values.
+    fn families(&self) -> [Family; 12] {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        [
             (
                 "ferrum_alloy_active_connections",
                 "gauge",
                 "Held connection slots, including upgrades after TCP shutdown until drop.",
-                &self.active_connections,
+                load(&self.active_connections),
             ),
             (
                 "ferrum_alloy_rejected_connections_total",
                 "counter",
                 "Connections closed at the connection limit.",
-                &self.rejected_connections,
+                load(&self.rejected_connections),
             ),
             (
                 "ferrum_alloy_tls_handshake_failures_total",
                 "counter",
                 "Failed or timed-out TLS handshakes.",
-                &self.tls_handshake_failures,
+                load(&self.tls_handshake_failures),
             ),
             (
                 "ferrum_alloy_tls_reloads_total",
                 "counter",
                 "TLS reloads that swapped in changed certificates, key, client CAs, or CRLs.",
-                &self.tls_reloads,
+                load(&self.tls_reloads),
             ),
             (
                 "ferrum_alloy_tls_reload_failures_total",
                 "counter",
                 "Repeated TLS reload failures; the previous material kept serving.",
-                &self.tls_reload_failures,
+                load(&self.tls_reload_failures),
             ),
             (
                 "ferrum_alloy_tls_reload_stalls_total",
                 "counter",
                 "Streaks of TLS reloads stalled by files that kept changing between reads.",
-                &self.tls_reload_stalls,
+                load(&self.tls_reload_stalls),
             ),
             (
                 "ferrum_alloy_force_closed_connections_total",
                 "counter",
                 "Connections force-closed after the drain budget.",
-                &self.force_closed_connections,
+                load(&self.force_closed_connections),
             ),
             (
                 "ferrum_alloy_first_request_timeouts_total",
                 "counter",
                 "Connections closed without a request head within the header read timeout.",
-                &self.first_request_timeouts,
+                load(&self.first_request_timeouts),
             ),
             (
                 "ferrum_alloy_idle_timeouts_total",
                 "counter",
                 "Connections closed with no request in flight for the idle timeout.",
-                &self.idle_timeouts,
+                load(&self.idle_timeouts),
             ),
             (
                 "ferrum_alloy_force_closed_streams_total",
                 "counter",
                 "HTTP/2 stream tasks cancelled after the drain budget.",
-                &self.force_closed_streams,
+                load(&self.force_closed_streams),
             ),
             (
                 "ferrum_alloy_write_stall_timeouts_total",
                 "counter",
                 "Connections closed with a response unwritten for the write stall timeout.",
-                &self.write_stall_timeouts,
+                load(&self.write_stall_timeouts),
             ),
             (
                 "ferrum_alloy_body_read_stall_timeouts_total",
                 "counter",
                 "Connections closed with a request body unread for the body read stall timeout.",
-                &self.body_read_stall_timeouts,
+                load(&self.body_read_stall_timeouts),
             ),
-        ] {
-            out.push_str(&format!(
-                "# HELP {name} {help}\n# TYPE {name} {kind}\n{name}{{listener=\"{listener}\"}} {}\n",
-                value.load(Ordering::Relaxed)
-            ));
+        ]
+    }
+
+    /// Prometheus text for the counters of one or more listeners, each
+    /// labelled with its `listener` name. Every metric family is written
+    /// once, with one sample per listener, so the listeners must be rendered
+    /// together: concatenating separate renderings would repeat `# HELP`
+    /// and `# TYPE` lines, which is invalid exposition.
+    pub fn render_prometheus(listeners: &[(&str, &ServerStats)]) -> String {
+        let samples: Vec<(&str, [Family; 12])> = listeners
+            .iter()
+            .map(|&(listener, stats)| (listener, stats.families()))
+            .collect();
+        let mut out = String::new();
+        let Some((_, first)) = samples.first() else {
+            return out;
+        };
+        for (index, &(name, kind, help, _)) in first.iter().enumerate() {
+            out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
+            for (listener, families) in &samples {
+                if let Some(&(_, _, _, value)) = families.get(index) {
+                    out.push_str(&format!("{name}{{listener=\"{listener}\"}} {value}\n"));
+                }
+            }
         }
         #[cfg(feature = "tls")]
         {
-            let expiry = self
-                .tls_expiry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            out.push_str(&expiry.render_prometheus(listener));
+            let expiries: Vec<(&str, crate::tls::Expiry)> = listeners
+                .iter()
+                .map(|&(listener, stats)| {
+                    let expiry = stats
+                        .tls_expiry
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (listener, *expiry)
+                })
+                .collect();
+            out.push_str(&crate::tls::Expiry::render_prometheus(&expiries));
         }
         out
     }

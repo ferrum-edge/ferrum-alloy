@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+- `examples/bench` no longer requests axum's `json` feature, which it has
+  not used since #262 (#297). `ferrum-alloy` enables it anyway, so the
+  benchmark binary is unchanged.
+- The benchmark regression gate no longer runs weekly on `main` (#291). The
+  owner closed #15 as not planned on 2026-11-04 (budgets need an isolated
+  benchmark host, and none is planned), so shared-runner results are
+  diagnostic only; the gate still runs on manual dispatch and as the
+  pull-request smoke. `docs/benchmarks.md`, `docs/implementation-status.md`
+  and `docs/release.md` no longer say #15 closes when a gate run passes.
+- The management listener's connection counters now reach `/metrics`,
+  labelled `listener="management"` next to the application listener's
+  `listener="app"` (#290). Before, the listener counted into a
+  `ServerStats` nothing read, so connections refused at its fixed limit of
+  64, or closed by its header, idle and stall timeouts, were invisible.
+  **API change:** `ServerStats::render_prometheus` is now an associated
+  function taking every listener at once,
+  `ServerStats::render_prometheus(&[("app", &stats)])`, and writes each
+  metric family's `# HELP`/`# TYPE` lines once; concatenating two
+  single-listener renderings would have repeated them.
+- **Behavior change:** with `otlp.enabled = true`, an `otlp.timeout_ms`
+  above 24 hours (`86400000`) is refused by startup
+  (`OtlpConfig::validate`) and by `ferrum-alloy check`, like every other
+  timeout, so a units typo cannot silently negate the export timeout
+  (#289). The bound is public as
+  `ferrum_alloy_telemetry::otel::MAX_OTLP_TIMEOUT_MS`.
+- **Behavior change:** the authenticated Edge-record finding
+  `alloy.edge.bound_diagnostic_record` now reports rule id `alloy.r009`
+  (version 1) instead of `alloy.r008`, which it shared by accident with
+  `alloy.response.body_incomplete` (`alloy.r008`, version 2) (#287). A
+  consumer that groups, suppresses or version-gates findings by `rule_id`
+  no longer conflates the two. Finding codes are unchanged.
 - Fix: `ferrum-alloy check` (and `AlloyConfig::check`) now refuses the
   enabled `[otlp]` settings that made startup fail with an OpenTelemetry
   configuration error (#289): a zero `timeout_ms`, `scheduled_delay_ms`,
