@@ -79,7 +79,7 @@ Both supported releases run every case. The driver resolves the release under te
 | Client cancellation mid-body | The driver closes its connection after the first frame of a 4 s event stream. | Edge records the client disconnect; one Alloy SERVER span with outcome `cancelled`, ended mid-stream, and one `alloy.response.body_incomplete` finding. |
 | Refused connection | Proxy `e2e-refused` targets a port on the Alloy container with no listener. | `X-Gateway-Error: connection_failure`, an Edge span with `gateway.error.class` and no Alloy span, and a `likely` diagnosis that does not claim the service is down. On both supported releases the response also carries a well-formed `X-Ferrum-Diagnostic-Ref`, which diagnosis records as `alloy.edge.diagnostic_ref`, `likely`, with nothing confirmed. |
 
-Not covered: an upstream reset after a connection is established. Retry backoff is not measured on either supported release (see [measurement-semantics.md](measurement-semantics.md#ferrum-edge-measurements-supported-v0920-and-v0919-legacy-v098-input)).
+Not covered: an upstream reset after a connection is established. Retry backoff is not measured on either supported release (see [measurement-semantics.md](measurement-semantics.md#ferrum-edge-measurements)).
 
 ## Component versions
 
