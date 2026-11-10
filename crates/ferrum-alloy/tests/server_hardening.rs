@@ -20,8 +20,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::routing::{get, post};
 use bytes::Bytes;
-use ferrum_alloy::AlloyApp;
 use ferrum_alloy::config::AlloyConfig;
+use ferrum_alloy::{AlloyApp, ServerStats};
 use futures_util::StreamExt;
 use http::{Request, StatusCode};
 use http_body_util::{BodyExt, Empty};
@@ -203,6 +203,11 @@ async fn echo(session: &mut TcpStream, text: &str) -> String {
         .unwrap();
     assert!(n >= 2, "a reply frame arrived ({n} bytes)");
     String::from_utf8_lossy(&reply[2..n]).into_owned()
+}
+
+/// The application listener's counters, rendered as `/metrics` renders them.
+fn app_metrics(stats: &ServerStats) -> String {
+    ServerStats::render_prometheus(&[("app", stats)])
 }
 
 fn hardened() -> AlloyConfig {
@@ -701,6 +706,63 @@ async fn the_management_listener_closes_silent_connections_and_frees_its_slots()
         served_again(server.management, "/livez").await,
         StatusCode::OK
     );
+    server.shutdown().await.unwrap();
+}
+
+/// The management listener's connection counters reach `/metrics` under the
+/// `listener="management"` label, next to the application listener's, with
+/// each metric family described once (#290).
+#[tokio::test]
+async fn the_management_listener_counts_rejected_connections_on_metrics() {
+    // The default header read timeout (10 s) keeps the held connections open
+    // for the whole test.
+    let server = support::start(
+        AlloyApp::new("hardening").router(router()),
+        support::config(),
+    )
+    .await;
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        held.push(TcpStream::connect(server.management).await.unwrap());
+    }
+    let mut over = TcpStream::connect(server.management).await.unwrap();
+    assert!(
+        closed_by_server(&mut over).await,
+        "a connection over the management limit is closed"
+    );
+    drop(held);
+    assert_eq!(
+        served_again(server.management, "/livez").await,
+        StatusCode::OK
+    );
+    let bearer = format!("Bearer {}", support::TOKEN);
+    let metrics = support::fetch_with(
+        &server.management_url("/metrics"),
+        &[("authorization", &bearer)],
+    )
+    .await;
+    assert_eq!(metrics.status, StatusCode::OK);
+    let text = metrics.text();
+    let rejected = |listener: &str| -> u64 {
+        let prefix = format!("ferrum_alloy_rejected_connections_total{{listener=\"{listener}\"}} ");
+        let line = text
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .unwrap_or_else(|| panic!("no {prefix:?} sample in {text}"));
+        line.parse().unwrap()
+    };
+    assert!(rejected("management") >= 1, "{text}");
+    assert_eq!(rejected("app"), 0, "{text}");
+    for family in [
+        "ferrum_alloy_rejected_connections_total",
+        "ferrum_alloy_active_connections",
+    ] {
+        assert_eq!(
+            text.matches(&format!("# TYPE {family} ")).count(),
+            1,
+            "{family} is described once: {text}"
+        );
+    }
     server.shutdown().await.unwrap();
 }
 
@@ -1355,7 +1417,7 @@ async fn an_http2_response_without_window_updates_is_sent_goaway_and_releases_it
     assert_eq!(stats.write_stall_timeouts.load(Ordering::Relaxed), 1);
     assert_eq!(stats.idle_timeouts.load(Ordering::Relaxed), 0);
     assert_eq!(served_again(server.addr, "/hello").await, StatusCode::OK);
-    let text = stats.render_prometheus("app");
+    let text = app_metrics(&stats);
     assert!(
         text.contains("ferrum_alloy_write_stall_timeouts_total{listener=\"app\"} 1\n"),
         "{text}"
@@ -1653,7 +1715,7 @@ async fn every_connection_is_closed_when_serve_on_returns() {
         "the force-closed connection is counted"
     );
     // The counter reaches `/metrics` under its documented name.
-    let text = server.stats.render_prometheus("app");
+    let text = app_metrics(&server.stats);
     assert!(
         text.contains("ferrum_alloy_force_closed_connections_total{listener=\"app\"} 1\n"),
         "{text}"
@@ -1711,7 +1773,7 @@ async fn a_hanging_http2_handler_is_cancelled_at_the_drain_budget() {
         1,
         "the cancelled stream task is counted"
     );
-    let text = server.stats.render_prometheus("app");
+    let text = app_metrics(&server.stats);
     assert!(
         text.contains("ferrum_alloy_force_closed_streams_total{listener=\"app\"} 1\n"),
         "{text}"

@@ -120,26 +120,35 @@ pub(crate) struct Expiry {
 }
 
 impl Expiry {
-    /// Prometheus text for the known times.
-    pub(crate) fn render_prometheus(&self, listener: &str) -> String {
+    /// Prometheus text for the known times of one or more listeners. A
+    /// family is written once, with a sample for each listener whose time is
+    /// known, and left out when no listener's time is known.
+    pub(crate) fn render_prometheus(listeners: &[(&str, Expiry)]) -> String {
         let mut out = String::new();
-        for (name, help, value) in [
+        let families: [(&str, &str, fn(&Expiry) -> Option<i64>); 2] = [
             (
                 "ferrum_alloy_tls_server_cert_not_after_timestamp_seconds",
                 "notAfter time of the serving TLS certificate, in Unix seconds.",
-                self.cert_not_after,
+                |expiry| expiry.cert_not_after,
             ),
             (
                 "ferrum_alloy_tls_client_crl_next_update_timestamp_seconds",
                 "Earliest nextUpdate time of the serving client CRLs, in Unix seconds.",
-                self.crl_next_update,
+                |expiry| expiry.crl_next_update,
             ),
-        ] {
-            let Some(value) = value else {
+        ];
+        for (name, help, time) in families {
+            let mut known = listeners
+                .iter()
+                .filter_map(|(listener, expiry)| Some((listener, time(expiry)?)))
+                .peekable();
+            if known.peek().is_none() {
                 continue;
-            };
+            }
             out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n"));
-            out.push_str(&format!("{name}{{listener=\"{listener}\"}} {value}\n"));
+            for (listener, value) in known {
+                out.push_str(&format!("{name}{{listener=\"{listener}\"}} {value}\n"));
+            }
         }
         out
     }
@@ -1157,7 +1166,7 @@ mod tests {
         let (server, cert_path, key_path) = reloadable(dir.path(), ca_path, &issuer);
         assert_eq!(server.reload_interval, Some(Duration::from_secs(1)));
         let initial = serving(&server);
-        let metrics = server.expiry().render_prometheus("app");
+        let metrics = Expiry::render_prometheus(&[("app", server.expiry())]);
         assert!(
             metrics.contains("cert_not_after_timestamp_seconds"),
             "{metrics}"
@@ -1400,7 +1409,7 @@ mod tests {
         let refused = handshake(serving(&server), Arc::clone(&client));
         let refused = refused.unwrap_err().to_string();
         assert!(refused.contains("revocation list expired"), "{refused}");
-        let metrics = server.expiry().render_prometheus("app");
+        let metrics = Expiry::render_prometheus(&[("app", server.expiry())]);
         let gauge = "ferrum_alloy_tls_client_crl_next_update_timestamp_seconds";
         let sample = format!("{gauge}{{listener=\"app\"}} {NEXT_UPDATE_SECS}\n");
         assert!(metrics.contains(&sample), "{metrics}");

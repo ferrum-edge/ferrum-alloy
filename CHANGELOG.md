@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- The management listener's connection counters now reach `/metrics`,
+  labelled `listener="management"` next to the application listener's
+  `listener="app"` (#290). Before, the listener counted into a
+  `ServerStats` nothing read, so connections refused at its fixed limit of
+  64, or closed by its header, idle and stall timeouts, were invisible.
+  **API change:** `ServerStats::render_prometheus` is now an associated
+  function taking every listener at once,
+  `ServerStats::render_prometheus(&[("app", &stats)])`, and writes each
+  metric family's `# HELP`/`# TYPE` lines once; concatenating two
+  single-listener renderings would have repeated them.
 - **Behavior change:** with `otlp.enabled = true`, an `otlp.timeout_ms`
   above 24 hours (`86400000`) is refused by startup
   (`OtlpConfig::validate`) and by `ferrum-alloy check`, like every other
