@@ -15,8 +15,8 @@
 
 A parity test (`crates/ferrum-alloy-diagnostics/tests/schema_parity.rs`) fails when the Rust enums and the JSON Schema disagree.
 
-Owner and consumer qualification, the shared v1 freeze and the remaining adoption
-gates for #27/#28 are recorded in the
+Owner and consumer qualification, the shared v1 freeze and the adoption history
+(#27 and #28 are closed) are recorded in the
 [owner/adoption record](../docs/shared-contract-qualification.md) and the
 [consumer evidence ledger](../docs/implementation-status.md#cross-repository-dependencies).
 

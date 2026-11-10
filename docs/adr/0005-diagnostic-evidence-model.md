@@ -9,7 +9,7 @@ unchanged shared report/manifest v1 freeze at qualified owner 81cbb. Published
 still unreleased. This pin adoption retains every historical schema description
 for full parity and requires fresh hosted CI. See the
 [owner/adoption record](../shared-contract-qualification.md) for immutable slices
-and remaining #27/#28 gates; no trust or timing authority is widened.
+and adoption history; no trust or timing authority is widened.
 
 ## Context
 
