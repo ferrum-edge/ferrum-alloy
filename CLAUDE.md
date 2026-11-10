@@ -52,3 +52,5 @@ Local cargo runs are permitted in this repository; hosted CI remains the source 
 ## PRs
 
 Use concise imperative commit messages. PRs need a summary, the changes, and a test plan. Never merge or publish without the owner's approval.
+
+`AGENTS.md` and `CLAUDE.md` are the same guide under two names; edit both. CI's Format job fails when they differ.

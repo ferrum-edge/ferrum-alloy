@@ -35,6 +35,12 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: AGENTS.md matches CLAUDE.md
+        # The same agent guide under the two names agents look for. A regular
+        # copy rather than a symlink, which Windows checkouts turn into a
+        # small text file.
+        if: ${{ !cancelled() }}
+        run: cmp AGENTS.md CLAUDE.md
 
   clippy:
     name: Clippy
