@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **Breaking:** manifest paths (`api.public_path`, `api.service_base_path`,
+  `health.path` and `agents.endpoint_path`) refuse `~` and `*` again, as
+  the shared `service-manifest` v1 schema always has
+  (ferrum-edge/ferrum-contracts#58). This corrects #210, which admitted
+  both through its RFC 3986 `pchar` allow-list and said paths such as
+  `/items~draft` "stay accepted"; under v1 they never were. A manifest
+  with `/items~draft` or `/v1/*` now fails validation with
+  `api.public_path must be a literal absolute path` (or the matching
+  field's message). To upgrade, rename such a path to letters, digits and
+  `- . _ ! $ & ' ( ) + , = : @` (for example `/items-draft`), and update
+  the Edge `listen_path` and clients to match.
+- **Security:** `rustix` is bumped from 1.1.5 to 1.1.6 in `Cargo.lock` and
+  `fuzz/Cargo.lock` for RUSTSEC-2026-0486 (unsound: its xattr functions
+  marked unwritten bytes as initialized when given a zero-length buffer).
+  `cargo deny check` passes again.
+- `deny.toml`'s RUSTSEC-2026-0387 exception (`crypto-bigint` 0.5.5 via
+  jsonwebtoken's `rust_crypto` backend) is owner-accepted as of
+  2026-11-14 and now expires 2026-12-26, aligned with RUSTSEC-2023-0071.
+  Only public-key verification and throwaway test keys reach the crate.
+  It is revisited when jsonwebtoken adopts `p256`/`p384` 0.14 (#294).
+- `examples/bench` no longer enables `opentelemetry_sdk`'s unused
+  `testing` feature, which compiled the SDK's metrics and logs code into
+  `alloy-bench` (#297). The 2026-10-31 budgets were measured on the
+  earlier binary; the gate is diagnostic only, so it was not recalibrated.
 - `examples/bench` no longer requests axum's `json` feature, which it has
   not used since #262 (#297). `ferrum-alloy` enables it anyway, so the
   benchmark binary is unchanged.
