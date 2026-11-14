@@ -253,10 +253,14 @@ fn valid_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// A literal absolute path: RFC 3986 `pchar`s and `/` only, minus `;` and
-/// `%`, with no `//` or `.`/`..` segment. Anything else — control or
+/// A literal absolute path: RFC 3986 `pchar`s and `/` only, minus `;`, `%`,
+/// `~`, `*`, with no `//` or `.`/`..` segment. Anything else — control or
 /// non-ASCII bytes, spaces, query/fragment delimiters, templates — is
 /// refused by construction, not by enumerating bad characters.
+///
+/// `~` and `*` are refused because the shared `service-manifest` v1 schema
+/// in ferrum-contracts refuses them in every manifest path, and Alloy's
+/// rule must stay within that wire (ferrum-edge/ferrum-contracts#58).
 ///
 /// For `api.public_path`, exported as the `listen_path`, this is Alloy's
 /// canonical subset of what Ferrum Edge admits as written (`policy_path`
@@ -275,14 +279,12 @@ fn valid_path(value: &str) -> bool {
                     b,
                     b'-' | b'.'
                         | b'_'
-                        | b'~'
                         | b'!'
                         | b'$'
                         | b'&'
                         | b'\''
                         | b'('
                         | b')'
-                        | b'*'
                         | b'+'
                         | b','
                         | b'='

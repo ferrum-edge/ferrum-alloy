@@ -352,8 +352,11 @@ fn direct_proxy_id_can_use_the_full_edge_limit_without_derived_resources() {
 /// ones Ferrum Edge itself refuses as a `listen_path`: a `;` path
 /// parameter (v0.9.9 without `allow_path_parameters`, which export
 /// never sets), a `.` segment, a percent-escape, and a backslash. The
-/// rest Edge's `policy_path` admits, but export only writes plain
-/// ASCII `pchar` paths, so they are refused here instead.
+/// next four Edge's `policy_path` admits, but export only writes plain
+/// ASCII `pchar` paths, so they are refused here instead. The last two
+/// are `pchar` paths that the shared `service-manifest` v1 schema refuses
+/// (`~` and `*`), so Alloy refuses them too
+/// (ferrum-edge/ferrum-contracts#58).
 const REFUSED_PATHS: &[&str] = &[
     "/orders;v=1",
     "/orders/./items",
@@ -363,6 +366,8 @@ const REFUSED_PATHS: &[&str] = &[
     "/orders|items",
     "/orders\"items",
     "/ordérs",
+    "/items~draft",
+    "/v1/*",
 ];
 
 #[test]
@@ -380,7 +385,7 @@ fn paths_outside_the_canonical_subset_are_rejected() {
 #[test]
 fn ordinary_pchar_paths_are_accepted() {
     let fixture = std::fs::read_to_string(fixtures().join("orders-api.toml")).unwrap();
-    for path in ["/orders-v2/items.json", "/items~draft", "/a:b@c"] {
+    for path in ["/orders-v2/items.json", "/a:b@c"] {
         let text = fixture.replace(
             "public_path = \"/orders\"",
             &format!("public_path = {path:?}"),

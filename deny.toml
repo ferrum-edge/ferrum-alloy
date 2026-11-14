@@ -28,8 +28,9 @@ ignore = [
     # p256 0.13.2 / p384 0.13.1 -> elliptic-curve 0.13.8): RUSTSEC-2026-0387,
     # timing variability in operations meant to be constant-time. Fixed only in
     # >= 0.7.6; there is no patched 0.5.x, and jsonwebtoken 11.1.0 (latest)
-    # still requires p256 ^0.13. Time-boxed risk acceptance, PENDING OWNER
-    # ACCEPTANCE. It is reached in two ways:
+    # still requires p256 ^0.13. Time-boxed risk acceptance, accepted by the
+    # owner on 2026-11-14 (#294): only public-key verification and throwaway
+    # test keys reach the crate. It is reached in two ways:
     #   - The optional `jwt` feature (also in `full`, and enabled by
     #     `ferrum-alloy new --with jwt` projects). It is not in the CLI binary
     #     or the default features. src/jwt.rs only builds `DecodingKey`s from
@@ -41,14 +42,16 @@ ignore = [
     # No private key from a deployment ever reaches this code, so no
     # secret-dependent use is reachable in Alloy or in generated services.
     # Exit: jsonwebtoken moves to p256/p384 0.14 (elliptic-curve 0.14 /
-    # crypto-bigint >= 0.7.6), or Alloy switches its backend.
+    # crypto-bigint >= 0.7.6), or Alloy switches its backend. Revisit when a
+    # jsonwebtoken release adopts p256/p384 0.14, and re-review by the expiry
+    # (aligned with RUSTSEC-2023-0071, which has the same exit).
     # jsonwebtoken's only other backend, `aws_lc_rs`, would remove the crate
     # today, but `aws-lc-sys` is banned below (the crypto stack stays on
     # ring), so that is a policy change for the owner, not a drop-in fix.
     # Installing a ring-backed jsonwebtoken CryptoProvider instead would mean
     # a process-global install from library code, which AGENTS.md forbids.
-    # [expires:2026-11-30]
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; pending owner acceptance; see comment [expires:2026-11-30]" },
+    # [expires:2026-12-26]
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; owner-accepted 2026-11-14 (#294); revisit when jsonwebtoken adopts p256/p384 0.14; see comment [expires:2026-12-26]" },
 ]
 
 [licenses]

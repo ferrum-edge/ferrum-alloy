@@ -20,7 +20,7 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "server-auto", "service", "http1", "http2"] }
-opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
+opentelemetry_sdk = { workspace = true, features = ["trace"] }
 rcgen = { workspace = true, features = ["crypto", "ring", "pem"] }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
