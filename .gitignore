@@ -1,5 +1,7 @@
 /target
 **/*.rs.bk
 .DS_Store
+__pycache__/
+*.pyc
 /.claude/*
 !/.claude/skills/
