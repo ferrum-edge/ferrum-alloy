@@ -22,6 +22,10 @@
   2026-11-14 and now expires 2026-12-26, aligned with RUSTSEC-2023-0071.
   Only public-key verification and throwaway test keys reach the crate.
   It is revisited when jsonwebtoken adopts `p256`/`p384` 0.14 (#294).
+- A CPython 3.14 bytecode cache for the advisory-expiry tests, committed by
+  mistake with the change above, is removed. `.gitignore` now excludes
+  `__pycache__/` and `*.pyc`, and a test in `ci/tests` fails if any Python
+  bytecode is tracked.
 - `examples/bench` no longer enables `opentelemetry_sdk`'s unused
   `testing` feature, which compiled the SDK's metrics and logs code into
   `alloy-bench` (#297). The 2026-10-31 budgets were measured on the
