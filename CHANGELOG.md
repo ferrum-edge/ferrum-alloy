@@ -36,7 +36,9 @@
   near 1.2 or near 1.38; the calibration only saw the low mode, so its
   limit of 1.2983 failed gate runs 41829418237 and 43685432885 at random.
   The cell's throughput and p50 limits, and every other budget, are
-  unchanged. `derivation.json` records the dropped limit and why.
+  unchanged. `derivation.json` records the dropped limit and why, and
+  `committed_budgets_parse_and_match_their_index` now fails unless each
+  budget file's limits equal its derivation's gated metrics and coverage.
 - `examples/bench` no longer requests axum's `json` feature, which it has
   not used since #262 (#297). `ferrum-alloy` enables it anyway, so the
   benchmark binary is unchanged.
