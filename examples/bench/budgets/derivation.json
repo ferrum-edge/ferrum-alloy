@@ -382,9 +382,9 @@
       "held_out_failures": 7,
       "untested_limits": 0,
       "coverage": {
-        "gated": 540,
+        "gated": 539,
         "total": 576,
-        "fraction": 0.9375
+        "fraction": 0.9357638888888888
       },
       "positive_controls": [
         {
@@ -9745,8 +9745,8 @@
             "center": 1.2219159200551344,
             "spread": 0.013524692034446844,
             "margin": 0.060574076103340535,
-            "gated": true,
-            "limit": 1.2983
+            "gated": false,
+            "reason": "dropped by owner decision on 2026-11-15: bimodal on shared runners (per-repetition ratio near 1.2 or near 1.38; all nine calibration runs were in the low mode, so the limit sat between the modes); gate runs 41829418237 and 43685432885 failed on it"
           }
         }
       },

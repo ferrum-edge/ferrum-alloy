@@ -30,6 +30,15 @@
   `testing` feature, which compiled the SDK's metrics and logs code into
   `alloy-bench` (#297). The 2026-10-31 budgets were measured on the
   earlier binary; the gate is diagnostic only, so it was not recalibrated.
+- The benchmark regression gate no longer holds `otel-sampled` `stream`
+  `h1-mtls` to a p99 latency limit on AMD EPYC 7763 (owner decision,
+  2026-11-15). On shared runners that ratio is bimodal per repetition,
+  near 1.2 or near 1.38; the calibration only saw the low mode, so its
+  limit of 1.2983 failed gate runs 41829418237 and 43685432885 at random.
+  The cell's throughput and p50 limits, and every other budget, are
+  unchanged. `derivation.json` records the dropped limit and why, and
+  `committed_budgets_parse_and_match_their_index` now fails unless each
+  budget file's limits equal its derivation's gated metrics and coverage.
 - `examples/bench` no longer requests axum's `json` feature, which it has
   not used since #262 (#297). `ferrum-alloy` enables it anyway, so the
   benchmark binary is unchanged.

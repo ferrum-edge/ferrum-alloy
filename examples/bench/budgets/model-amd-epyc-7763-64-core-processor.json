@@ -1226,8 +1226,7 @@
       "transport": "h1-mtls",
       "alloc_counting": false,
       "min_throughput_ratio": 0.6667,
-      "max_latency_p50_ratio": 1.543,
-      "max_latency_p99_ratio": 1.2983
+      "max_latency_p50_ratio": 1.543
     },
     {
       "scenario": "otel-sampled",
