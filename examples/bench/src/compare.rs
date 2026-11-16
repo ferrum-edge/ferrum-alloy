@@ -875,8 +875,16 @@ mod tests {
         assert!(parse_budgets(&twice.to_string()).is_err());
     }
 
+    /// Each derivation metric and the budget key that carries its limit.
+    const LIMIT_KEYS: [(&str, &str); 3] = [
+        ("throughput_ratio", "min_throughput_ratio"),
+        ("latency_p50_ratio", "max_latency_p50_ratio"),
+        ("latency_p99_ratio", "max_latency_p99_ratio"),
+    ];
+
     /// The committed budgets are what the regression gate reads: every file
-    /// the index names must parse, and every budget file must be named.
+    /// the index names must parse, every budget file must be named, and each
+    /// model's limits must be exactly its derivation's gated metrics.
     #[test]
     fn committed_budgets_parse_and_match_their_index() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("budgets");
@@ -887,6 +895,7 @@ mod tests {
         let models = index["models"].as_object().unwrap();
         assert!(!models.is_empty());
         let mut named = Vec::new();
+        let mut parsed = Vec::new();
         for (model, file) in models {
             let file = file.as_str().unwrap();
             let budgets = parse_budgets(&read(&dir.join(file)).unwrap())
@@ -897,6 +906,7 @@ mod tests {
                 "{file}"
             );
             named.push(file.to_owned());
+            parsed.push((model.as_str(), budgets));
         }
         let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -921,5 +931,52 @@ mod tests {
         published.sort_unstable();
         indexed.sort_unstable();
         assert_eq!(published, indexed);
+
+        // The budgets and the derivation move in lockstep: a model's limits
+        // are exactly its gated derivation metrics, with the same values,
+        // and its coverage counts them. A hand edit to one file alone fails.
+        for (model, budgets) in &parsed {
+            let mut in_budget = BTreeMap::new();
+            for budget in budgets {
+                let limits = [
+                    budget.min_throughput_ratio,
+                    budget.max_latency_p50_ratio,
+                    budget.max_latency_p99_ratio,
+                ];
+                for ((_, key), limit) in LIMIT_KEYS.into_iter().zip(limits) {
+                    let Some(limit) = limit else { continue };
+                    let cell = (
+                        budget.scenario.clone(),
+                        budget.workload.clone(),
+                        budget.transport.clone(),
+                    );
+                    in_budget.insert((cell, key), limit);
+                }
+            }
+            let mut in_derivation = BTreeMap::new();
+            for record in report["cells"][*model].as_array().unwrap() {
+                let cell = (
+                    record["scenario"].as_str().unwrap().to_owned(),
+                    record["workload"].as_str().unwrap().to_owned(),
+                    record["transport"].as_str().unwrap().to_owned(),
+                );
+                for (metric, key) in LIMIT_KEYS {
+                    let info = &record["metrics"][metric];
+                    if info["gated"].as_bool().unwrap() {
+                        let limit = info["limit"].as_f64().unwrap();
+                        in_derivation.insert((cell.clone(), key), limit);
+                    } else {
+                        assert!(info.get("limit").is_none(), "{model} {cell:?} {metric}");
+                        assert!(info["reason"].is_string(), "{model} {cell:?} {metric}");
+                    }
+                }
+            }
+            assert_eq!(
+                in_budget, in_derivation,
+                "{model}: limits differ from the derivation"
+            );
+            let coverage = &report["models"][*model]["coverage"];
+            assert_eq!(coverage["gated"], json!(in_derivation.len()), "{model}");
+        }
     }
 }
