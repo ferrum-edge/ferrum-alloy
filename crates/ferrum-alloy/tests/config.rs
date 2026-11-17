@@ -1181,6 +1181,28 @@ fn gateway_modes_require_verified_identities() {
     );
 }
 
+/// `edge.trusted_proxies` mirrors Edge's `FERRUM_TRUSTED_PROXIES`; a `/0`
+/// would trust every forwarded entry, so it is refused (#308).
+#[test]
+fn edge_trusted_proxies_parse_and_refuse_whole_families() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        &dir,
+        "alloy.toml",
+        "[edge]\ntrusted_proxies = [\"10.0.0.0/8\", \"2001:db8::/32\"]\n",
+    );
+    let (config, _) = load_from(Some(&path), env(&[]), &Overrides::default()).unwrap();
+    assert_eq!(config.edge.trusted_proxies.len(), 2);
+    config.validate(&["edge"]).unwrap();
+
+    for whole in ["0.0.0.0/0", "::/0"] {
+        let mut config = AlloyConfig::default();
+        config.edge.trusted_proxies = vec![whole.parse().unwrap()];
+        let error = config.validate(&["edge"]).unwrap_err().to_string();
+        assert!(error.contains("edge.trusted_proxies"), "{whole}: {error}");
+    }
+}
+
 #[test]
 fn warnings_flag_risky_but_valid_choices() {
     let mut config = AlloyConfig::default();

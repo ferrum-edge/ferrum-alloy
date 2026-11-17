@@ -273,92 +273,119 @@ async fn verified_gateway_hands_off_the_external_authenticated_identity() {
     );
 }
 
-fn policy_with_hops(hops: usize) -> EdgePolicy {
+fn policy_with_trusted_proxies(trusted: &[&str]) -> EdgePolicy {
     let mut trust = TrustedPeersConfig::default();
     trust.identities = vec![GATEWAY.into()];
     let peers = TrustedPeers::new(&trust).unwrap();
     let mut config = EdgePolicyConfig::default();
     config.mode = DeploymentMode::GatewayPreferred;
     config.accept_consumer_identity = true;
-    config.trusted_proxy_hops = hops;
+    config.trusted_proxies = trusted.iter().map(|net| net.parse().unwrap()).collect();
     EdgePolicy::new(config, Arc::new(peers))
 }
 
-/// Each outbound form of Edge's `build_xff_value` truth table (#308): Edge
-/// appends the address it accepted the connection from, so behind a
-/// trusted load balancer the last hop is the balancer, and
-/// `trusted_proxy_hops` selects the client Edge resolved.
+/// Edge's outbound `X-Forwarded-For` forms (`build_xff_value`) resolved the
+/// way Edge resolves them (`resolve_client_ip_field_lines`) with the same
+/// trusted list (#308, sol F1): Edge appends the address it accepted the
+/// connection from, so the walk starts at Edge's peer and stops at the
+/// first untrusted address. A position-based pick would hand out a
+/// caller-chosen entry whenever the number of trusted hops varies.
 #[tokio::test]
-async fn client_address_follows_edges_forwarded_for_truth_table() {
-    for (row, hops, xff, client, peer) in [
+async fn client_address_repeats_edges_forwarded_for_resolution() {
+    const LB: &[&str] = &["10.0.0.0/8"];
+    const CDN_AND_LB: &[&str] = &["10.0.0.0/8", "192.0.2.0/24"];
+    for (row, trusted, xff, client, peer) in [
         // No proxy in front of Edge: `peer`.
         (
             "direct",
-            0,
+            &[][..],
             vec!["203.0.113.7"],
             Some("203.0.113.7"),
             Some("203.0.113.7"),
         ),
-        // Trusted LB sending XFF: `…, client, peer`.
+        // Trusted LB appending to a caller-supplied chain: `spoof, client, lb`.
         (
             "lb with xff",
-            1,
+            LB,
             vec!["198.51.100.1, 203.0.113.7, 10.0.0.5"],
             Some("203.0.113.7"),
             Some("10.0.0.5"),
         ),
-        // Trusted LB sending a real-IP header: `client, peer`.
+        // A caller that pads the chain cannot move the boundary: the walk
+        // stops at the address the trusted LB vouched for.
         (
-            "lb with real ip",
-            1,
-            vec!["203.0.113.7, 10.0.0.5"],
+            "padded chain",
+            LB,
+            vec!["192.0.2.99, 198.51.100.1, 203.0.113.7, 10.0.0.5"],
             Some("203.0.113.7"),
             Some("10.0.0.5"),
         ),
-        // The same chain read without the hop count names the balancer.
-        (
-            "lb, hops unset",
-            0,
-            vec!["203.0.113.7, 10.0.0.5"],
-            Some("10.0.0.5"),
-            Some("10.0.0.5"),
-        ),
-        // Two trusted proxies (CDN, then LB).
+        // A request that reached Edge through the CDN and the LB.
         (
             "cdn and lb",
-            2,
+            CDN_AND_LB,
             vec!["203.0.113.7, 192.0.2.10, 10.0.0.5"],
             Some("203.0.113.7"),
             Some("10.0.0.5"),
         ),
-        // A request that bypassed the balancer: Edge wrote only `peer`.
+        // The same deployment, a request that skipped the CDN.
+        (
+            "lb only",
+            CDN_AND_LB,
+            vec!["203.0.113.8, 10.0.0.5"],
+            Some("203.0.113.8"),
+            Some("10.0.0.5"),
+        ),
+        // A request that bypassed the balancer: Edge dropped its chain and
+        // wrote only the untrusted peer, which Edge resolved as the client.
         (
             "bypassed lb",
-            1,
+            LB,
             vec!["198.51.100.66"],
-            None,
+            Some("198.51.100.66"),
             Some("198.51.100.66"),
         ),
-        // Field lines read in order as one list; IPv6 in brackets or bare.
+        // Without the trusted list the walk stops at Edge's peer.
+        (
+            "lb, list empty",
+            &[][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // Only trusted entries: Edge falls back to its peer.
+        (
+            "all trusted",
+            LB,
+            vec!["10.0.0.9, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // A malformed boundary falls back to the peer, as in Edge, never to a
+        // caller-chosen neighbour further left.
+        (
+            "malformed boundary",
+            LB,
+            vec!["198.51.100.1, unknown, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // Field lines are one chain in order; empty entries are skipped.
         (
             "split lines",
-            1,
-            vec!["2001:db8::7", "[2001:db8::5]"],
+            LB,
+            vec!["2001:db8::7", ", 10.0.0.5"],
             Some("2001:db8::7"),
-            Some("2001:db8::5"),
-        ),
-        // A hop that is not an address yields nothing rather than a neighbour.
-        (
-            "garbage hop",
-            1,
-            vec!["unknown, 10.0.0.5"],
-            None,
             Some("10.0.0.5"),
         ),
     ] {
         let headers: Vec<(&str, &str)> =
             xff.iter().map(|line| ("x-forwarded-for", *line)).collect();
-        let (_, seen, _) = run(policy_with_hops(hops), request("/x", verified(), &headers)).await;
+        let (_, seen, _) = run(
+            policy_with_trusted_proxies(trusted),
+            request("/x", verified(), &headers),
+        )
+        .await;
         let context = seen.unwrap().context.unwrap();
         assert_eq!(
             context.client_address.map(|a| a.to_string()).as_deref(),
@@ -371,6 +398,25 @@ async fn client_address_follows_edges_forwarded_for_truth_table() {
             "{row}"
         );
     }
+}
+
+/// Edge's real-IP-header mode keeps a trusted LB's passed-through chain and
+/// seeds the authoritative client only when the chain lacks it, so the chain
+/// alone cannot show which entry Edge chose (sol F1). Alloy cannot repeat
+/// that resolution; the documented setting for this layout is an empty
+/// trusted list, which reports Edge's peer, never a caller-chosen entry.
+#[tokio::test]
+async fn real_ip_header_layouts_never_report_a_caller_chosen_entry() {
+    // Edge resolved 203.0.113.7 from the LB's real-IP header; the caller
+    // supplied `203.0.113.7, 192.0.2.99`.
+    let headers = [("x-forwarded-for", "203.0.113.7, 192.0.2.99, 10.0.0.5")];
+    let (_, seen, _) = run(
+        policy_with_trusted_proxies(&[]),
+        request("/x", verified(), &headers),
+    )
+    .await;
+    let context = seen.unwrap().context.unwrap();
+    assert_eq!(context.client_address.unwrap().to_string(), "10.0.0.5");
 }
 
 #[tokio::test]

@@ -25,6 +25,7 @@ use std::task::{Context, Poll};
 use ferrum_alloy_telemetry::peer::{ClassifiedPeer, PeerTrust, SharedClassifier};
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{HeaderMap, Request, Response, StatusCode};
+use ipnet::IpNet;
 use tower_layer::Layer;
 use tower_service::Service;
 
@@ -57,12 +58,13 @@ pub struct EdgePolicyConfig {
     /// identity, geo country, mesh principals) from a verified gateway
     /// identity. Off, or from any other peer, they are removed.
     pub accept_consumer_identity: bool,
-    /// How many proxies Edge trusts in front of itself
-    /// (`FERRUM_TRUSTED_PROXIES` hops, such as a load balancer or CDN), which
-    /// selects [`GatewayContext::client_address`] from Edge's
-    /// `X-Forwarded-For`. `0` (the default) when clients connect to Edge
-    /// directly.
-    pub trusted_proxy_hops: usize,
+    /// Edge's `FERRUM_TRUSTED_PROXIES`: the proxies (load balancers, CDNs)
+    /// Edge trusts in front of itself. [`GatewayContext::client_address`]
+    /// repeats Edge's own `X-Forwarded-For` resolution with this list, so it
+    /// must equal Edge's. Empty (the default) when clients connect to Edge
+    /// directly, and when Edge resolves the client from
+    /// `FERRUM_REAL_IP_HEADER`, which Alloy cannot repeat.
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 /// Counters for gateway handling.
@@ -145,16 +147,15 @@ pub struct GatewayContext {
     /// mapped no Consumer. Edge sends it instead of `X-Consumer-Username`,
     /// never with it.
     pub authenticated_identity: Option<String>,
-    /// The client Edge resolved: the `X-Forwarded-For` hop
-    /// [`EdgePolicyConfig::trusted_proxy_hops`] places left of the rightmost
-    /// one. Edge always appends the address it accepted the connection from
-    /// as the last hop (`build_xff_value`), so with Edge reached directly
-    /// (`trusted_proxy_hops = 0`, outbound `peer`) this is the client, and
-    /// behind one trusted load balancer (`trusted_proxy_hops = 1`, outbound
-    /// `…, client, lb`) it is the hop before the balancer. `None` when the
-    /// chain is shorter than that (for example a request that bypassed the
-    /// balancer, which Edge forwards as `peer` alone) or the hop is not an
-    /// IP address.
+    /// The client Edge resolved from `X-Forwarded-For`. Edge forwards the
+    /// chain it received from a trusted proxy with the address it accepted
+    /// the connection from appended (`build_xff_value`), so Alloy repeats
+    /// Edge's resolution (`client_ip::resolve_client_ip_field_lines`) with
+    /// [`EdgePolicyConfig::trusted_proxies`]: walking right to left, the first
+    /// address outside the trusted list is the client; a malformed entry
+    /// there, or a chain of trusted addresses only, yields Edge's peer, as in
+    /// Edge. With an empty list this is Edge's peer. It is not Edge's resolved
+    /// client when Edge uses `FERRUM_REAL_IP_HEADER`.
     pub client_address: Option<IpAddr>,
     /// Edge's immediate peer: the rightmost `X-Forwarded-For` hop, which Edge
     /// writes itself. It is the client only when nothing sits in front of
@@ -184,27 +185,53 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     (!text.is_empty() && text.len() <= MAX_IDENTITY_VALUE_BYTES).then(|| text.to_owned())
 }
 
-/// The `X-Forwarded-For` hop `from_right` places left of the rightmost one,
-/// reading every field line in order as one comma-separated list. `None`
-/// when a field line is not text, the list is shorter, or the hop is not an
-/// IP address.
-fn forwarded_hop(headers: &HeaderMap, from_right: usize) -> Option<IpAddr> {
-    let lines = headers
+/// Every `X-Forwarded-For` field line, in order. `None` when one is not text.
+fn forwarded_for_lines(headers: &HeaderMap) -> Option<Vec<&str>> {
+    headers
         .get_all("x-forwarded-for")
         .iter()
         .map(|value| value.to_str().ok())
-        .collect::<Option<Vec<&str>>>()?;
+        .collect()
+}
+
+/// Edge's immediate peer: the rightmost `X-Forwarded-For` hop.
+fn edge_peer(lines: &[&str]) -> Option<IpAddr> {
     let hop = lines
         .iter()
         .rev()
         .flat_map(|line| line.rsplit(','))
-        .nth(from_right)?
+        .next()?
         .trim();
     hop.strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
         .unwrap_or(hop)
         .parse()
         .ok()
+}
+
+/// Edge's `resolve_client_ip_field_lines` applied to the chain Edge
+/// forwarded: empty entries are skipped, and the last entry that is not a
+/// trusted proxy decides. A valid address there is the client; a malformed
+/// one, or no untrusted entry at all, falls back to Edge's peer, which Edge
+/// would have used. Since Edge appended its peer, an untrusted peer (whose
+/// inbound chain Edge dropped) is the last untrusted entry, as in Edge.
+fn resolved_client(lines: &[&str], trusted: &[IpNet], peer: Option<IpAddr>) -> Option<IpAddr> {
+    let mut client = None;
+    for entry in lines.iter().flat_map(|line| line.split(',')) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        match entry.parse::<IpAddr>() {
+            Ok(ip)
+                if trusted
+                    .iter()
+                    .any(|network| network.contains(&ip.to_canonical())) => {}
+            Ok(ip) => client = Some(ip),
+            Err(_) => client = None,
+        }
+    }
+    client.or(peer)
 }
 
 /// The problem type used for `gateway_required` rejections (kept in sync
@@ -336,13 +363,17 @@ where
                     .verified_gateway_requests
                     .fetch_add(1, Ordering::Relaxed);
                 let headers = request.headers();
+                let lines = forwarded_for_lines(headers).unwrap_or_default();
+                let edge_peer_address = edge_peer(&lines);
+                let client_address =
+                    resolved_client(&lines, &policy.config.trusted_proxies, edge_peer_address);
                 let context = GatewayContext {
                     gateway_identity: identity.clone(),
                     consumer_username: header_value(headers, CONSUMER_USERNAME),
                     consumer_custom_id: header_value(headers, CONSUMER_CUSTOM_ID),
                     authenticated_identity: header_value(headers, AUTHENTICATED_IDENTITY),
-                    client_address: forwarded_hop(headers, policy.config.trusted_proxy_hops),
-                    edge_peer_address: forwarded_hop(headers, 0),
+                    client_address,
+                    edge_peer_address,
                 };
                 request.extensions_mut().insert(context);
             }

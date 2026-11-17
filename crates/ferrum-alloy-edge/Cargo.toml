@@ -23,6 +23,7 @@ axum = ["dep:axum"]
 ferrum-alloy-telemetry = { workspace = true }
 ferrum-alloy-diagnostics = { workspace = true }
 http = { workspace = true }
+ipnet = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

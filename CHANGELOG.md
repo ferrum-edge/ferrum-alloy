@@ -30,12 +30,18 @@
   validation. CI validates a new `minimal.edge.yaml` fixture on both
   supported Edge releases.
 - **Breaking (#308):** `GatewayContext.client_address` is the client Edge
-  resolved, selected by the new `edge.trusted_proxy_hops` (how many
-  proxies Edge trusts in front of itself, default `0`), instead of always
-  the last `X-Forwarded-For` hop, which behind a load balancer was the
-  balancer for every request. The new `GatewayContext.edge_peer_address`
-  keeps the last hop. With Edge behind one load balancer, set
-  `edge.trusted_proxy_hops = 1`; with no proxy in front, nothing changes.
+  resolved from `X-Forwarded-For`, instead of always the last hop, which
+  behind a load balancer was the balancer for every request. Alloy repeats
+  Edge's resolution with the new `edge.trusted_proxies` (Edge's
+  `FERRUM_TRUSTED_PROXIES`, default empty): walking right to left, the
+  first address outside the list is the client, and a malformed entry
+  there or a chain of trusted addresses only yields Edge's peer. A
+  caller-padded chain cannot move that boundary, as a fixed hop count
+  could. The new `GatewayContext.edge_peer_address` keeps the last hop.
+  With Edge behind load balancers, copy Edge's `FERRUM_TRUSTED_PROXIES`
+  into `edge.trusted_proxies`; leave it empty when Edge uses
+  `FERRUM_REAL_IP_HEADER`, whose choice the chain cannot show. With no
+  proxy in front, nothing changes. `/0` entries are refused.
 - **Breaking (#306):** `ferrum-alloy openapi export --manifest` makes
   operation paths relative to `api.public_path` when
   `strip_public_path = false` too, removing
