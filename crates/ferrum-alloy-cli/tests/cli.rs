@@ -1537,8 +1537,13 @@ fn edge_forwarded_path(public_path: &str, base: &str, strip: bool, key: &str) ->
         format!("{listen}{key}")
     };
     let backend_path = base.trim_end_matches('/');
+    // Edge strips the literal listen path's length (`matched_prefix_len`),
+    // one byte for a root listen path `/`.
     let rest = if strip {
-        public.strip_prefix(listen).unwrap().to_owned()
+        public
+            .get(public_path.len()..)
+            .unwrap_or_default()
+            .to_owned()
     } else {
         public
     };
@@ -1808,7 +1813,7 @@ fn openapi_export_refuses_a_root_route_edge_cannot_compose() {
             "/internal/",
             true,
             "/internal/",
-            "depends on how Edge strips",
+            "\"/internal\"",
         ),
     ] {
         let (output, out) = export_paths(dir.path(), name, public_path, base, strip, &[path]);
@@ -1845,6 +1850,34 @@ fn openapi_export_refuses_a_root_route_edge_cannot_compose() {
     for (key, documented) in [("/", "/internal/"), ("/items", "/internal/items")] {
         assert_eq!(
             edge_forwarded_path("/", "/internal/", false, key),
+            documented
+        );
+    }
+
+    // With a root listen path and stripping, Edge removes the one-byte
+    // listen path, so `/` reaches the bare prefix: the service's own root
+    // route exports as `/` (round 2 dsf F1).
+    let (output, out) = export_paths(
+        dir.path(),
+        "root-listen-stripped-ok",
+        "/",
+        "/internal/",
+        true,
+        &["/internal", "/internal/items"],
+    );
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let written = read_json(&out);
+    let mut keys: Vec<&str> = written["paths"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["/", "/items"]);
+    for (key, documented) in [("/", "/internal"), ("/items", "/internal/items")] {
+        assert_eq!(
+            edge_forwarded_path("/", "/internal/", true, key),
             documented
         );
     }

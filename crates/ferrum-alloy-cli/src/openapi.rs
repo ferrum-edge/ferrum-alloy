@@ -212,29 +212,25 @@ fn normalize_paths(
     // trailing slash (`extract_mcp_bridge_operations`), or as `/` for a root
     // listen path. So `/` reaches exactly one of the bare prefix and the
     // prefix with a slash, and the other has no key: refused rather than
-    // exported as a key Edge forwards to a different route (sol F2). A root
-    // listen path that Edge strips leaves both ambiguous.
+    // exported as a key Edge forwards to a different route (sol F2).
     let listen = manifest.api.public_path.trim_end_matches('/');
-    let root_target = if !listen.is_empty() {
-        Some(prefix.as_str())
-    } else if !manifest.api.strip_public_path {
-        Some(slash_root.as_str())
+    // A root listen path `/` with stripping removes its one byte (Edge's
+    // `matched_prefix_len`), so `/` reaches the bare prefix there too; only a
+    // root listen path without stripping forwards `/` whole (round 2 dsf F1).
+    let root_target = if !listen.is_empty() || manifest.api.strip_public_path {
+        prefix.as_str()
     } else {
-        None
+        slash_root.as_str()
     };
     for (path, operations) in std::mem::take(paths) {
         // Keys that are not paths are specification extensions (`x-`).
         let normalized = if !path.starts_with('/') {
             path.clone()
         } else if path == prefix || path == slash_root {
-            if root_target != Some(path.as_str()) {
+            if root_target != path {
                 return Err(CliError::Invalid(format!(
-                    "OpenAPI path {path:?} cannot be exported: only the key \"/\" names the public path's root, and Ferrum Edge composes it as {:?} and forwards it to {}. Serve the operation at that path instead",
+                    "OpenAPI path {path:?} cannot be exported: only the key \"/\" names the public path's root, and Ferrum Edge composes it as {:?} and forwards it to {root_target:?}. Serve the operation at that path instead",
                     if listen.is_empty() { "/" } else { listen },
-                    root_target.map_or_else(
-                        || "a path that depends on how Edge strips the root listen path".to_owned(),
-                        |target| format!("{target:?}")
-                    ),
                 )));
             }
             "/".to_owned()
