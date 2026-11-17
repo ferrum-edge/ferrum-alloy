@@ -1,0 +1,21 @@
+# A minimal manifest like the `ferrum-alloy new` starter: no health check, no
+# TLS, and no gateway.otel_endpoint. Export still attaches Edge's otel_tracing
+# plugin, in propagation-only mode, so a caller's traceparent/tracestate never
+# reaches the service (#307). CI validates the snapshot with
+# `ferrum-edge validate` on every supported Edge release.
+schema = "ferrum.service_manifest"
+schema_version = "1.0"
+
+[service]
+name = "starter-api"
+
+[api]
+public_path = "/starter"
+
+[upstream]
+host = "127.0.0.1"
+port = 8080
+scheme = "http"
+
+[gateway]
+namespace = "retail"

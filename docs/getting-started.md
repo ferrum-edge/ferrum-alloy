@@ -163,14 +163,18 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    ```
 
    Edge resource IDs are limited to 254 characters. Manifest validation checks
-   the proxy ID and any generated `-upstream`, `-correlation-id`, or
-   `-otel-tracing` IDs selected by the health check and gateway plugin settings.
+   the proxy ID, the `-otel-tracing` ID generated for every proxy, and any
+   `-upstream` or `-correlation-id` IDs selected by the health check and
+   gateway plugin settings.
 
    `gateway.otel_endpoint` must use `https://` unless its host is a loopback IP
    literal (`127.0.0.0/8` or `[::1]`; `localhost` is refused): Edge v0.9.19
    and later drop a cleartext OTLP exporter to any other host unless it sets
    `allow_plaintext`, which the export never writes. An `https://` endpoint
-   works on both supported releases.
+   works on both supported releases. Without an endpoint, the export still
+   attaches Edge's `otel_tracing` plugin, exporting nothing, because only
+   that plugin stops Edge from relaying a caller's `traceparent` and
+   `tracestate` to the service, which trusts Edge's identity.
 
    Or write a GitForgeOps tree with `--format gitforgeops --output DIR`. Nothing is applied to a gateway.
 

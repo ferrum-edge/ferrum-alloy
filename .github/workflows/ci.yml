@@ -604,16 +604,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: ferrum-edge validate (${{ matrix.edge.release }}) on the plain-HTTP fixture
+      - name: ferrum-edge validate (${{ matrix.edge.release }}) on the plain-HTTP and minimal fixtures
+        # minimal.edge.yaml carries the propagation-only otel_tracing plugin
+        # export attaches without gateway.otel_endpoint (#307).
         env:
           EDGE_IMAGE: ${{ matrix.edge.image }}
         run: |
           set -euxo pipefail
-          docker run --rm \
-            -e FERRUM_NAMESPACE=retail \
-            -v "$PWD/contracts/fixtures/manifests:/config:ro" \
-            "$EDGE_IMAGE" \
-            validate -m file -c /config/plain-http.edge.yaml
+          for fixture in plain-http minimal; do
+            docker run --rm \
+              -e FERRUM_NAMESPACE=retail \
+              -v "$PWD/contracts/fixtures/manifests:/config:ro" \
+              "$EDGE_IMAGE" \
+              validate -m file -c "/config/$fixture.edge.yaml"
+          done
       - name: POST /api-specs (${{ matrix.edge.release }}) accepts the exported agent-tool document
         # contracts/fixtures/openapi/orders-api.openapi.json is what
         # `ferrum-alloy openapi export` writes for orders-api.toml's [agents]

@@ -11,6 +11,16 @@
 //! output invalid on v0.9.8. Nothing is sent to a running gateway: artifacts are
 //! written for review and applied through the operator's normal process.
 //!
+//! Every proxy gets Edge's `otel_tracing` plugin with
+//! `trace_context_trust: untrusted`, because only that plugin removes a
+//! caller's `traceparent`/`tracestate` before Edge forwards the request:
+//! without it they are ordinary end-to-end headers, and a service that
+//! trusts Edge's transport identity would accept them as a trusted parent.
+//! Without `gateway.otel_endpoint` the plugin runs in Edge's
+//! propagation-only mode with `generate_trace_id: false`, so it exports
+//! nothing and the service receives no trace context at all and roots its
+//! own trace under its own sampling.
+//!
 //! When the manifest declares a health check, the backend is expressed as an
 //! `Upstream` with an active HTTP health check, and backend TLS settings are
 //! placed on the upstream (Edge ignores a proxy's own `backend_tls_*` fields
@@ -131,22 +141,38 @@ pub fn resources(manifest: &ServiceManifest) -> Result<EdgeResources, ExportErro
         }));
         plugin_refs.push(json!({ "plugin_config_id": id }));
     }
-    if let Some(endpoint) = &manifest.gateway.otel_endpoint {
+    {
         let id = format!("{proxy_id}{OTEL_TRACING_PLUGIN_ID_SUFFIX}");
-        let mut config = json!({
-            "endpoint": endpoint,
-            "service_name": format!("ferrum-edge-{namespace}"),
-            // The gateway does not trust callers' trace context; it starts a
-            // new trace and propagates its own SERVER span to the service.
-            "trace_context_trust": "untrusted",
-            "include_url_path": false,
-        });
-        if let Some(ratio) = manifest.gateway.otel_root_sampling_ratio
-            && let Some(map) = config.as_object_mut()
-        {
-            map.insert("root_sampling".into(), json!("ratio"));
-            map.insert("root_sampling_ratio".into(), json!(ratio));
-        }
+        let config = match &manifest.gateway.otel_endpoint {
+            Some(endpoint) => {
+                let mut config = json!({
+                    "endpoint": endpoint,
+                    "service_name": format!("ferrum-edge-{namespace}"),
+                    // The gateway does not trust callers' trace context; it
+                    // starts a new trace and propagates its own SERVER span
+                    // to the service.
+                    "trace_context_trust": "untrusted",
+                    "include_url_path": false,
+                });
+                if let Some(ratio) = manifest.gateway.otel_root_sampling_ratio
+                    && let Some(map) = config.as_object_mut()
+                {
+                    map.insert("root_sampling".into(), json!("ratio"));
+                    map.insert("root_sampling_ratio".into(), json!(ratio));
+                }
+                config
+            }
+            // Propagation-only (no endpoint): Edge strips the caller's
+            // `traceparent`/`tracestate` in `before_proxy` and, with trace
+            // generation off, forwards none, so no caller can choose the
+            // service's trace id, parent, or sampled flag (#307).
+            None => json!({
+                "service_name": format!("ferrum-edge-{namespace}"),
+                "trace_context_trust": "untrusted",
+                "generate_trace_id": false,
+                "include_url_path": false,
+            }),
+        };
         plugin_configs.push(json!({
             "id": id,
             "plugin_name": "otel_tracing",

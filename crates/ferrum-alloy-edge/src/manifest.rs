@@ -188,8 +188,10 @@ pub struct ManifestGateway {
     pub proxy_id: Option<String>,
     /// Attach Edge's `correlation_id` plugin (`x-request-id`).
     pub correlation_id: bool,
-    /// Attach Edge's `otel_tracing` plugin exporting to this OTLP/HTTP
-    /// traces URL.
+    /// OTLP/HTTP traces URL Edge's `otel_tracing` plugin exports to. The
+    /// plugin is attached either way, because only it removes a caller's
+    /// `traceparent`/`tracestate`; without an endpoint it exports nothing
+    /// and forwards no trace context.
     pub otel_endpoint: Option<String>,
     /// Edge root sampling ratio for new traces.
     pub otel_root_sampling_ratio: Option<f64>,
@@ -355,10 +357,11 @@ impl ServiceManifest {
                     crate::export::CORRELATION_ID_PLUGIN_ID_SUFFIX
                 )
             }),
-            self.gateway
-                .otel_endpoint
-                .as_ref()
-                .map(|_| format!("{proxy_id}{}", crate::export::OTEL_TRACING_PLUGIN_ID_SUFFIX)),
+            // Always generated: it neutralizes caller trace context.
+            Some(format!(
+                "{proxy_id}{}",
+                crate::export::OTEL_TRACING_PLUGIN_ID_SUFFIX
+            )),
         ]
         .into_iter()
         .flatten()
