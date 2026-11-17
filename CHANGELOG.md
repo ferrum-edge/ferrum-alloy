@@ -6,8 +6,9 @@
   every gateway-asserted request header in the pinned `gateway-headers`
   vocabulary, not just `x-consumer-username` and `x-consumer-custom-id`: the
   whole `x-consumer-*` namespace, `X-Authenticated-Identity`,
-  `X-Geo-Country`, `X-Ferrum-Hops`, `x-ferrum-peer-spiffe-id`, and the mesh
-  ext-authz principals, in any letter case and with `_` read as `-`.
+  `X-Geo-Country`, `X-Ferrum-Hops`, `x-ferrum-peer-spiffe-id`, the mesh
+  ext-authz principals, and the `x-path-param-*` route captures Edge
+  writes, in any letter case and with `_` read as `-`.
   Before, a direct caller of a `standalone` or `gateway_preferred` service
   (or of an exempt path under `gateway_required`) could hand handlers a
   forged `X-Authenticated-Identity` or `X-Consumer-Role`. They are kept

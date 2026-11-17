@@ -108,6 +108,24 @@ pub const GATEWAY_ASSERTION_HEADERS: &[&str] = &[
 /// and so on), not just the two names it writes today.
 pub const GATEWAY_ASSERTION_HEADER_PREFIXES: &[&str] = &["x-consumer-"];
 
+/// Request header prefixes the pinned vocabulary gives the role
+/// `ferrum_owned` with direction `gateway_to_backend`: names Edge writes to
+/// the backend itself (route path-parameter captures, `x-path-param-*`) and
+/// strips from clients (`is_path_param_assertion_header`). Not assertions
+/// about the caller, but just as forgeable by a direct caller, so the Edge
+/// policy removes them with the assertions.
+pub const GATEWAY_WRITTEN_HEADER_PREFIXES: &[&str] = &["x-path-param-"];
+
+/// Whether `name` is a request header only Edge may write: a gateway
+/// assertion ([`is_gateway_assertion_header`]) or under
+/// [`GATEWAY_WRITTEN_HEADER_PREFIXES`], matched the same way.
+pub fn is_gateway_written_header(name: &str) -> bool {
+    is_gateway_assertion_header(name)
+        || GATEWAY_WRITTEN_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| folded_starts_with(name, prefix))
+}
+
 /// Whether `name` is a gateway-asserted request header
 /// ([`GATEWAY_ASSERTION_HEADERS`] or under
 /// [`GATEWAY_ASSERTION_HEADER_PREFIXES`]), matched the way Edge matches

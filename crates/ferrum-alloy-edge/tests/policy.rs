@@ -151,13 +151,14 @@ const FORGED: &[(&str, &str)] = &[
         "spiffe://ferrum.test/ns/pay/sa/payments",
     ),
     ("x-ferrum-hops", "1"),
+    ("X_Path_Param_Id", "someone-else"),
     ("x-api-version", "2"),
 ];
 
 fn assertion_names(headers: &http::HeaderMap) -> Vec<String> {
     headers
         .keys()
-        .filter(|name| ferrum_alloy_edge::contract::is_gateway_assertion_header(name.as_str()))
+        .filter(|name| ferrum_alloy_edge::contract::is_gateway_written_header(name.as_str()))
         .map(|name| name.as_str().to_owned())
         .collect()
 }
@@ -226,7 +227,10 @@ async fn every_pinned_gateway_assertion_header_is_removed_from_direct_callers() 
         .as_array()
         .unwrap()
         .iter()
-        .filter(|entry| entry["role"] == "gateway_assertion")
+        .filter(|entry| {
+            entry["role"] == "gateway_assertion"
+                || (entry["role"] == "ferrum_owned" && entry["direction"] == "gateway_to_backend")
+        })
         .map(|entry| {
             let name = entry["name"].as_str().unwrap().to_ascii_lowercase();
             if entry["match"] == "prefix" {
@@ -236,7 +240,11 @@ async fn every_pinned_gateway_assertion_header_is_removed_from_direct_callers() 
             }
         })
         .collect();
-    assert!(names.len() >= 10, "{names:?}");
+    assert!(names.len() >= 11, "{names:?}");
+    assert!(
+        names.contains(&"x-path-param-groups".to_owned()),
+        "{names:?}"
+    );
     let forged: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "forged")).collect();
     let (_, seen, _) = run(
         policy(DeploymentMode::GatewayPreferred, true),

@@ -11,10 +11,11 @@
 //!   authentication performed by Edge; authorization remains the
 //!   application's decision.
 //! * Every gateway-asserted request header of the pinned Edge vocabulary
-//!   ([`is_gateway_assertion_header`]: the whole `x-consumer-*` namespace,
+//!   (the whole `x-consumer-*` namespace,
 //!   `X-Authenticated-Identity`, `X-Geo-Country`, `X-Ferrum-Hops`, and the
-//!   mesh principal headers, in any letter case and with `_` for `-`) is
-//!   removed unless the peer is a verified gateway identity and identity
+//!   mesh principal headers, in any letter case and with `_` for `-`), and
+//!   the `x-path-param-*` captures Edge writes ([`is_gateway_written_header`]),
+//!   are removed unless the peer is a verified gateway identity and identity
 //!   handoff is enabled, so handlers cannot trust a forged value by accident.
 
 use std::net::IpAddr;
@@ -31,7 +32,7 @@ use tower_service::Service;
 
 use crate::contract::{
     AUTHENTICATED_IDENTITY, CONSUMER_CUSTOM_ID, CONSUMER_USERNAME, MAX_IDENTITY_VALUE_BYTES,
-    is_gateway_assertion_header,
+    is_gateway_written_header,
 };
 
 /// How the service relates to Ferrum Edge.
@@ -388,7 +389,7 @@ where
         let assertion_present = request
             .headers()
             .keys()
-            .any(|name| is_gateway_assertion_header(name.as_str()));
+            .any(|name| is_gateway_written_header(name.as_str()));
         match (&verification, policy.config.accept_consumer_identity) {
             (GatewayVerification::Verified { identity }, true) => {
                 policy
@@ -431,7 +432,7 @@ fn strip<B>(request: &mut Request<B>, present: bool, stats: &EdgeStats) {
     let forged: Vec<_> = request
         .headers()
         .keys()
-        .filter(|name| is_gateway_assertion_header(name.as_str()))
+        .filter(|name| is_gateway_written_header(name.as_str()))
         .cloned()
         .collect();
     for name in forged {

@@ -544,6 +544,48 @@ fn gateway_assertion_headers_match_the_pinned_vocabulary() {
     }
 }
 
+/// The `ferrum_owned` request namespaces Edge writes to backends (role
+/// `ferrum_owned`, direction `gateway_to_backend`, today `x-path-param-`)
+/// are stripped with the assertions (round 2 dsf F2).
+#[test]
+fn gateway_written_headers_match_the_pinned_vocabulary() {
+    use ferrum_alloy_edge::contract::{GATEWAY_WRITTEN_HEADER_PREFIXES, is_gateway_written_header};
+    let headers = pinned_json("vocabularies/gateway-headers.json");
+    let canonical: BTreeSet<String> = headers["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry["role"] == "ferrum_owned" && entry["direction"] == "gateway_to_backend"
+        })
+        .map(|entry| {
+            assert_eq!(entry["match"], "prefix", "{entry}");
+            entry["name"].as_str().unwrap().to_ascii_lowercase()
+        })
+        .collect();
+    let local: BTreeSet<String> = GATEWAY_WRITTEN_HEADER_PREFIXES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let (missing, extra) = differences(&canonical, &local);
+    assert!(
+        missing.is_empty(),
+        "gateway-written prefixes Alloy does not strip: {missing:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "stripped prefixes the pin does not list: {extra:?}"
+    );
+    for spelling in ["x-path-param-id", "X_Path_Param_Id", "X-PATH-PARAM-ORDER"] {
+        assert!(is_gateway_written_header(spelling), "{spelling}");
+    }
+    assert!(!is_gateway_written_header("x-path-param"));
+    assert!(
+        is_gateway_written_header("x-geo-country"),
+        "assertions are included"
+    );
+}
+
 #[test]
 fn external_authenticated_identity_is_not_a_consumer_identity_header() {
     let headers = pinned_json("vocabularies/gateway-headers.json");
