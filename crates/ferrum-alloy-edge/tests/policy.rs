@@ -124,6 +124,10 @@ async fn verified_gateway_identity_is_handed_off() {
     assert_eq!(context.consumer_custom_id.as_deref(), Some("cust-7"));
     assert_eq!(context.client_address.unwrap().to_string(), "203.0.113.44");
     assert_eq!(
+        context.edge_peer_address.unwrap().to_string(),
+        "203.0.113.44"
+    );
+    assert_eq!(
         seen.verification,
         Some(GatewayVerification::Verified {
             identity: GATEWAY.into()
@@ -267,6 +271,106 @@ async fn verified_gateway_hands_off_the_external_authenticated_identity() {
         "US",
         "a verified gateway's assertions reach the handler"
     );
+}
+
+fn policy_with_hops(hops: usize) -> EdgePolicy {
+    let mut trust = TrustedPeersConfig::default();
+    trust.identities = vec![GATEWAY.into()];
+    let peers = TrustedPeers::new(&trust).unwrap();
+    let mut config = EdgePolicyConfig::default();
+    config.mode = DeploymentMode::GatewayPreferred;
+    config.accept_consumer_identity = true;
+    config.trusted_proxy_hops = hops;
+    EdgePolicy::new(config, Arc::new(peers))
+}
+
+/// Each outbound form of Edge's `build_xff_value` truth table (#308): Edge
+/// appends the address it accepted the connection from, so behind a
+/// trusted load balancer the last hop is the balancer, and
+/// `trusted_proxy_hops` selects the client Edge resolved.
+#[tokio::test]
+async fn client_address_follows_edges_forwarded_for_truth_table() {
+    for (row, hops, xff, client, peer) in [
+        // No proxy in front of Edge: `peer`.
+        (
+            "direct",
+            0,
+            vec!["203.0.113.7"],
+            Some("203.0.113.7"),
+            Some("203.0.113.7"),
+        ),
+        // Trusted LB sending XFF: `…, client, peer`.
+        (
+            "lb with xff",
+            1,
+            vec!["198.51.100.1, 203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // Trusted LB sending a real-IP header: `client, peer`.
+        (
+            "lb with real ip",
+            1,
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // The same chain read without the hop count names the balancer.
+        (
+            "lb, hops unset",
+            0,
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // Two trusted proxies (CDN, then LB).
+        (
+            "cdn and lb",
+            2,
+            vec!["203.0.113.7, 192.0.2.10, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // A request that bypassed the balancer: Edge wrote only `peer`.
+        (
+            "bypassed lb",
+            1,
+            vec!["198.51.100.66"],
+            None,
+            Some("198.51.100.66"),
+        ),
+        // Field lines read in order as one list; IPv6 in brackets or bare.
+        (
+            "split lines",
+            1,
+            vec!["2001:db8::7", "[2001:db8::5]"],
+            Some("2001:db8::7"),
+            Some("2001:db8::5"),
+        ),
+        // A hop that is not an address yields nothing rather than a neighbour.
+        (
+            "garbage hop",
+            1,
+            vec!["unknown, 10.0.0.5"],
+            None,
+            Some("10.0.0.5"),
+        ),
+    ] {
+        let headers: Vec<(&str, &str)> =
+            xff.iter().map(|line| ("x-forwarded-for", *line)).collect();
+        let (_, seen, _) = run(policy_with_hops(hops), request("/x", verified(), &headers)).await;
+        let context = seen.unwrap().context.unwrap();
+        assert_eq!(
+            context.client_address.map(|a| a.to_string()).as_deref(),
+            client,
+            "{row}"
+        );
+        assert_eq!(
+            context.edge_peer_address.map(|a| a.to_string()).as_deref(),
+            peer,
+            "{row}"
+        );
+    }
 }
 
 #[tokio::test]

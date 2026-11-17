@@ -642,6 +642,10 @@ pub struct EdgeSettings {
     /// (mTLS). Never accepted from network-boundary trust; otherwise they
     /// are removed.
     pub accept_consumer_identity: bool,
+    /// Proxies Edge trusts in front of itself (its `FERRUM_TRUSTED_PROXIES`
+    /// hops); selects `GatewayContext::client_address` from Edge's
+    /// `X-Forwarded-For`. `0` when clients reach Edge directly.
+    pub trusted_proxy_hops: usize,
 }
 
 /// CORS settings. Nothing is permitted unless listed.

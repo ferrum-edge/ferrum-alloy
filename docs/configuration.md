@@ -342,6 +342,7 @@ Trust affects only propagation metadata and gateway-asserted headers. It never a
 |---|---|---|
 | `mode` | `standalone` | `standalone`, `gateway_preferred`, or `gateway_required`. `gateway_required` needs `trust.identities`. The health paths are exempt from it only when `health.app_endpoints = true`, where Alloy's status-only handlers serve them. With `app_endpoints = false`, probe the management listener, bound to an address the node can reach rather than loopback. |
 | `accept_consumer_identity` | `false` | Expose Edge's `X-Consumer-Username` / `X-Consumer-Custom-Id` / `X-Authenticated-Identity` as `GatewayContext`, and pass Edge's other gateway-asserted headers (`x-consumer-*`, `X-Geo-Country`, `X-Ferrum-Hops`, mesh principals) to handlers, only from a verified mTLS identity. Otherwise all of them are removed. |
+| `trusted_proxy_hops` | `0` | How many proxies Edge trusts in front of itself (`FERRUM_TRUSTED_PROXIES` hops: a load balancer, a CDN). Selects `GatewayContext.client_address`, the client Edge resolved, from Edge's `X-Forwarded-For`: Edge always appends the address it accepted the connection from, so `0` reads the last hop (right when clients reach Edge directly) and `1` the hop before a single load balancer. `GatewayContext.edge_peer_address` is always the last hop. |
 
 ### `[cors]` (feature `cors`)
 

@@ -57,6 +57,12 @@ pub struct EdgePolicyConfig {
     /// identity, geo country, mesh principals) from a verified gateway
     /// identity. Off, or from any other peer, they are removed.
     pub accept_consumer_identity: bool,
+    /// How many proxies Edge trusts in front of itself
+    /// (`FERRUM_TRUSTED_PROXIES` hops, such as a load balancer or CDN), which
+    /// selects [`GatewayContext::client_address`] from Edge's
+    /// `X-Forwarded-For`. `0` (the default) when clients connect to Edge
+    /// directly.
+    pub trusted_proxy_hops: usize,
 }
 
 /// Counters for gateway handling.
@@ -139,9 +145,21 @@ pub struct GatewayContext {
     /// mapped no Consumer. Edge sends it instead of `X-Consumer-Username`,
     /// never with it.
     pub authenticated_identity: Option<String>,
-    /// The client address Edge observed (rightmost `X-Forwarded-For` hop,
-    /// which Edge writes itself).
+    /// The client Edge resolved: the `X-Forwarded-For` hop
+    /// [`EdgePolicyConfig::trusted_proxy_hops`] places left of the rightmost
+    /// one. Edge always appends the address it accepted the connection from
+    /// as the last hop (`build_xff_value`), so with Edge reached directly
+    /// (`trusted_proxy_hops = 0`, outbound `peer`) this is the client, and
+    /// behind one trusted load balancer (`trusted_proxy_hops = 1`, outbound
+    /// `…, client, lb`) it is the hop before the balancer. `None` when the
+    /// chain is shorter than that (for example a request that bypassed the
+    /// balancer, which Edge forwards as `peer` alone) or the hop is not an
+    /// IP address.
     pub client_address: Option<IpAddr>,
+    /// Edge's immediate peer: the rightmost `X-Forwarded-For` hop, which Edge
+    /// writes itself. It is the client only when nothing sits in front of
+    /// Edge; behind a load balancer it is the balancer.
+    pub edge_peer_address: Option<IpAddr>,
 }
 
 #[cfg(feature = "axum")]
@@ -166,18 +184,25 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     (!text.is_empty() && text.len() <= MAX_IDENTITY_VALUE_BYTES).then(|| text.to_owned())
 }
 
-fn forwarded_client(headers: &HeaderMap) -> Option<IpAddr> {
-    let last = headers
+/// The `X-Forwarded-For` hop `from_right` places left of the rightmost one,
+/// reading every field line in order as one comma-separated list. `None`
+/// when a field line is not text, the list is shorter, or the hop is not an
+/// IP address.
+fn forwarded_hop(headers: &HeaderMap, from_right: usize) -> Option<IpAddr> {
+    let lines = headers
         .get_all("x-forwarded-for")
         .iter()
-        .next_back()?
-        .to_str()
-        .ok()?
-        .rsplit(',')
-        .next()?
+        .map(|value| value.to_str().ok())
+        .collect::<Option<Vec<&str>>>()?;
+    let hop = lines
+        .iter()
+        .rev()
+        .flat_map(|line| line.rsplit(','))
+        .nth(from_right)?
         .trim();
-    last.trim_start_matches('[')
-        .trim_end_matches(']')
+    hop.strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(hop)
         .parse()
         .ok()
 }
@@ -316,7 +341,8 @@ where
                     consumer_username: header_value(headers, CONSUMER_USERNAME),
                     consumer_custom_id: header_value(headers, CONSUMER_CUSTOM_ID),
                     authenticated_identity: header_value(headers, AUTHENTICATED_IDENTITY),
-                    client_address: forwarded_client(headers),
+                    client_address: forwarded_hop(headers, policy.config.trusted_proxy_hops),
+                    edge_peer_address: forwarded_hop(headers, 0),
                 };
                 request.extensions_mut().insert(context);
             }
