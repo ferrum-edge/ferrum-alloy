@@ -72,6 +72,7 @@ struct Seen {
     context: Option<GatewayContext>,
     verification: Option<GatewayVerification>,
     username_header: Option<String>,
+    headers: http::HeaderMap,
 }
 
 async fn run(
@@ -90,6 +91,7 @@ async fn run(
                     .headers()
                     .get("x-consumer-username")
                     .map(|v| v.to_str().unwrap().to_owned()),
+                headers: req.headers().clone(),
             });
             Ok::<_, Infallible>(Response::new(Body::empty()))
         }
@@ -126,6 +128,144 @@ async fn verified_gateway_identity_is_handed_off() {
         Some(GatewayVerification::Verified {
             identity: GATEWAY.into()
         })
+    );
+}
+
+/// Forged copies of every gateway-asserted header, not just the two
+/// Consumer names (GHSA-hh7p-48xw-gwqg), in Edge's spellings.
+const FORGED: &[(&str, &str)] = &[
+    ("x-authenticated-identity", "admin@example.com"),
+    ("x-consumer-role", "admin"),
+    ("X_Consumer_Username", "mallory"),
+    ("x-geo-country", "US"),
+    (
+        "x-ferrum-peer-spiffe-id",
+        "spiffe://ferrum.test/ns/pay/sa/payments",
+    ),
+    (
+        "x-ferrum-source-principal",
+        "spiffe://ferrum.test/ns/pay/sa/payments",
+    ),
+    ("x-ferrum-hops", "1"),
+    ("x-api-version", "2"),
+];
+
+fn assertion_names(headers: &http::HeaderMap) -> Vec<String> {
+    headers
+        .keys()
+        .filter(|name| ferrum_alloy_edge::contract::is_gateway_assertion_header(name.as_str()))
+        .map(|name| name.as_str().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn every_forged_gateway_assertion_is_removed_without_a_verified_gateway() {
+    for (label, mode, accept, peer) in [
+        ("standalone", DeploymentMode::Standalone, false, untrusted()),
+        (
+            "preferred",
+            DeploymentMode::GatewayPreferred,
+            true,
+            untrusted(),
+        ),
+        (
+            "network",
+            DeploymentMode::GatewayPreferred,
+            true,
+            network_trusted(),
+        ),
+        ("exempt", DeploymentMode::GatewayRequired, true, untrusted()),
+        (
+            "handoff off",
+            DeploymentMode::GatewayPreferred,
+            false,
+            verified(),
+        ),
+    ] {
+        let policy = policy(mode, accept);
+        let stats = policy.stats();
+        let (status, seen, _) = run(policy, request("/readyz", peer, FORGED)).await;
+        assert_eq!(status, 200, "{label}");
+        let seen = seen.unwrap();
+        assert!(seen.context.is_none(), "{label}");
+        assert_eq!(
+            assertion_names(&seen.headers),
+            Vec::<String>::new(),
+            "{label}"
+        );
+        assert_eq!(
+            seen.headers.get("x-api-version").unwrap(),
+            "2",
+            "{label}: ordinary headers stay"
+        );
+        assert_eq!(
+            stats.stripped_unverified_identity.load(Ordering::Relaxed),
+            1,
+            "{label}"
+        );
+    }
+}
+
+/// Driven by the pinned vocabulary, so a header it adds is covered here
+/// as soon as `contract::GATEWAY_ASSERTION_HEADERS` lists it.
+#[tokio::test]
+async fn every_pinned_gateway_assertion_header_is_removed_from_direct_callers() {
+    let vocabulary: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/ferrum-contracts/vocabularies/gateway-headers.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let names: Vec<String> = vocabulary["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "gateway_assertion")
+        .map(|entry| {
+            let name = entry["name"].as_str().unwrap().to_ascii_lowercase();
+            if entry["match"] == "prefix" {
+                format!("{name}groups")
+            } else {
+                name
+            }
+        })
+        .collect();
+    assert!(names.len() >= 10, "{names:?}");
+    let forged: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "forged")).collect();
+    let (_, seen, _) = run(
+        policy(DeploymentMode::GatewayPreferred, true),
+        request("/x", untrusted(), &forged),
+    )
+    .await;
+    let seen = seen.unwrap();
+    for name in &names {
+        assert!(
+            !seen.headers.contains_key(name.as_str()),
+            "{name} reached the handler"
+        );
+    }
+}
+
+#[tokio::test]
+async fn verified_gateway_hands_off_the_external_authenticated_identity() {
+    let (_, seen, _) = run(
+        policy(DeploymentMode::GatewayPreferred, true),
+        request("/x", verified(), FORGED),
+    )
+    .await;
+    let seen = seen.unwrap();
+    let context = seen.context.unwrap();
+    assert_eq!(
+        context.authenticated_identity.as_deref(),
+        Some("admin@example.com")
+    );
+    assert_eq!(context.consumer_username, None);
+    assert_eq!(
+        seen.headers.get("x-geo-country").unwrap(),
+        "US",
+        "a verified gateway's assertions reach the handler"
     );
 }
 

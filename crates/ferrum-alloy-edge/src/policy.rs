@@ -5,12 +5,17 @@
 //! * *Transport trust* (is the direct peer the gateway?) comes only from the
 //!   shared [`TrustClassifier`](ferrum_alloy_telemetry::peer::TrustClassifier): a verified mTLS identity or a configured
 //!   network boundary.
-//! * *Gateway-asserted identity* (`X-Consumer-Username`) is accepted only
-//!   from a verified mTLS identity, never from network trust, and only when
-//!   enabled. It is authentication performed by Edge; authorization remains
-//!   the application's decision.
-//! * Unverified copies of gateway-asserted headers are removed so handlers
-//!   cannot trust a forged value by accident.
+//! * *Gateway-asserted identity* (`X-Consumer-Username`,
+//!   `X-Authenticated-Identity`) is accepted only from a verified mTLS
+//!   identity, never from network trust, and only when enabled. It is
+//!   authentication performed by Edge; authorization remains the
+//!   application's decision.
+//! * Every gateway-asserted request header of the pinned Edge vocabulary
+//!   ([`is_gateway_assertion_header`]: the whole `x-consumer-*` namespace,
+//!   `X-Authenticated-Identity`, `X-Geo-Country`, `X-Ferrum-Hops`, and the
+//!   mesh principal headers, in any letter case and with `_` for `-`) is
+//!   removed unless the peer is a verified gateway identity and identity
+//!   handoff is enabled, so handlers cannot trust a forged value by accident.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -24,7 +29,8 @@ use tower_layer::Layer;
 use tower_service::Service;
 
 use crate::contract::{
-    CONSUMER_CUSTOM_ID, CONSUMER_USERNAME, IDENTITY_HEADERS, MAX_IDENTITY_VALUE_BYTES,
+    AUTHENTICATED_IDENTITY, CONSUMER_CUSTOM_ID, CONSUMER_USERNAME, MAX_IDENTITY_VALUE_BYTES,
+    is_gateway_assertion_header,
 };
 
 /// How the service relates to Ferrum Edge.
@@ -47,7 +53,9 @@ pub enum DeploymentMode {
 pub struct EdgePolicyConfig {
     /// Deployment mode.
     pub mode: DeploymentMode,
-    /// Accept consumer identity headers from a verified gateway identity.
+    /// Accept Edge's gateway-asserted headers (consumer and external
+    /// identity, geo country, mesh principals) from a verified gateway
+    /// identity. Off, or from any other peer, they are removed.
     pub accept_consumer_identity: bool,
 }
 
@@ -58,7 +66,7 @@ pub struct EdgeStats {
     pub verified_gateway_requests: AtomicU64,
     /// Requests rejected by `gateway_required`.
     pub rejected_without_gateway: AtomicU64,
-    /// Requests from which unverified identity headers were removed.
+    /// Requests from which unverified gateway-asserted headers were removed.
     pub stripped_unverified_identity: AtomicU64,
 }
 
@@ -117,13 +125,20 @@ pub enum GatewayVerification {
 /// Metadata asserted by a verified gateway. Present only when the peer's
 /// identity was verified and identity handoff is enabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GatewayContext {
     /// Verified gateway identity.
     pub gateway_identity: String,
-    /// `X-Consumer-Username`, when Edge authenticated the caller.
+    /// `X-Consumer-Username`, when Edge authenticated the caller as a
+    /// mapped Consumer.
     pub consumer_username: Option<String>,
     /// `X-Consumer-Custom-Id`, when the consumer has one.
     pub consumer_custom_id: Option<String>,
+    /// `X-Authenticated-Identity` (Edge v0.9.15 and later): the identity an
+    /// external auth flow such as `jwks_auth`/OIDC authenticated when it
+    /// mapped no Consumer. Edge sends it instead of `X-Consumer-Username`,
+    /// never with it.
+    pub authenticated_identity: Option<String>,
     /// The client address Edge observed (rightmost `X-Forwarded-For` hop,
     /// which Edge writes itself).
     pub client_address: Option<IpAddr>,
@@ -285,9 +300,10 @@ where
             return Box::pin(async move { Ok(response) });
         }
 
-        let identity_present = IDENTITY_HEADERS
-            .iter()
-            .any(|name| request.headers().contains_key(*name));
+        let assertion_present = request
+            .headers()
+            .keys()
+            .any(|name| is_gateway_assertion_header(name.as_str()));
         match (&verification, policy.config.accept_consumer_identity) {
             (GatewayVerification::Verified { identity }, true) => {
                 policy
@@ -299,6 +315,7 @@ where
                     gateway_identity: identity.clone(),
                     consumer_username: header_value(headers, CONSUMER_USERNAME),
                     consumer_custom_id: header_value(headers, CONSUMER_CUSTOM_ID),
+                    authenticated_identity: header_value(headers, AUTHENTICATED_IDENTITY),
                     client_address: forwarded_client(headers),
                 };
                 request.extensions_mut().insert(context);
@@ -308,9 +325,9 @@ where
                     .stats
                     .verified_gateway_requests
                     .fetch_add(1, Ordering::Relaxed);
-                strip(&mut request, identity_present, &policy.stats);
+                strip(&mut request, assertion_present, &policy.stats);
             }
-            _ => strip(&mut request, identity_present, &policy.stats),
+            _ => strip(&mut request, assertion_present, &policy.stats),
         }
         request.extensions_mut().insert(verification);
         Box::pin(self.inner.call(request))
@@ -321,11 +338,17 @@ fn strip<B>(request: &mut Request<B>, present: bool, stats: &EdgeStats) {
     if !present {
         return;
     }
-    for name in IDENTITY_HEADERS {
-        request.headers_mut().remove(*name);
+    let forged: Vec<_> = request
+        .headers()
+        .keys()
+        .filter(|name| is_gateway_assertion_header(name.as_str()))
+        .cloned()
+        .collect();
+    for name in forged {
+        request.headers_mut().remove(name);
     }
     stats
         .stripped_unverified_identity
         .fetch_add(1, Ordering::Relaxed);
-    tracing::debug!(target: "ferrum_alloy::edge", "removed gateway identity headers from a request without a verified gateway identity");
+    tracing::debug!(target: "ferrum_alloy::edge", "removed gateway-asserted headers from a request without a verified gateway identity");
 }

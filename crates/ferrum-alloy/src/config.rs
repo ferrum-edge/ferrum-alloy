@@ -636,8 +636,11 @@ pub enum EdgeMode {
 pub struct EdgeSettings {
     /// Deployment mode.
     pub mode: EdgeMode,
-    /// Accept `X-Consumer-Username` / `X-Consumer-Custom-Id` from a verified
-    /// gateway identity (mTLS). Never accepted from network-boundary trust.
+    /// Accept Edge's gateway-asserted headers (`X-Consumer-Username`,
+    /// `X-Consumer-Custom-Id`, `X-Authenticated-Identity`, and the rest of
+    /// the pinned vocabulary's assertions) from a verified gateway identity
+    /// (mTLS). Never accepted from network-boundary trust; otherwise they
+    /// are removed.
     pub accept_consumer_identity: bool,
 }
 

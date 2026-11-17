@@ -461,6 +461,89 @@ fn released_gateway_diagnostic_headers_match_the_pinned_vocabulary() {
     );
 }
 
+/// Every request header the pinned vocabulary marks `gateway_assertion`
+/// (whatever its direction, so ext-authz recipient headers too) is one the
+/// Edge policy strips from unverified peers, and nothing else is: a
+/// re-vendored vocabulary that adds, drops, or renames one fails here until
+/// `contract::GATEWAY_ASSERTION_HEADERS` (or its prefixes) is updated.
+#[test]
+fn gateway_assertion_headers_match_the_pinned_vocabulary() {
+    use ferrum_alloy_edge::contract::{
+        GATEWAY_ASSERTION_HEADER_PREFIXES, GATEWAY_ASSERTION_HEADERS, is_gateway_assertion_header,
+    };
+    let headers = pinned_json("vocabularies/gateway-headers.json");
+    let assertions: Vec<&serde_json::Value> = headers["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["role"] == "gateway_assertion")
+        .collect();
+    let names = |kind: &str| -> BTreeSet<String> {
+        assertions
+            .iter()
+            .filter(|entry| entry["match"] == kind)
+            .map(|entry| entry["name"].as_str().unwrap().to_ascii_lowercase())
+            .collect()
+    };
+    let canonical_exact = names("exact");
+    let canonical_prefixes = names("prefix");
+    assert_eq!(
+        canonical_exact.len() + canonical_prefixes.len(),
+        assertions.len(),
+        "every gateway_assertion entry is an exact name or a prefix"
+    );
+    let local_exact: BTreeSet<String> = GATEWAY_ASSERTION_HEADERS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let local_prefixes: BTreeSet<String> = GATEWAY_ASSERTION_HEADER_PREFIXES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let (missing, extra) = differences(&canonical_exact, &local_exact);
+    assert!(
+        missing.is_empty(),
+        "gateway_assertion headers Alloy does not strip: {missing:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "stripped headers the pin does not assert: {extra:?}"
+    );
+    let (missing, extra) = differences(&canonical_prefixes, &local_prefixes);
+    assert!(
+        missing.is_empty(),
+        "gateway_assertion prefixes Alloy does not strip: {missing:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "stripped prefixes the pin does not assert: {extra:?}"
+    );
+    // Matched as Edge matches them: any letter case, `_` read as `-`.
+    for entry in &assertions {
+        let name = entry["name"].as_str().unwrap();
+        let name = if entry["match"] == "prefix" {
+            format!("{name}role")
+        } else {
+            name.to_owned()
+        };
+        for spelling in [
+            name.clone(),
+            name.to_ascii_uppercase(),
+            name.replace('-', "_"),
+        ] {
+            assert!(is_gateway_assertion_header(&spelling), "{spelling}");
+        }
+    }
+    for name in [
+        "x-request-id",
+        "x-consumer",
+        "x-geo-country-code",
+        "x-ferrum-diagnostic-ref",
+    ] {
+        assert!(!is_gateway_assertion_header(name), "{name}");
+    }
+}
+
 #[test]
 fn external_authenticated_identity_is_not_a_consumer_identity_header() {
     let headers = pinned_json("vocabularies/gateway-headers.json");
