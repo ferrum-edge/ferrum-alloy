@@ -618,6 +618,71 @@ jobs:
               "$EDGE_IMAGE" \
               validate -m file -c "/config/$fixture.edge.yaml"
           done
+      - name: Edge (${{ matrix.edge.release }}) strips a caller's trace context through the minimal fixture
+        # Runtime proof for #307 (dsf F1): minimal.edge.yaml has no
+        # gateway.otel_endpoint, so its otel_tracing plugin is
+        # propagation-only. Edge serves the fixture in file mode in front of
+        # a header-echo backend on 127.0.0.1:8080 (the fixture's upstream);
+        # a client traceparent with the sampled flag and a tracestate must
+        # not reach the backend. x-request-id from the correlation_id plugin
+        # proves the request went through Edge's plugin chain.
+        env:
+          EDGE_IMAGE: ${{ matrix.edge.image }}
+          EDGE_RELEASE: ${{ matrix.edge.release }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/r4-echo-backend.py" <<'PY'
+          import http.server
+          import json
+
+
+          class Echo(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
+                  self.send_response(200)
+                  self.send_header("content-type", "application/json")
+                  self.send_header("content-length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def log_message(self, *args):
+                  pass
+
+
+          http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Echo).serve_forever()
+          PY
+          python3 "$RUNNER_TEMP/r4-echo-backend.py" &
+          echo_pid=$!
+          trap 'code=$?; if [ "$code" -ne 0 ]; then docker logs edge-trace || true; fi; docker rm -f edge-trace > /dev/null 2>&1 || true; kill "$echo_pid" 2> /dev/null || true' EXIT
+          docker run -d --name edge-trace --network host \
+            -e FERRUM_MODE=file \
+            -e FERRUM_FILE_CONFIG_PATH=/config/minimal.edge.yaml \
+            -e FERRUM_NAMESPACE=retail \
+            -e FERRUM_ADMIN_HTTP_PORT=0 \
+            -v "$PWD/contracts/fixtures/manifests:/config:ro" \
+            "$EDGE_IMAGE" run -m file
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8000/starter/ready; then
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' edge-trace)" != true ]; then
+              echo "::error::Edge exited before serving the minimal fixture"
+              exit 1
+            fi
+            sleep 1
+          done
+          seen=$(curl -fsS http://127.0.0.1:8000/starter/items \
+            -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
+            -H 'tracestate: attacker=chosen')
+          echo "backend received: $seen"
+          if ! jq -e 'has("x-request-id")' <<< "$seen" > /dev/null; then
+            echo "::error::the request did not pass Edge's plugin chain"
+            exit 1
+          fi
+          if jq -e 'has("traceparent") or has("tracestate")' <<< "$seen" > /dev/null; then
+            echo "::error::Edge $EDGE_RELEASE relayed the caller's trace context to the backend"
+            exit 1
+          fi
       - name: POST /api-specs (${{ matrix.edge.release }}) accepts the exported agent-tool document
         # contracts/fixtures/openapi/orders-api.openapi.json is what
         # `ferrum-alloy openapi export` writes for orders-api.toml's [agents]
