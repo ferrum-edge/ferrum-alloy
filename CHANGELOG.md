@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+- **Security (GHSA-hh7p-48xw-gwqg), breaking:** the Edge policy removes
+  every gateway-asserted request header in the pinned `gateway-headers`
+  vocabulary, not just `x-consumer-username` and `x-consumer-custom-id`: the
+  whole `x-consumer-*` namespace, `X-Authenticated-Identity`,
+  `X-Geo-Country`, `X-Ferrum-Hops`, `x-ferrum-peer-spiffe-id`, and the mesh
+  ext-authz principals, in any letter case and with `_` read as `-`.
+  Before, a direct caller of a `standalone` or `gateway_preferred` service
+  (or of an exempt path under `gateway_required`) could hand handlers a
+  forged `X-Authenticated-Identity` or `X-Consumer-Role`. They are kept
+  only from a verified gateway identity with `edge.accept_consumer_identity
+  = true`; a service that read `X-Geo-Country` from a verified gateway with
+  handoff off must turn handoff on. `GatewayContext` gains
+  `authenticated_identity` (Edge's external-auth identity when no Consumer
+  is mapped) and is now `#[non_exhaustive]`. A pairing test fails when a
+  re-vendored vocabulary adds an assertion header Alloy does not strip.
+- **Security, breaking (#307):** `ferrum-alloy edge export` attaches Edge's
+  `otel_tracing` plugin with `trace_context_trust: untrusted` to every
+  proxy, not only when `gateway.otel_endpoint` is set. Only that plugin
+  stops Edge from relaying a caller's `traceparent`/`tracestate`, which a
+  service trusting Edge accepted as a trusted parent (so callers could
+  force sampling and pick trace ids). Without an endpoint the plugin runs
+  propagation-only with `generate_trace_id: false`: it exports nothing and
+  the service receives no trace context. The `-otel-tracing` resource id
+  is now always generated, so `gateway.proxy_id` is limited to 241
+  characters (239 with `correlation_id`); export of a longer id fails
+  validation. CI validates a new `minimal.edge.yaml` fixture on both
+  supported Edge releases.
+- **Breaking (#308):** `GatewayContext.client_address` is the client Edge
+  resolved, selected by the new `edge.trusted_proxy_hops` (how many
+  proxies Edge trusts in front of itself, default `0`), instead of always
+  the last `X-Forwarded-For` hop, which behind a load balancer was the
+  balancer for every request. The new `GatewayContext.edge_peer_address`
+  keeps the last hop. With Edge behind one load balancer, set
+  `edge.trusted_proxy_hops = 1`; with no proxy in front, nothing changes.
+- **Breaking (#306):** `ferrum-alloy openapi export --manifest` makes
+  operation paths relative to `api.public_path` when
+  `strip_public_path = false` too, removing
+  `{service_base_path}{public_path}` (Edge forwards the whole public path
+  then), so `/internal/public/items` exports as `/items` instead of a key
+  that Edge and clients resolved to `/public/internal/public/items`. A path
+  outside the forwarded prefix, in either mode (such as `/items` beside a
+  `/internal/` base path), can never be reached through Edge and now fails
+  the export with exit 3 instead of being written unchanged. To upgrade,
+  remove such paths from the document or fix the manifest.
+- **Breaking (#309):** service manifest validation enforces Ferrum Edge's
+  upper bounds, so `edge export` no longer writes configuration Edge
+  refuses to load: `timeouts.*` and `health.timeout_ms` at most 86400000,
+  `health.interval_seconds` at most 3600, `api.public_path` at most 500
+  bytes, `api.service_base_path` and `health.path` at most 2048 bytes, and
+  `upstream.host` at most 255 bytes without control or whitespace
+  characters. The limits are `manifest::EDGE_MAX_*`.
+- **Breaking (#312):** `openapi export` refuses `x-ferrum-mcp` values Edge
+  refuses or shadows: `limits` above Edge's ceilings (16 MiB for the body
+  and structured-content limits, 64 KiB for `max_error_excerpt_bytes`),
+  `forward_request_headers` with more than 32 names, an invalid header
+  name, or a name Edge's bridge reserves (hop-by-hop, `Host`,
+  `Authorization`, `Cookie`, `mcp-*`, `x-forwarded-*`, `x-ferrum-*`,
+  `x-consumer-*`, and others), and operation paths that are ASCII case
+  variants of the MCP endpoint's subtree (`/MCP/status` under `/mcp`).
+
 - **Breaking:** manifest paths (`api.public_path`, `api.service_base_path`,
   `health.path` and `agents.endpoint_path`) refuse `~` and `*` again, as
   the shared `service-manifest` v1 schema always has
