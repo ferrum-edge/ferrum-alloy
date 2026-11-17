@@ -27,6 +27,21 @@ pub const MANIFEST_MAJOR: u32 = 1;
 /// Maximum resource ID length accepted by the supported Ferrum Edge releases,
 /// in bytes.
 pub const EDGE_RESOURCE_ID_MAX_LENGTH: usize = 254;
+/// Largest backend timeout and health-probe timeout the supported Ferrum
+/// Edge releases accept, in milliseconds (`src/config/types.rs`
+/// `MAX_TIMEOUT_MS`, 24 hours).
+pub const EDGE_MAX_TIMEOUT_MS: u64 = 86_400_000;
+/// Largest active health-check interval Edge accepts, in seconds
+/// (`MAX_HEALTH_CHECK_INTERVAL`).
+pub const EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS: u64 = 3_600;
+/// Longest `listen_path` Edge accepts, in bytes (`MAX_LISTEN_PATH_LENGTH`).
+pub const EDGE_MAX_LISTEN_PATH_LENGTH: usize = 500;
+/// Longest `backend_path` and `active.http_path` Edge accepts, in bytes
+/// (`MAX_BACKEND_PATH_LENGTH`).
+pub const EDGE_MAX_BACKEND_PATH_LENGTH: usize = 2_048;
+/// Longest `backend_host` and `targets[].host` Edge accepts, in bytes
+/// (`MAX_BACKEND_HOST_LENGTH`).
+pub const EDGE_MAX_BACKEND_HOST_LENGTH: usize = 255;
 
 /// A service manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -316,7 +331,11 @@ impl ServiceManifest {
             .unwrap_or(&self.service.name)
     }
 
-    /// Validates every field that feeds generated gateway configuration.
+    /// Validates every field that feeds generated gateway configuration,
+    /// against both bounds of the supported Ferrum Edge releases' own
+    /// validation (`Proxy`, `Upstream`, and active health-check rules in
+    /// `src/config/types.rs`), so an accepted manifest exports configuration
+    /// Edge loads.
     pub fn validate(&self) -> Result<(), ManifestError> {
         let mut errors = Vec::new();
         if self.schema != MANIFEST_SCHEMA {
@@ -379,15 +398,31 @@ impl ServiceManifest {
         if !valid_path(&self.api.public_path) {
             errors.push("api.public_path must be a literal absolute path".into());
         }
+        if self.api.public_path.len() > EDGE_MAX_LISTEN_PATH_LENGTH {
+            errors.push(format!(
+                "api.public_path must not exceed {EDGE_MAX_LISTEN_PATH_LENGTH} bytes (Ferrum Edge's listen_path limit)"
+            ));
+        }
         if !valid_path(&self.api.service_base_path) || !self.api.service_base_path.ends_with('/') {
             errors
                 .push("api.service_base_path must be a literal absolute path ending in '/'".into());
         }
-        if self.upstream.host.is_empty()
-            || self.upstream.host.contains("://")
-            || self.upstream.host.contains(['/', ' ', '@'])
-        {
+        if self.api.service_base_path.len() > EDGE_MAX_BACKEND_PATH_LENGTH {
+            errors.push(format!(
+                "api.service_base_path must not exceed {EDGE_MAX_BACKEND_PATH_LENGTH} bytes (Ferrum Edge's backend_path limit)"
+            ));
+        }
+        let host = &self.upstream.host;
+        if host.is_empty() || host.contains("://") || host.contains(['/', ' ', '@']) {
             errors.push("upstream.host must be a bare host name or address".into());
+        }
+        if host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            errors.push("upstream.host must not contain control or whitespace characters".into());
+        }
+        if host.len() > EDGE_MAX_BACKEND_HOST_LENGTH {
+            errors.push(format!(
+                "upstream.host must not exceed {EDGE_MAX_BACKEND_HOST_LENGTH} bytes (Ferrum Edge's backend host limit)"
+            ));
         }
         if self.upstream.port == 0 {
             errors.push("upstream.port must be greater than zero".into());
@@ -412,12 +447,38 @@ impl ServiceManifest {
             if !valid_path(&health.path) {
                 errors.push("health.path must be a literal absolute path".into());
             }
+            if health.path.len() > EDGE_MAX_BACKEND_PATH_LENGTH {
+                errors.push(format!(
+                    "health.path must not exceed {EDGE_MAX_BACKEND_PATH_LENGTH} bytes (Ferrum Edge's active.http_path limit)"
+                ));
+            }
             if health.interval_seconds == 0 || health.timeout_ms == 0 {
                 errors.push("health interval and timeout must be greater than zero".into());
+            }
+            if health.interval_seconds > EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS {
+                errors.push(format!(
+                    "health.interval_seconds must not exceed {EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS} (Ferrum Edge's limit)"
+                ));
+            }
+            if health.timeout_ms > EDGE_MAX_TIMEOUT_MS {
+                errors.push(format!(
+                    "health.timeout_ms must not exceed {EDGE_MAX_TIMEOUT_MS} (Ferrum Edge's limit)"
+                ));
             }
         }
         if self.timeouts.connect_ms == 0 || self.timeouts.write_ms == 0 {
             errors.push("timeouts.connect_ms and write_ms must be greater than zero".into());
+        }
+        for (field, value) in [
+            ("connect_ms", self.timeouts.connect_ms),
+            ("read_ms", self.timeouts.read_ms),
+            ("write_ms", self.timeouts.write_ms),
+        ] {
+            if value > EDGE_MAX_TIMEOUT_MS {
+                errors.push(format!(
+                    "timeouts.{field} must not exceed {EDGE_MAX_TIMEOUT_MS} (Ferrum Edge's limit)"
+                ));
+            }
         }
         if let Some(endpoint) = &self.gateway.otel_endpoint {
             let authority = endpoint

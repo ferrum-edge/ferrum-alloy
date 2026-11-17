@@ -634,3 +634,106 @@ fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
         assert!(error.contains("loopback IP literal"), "{refused}: {error}");
     }
 }
+
+/// Edge's upper bounds and control-character rules (#309): every field at
+/// its limit is accepted and exports exactly that value; one past it is
+/// refused with a message naming the field, instead of export writing
+/// configuration Edge refuses to load.
+#[test]
+fn manifests_are_held_to_edges_upper_bounds() {
+    use ferrum_alloy_edge::manifest::{
+        EDGE_MAX_BACKEND_HOST_LENGTH, EDGE_MAX_BACKEND_PATH_LENGTH,
+        EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS, EDGE_MAX_LISTEN_PATH_LENGTH, EDGE_MAX_TIMEOUT_MS,
+    };
+    assert_eq!(EDGE_MAX_TIMEOUT_MS, 86_400_000);
+    assert_eq!(EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS, 3_600);
+    assert_eq!(EDGE_MAX_LISTEN_PATH_LENGTH, 500);
+    assert_eq!(EDGE_MAX_BACKEND_PATH_LENGTH, 2_048);
+    assert_eq!(EDGE_MAX_BACKEND_HOST_LENGTH, 255);
+    let path_of = |len: usize| format!("/{}", "p".repeat(len - 1));
+
+    let mut at_limit = manifest();
+    at_limit.timeouts.connect_ms = EDGE_MAX_TIMEOUT_MS;
+    at_limit.timeouts.read_ms = EDGE_MAX_TIMEOUT_MS;
+    at_limit.timeouts.write_ms = EDGE_MAX_TIMEOUT_MS;
+    let health = at_limit.health.as_mut().unwrap();
+    health.interval_seconds = EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS;
+    health.timeout_ms = EDGE_MAX_TIMEOUT_MS;
+    health.path = path_of(EDGE_MAX_BACKEND_PATH_LENGTH);
+    at_limit.api.public_path = path_of(EDGE_MAX_LISTEN_PATH_LENGTH);
+    at_limit.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH - 1));
+    at_limit.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH);
+    at_limit.validate().unwrap();
+    let exported = resources(&at_limit).unwrap();
+    assert_eq!(
+        exported.proxy["backend_read_timeout_ms"],
+        EDGE_MAX_TIMEOUT_MS
+    );
+    assert_eq!(
+        exported.proxy["listen_path"].as_str().unwrap().len(),
+        EDGE_MAX_LISTEN_PATH_LENGTH
+    );
+    let upstream = exported.upstream.unwrap();
+    assert_eq!(
+        upstream["health_checks"]["active"]["interval_seconds"],
+        EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS
+    );
+    assert_eq!(
+        upstream["targets"][0]["host"].as_str().unwrap().len(),
+        EDGE_MAX_BACKEND_HOST_LENGTH
+    );
+
+    let refused = |change: &dyn Fn(&mut ServiceManifest), field: &str| {
+        let mut manifest = manifest();
+        change(&mut manifest);
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(field), "{field}: {error}");
+    };
+    refused(
+        &|m| m.timeouts.read_ms = 100_000_000,
+        "timeouts.read_ms must not exceed",
+    );
+    refused(
+        &|m| m.timeouts.connect_ms = EDGE_MAX_TIMEOUT_MS + 1,
+        "timeouts.connect_ms must not exceed",
+    );
+    refused(
+        &|m| m.timeouts.write_ms = EDGE_MAX_TIMEOUT_MS + 1,
+        "timeouts.write_ms must not exceed",
+    );
+    refused(
+        &|m| m.health.as_mut().unwrap().interval_seconds = 7_200,
+        "health.interval_seconds must not exceed",
+    );
+    refused(
+        &|m| m.health.as_mut().unwrap().timeout_ms = EDGE_MAX_TIMEOUT_MS + 1,
+        "health.timeout_ms must not exceed",
+    );
+    refused(
+        &|m| m.health.as_mut().unwrap().path = path_of(EDGE_MAX_BACKEND_PATH_LENGTH + 1),
+        "health.path must not exceed",
+    );
+    refused(
+        &|m| m.api.public_path = path_of(600),
+        "api.public_path must not exceed 500 bytes",
+    );
+    refused(
+        &|m| m.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH)),
+        "api.service_base_path must not exceed",
+    );
+    refused(
+        &|m| m.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH + 1),
+        "upstream.host must not exceed 255 bytes",
+    );
+    for host in [
+        "orders\ninternal",
+        "orders\tinternal",
+        "orders\u{7f}",
+        "orders\u{85}x",
+    ] {
+        refused(
+            &|m| m.upstream.host = host.to_owned(),
+            "upstream.host must not contain control or whitespace characters",
+        );
+    }
+}
