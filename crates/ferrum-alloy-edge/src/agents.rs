@@ -467,7 +467,7 @@ fn fill_item_annotations(item: &mut Map<String, Value>) {
 ///
 /// With `public_path` (the manifest's `api.public_path`, which a publisher
 /// uses as the proxy's `listen_path`), the MCP endpoint must sit under it and
-/// must not overlap a selected operation's path.
+/// must not overlap any operation's path, whether or not it is a tool.
 ///
 /// An operation reached through several paths (Path Item `$ref` aliases) is
 /// parsed and checked once, and its problems name the first such path; only
@@ -510,6 +510,10 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     let mut tools: HashMap<*const Map<String, Value>, Option<Option<String>>> = HashMap::new();
     for &(path, method, operation) in &found {
         let location = location(path, method);
+        // Every operation, published as a tool or not: Edge's generated
+        // `mcp_gateway` answers every request inside its endpoint scope, so
+        // a hidden REST route there stops reaching the service too (sol F3).
+        public_paths.push((path, location.clone()));
         let key = std::ptr::from_ref(operation);
         let tool = match tools.get(&key) {
             Some(tool) => tool.clone(),
@@ -540,7 +544,6 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
                 "{location} and {other} both produce the tool name {name:?}; set `{X_FERRUM_MCP}.name` on one of them"
             ));
         }
-        public_paths.push((path, location));
     }
     if selected == 0 {
         problems.push_summary(format!(
@@ -1311,8 +1314,8 @@ fn operation_extension<'a>(
 }
 
 /// The MCP endpoint must sit under the public path (Edge: under the literal
-/// `listen_path`) and must not overlap a selected operation, because it
-/// reserves its whole subtree. Operation paths are those a client sees: the
+/// `listen_path`) and must not overlap any operation, selected as a tool or
+/// not, because it reserves its whole subtree for every request. Operation paths are those a client sees: the
 /// public path followed by the Paths key. Edge's `mcp_gateway` matches its
 /// endpoint ASCII case-insensitively, including percent-encoded suffixes, so
 /// `/MCP/status` under an endpoint `/mcp` is shadowed too.
@@ -1355,7 +1358,7 @@ fn endpoint_problems(
             });
         if inside {
             problems.push(format!(
-                "{location} is served at \"{}{}\", inside the MCP endpoint {shown_endpoint:?}; move the endpoint ([agents] endpoint_path)",
+                "{location} is served at \"{}{}\", inside the MCP endpoint {shown_endpoint:?}, which answers every request in its subtree whether or not the operation is a tool; move the endpoint ([agents] endpoint_path)",
                 excerpt_text(prefix),
                 excerpt_text(suffix)
             ));

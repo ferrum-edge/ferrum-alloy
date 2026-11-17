@@ -1028,3 +1028,45 @@ fn the_endpoint_overlap_ignores_ascii_case_like_edge() {
     document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/SHOP" } });
     assert_problem(&lint(&document, Some("/shop")), "inside the MCP endpoint");
 }
+
+/// Edge's `mcp_gateway` answers every request inside its endpoint scope,
+/// so the overlap check covers operations hidden from agents too: a REST
+/// route there would stop reaching the service (sol F3).
+#[test]
+fn the_endpoint_must_not_shadow_operations_hidden_from_agents() {
+    for (label, extension, hidden) in [
+        (
+            "expose false",
+            json!({ "include": { "operations": ["list_orders"] } }),
+            json!({ "expose": false }),
+        ),
+        (
+            "left out of include",
+            json!({ "include": { "operations": ["list_orders"] } }),
+            Value::Null,
+        ),
+    ] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = extension;
+        document["paths"]["/MCP/status"] = json!({ "get": operation("status", hidden) });
+        let problems = lint(&document, Some("/shop"));
+        assert_problem(
+            &problems,
+            "paths./MCP/status.get is served at \"/shop/MCP/status\", inside the MCP endpoint",
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("paths./orders.get is served")),
+            "{label}: {problems:?}"
+        );
+    }
+    // A mutating route in the scope counts too, tool or not.
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!({ "include": { "operations": ["list_orders"] } });
+    document["paths"]["/mcp"] = json!({ "delete": operation("purge", Value::Null) });
+    assert_problem(
+        &lint(&document, Some("/shop")),
+        "paths./mcp.delete is served at \"/shop/mcp\", inside the MCP endpoint",
+    );
+}
