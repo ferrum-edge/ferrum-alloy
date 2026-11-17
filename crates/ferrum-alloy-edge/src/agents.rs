@@ -1350,7 +1350,7 @@ fn endpoint_problems<'a>(
             "`{X_FERRUM_MCP}.endpoint.path` {shown_endpoint:?} is not under api.public_path {shown_public_path:?}"
         ));
     }
-    let scope = endpoint.trim_end_matches('/');
+    let claim = ScopeClaim::new(endpoint.trim_end_matches('/'), prefix);
     let document = resolver.document;
     let mut root_bases = vec![SERVER_BASE_ROOT.to_owned()];
     for base in server_bases(document.get("servers")).unwrap_or_default() {
@@ -1376,16 +1376,20 @@ fn endpoint_problems<'a>(
         };
         for base in &bases {
             let spec_path = join_server_base_and_path(base, path);
-            let public = if !prefix.is_empty() && spec_path == "/" {
-                prefix.to_owned()
+            // Edge composes the key `/` as the listen path alone.
+            let rest = if !prefix.is_empty() && spec_path == "/" {
+                ""
             } else {
-                format!("{prefix}{spec_path}")
+                spec_path.as_str()
             };
-            if template_may_enter_endpoint_scope(scope, &public) {
-                problems.push(format!(
-                    "{location} is served at {:?}, inside the MCP endpoint {shown_endpoint:?} (a literal match or a path parameter that can spell it), which answers every request in its subtree whether or not the operation is a tool; move the endpoint ([agents] endpoint_path) to a path no operation can produce",
-                    excerpt_text(&public),
-                ));
+            if claim.may_enter(rest) {
+                problems.push_with(|| {
+                    format!(
+                        "{location} is served at \"{}{}\", inside the MCP endpoint {shown_endpoint:?} (a literal match or a path parameter that can spell it), which answers every request in its subtree whether or not the operation is a tool; move the endpoint ([agents] endpoint_path) to a path no operation can produce",
+                        excerpt_text(prefix),
+                        excerpt_text(rest),
+                    )
+                });
                 break;
             }
         }
@@ -1488,37 +1492,145 @@ fn join_server_base_and_path(base: &str, path: &str) -> String {
     }
 }
 
-/// Edge `path_template_may_enter_endpoint_scope`: whether any request path
-/// the template can produce falls inside the endpoint scope's runtime claim
-/// (the scope and its descendants or `%`-suffixes, ASCII
-/// case-insensitively). Literal runs are compared canonically when they
-/// canonicalize, and as written (with the `%`-suffix rule) otherwise.
-fn template_may_enter_endpoint_scope(scope: &str, template: &str) -> bool {
-    let canonical: Option<Vec<SegmentPattern>> = template
-        .split('/')
-        .map(|segment| {
-            let pattern = SegmentPattern::new(segment);
-            let literals = pattern
-                .literals
-                .into_iter()
-                .map(|literal| canonical_literal(&literal))
-                .collect::<Option<Vec<_>>>()?;
-            Some(SegmentPattern { literals })
-        })
-        .collect();
-    let is_canonical = canonical.is_some();
-    let segments =
-        canonical.unwrap_or_else(|| template.split('/').map(SegmentPattern::new).collect());
-    let scope_segments: Vec<&str> = scope.split('/').collect();
-    let segment_overlap = segments.len() >= scope_segments.len()
-        && scope_segments
-            .iter()
-            .zip(&segments)
-            .all(|(scope_segment, pattern)| pattern.matches(scope_segment));
-    segment_overlap
-        || (!is_canonical
-            && (template.eq_ignore_ascii_case(scope)
-                || strip_prefix_ignore_ascii_case(template, scope).is_some_and(continues_scope)))
+/// Edge `path_template_may_enter_endpoint_scope` for public paths that all
+/// share the listen prefix: whether any request path a template can produce
+/// falls inside the endpoint scope's runtime claim (the scope and its
+/// descendants or `%`-suffixes, ASCII case-insensitively). Segments are
+/// compared as patterns, literal runs canonically when every run
+/// canonicalizes and as written (with the `%`-suffix rule) otherwise. The
+/// shared prefix is compared with the scope once, so each operation costs
+/// only its own path.
+struct ScopeClaim<'a> {
+    scope: &'a str,
+    scope_segments: Vec<&'a str>,
+    prefix: &'a str,
+    /// `None` when a literal of the prefix does not canonicalize.
+    canonical_prefix: Option<PrefixMatch>,
+    raw_prefix: PrefixMatch,
+}
+
+/// How the prefix's segments relate to the scope's.
+#[derive(Clone, Copy)]
+enum PrefixMatch {
+    /// The prefix already covers every scope segment.
+    Inside,
+    /// A prefix segment cannot spell its scope segment.
+    Outside,
+    /// The first `n` scope segments match; the rest is up to the operation.
+    Continue(usize),
+}
+
+impl<'a> ScopeClaim<'a> {
+    fn new(scope: &'a str, prefix: &'a str) -> Self {
+        let scope_segments: Vec<&str> = scope.split('/').collect();
+        let canonical_prefix = prefix
+            .split('/')
+            .map(canonical_segment_pattern)
+            .collect::<Option<Vec<_>>>()
+            .map(|patterns| prefix_match(&patterns, &scope_segments));
+        let raw: Vec<SegmentPattern> = prefix.split('/').map(SegmentPattern::new).collect();
+        let raw_prefix = prefix_match(&raw, &scope_segments);
+        Self {
+            scope,
+            scope_segments,
+            prefix,
+            canonical_prefix,
+            raw_prefix,
+        }
+    }
+
+    /// Whether the public path `prefix + rest` can fall inside the claim.
+    fn may_enter(&self, rest: &str) -> bool {
+        let rest_segments: Vec<&str> = if rest.is_empty() {
+            Vec::new()
+        } else {
+            rest.split('/').skip(1).collect()
+        };
+        let canonical = self.canonical_prefix.and_then(|prefix| {
+            rest_segments
+                .iter()
+                .map(|segment| canonical_segment_pattern(segment))
+                .collect::<Option<Vec<_>>>()
+                .map(|patterns| (prefix, patterns))
+        });
+        let is_canonical = canonical.is_some();
+        let (prefix, patterns) = canonical.unwrap_or_else(|| {
+            (
+                self.raw_prefix,
+                rest_segments
+                    .iter()
+                    .map(|s| SegmentPattern::new(s))
+                    .collect(),
+            )
+        });
+        let segment_overlap = match prefix {
+            PrefixMatch::Inside => true,
+            PrefixMatch::Outside => false,
+            PrefixMatch::Continue(matched) => {
+                let remaining = &self.scope_segments[matched..];
+                patterns.len() >= remaining.len()
+                    && remaining
+                        .iter()
+                        .zip(&patterns)
+                        .all(|(scope_segment, pattern)| pattern.matches(scope_segment))
+            }
+        };
+        segment_overlap || (!is_canonical && self.reserves_as_written(rest))
+    }
+
+    /// The runtime claim on `prefix + rest` as written, without building it.
+    fn reserves_as_written(&self, rest: &str) -> bool {
+        let (scope, prefix) = (self.scope, self.prefix);
+        if scope.len() <= prefix.len() {
+            if !prefix
+                .get(..scope.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(scope))
+            {
+                return false;
+            }
+            let next = prefix
+                .as_bytes()
+                .get(scope.len())
+                .or_else(|| rest.as_bytes().first());
+            matches!(next, None | Some(b'/' | b'%'))
+        } else {
+            let Some(scope_rest) = scope
+                .get(..prefix.len())
+                .filter(|head| head.eq_ignore_ascii_case(prefix))
+                .and_then(|_| scope.get(prefix.len()..))
+            else {
+                return false;
+            };
+            rest.eq_ignore_ascii_case(scope_rest)
+                || strip_prefix_ignore_ascii_case(rest, scope_rest).is_some_and(continues_scope)
+        }
+    }
+}
+
+fn prefix_match(patterns: &[SegmentPattern], scope_segments: &[&str]) -> PrefixMatch {
+    let compared = patterns.len().min(scope_segments.len());
+    if !patterns[..compared]
+        .iter()
+        .zip(&scope_segments[..compared])
+        .all(|(pattern, segment)| pattern.matches(segment))
+    {
+        PrefixMatch::Outside
+    } else if patterns.len() >= scope_segments.len() {
+        PrefixMatch::Inside
+    } else {
+        PrefixMatch::Continue(patterns.len())
+    }
+}
+
+/// A segment pattern with every literal run canonicalized, `None` when one
+/// does not canonicalize.
+fn canonical_segment_pattern(segment: &str) -> Option<SegmentPattern> {
+    let literals = SegmentPattern::new(segment)
+        .literals
+        .into_iter()
+        .map(|literal| canonical_literal(&literal))
+        .collect::<Option<Vec<_>>>()?;
+    Some(SegmentPattern { literals })
 }
 
 /// One template segment: lower-cased literal runs separated by `{...}`
