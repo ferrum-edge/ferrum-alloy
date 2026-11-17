@@ -933,6 +933,10 @@ fn limits_are_held_to_edges_ceilings() {
 #[test]
 fn forwarded_request_headers_follow_edges_rules() {
     use ferrum_alloy_edge::agents::MAX_FORWARDED_REQUEST_HEADERS;
+    // `x-api-key` is not reserved by Edge's bridge (Edge main
+    // `RESERVED_BRIDGE_HEADER_NAMES`, `MCP_CLIENT_CREDENTIAL_HEADERS` is
+    // only authorization, cookie, proxy-authorization), so the export, which
+    // follows Edge, accepts it (dsf F2).
     let mut document = orders();
     document[X_FERRUM_MCP] = json!({
         "forward_request_headers": ["x-api-version", "X-Tenant", "accept-language", "x-api-key"]
