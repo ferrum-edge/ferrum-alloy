@@ -1074,3 +1074,70 @@ fn the_endpoint_must_not_shadow_operations_hidden_from_agents() {
         "paths./mcp.delete is served at \"/shop/mcp\", inside the MCP endpoint",
     );
 }
+
+/// Edge's admission after ferrum-edge #7410 (`path_template_may_enter_endpoint_scope`):
+/// a path parameter stands for any value, literals compare canonically, and
+/// every effective server base counts, so the export refuses what Edge
+/// refuses.
+#[test]
+fn the_endpoint_overlap_follows_edges_template_aware_admission() {
+    for (path, shadowed) in [
+        ("/{name}/status", true),
+        ("/mcp{suffix}", true),
+        ("/{section}", true),
+        ("/%6d%63p", true),
+        ("/v{n}", false),
+        ("/{name}x", false),
+        ("/status/{name}", false),
+    ] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/shop/mcp" } });
+        document["paths"][path] = json!({ "get": operation("probe", Value::Null) });
+        let found = lint(&document, Some("/shop"))
+            .iter()
+            .any(|problem| problem.contains("inside the MCP endpoint"));
+        assert_eq!(found, shadowed, "{path}");
+    }
+
+    // Path Item and operation `servers` move an operation under their base,
+    // variables taking their defaults; root `servers` count as written too.
+    for place in ["item", "operation", "root"] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/shop/mcp" } });
+        let servers = json!([
+            { "url": "/" },
+            { "url": "https://api.example.com/{area}/", "variables": { "area": { "default": "mcp" } } }
+        ]);
+        let mut item = json!({ "get": operation("status", Value::Null) });
+        match place {
+            "item" => item["servers"] = servers,
+            "operation" => item["get"]["servers"] = servers,
+            _ => document["servers"] = servers,
+        }
+        document["paths"]["/status"] = item;
+        assert_problem(
+            &lint(&document, Some("/shop")),
+            "paths./status.get is served at \"/shop/mcp/status\", inside the MCP endpoint",
+        );
+    }
+
+    // Edge refuses an embedded `mcp_gateway` whose `endpoint.path` differs
+    // from the validated `x-ferrum-mcp` endpoint.
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/shop/mcp" } });
+    document["x-ferrum-plugins"] = json!([
+        { "plugin_name": "mcp_gateway", "config": { "endpoint": { "path": "/shop/orders" } } }
+    ]);
+    assert_problem(
+        &lint(&document, Some("/shop")),
+        "embedded in `x-ferrum-plugins` sets `endpoint.path` \"/shop/orders\"",
+    );
+    document["x-ferrum-plugins"] = json!([
+        { "plugin_name": "mcp_gateway", "config": { "endpoint": { "path": "/shop/mcp", "protocol_versions": ["2025-06-18"] } } }
+    ]);
+    assert!(
+        !lint(&document, Some("/shop"))
+            .iter()
+            .any(|problem| problem.contains("x-ferrum-plugins")),
+    );
+}

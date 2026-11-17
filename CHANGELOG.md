@@ -69,10 +69,14 @@
   `forward_request_headers` with more than 32 names, an invalid header
   name, or a name Edge's bridge reserves (hop-by-hop, `Host`,
   `Authorization`, `Cookie`, `mcp-*`, `x-forwarded-*`, `x-ferrum-*`,
-  `x-consumer-*`, and others), and operation paths inside the MCP
-  endpoint's subtree, compared ASCII case-insensitively (`/MCP/status`
-  under `/mcp`) and including operations that are not tools, since Edge's
-  `mcp_gateway` answers every request there. `forward_request_headers`
+  `x-consumer-*`, and others), and operation paths that can fall inside
+  the MCP endpoint's subtree, including operations that are not tools,
+  since Edge's `mcp_gateway` answers every request there. As in Edge's
+  admission (ferrum-edge #7410), the comparison is ASCII case-insensitive
+  (`/MCP/status` under `/mcp`), canonical (`/%6d%63p`), made under every
+  effective server base, and treats a path parameter as any value
+  (`/{name}/status` under `/mcp`). An `mcp_gateway` embedded in
+  `x-ferrum-plugins` with a different `endpoint.path` is refused too. `forward_request_headers`
   may still name an application credential header such as `X-Api-Key`,
   which Edge's bridge does not reserve; listing it forwards the MCP
   caller's value.
