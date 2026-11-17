@@ -1948,7 +1948,14 @@ impl AlloyConfig {
             .edge
             .trusted_proxies
             .iter()
-            .any(|network| network.prefix_len() == 0)
+            .any(|network| match network {
+                // Edge folds `::ffff:0.0.0.0/96` to the IPv4 `/0`.
+                IpNet::V6(v6) => {
+                    v6.prefix_len() == 0
+                        || (v6.prefix_len() == 96 && v6.addr().to_ipv4_mapped().is_some())
+                }
+                IpNet::V4(v4) => v4.prefix_len() == 0,
+            })
         {
             error("edge.trusted_proxies must not trust a whole address family (/0); list Edge's FERRUM_TRUSTED_PROXIES".into());
         }

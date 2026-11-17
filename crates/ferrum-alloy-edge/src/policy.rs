@@ -185,50 +185,83 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     (!text.is_empty() && text.len() <= MAX_IDENTITY_VALUE_BYTES).then(|| text.to_owned())
 }
 
-/// Every `X-Forwarded-For` field line, in order. `None` when one is not text.
-fn forwarded_for_lines(headers: &HeaderMap) -> Option<Vec<&str>> {
+/// Every `X-Forwarded-For` entry, in wire order across field lines, as raw
+/// bytes with surrounding optional whitespace removed and empty entries
+/// skipped, the way Edge's `resolve_client_ip_field_lines` reads them: one
+/// entry that is not ASCII (obs-text) or not an address does not discard
+/// the others.
+fn forwarded_for_entries(headers: &HeaderMap) -> Vec<&[u8]> {
     headers
         .get_all("x-forwarded-for")
         .iter()
-        .map(|value| value.to_str().ok())
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(|entry| entry.trim_ascii_start().trim_ascii_end())
+        .filter(|entry| !entry.is_empty())
         .collect()
 }
 
-/// Edge's immediate peer: the rightmost `X-Forwarded-For` hop.
-fn edge_peer(lines: &[&str]) -> Option<IpAddr> {
-    let hop = lines
-        .iter()
-        .rev()
-        .flat_map(|line| line.rsplit(','))
-        .next()?
-        .trim();
-    hop.strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-        .unwrap_or(hop)
-        .parse()
-        .ok()
+/// An entry as an address, `None` when it is not one.
+fn entry_address(entry: &[u8]) -> Option<IpAddr> {
+    std::str::from_utf8(entry).ok()?.parse().ok()
+}
+
+/// Edge's immediate peer: the rightmost entry, which Edge writes itself
+/// (canonical, so an IPv4-mapped spelling reads as IPv4, as Edge reports
+/// client identities).
+fn edge_peer(entries: &[&[u8]]) -> Option<IpAddr> {
+    let hop = entries.last()?;
+    let hop = hop
+        .strip_prefix(b"[")
+        .and_then(|rest| rest.strip_suffix(b"]"))
+        .unwrap_or(hop);
+    entry_address(hop).map(|ip| ip.to_canonical())
+}
+
+/// Whether Edge's trusted-proxy set (`util::cidr::CidrSet`) contains `ip`.
+/// An IPv4-mapped IPv6 network with a prefix of at least 96 is the
+/// equivalent IPv4 network (a shorter one matches nothing); a mapped query
+/// matches an IPv4 network by its embedded address; a native IPv4 query
+/// never matches an IPv6 network.
+fn trusted_proxy(trusted: &[IpNet], ip: IpAddr) -> bool {
+    trusted.iter().any(|network| {
+        let network = match network {
+            IpNet::V6(v6) => match v6.addr().to_ipv4_mapped() {
+                Some(v4) if v6.prefix_len() >= 96 => {
+                    match ipnet::Ipv4Net::new(v4, v6.prefix_len() - 96) {
+                        Ok(v4) => IpNet::V4(v4.trunc()),
+                        Err(_) => return false,
+                    }
+                }
+                Some(_) => return false,
+                None => *network,
+            },
+            IpNet::V4(_) => *network,
+        };
+        match (network, ip) {
+            (IpNet::V4(network), IpAddr::V4(addr)) => network.contains(&addr),
+            (IpNet::V4(network), IpAddr::V6(addr)) => addr
+                .to_ipv4_mapped()
+                .is_some_and(|v4| network.contains(&v4)),
+            (IpNet::V6(network), IpAddr::V6(addr)) => network.contains(&addr),
+            (IpNet::V6(_), IpAddr::V4(_)) => false,
+        }
+    })
 }
 
 /// Edge's `resolve_client_ip_field_lines` applied to the chain Edge
-/// forwarded: empty entries are skipped, and the last entry that is not a
-/// trusted proxy decides. A valid address there is the client; a malformed
-/// one, or no untrusted entry at all, falls back to Edge's peer, which Edge
-/// would have used. Since Edge appended its peer, an untrusted peer (whose
-/// inbound chain Edge dropped) is the last untrusted entry, as in Edge.
-fn resolved_client(lines: &[&str], trusted: &[IpNet], peer: Option<IpAddr>) -> Option<IpAddr> {
+/// forwarded: the last entry that is not a trusted proxy decides. A valid
+/// address there is the client (canonical, as Edge's `canonical_ip_string`);
+/// a malformed one, or no untrusted entry at all, falls back to Edge's peer,
+/// which Edge would have used. Since Edge appended its peer, an untrusted
+/// peer (whose inbound chain Edge dropped) is the last untrusted entry, as in
+/// Edge.
+fn resolved_client(entries: &[&[u8]], trusted: &[IpNet], peer: Option<IpAddr>) -> Option<IpAddr> {
     let mut client = None;
-    for entry in lines.iter().flat_map(|line| line.split(',')) {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        match entry.parse::<IpAddr>() {
-            Ok(ip)
-                if trusted
-                    .iter()
-                    .any(|network| network.contains(&ip.to_canonical())) => {}
-            Ok(ip) => client = Some(ip),
-            Err(_) => client = None,
+    for entry in entries {
+        match entry_address(entry) {
+            Some(ip) if trusted_proxy(trusted, ip) => {}
+            Some(ip) => client = Some(ip.to_canonical()),
+            None => client = None,
         }
     }
     client.or(peer)
@@ -363,10 +396,10 @@ where
                     .verified_gateway_requests
                     .fetch_add(1, Ordering::Relaxed);
                 let headers = request.headers();
-                let lines = forwarded_for_lines(headers).unwrap_or_default();
-                let edge_peer_address = edge_peer(&lines);
+                let entries = forwarded_for_entries(headers);
+                let edge_peer_address = edge_peer(&entries);
                 let client_address =
-                    resolved_client(&lines, &policy.config.trusted_proxies, edge_peer_address);
+                    resolved_client(&entries, &policy.config.trusted_proxies, edge_peer_address);
                 let context = GatewayContext {
                     gateway_identity: identity.clone(),
                     consumer_username: header_value(headers, CONSUMER_USERNAME),

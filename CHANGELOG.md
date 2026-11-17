@@ -35,9 +35,10 @@
   Edge's resolution with the new `edge.trusted_proxies` (Edge's
   `FERRUM_TRUSTED_PROXIES`, default empty): walking right to left, the
   first address outside the list is the client, and a malformed entry
-  there or a chain of trusted addresses only yields Edge's peer. A
-  caller-padded chain cannot move that boundary, as a fixed hop count
-  could. The new `GatewayContext.edge_peer_address` keeps the last hop.
+  there or a chain of trusted addresses only yields Edge's peer. Entries
+  are parsed one by one and IPv4-mapped rules and addresses are treated as
+  Edge's `CidrSet` treats them. A caller-padded chain cannot move that
+  boundary, as a fixed hop count could. The new `GatewayContext.edge_peer_address` keeps the last hop.
   With Edge behind load balancers, copy Edge's `FERRUM_TRUSTED_PROXIES`
   into `edge.trusted_proxies`; leave it empty when Edge uses
   `FERRUM_REAL_IP_HEADER`, whose choice the chain cannot show. With no

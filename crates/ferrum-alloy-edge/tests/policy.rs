@@ -378,6 +378,63 @@ async fn client_address_repeats_edges_forwarded_for_resolution() {
             Some("2001:db8::7"),
             Some("10.0.0.5"),
         ),
+        // Obs-text in a caller-supplied entry or field line is one malformed
+        // entry left of the boundary, as in Edge, not a reason to drop the
+        // gateway-written suffix (round 2 sol F1).
+        (
+            "obs-text entry",
+            LB,
+            vec!["caf\u{e9}, 203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        (
+            "obs-text line",
+            LB,
+            vec!["caf\u{e9}", "203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // Edge's CidrSet reads an IPv4-mapped rule of /96 or longer as the
+        // IPv4 network, and a shorter one as matching nothing (round 2 sol F2).
+        (
+            "mapped rule",
+            &["::ffff:10.0.0.0/104"][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        (
+            "short mapped rule",
+            &["::ffff:0:0/80"][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // A mapped query matches an IPv4 rule by its embedded address, and
+        // addresses are reported canonically, as Edge's identities are.
+        (
+            "mapped lb",
+            LB,
+            vec!["203.0.113.7, ::ffff:10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        (
+            "mapped client",
+            LB,
+            vec!["203.0.113.7, ::ffff:203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // A native IPv4 address never matches an IPv6 rule.
+        (
+            "v6 rule, v4 lb",
+            &["::/0"][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
     ] {
         let headers: Vec<(&str, &str)> =
             xff.iter().map(|line| ("x-forwarded-for", *line)).collect();

@@ -1195,7 +1195,7 @@ fn edge_trusted_proxies_parse_and_refuse_whole_families() {
     assert_eq!(config.edge.trusted_proxies.len(), 2);
     config.validate(&["edge"]).unwrap();
 
-    for whole in ["0.0.0.0/0", "::/0"] {
+    for whole in ["0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96"] {
         let mut config = AlloyConfig::default();
         config.edge.trusted_proxies = vec![whole.parse().unwrap()];
         let error = config.validate(&["edge"]).unwrap_err().to_string();
