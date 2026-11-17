@@ -207,11 +207,36 @@ fn normalize_paths(
     let mut normalized_paths = serde_json::Map::new();
     let mut renamed = BTreeMap::new();
     let mut unreachable = Vec::new();
+    let slash_root = format!("{prefix}/");
+    // Edge composes the key `/` as the listen path alone, without a
+    // trailing slash (`extract_mcp_bridge_operations`), or as `/` for a root
+    // listen path. So `/` reaches exactly one of the bare prefix and the
+    // prefix with a slash, and the other has no key: refused rather than
+    // exported as a key Edge forwards to a different route (sol F2). A root
+    // listen path that Edge strips leaves both ambiguous.
+    let listen = manifest.api.public_path.trim_end_matches('/');
+    let root_target = if !listen.is_empty() {
+        Some(prefix.as_str())
+    } else if !manifest.api.strip_public_path {
+        Some(slash_root.as_str())
+    } else {
+        None
+    };
     for (path, operations) in std::mem::take(paths) {
         // Keys that are not paths are specification extensions (`x-`).
         let normalized = if !path.starts_with('/') {
             path.clone()
-        } else if path == prefix {
+        } else if path == prefix || path == slash_root {
+            if root_target != Some(path.as_str()) {
+                return Err(CliError::Invalid(format!(
+                    "OpenAPI path {path:?} cannot be exported: only the key \"/\" names the public path's root, and Ferrum Edge composes it as {:?} and forwards it to {}. Serve the operation at that path instead",
+                    if listen.is_empty() { "/" } else { listen },
+                    root_target.map_or_else(
+                        || "a path that depends on how Edge strips the root listen path".to_owned(),
+                        |target| format!("{target:?}")
+                    ),
+                )));
+            }
             "/".to_owned()
         } else if let Some(suffix) = path.strip_prefix(&prefix).filter(|s| s.starts_with('/')) {
             suffix.to_owned()

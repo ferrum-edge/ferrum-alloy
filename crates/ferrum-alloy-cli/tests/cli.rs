@@ -1723,6 +1723,133 @@ fn openapi_export_refuses_paths_edge_cannot_reach() {
     }
 }
 
+fn export_paths(
+    dir: &Path,
+    name: &str,
+    public_path: &str,
+    base: &str,
+    strip: bool,
+    paths: &[&str],
+) -> (std::process::Output, PathBuf) {
+    let mut map = serde_json::Map::new();
+    for path in paths {
+        map.insert((*path).to_owned(), serde_json::json!({}));
+    }
+    let document = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": { "title": "t", "version": "1" },
+        "paths": map,
+    });
+    let input = write(dir, &format!("{name}.json"), &document.to_string());
+    let manifest = write(
+        dir,
+        &format!("{name}.toml"),
+        &format!(
+            "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"{public_path}\"\nservice_base_path = \"{base}\"\nstrip_public_path = {strip}\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n"
+        ),
+    );
+    let out = dir.join(format!("{name}.out.json"));
+    let output = run(&[
+        "openapi",
+        "export",
+        "--input",
+        &input,
+        "--manifest",
+        &manifest,
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    (output, out)
+}
+
+/// Edge composes the key `/` as the listen path without a trailing slash,
+/// so a slash-suffixed root route has no key that reaches it and is refused
+/// instead of exported as `/`, which Edge forwards to the bare prefix
+/// (sol F2). With a root listen path the roles swap.
+#[test]
+fn openapi_export_refuses_a_root_route_edge_cannot_compose() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, public_path, base, strip, path, target) in [
+        (
+            "stripped",
+            "/public",
+            "/internal/",
+            true,
+            "/internal/",
+            "\"/internal\"",
+        ),
+        (
+            "not-stripped",
+            "/public",
+            "/internal/",
+            false,
+            "/internal/public/",
+            "\"/internal/public\"",
+        ),
+        (
+            "root-base",
+            "/public",
+            "/",
+            false,
+            "/public/",
+            "\"/public\"",
+        ),
+        (
+            "root-listen",
+            "/",
+            "/internal/",
+            false,
+            "/internal",
+            "\"/internal/\"",
+        ),
+        (
+            "root-listen-stripped",
+            "/",
+            "/internal/",
+            true,
+            "/internal/",
+            "depends on how Edge strips",
+        ),
+    ] {
+        let (output, out) = export_paths(dir.path(), name, public_path, base, strip, &[path]);
+        assert_eq!(code(&output), 3, "{name}: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains(&format!("{path:?} cannot be exported"))
+                && stderr(&output).contains(target),
+            "{name}: {}",
+            stderr(&output)
+        );
+        assert!(!out.exists(), "{name}");
+    }
+
+    // With a root listen path and no stripping, `/` reaches the
+    // slash-suffixed prefix, so that route exports as `/`.
+    let (output, out) = export_paths(
+        dir.path(),
+        "root-listen-ok",
+        "/",
+        "/internal/",
+        false,
+        &["/internal/", "/internal/items"],
+    );
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let written = read_json(&out);
+    let mut keys: Vec<&str> = written["paths"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["/", "/items"]);
+    for (key, documented) in [("/", "/internal/"), ("/items", "/internal/items")] {
+        assert_eq!(
+            edge_forwarded_path("/", "/internal/", false, key),
+            documented
+        );
+    }
+}
+
 #[test]
 fn openapi_export_rewrites_path_item_refs_when_stripping_and_refuses_other_stripped_refs() {
     let dir = tempfile::tempdir().unwrap();

@@ -50,7 +50,9 @@
   that Edge and clients resolved to `/public/internal/public/items`. A path
   outside the forwarded prefix, in either mode (such as `/items` beside a
   `/internal/` base path), can never be reached through Edge and now fails
-  the export with exit 3 instead of being written unchanged. To upgrade,
+  the export with exit 3 instead of being written unchanged, and so does a
+  slash-suffixed root route such as `/internal/public/`, because Edge
+  composes the key `/` as the public path without the slash. To upgrade,
   remove such paths from the document or fix the manifest.
 - **Breaking (#309):** service manifest validation enforces Ferrum Edge's
   upper bounds, so `edge export` no longer writes configuration Edge
