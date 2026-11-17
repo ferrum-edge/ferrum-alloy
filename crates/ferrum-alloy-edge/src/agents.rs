@@ -56,6 +56,81 @@ const LIMIT_KEYS: &[&str] = &[
     "max_response_body_bytes",
     "max_structured_content_bytes",
 ];
+/// Largest `limits.max_request_body_bytes`, `max_response_body_bytes`, and
+/// `max_structured_content_bytes` Edge accepts (`mcp_openapi_bridge.rs`
+/// `MAX_BRIDGE_BODY_LIMIT`, 16 MiB).
+pub const MAX_BODY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest `limits.max_error_excerpt_bytes` Edge accepts
+/// (`MAX_BRIDGE_ERROR_EXCERPT_LIMIT`, 64 KiB).
+pub const MAX_ERROR_EXCERPT_LIMIT_BYTES: u64 = 64 * 1024;
+/// Most names `forward_request_headers` may list (Edge
+/// `MAX_FORWARDED_REQUEST_HEADERS`).
+pub const MAX_FORWARDED_REQUEST_HEADERS: usize = 32;
+/// Request headers a bridged call never forwards (Edge
+/// `RESERVED_BRIDGE_HEADER_NAMES`): framing and hop-by-hop fields,
+/// credentials, client-address attribution, method and URL overrides,
+/// ranges, trace context, and MCP transport fields.
+const RESERVED_BRIDGE_HEADER_NAMES: &[&str] = &[
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "baggage",
+    "cf-connecting-ip",
+    "connection",
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "cookie",
+    "cookie2",
+    "early-data",
+    "expect",
+    "forwarded",
+    "host",
+    "http2-settings",
+    "if-range",
+    "keep-alive",
+    "last-event-id",
+    "max-forwards",
+    "range",
+    "set-cookie",
+    "te",
+    "traceparent",
+    "tracestate",
+    "trailer",
+    "transfer-encoding",
+    "true-client-ip",
+    "upgrade",
+    "via",
+    "x-client-ip",
+    "x-http-method",
+    "x-http-method-override",
+    "x-method-override",
+    "x-original-uri",
+    "x-original-url",
+    "x-real-ip",
+    "x-rewrite-url",
+    // Edge's backend request strip set (`is_backend_request_strip_header`)
+    // beyond the names above.
+    "proxy-connection",
+    "x-ferrum-original-content-encoding",
+    "x-grpc-web-mode",
+];
+/// Reserved header-name families (Edge `RESERVED_BRIDGE_HEADER_PREFIXES`).
+/// Edge's default MCP session header, `mcp-session-id`, is under `mcp-`.
+const RESERVED_BRIDGE_HEADER_PREFIXES: &[&str] = &[
+    "proxy-",
+    "x-forwarded-",
+    "x-ferrum-",
+    "ferrum-",
+    "x-gateway-",
+    "x-consumer-",
+    "x-path-param-",
+    "mcp-",
+    "sec-",
+    "x-envoy-",
+    "x-istio-",
+    "l5d-",
+];
 /// Per-operation keys (Edge `X_FERRUM_MCP_OPERATION_KEYS`).
 const OPERATION_KEYS: &[&str] = &["annotations", "description", "expose", "name", "title"];
 /// MCP tool annotation keys the bridge accepts (Edge `ANNOTATION_KEYS`).
@@ -1039,11 +1114,20 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
             let at = format!("{X_FERRUM_MCP}.limits");
             unknown_keys(limits, LIMIT_KEYS, &at, problems);
             for (key, value) in limits {
-                if value.as_u64().is_none_or(|limit| limit == 0) {
-                    problems.push(format!(
+                match value.as_u64() {
+                    None | Some(0) => problems.push(format!(
                         "`{at}.{}` must be a positive integer",
                         excerpt_text(key)
-                    ));
+                    )),
+                    Some(limit) => {
+                        if let Some(ceiling) = limit_ceiling(key)
+                            && limit > ceiling
+                        {
+                            problems.push(format!(
+                                "`{at}.{key}` must be between 1 and {ceiling} (Edge's ceiling)"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1051,7 +1135,9 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
     }
     match object.get("forward_request_headers") {
         None | Some(Value::Null) => {}
-        Some(Value::Array(names)) if names.iter().all(Value::is_string) => {}
+        Some(Value::Array(names)) if names.iter().all(Value::is_string) => {
+            forward_request_header_problems(names, problems);
+        }
         Some(_) => problems.push(format!(
             "`{X_FERRUM_MCP}.forward_request_headers` must be an array of header names"
         )),
@@ -1063,6 +1149,73 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
         exclude_operations,
         exclude_tags,
     })
+}
+
+/// Edge's ceiling for a known `limits` key.
+fn limit_ceiling(key: &str) -> Option<u64> {
+    match key {
+        "max_error_excerpt_bytes" => Some(MAX_ERROR_EXCERPT_LIMIT_BYTES),
+        "max_request_body_bytes" | "max_response_body_bytes" | "max_structured_content_bytes" => {
+            Some(MAX_BODY_LIMIT_BYTES)
+        }
+        _ => None,
+    }
+}
+
+/// Edge `parse_forward_request_headers`: at most
+/// [`MAX_FORWARDED_REQUEST_HEADERS`] valid HTTP header names, none reserved.
+fn forward_request_header_problems(names: &[Value], problems: &mut Problems) {
+    let at = format!("{X_FERRUM_MCP}.forward_request_headers");
+    if names.len() > MAX_FORWARDED_REQUEST_HEADERS {
+        problems.push(format!(
+            "`{at}` lists {} names; Edge forwards at most {MAX_FORWARDED_REQUEST_HEADERS}",
+            names.len()
+        ));
+    }
+    for (index, name) in names.iter().enumerate() {
+        let name = name.as_str().unwrap_or_default();
+        if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            problems.push_with(|| {
+                format!(
+                    "`{at}[{index}]` {:?} is not a valid HTTP header name",
+                    excerpt_text(name)
+                )
+            });
+        } else if is_reserved_bridge_header(name) {
+            problems.push_with(|| {
+                format!(
+                    "`{at}[{index}]` {:?} names a reserved request header (hop-by-hop, Host, Authorization, Cookie, Range, a method or URL override, trace context, MCP transport, or a gateway-owned field) that Edge never forwards from a bridged call",
+                    excerpt_text(name)
+                )
+            });
+        }
+    }
+}
+
+/// Edge `bridge_header_name_is_reserved`: ASCII case-insensitive, with `_`
+/// read as `-`, so a backend that folds underscores cannot be reached
+/// through an alternate spelling.
+fn is_reserved_bridge_header(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    RESERVED_BRIDGE_HEADER_NAMES.contains(&normalized.as_str())
+        || RESERVED_BRIDGE_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix))
+        || crate::contract::is_gateway_assertion_header(&normalized)
+}
+
+/// `text` without `prefix`, compared ASCII case-insensitively.
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .and_then(|_| text.get(prefix.len()..))
+}
+
+/// Whether what follows an endpoint scope keeps a path inside it: Edge's
+/// `endpoint_scope_contains` reserves descendants and percent-encoded
+/// suffixes.
+fn continues_scope(tail: &str) -> bool {
+    tail.starts_with(['/', '%'])
 }
 
 fn optional_text<'a>(
@@ -1160,7 +1313,9 @@ fn operation_extension<'a>(
 /// The MCP endpoint must sit under the public path (Edge: under the literal
 /// `listen_path`) and must not overlap a selected operation, because it
 /// reserves its whole subtree. Operation paths are those a client sees: the
-/// public path followed by the Paths key.
+/// public path followed by the Paths key. Edge's `mcp_gateway` matches its
+/// endpoint ASCII case-insensitively, including percent-encoded suffixes, so
+/// `/MCP/status` under an endpoint `/mcp` is shadowed too.
 fn endpoint_problems(
     extension: &DocumentExtension,
     public_path: &str,
@@ -1184,11 +1339,9 @@ fn endpoint_problems(
     // once, and each path only against what is left of the endpoint, so no
     // per-path string is built.
     let scope = endpoint.trim_end_matches('/');
-    let within_prefix = prefix == scope
-        || prefix
-            .strip_prefix(scope)
-            .is_some_and(|rest| rest.starts_with('/'));
-    let rest_of_scope = scope.strip_prefix(prefix);
+    let within_prefix = prefix.eq_ignore_ascii_case(scope)
+        || strip_prefix_ignore_ascii_case(prefix, scope).is_some_and(continues_scope);
+    let rest_of_scope = strip_prefix_ignore_ascii_case(scope, prefix);
     for (path, location) in selected {
         let suffix = if !prefix.is_empty() && *path == "/" {
             ""
@@ -1197,10 +1350,8 @@ fn endpoint_problems(
         };
         let inside = within_prefix
             || rest_of_scope.is_some_and(|rest| {
-                suffix == rest
-                    || suffix
-                        .strip_prefix(rest)
-                        .is_some_and(|tail| tail.starts_with('/'))
+                suffix.eq_ignore_ascii_case(rest)
+                    || strip_prefix_ignore_ascii_case(suffix, rest).is_some_and(continues_scope)
             });
         if inside {
             problems.push(format!(

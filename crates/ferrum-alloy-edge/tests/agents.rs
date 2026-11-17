@@ -881,3 +881,150 @@ fn unresolved_aliases_are_reported_within_the_cap() {
             .any(|problem| problem.ends_with("further problems not listed"))
     );
 }
+
+fn problems_about(problems: &[String], topic: &str) -> Vec<String> {
+    problems
+        .iter()
+        .filter(|problem| problem.contains(topic))
+        .cloned()
+        .collect()
+}
+
+/// Edge's bridge ceilings (`mcp_openapi_bridge.rs` `MAX_BRIDGE_BODY_LIMIT`,
+/// `MAX_BRIDGE_ERROR_EXCERPT_LIMIT`): at the ceiling is accepted, one past
+/// it is refused, as `POST /api-specs` would (#312).
+#[test]
+fn limits_are_held_to_edges_ceilings() {
+    use ferrum_alloy_edge::agents::{MAX_BODY_LIMIT_BYTES, MAX_ERROR_EXCERPT_LIMIT_BYTES};
+    assert_eq!(MAX_BODY_LIMIT_BYTES, 16_777_216);
+    assert_eq!(MAX_ERROR_EXCERPT_LIMIT_BYTES, 65_536);
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!({ "limits": {
+        "max_request_body_bytes": MAX_BODY_LIMIT_BYTES,
+        "max_response_body_bytes": MAX_BODY_LIMIT_BYTES,
+        "max_structured_content_bytes": MAX_BODY_LIMIT_BYTES,
+        "max_error_excerpt_bytes": MAX_ERROR_EXCERPT_LIMIT_BYTES,
+    } });
+    let problems = lint(&document, Some("/shop"));
+    assert!(
+        problems_about(&problems, "limits").is_empty(),
+        "{problems:?}"
+    );
+
+    document[X_FERRUM_MCP] = json!({ "limits": {
+        "max_request_body_bytes": MAX_BODY_LIMIT_BYTES + 1,
+        "max_response_body_bytes": u64::MAX,
+        "max_structured_content_bytes": MAX_BODY_LIMIT_BYTES + 1,
+        "max_error_excerpt_bytes": MAX_ERROR_EXCERPT_LIMIT_BYTES + 1,
+    } });
+    let problems = lint(&document, Some("/shop"));
+    for expected in [
+        "`x-ferrum-mcp.limits.max_request_body_bytes` must be between 1 and 16777216",
+        "`x-ferrum-mcp.limits.max_response_body_bytes` must be between 1 and 16777216",
+        "`x-ferrum-mcp.limits.max_structured_content_bytes` must be between 1 and 16777216",
+        "`x-ferrum-mcp.limits.max_error_excerpt_bytes` must be between 1 and 65536",
+    ] {
+        assert_problem(&problems, expected);
+    }
+}
+
+/// Edge `parse_forward_request_headers`: at most 32 valid header names,
+/// none of them reserved, in any letter case or with `_` for `-` (#312).
+#[test]
+fn forwarded_request_headers_follow_edges_rules() {
+    use ferrum_alloy_edge::agents::MAX_FORWARDED_REQUEST_HEADERS;
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!({
+        "forward_request_headers": ["x-api-version", "X-Tenant", "accept-language", "x-api-key"]
+    });
+    let problems = lint(&document, Some("/shop"));
+    assert!(
+        problems_about(&problems, "forward_request_headers").is_empty(),
+        "{problems:?}"
+    );
+
+    let reserved = [
+        "Authorization",
+        "cookie",
+        "Host",
+        "content-length",
+        "Transfer-Encoding",
+        "Mcp-Session-Id",
+        "X-Consumer-Username",
+        "x_consumer_role",
+        "X-Authenticated-Identity",
+        "x-geo-country",
+        "X_Forwarded_For",
+        "x-ferrum-anything",
+        "traceparent",
+        "Range",
+        "x-http-method-override",
+        "proxy-connection",
+        "x-grpc-web-mode",
+    ];
+    document[X_FERRUM_MCP] = json!({ "forward_request_headers": reserved });
+    let problems = lint(&document, Some("/shop"));
+    for (index, name) in reserved.iter().enumerate() {
+        assert_problem(
+            &problems,
+            &format!(
+                "forward_request_headers[{index}]` \"{name}\" names a reserved request header"
+            ),
+        );
+    }
+
+    document[X_FERRUM_MCP] =
+        json!({ "forward_request_headers": ["x api", "x-ok", "", "caf\u{e9}"] });
+    let problems = lint(&document, Some("/shop"));
+    assert_problem(
+        &problems,
+        "forward_request_headers[0]` \"x api\" is not a valid HTTP header name",
+    );
+    assert_problem(
+        &problems,
+        "forward_request_headers[2]` \"\" is not a valid HTTP header name",
+    );
+    assert_problem(&problems, "forward_request_headers[3]`");
+    assert!(
+        !problems
+            .iter()
+            .any(|problem| problem.contains("forward_request_headers[1]")),
+        "{problems:?}"
+    );
+
+    let many: Vec<String> = (0..=MAX_FORWARDED_REQUEST_HEADERS)
+        .map(|index| format!("x-app-{index}"))
+        .collect();
+    document[X_FERRUM_MCP] = json!({ "forward_request_headers": many });
+    assert_problem(
+        &lint(&document, Some("/shop")),
+        "lists 33 names; Edge forwards at most 32",
+    );
+}
+
+/// Edge's `mcp_gateway` reserves its endpoint and subtree ASCII
+/// case-insensitively, percent-encoded suffixes included, so a case variant
+/// of the endpoint path is shadowed at runtime (#312).
+#[test]
+fn the_endpoint_overlap_ignores_ascii_case_like_edge() {
+    for (path, shadowed) in [
+        ("/MCP/status", true),
+        ("/Mcp", true),
+        ("/mcp%2Fstatus", true),
+        ("/MCPX", false),
+        ("/status/mcp", false),
+    ] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/shop/mcp" } });
+        document["paths"][path] = json!({ "get": operation("probe", Value::Null) });
+        let problems = lint(&document, Some("/shop"));
+        let found = problems
+            .iter()
+            .any(|problem| problem.contains("inside the MCP endpoint"));
+        assert_eq!(found, shadowed, "{path}: {problems:?}");
+    }
+    // A case variant of the public path itself is inside an endpoint at it.
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "/SHOP" } });
+    assert_problem(&lint(&document, Some("/shop")), "inside the MCP endpoint");
+}
