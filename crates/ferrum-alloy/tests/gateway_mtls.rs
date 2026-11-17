@@ -157,6 +157,29 @@ async fn the_verified_gateway_identity_is_trusted_end_to_end() {
     server.shutdown().await.unwrap();
 }
 
+/// Behind a load balancer Edge trusts, Edge's `X-Forwarded-For` ends with
+/// the balancer; `edge.trusted_proxies` (Edge's `FERRUM_TRUSTED_PROXIES`)
+/// lets Alloy repeat Edge's resolution and report the client (#308).
+#[tokio::test]
+async fn trusted_proxies_resolve_the_client_edge_resolved() {
+    let pki = pki();
+    let mut config = config(&pki, EdgeMode::GatewayRequired);
+    config.edge.trusted_proxies = vec!["10.0.0.0/8".parse().unwrap()];
+    let server = support::start(AlloyApp::new("mtls").router(router()), config).await;
+    let gateway = pki.ca.client(GATEWAY);
+    let reply = tls_get(
+        server.addr,
+        pki::client_config(&pki.ca, Some(&gateway)),
+        "/whoami",
+        &[("x-forwarded-for", "192.0.2.99, 198.51.100.7, 10.0.0.5")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(json(&reply)["client_address"], "198.51.100.7");
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn gateway_required_rejects_direct_callers_but_not_health_probes() {
     let pki = pki();

@@ -56,6 +56,81 @@ const LIMIT_KEYS: &[&str] = &[
     "max_response_body_bytes",
     "max_structured_content_bytes",
 ];
+/// Largest `limits.max_request_body_bytes`, `max_response_body_bytes`, and
+/// `max_structured_content_bytes` Edge accepts (`mcp_openapi_bridge.rs`
+/// `MAX_BRIDGE_BODY_LIMIT`, 16 MiB).
+pub const MAX_BODY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest `limits.max_error_excerpt_bytes` Edge accepts
+/// (`MAX_BRIDGE_ERROR_EXCERPT_LIMIT`, 64 KiB).
+pub const MAX_ERROR_EXCERPT_LIMIT_BYTES: u64 = 64 * 1024;
+/// Most names `forward_request_headers` may list (Edge
+/// `MAX_FORWARDED_REQUEST_HEADERS`).
+pub const MAX_FORWARDED_REQUEST_HEADERS: usize = 32;
+/// Request headers a bridged call never forwards (Edge
+/// `RESERVED_BRIDGE_HEADER_NAMES`): framing and hop-by-hop fields,
+/// credentials, client-address attribution, method and URL overrides,
+/// ranges, trace context, and MCP transport fields.
+const RESERVED_BRIDGE_HEADER_NAMES: &[&str] = &[
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "baggage",
+    "cf-connecting-ip",
+    "connection",
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "cookie",
+    "cookie2",
+    "early-data",
+    "expect",
+    "forwarded",
+    "host",
+    "http2-settings",
+    "if-range",
+    "keep-alive",
+    "last-event-id",
+    "max-forwards",
+    "range",
+    "set-cookie",
+    "te",
+    "traceparent",
+    "tracestate",
+    "trailer",
+    "transfer-encoding",
+    "true-client-ip",
+    "upgrade",
+    "via",
+    "x-client-ip",
+    "x-http-method",
+    "x-http-method-override",
+    "x-method-override",
+    "x-original-uri",
+    "x-original-url",
+    "x-real-ip",
+    "x-rewrite-url",
+    // Edge's backend request strip set (`is_backend_request_strip_header`)
+    // beyond the names above.
+    "proxy-connection",
+    "x-ferrum-original-content-encoding",
+    "x-grpc-web-mode",
+];
+/// Reserved header-name families (Edge `RESERVED_BRIDGE_HEADER_PREFIXES`).
+/// Edge's default MCP session header, `mcp-session-id`, is under `mcp-`.
+const RESERVED_BRIDGE_HEADER_PREFIXES: &[&str] = &[
+    "proxy-",
+    "x-forwarded-",
+    "x-ferrum-",
+    "ferrum-",
+    "x-gateway-",
+    "x-consumer-",
+    "x-path-param-",
+    "mcp-",
+    "sec-",
+    "x-envoy-",
+    "x-istio-",
+    "l5d-",
+];
 /// Per-operation keys (Edge `X_FERRUM_MCP_OPERATION_KEYS`).
 const OPERATION_KEYS: &[&str] = &["annotations", "description", "expose", "name", "title"];
 /// MCP tool annotation keys the bridge accepts (Edge `ANNOTATION_KEYS`).
@@ -392,7 +467,7 @@ fn fill_item_annotations(item: &mut Map<String, Value>) {
 ///
 /// With `public_path` (the manifest's `api.public_path`, which a publisher
 /// uses as the proxy's `listen_path`), the MCP endpoint must sit under it and
-/// must not overlap a selected operation's path.
+/// must not overlap any operation's path, whether or not it is a tool.
 ///
 /// An operation reached through several paths (Path Item `$ref` aliases) is
 /// parsed and checked once, and its problems name the first such path; only
@@ -435,6 +510,10 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
     let mut tools: HashMap<*const Map<String, Value>, Option<Option<String>>> = HashMap::new();
     for &(path, method, operation) in &found {
         let location = location(path, method);
+        // Every operation, published as a tool or not: Edge's generated
+        // `mcp_gateway` answers every request inside its endpoint scope, so
+        // a hidden REST route there stops reaching the service too (sol F3).
+        public_paths.push((path, location.clone(), operation.get("servers")));
         let key = std::ptr::from_ref(operation);
         let tool = match tools.get(&key) {
             Some(tool) => tool.clone(),
@@ -465,7 +544,6 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
                 "{location} and {other} both produce the tool name {name:?}; set `{X_FERRUM_MCP}.name` on one of them"
             ));
         }
-        public_paths.push((path, location));
     }
     if selected == 0 {
         problems.push_summary(format!(
@@ -477,7 +555,14 @@ pub fn lint(document: &Value, public_path: Option<&str>) -> Vec<String> {
         ));
     }
     if let Some(public_path) = public_path {
-        endpoint_problems(&extension, public_path, &public_paths, &mut problems);
+        endpoint_problems(
+            &extension,
+            public_path,
+            &public_paths,
+            &mut resolver,
+            &mut problems,
+        );
+        embedded_endpoint_problems(document, &extension, public_path, &mut problems);
     }
     problems.into_list()
 }
@@ -1039,11 +1124,20 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
             let at = format!("{X_FERRUM_MCP}.limits");
             unknown_keys(limits, LIMIT_KEYS, &at, problems);
             for (key, value) in limits {
-                if value.as_u64().is_none_or(|limit| limit == 0) {
-                    problems.push(format!(
+                match value.as_u64() {
+                    None | Some(0) => problems.push(format!(
                         "`{at}.{}` must be a positive integer",
                         excerpt_text(key)
-                    ));
+                    )),
+                    Some(limit) => {
+                        if let Some(ceiling) = limit_ceiling(key)
+                            && limit > ceiling
+                        {
+                            problems.push(format!(
+                                "`{at}.{key}` must be between 1 and {ceiling} (Edge's ceiling)"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1051,7 +1145,9 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
     }
     match object.get("forward_request_headers") {
         None | Some(Value::Null) => {}
-        Some(Value::Array(names)) if names.iter().all(Value::is_string) => {}
+        Some(Value::Array(names)) if names.iter().all(Value::is_string) => {
+            forward_request_header_problems(names, problems);
+        }
         Some(_) => problems.push(format!(
             "`{X_FERRUM_MCP}.forward_request_headers` must be an array of header names"
         )),
@@ -1063,6 +1159,73 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
         exclude_operations,
         exclude_tags,
     })
+}
+
+/// Edge's ceiling for a known `limits` key.
+fn limit_ceiling(key: &str) -> Option<u64> {
+    match key {
+        "max_error_excerpt_bytes" => Some(MAX_ERROR_EXCERPT_LIMIT_BYTES),
+        "max_request_body_bytes" | "max_response_body_bytes" | "max_structured_content_bytes" => {
+            Some(MAX_BODY_LIMIT_BYTES)
+        }
+        _ => None,
+    }
+}
+
+/// Edge `parse_forward_request_headers`: at most
+/// [`MAX_FORWARDED_REQUEST_HEADERS`] valid HTTP header names, none reserved.
+fn forward_request_header_problems(names: &[Value], problems: &mut Problems) {
+    let at = format!("{X_FERRUM_MCP}.forward_request_headers");
+    if names.len() > MAX_FORWARDED_REQUEST_HEADERS {
+        problems.push(format!(
+            "`{at}` lists {} names; Edge forwards at most {MAX_FORWARDED_REQUEST_HEADERS}",
+            names.len()
+        ));
+    }
+    for (index, name) in names.iter().enumerate() {
+        let name = name.as_str().unwrap_or_default();
+        if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            problems.push_with(|| {
+                format!(
+                    "`{at}[{index}]` {:?} is not a valid HTTP header name",
+                    excerpt_text(name)
+                )
+            });
+        } else if is_reserved_bridge_header(name) {
+            problems.push_with(|| {
+                format!(
+                    "`{at}[{index}]` {:?} names a reserved request header (hop-by-hop, Host, Authorization, Cookie, Range, a method or URL override, trace context, MCP transport, or a gateway-owned field) that Edge never forwards from a bridged call",
+                    excerpt_text(name)
+                )
+            });
+        }
+    }
+}
+
+/// Edge `bridge_header_name_is_reserved`: ASCII case-insensitive, with `_`
+/// read as `-`, so a backend that folds underscores cannot be reached
+/// through an alternate spelling.
+fn is_reserved_bridge_header(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    RESERVED_BRIDGE_HEADER_NAMES.contains(&normalized.as_str())
+        || RESERVED_BRIDGE_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix))
+        || crate::contract::is_gateway_assertion_header(&normalized)
+}
+
+/// `text` without `prefix`, compared ASCII case-insensitively.
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .and_then(|_| text.get(prefix.len()..))
+}
+
+/// Whether what follows an endpoint scope keeps a path inside it: Edge's
+/// `endpoint_scope_contains` reserves descendants and percent-encoded
+/// suffixes.
+fn continues_scope(tail: &str) -> bool {
+    tail.starts_with(['/', '%'])
 }
 
 fn optional_text<'a>(
@@ -1158,13 +1321,21 @@ fn operation_extension<'a>(
 }
 
 /// The MCP endpoint must sit under the public path (Edge: under the literal
-/// `listen_path`) and must not overlap a selected operation, because it
-/// reserves its whole subtree. Operation paths are those a client sees: the
-/// public path followed by the Paths key.
-fn endpoint_problems(
+/// `listen_path`) and must not overlap any operation, selected as a tool or
+/// not, because Edge's `mcp_gateway` claims its whole subtree for every
+/// request. This follows Edge's admission check
+/// (`path_template_may_enter_endpoint_scope`, ferrum-edge #7406/#7410): each
+/// operation's public path (listen path, then each effective server base,
+/// then the Paths key) is compared segment by segment with the endpoint
+/// scope, ASCII case-insensitively and on canonical literals, and a path
+/// parameter stands for any value, so `/{name}/status` overlaps `/mcp`.
+/// Root `servers` count as `/` (the publisher replaces the exported ones)
+/// and as written; Path Item and operation `servers` replace them.
+fn endpoint_problems<'a>(
     extension: &DocumentExtension,
     public_path: &str,
-    selected: &[(&str, String)],
+    paths: &[(&'a str, String, Option<&'a Value>)],
+    resolver: &mut Resolver<'a>,
     problems: &mut Problems,
 ) {
     let prefix = public_path.trim_end_matches('/');
@@ -1179,37 +1350,361 @@ fn endpoint_problems(
             "`{X_FERRUM_MCP}.endpoint.path` {shown_endpoint:?} is not under api.public_path {shown_public_path:?}"
         ));
     }
-    // A client sees each operation at the public path followed by its Paths
-    // key (the public path alone for `/`). The shared prefix is compared
-    // once, and each path only against what is left of the endpoint, so no
-    // per-path string is built.
-    let scope = endpoint.trim_end_matches('/');
-    let within_prefix = prefix == scope
-        || prefix
-            .strip_prefix(scope)
-            .is_some_and(|rest| rest.starts_with('/'));
-    let rest_of_scope = scope.strip_prefix(prefix);
-    for (path, location) in selected {
-        let suffix = if !prefix.is_empty() && *path == "/" {
-            ""
-        } else {
-            path
+    let claim = ScopeClaim::new(endpoint.trim_end_matches('/'), prefix);
+    let document = resolver.document;
+    let mut root_bases = vec![SERVER_BASE_ROOT.to_owned()];
+    for base in server_bases(document.get("servers")).unwrap_or_default() {
+        if !root_bases.contains(&base) {
+            root_bases.push(base);
+        }
+    }
+    let path_items = document.get("paths").and_then(Value::as_object);
+    let mut item_bases: HashMap<&str, Option<Vec<String>>> = HashMap::new();
+    for (path, location, operation_servers) in paths {
+        let (path, operation_servers) = (*path, *operation_servers);
+        let bases = match server_bases(operation_servers) {
+            Some(bases) => bases,
+            None => item_bases
+                .entry(path)
+                .or_insert_with(|| {
+                    let item = path_items.and_then(|items| items.get(path))?;
+                    let item = resolver.resolve(item).ok()?.value;
+                    server_bases(item.get("servers"))
+                })
+                .clone()
+                .unwrap_or_else(|| root_bases.clone()),
         };
-        let inside = within_prefix
-            || rest_of_scope.is_some_and(|rest| {
-                suffix == rest
-                    || suffix
-                        .strip_prefix(rest)
-                        .is_some_and(|tail| tail.starts_with('/'))
-            });
-        if inside {
+        for base in &bases {
+            let spec_path = join_server_base_and_path(base, path);
+            // Edge composes the key `/` as the listen path alone.
+            let rest = if !prefix.is_empty() && spec_path == "/" {
+                ""
+            } else {
+                spec_path.as_str()
+            };
+            if claim.may_enter(rest) {
+                problems.push_with(|| {
+                    format!(
+                        "{location} is served at \"{}{}\", inside the MCP endpoint {shown_endpoint:?} (a literal match or a path parameter that can spell it), which answers every request in its subtree whether or not the operation is a tool; move the endpoint ([agents] endpoint_path) to a path no operation can produce",
+                        excerpt_text(prefix),
+                        excerpt_text(rest),
+                    )
+                });
+                break;
+            }
+        }
+    }
+}
+
+/// An `mcp_gateway` embedded in `x-ferrum-plugins` is merged with the
+/// generated one, and Edge (#7410) refuses an embedded `endpoint.path` that
+/// differs from the one `x-ferrum-mcp` validated.
+fn embedded_endpoint_problems(
+    document: &Value,
+    extension: &DocumentExtension,
+    public_path: &str,
+    problems: &mut Problems,
+) {
+    let Some(plugins) = document.get("x-ferrum-plugins").and_then(Value::as_array) else {
+        return;
+    };
+    let endpoint = extension
+        .endpoint_path
+        .clone()
+        .unwrap_or_else(|| format!("{}/mcp", public_path.trim_end_matches('/')));
+    for plugin in plugins {
+        if plugin.get("plugin_name").and_then(Value::as_str) != Some("mcp_gateway") {
+            continue;
+        }
+        if let Some(path) = plugin
+            .get("config")
+            .and_then(|config| config.get("endpoint"))
+            .and_then(|endpoint| endpoint.get("path"))
+            && path.as_str() != Some(endpoint.as_str())
+        {
             problems.push(format!(
-                "{location} is served at \"{}{}\", inside the MCP endpoint {shown_endpoint:?}; move the endpoint ([agents] endpoint_path)",
-                excerpt_text(prefix),
-                excerpt_text(suffix)
+                "the `mcp_gateway` embedded in `x-ferrum-plugins` sets `endpoint.path` {:?}, but Edge requires it to equal the `{X_FERRUM_MCP}` endpoint {:?}; set `{X_FERRUM_MCP}.endpoint.path` ([agents] endpoint_path) instead",
+                path.as_str().map(excerpt_text).unwrap_or_default(),
+                excerpt_text(&endpoint),
             ));
         }
     }
+}
+
+/// Edge's root server base.
+const SERVER_BASE_ROOT: &str = "/";
+
+/// Edge `openapi_server_bases`: the distinct pathnames of a `servers` array,
+/// variables replaced by their defaults; `None` when absent or empty, which
+/// inherits (Edge refuses an empty array outright).
+fn server_bases(servers: Option<&Value>) -> Option<Vec<String>> {
+    let mut bases = Vec::new();
+    for entry in servers?.as_array()? {
+        let Some(url) = entry.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut url = url.to_owned();
+        if let Some(variables) = entry.get("variables").and_then(Value::as_object) {
+            for (name, variable) in variables {
+                if let Some(default) = variable.get("default").and_then(Value::as_str) {
+                    url = url.replace(&format!("{{{name}}}"), default);
+                }
+            }
+        }
+        let base = server_url_pathname(&url);
+        if !bases.contains(&base) {
+            bases.push(base);
+        }
+    }
+    (!bases.is_empty()).then_some(bases)
+}
+
+/// The pathname of a server URL (absolute, scheme-relative, or relative to
+/// the document root), without trailing slashes; `/` for none.
+fn server_url_pathname(url: &str) -> String {
+    let head = url.split(['#', '?']).next().unwrap_or_default();
+    let after_authority = |rest: &str| rest.find('/').map_or("", |at| &rest[at..]).to_owned();
+    let path = if let Some((_, rest)) = head.split_once("://") {
+        after_authority(rest)
+    } else if let Some(rest) = head.strip_prefix("//") {
+        after_authority(rest)
+    } else if head.starts_with('/') {
+        head.to_owned()
+    } else {
+        format!("/{head}")
+    };
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        SERVER_BASE_ROOT.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Edge `join_server_base_and_path`.
+fn join_server_base_and_path(base: &str, path: &str) -> String {
+    if base == SERVER_BASE_ROOT {
+        path.to_owned()
+    } else if path == "/" {
+        base.to_owned()
+    } else {
+        format!("{base}{path}")
+    }
+}
+
+/// Edge `path_template_may_enter_endpoint_scope` for public paths that all
+/// share the listen prefix: whether any request path a template can produce
+/// falls inside the endpoint scope's runtime claim (the scope and its
+/// descendants or `%`-suffixes, ASCII case-insensitively). Segments are
+/// compared as patterns, literal runs canonically when every run
+/// canonicalizes and as written (with the `%`-suffix rule) otherwise. The
+/// shared prefix is compared with the scope once, so each operation costs
+/// only its own path.
+struct ScopeClaim<'a> {
+    scope: &'a str,
+    scope_segments: Vec<&'a str>,
+    prefix: &'a str,
+    /// `None` when a literal of the prefix does not canonicalize.
+    canonical_prefix: Option<PrefixMatch>,
+    raw_prefix: PrefixMatch,
+}
+
+/// How the prefix's segments relate to the scope's.
+#[derive(Clone, Copy)]
+enum PrefixMatch {
+    /// The prefix already covers every scope segment.
+    Inside,
+    /// A prefix segment cannot spell its scope segment.
+    Outside,
+    /// The first `n` scope segments match; the rest is up to the operation.
+    Continue(usize),
+}
+
+impl<'a> ScopeClaim<'a> {
+    fn new(scope: &'a str, prefix: &'a str) -> Self {
+        let scope_segments: Vec<&str> = scope.split('/').collect();
+        let canonical_prefix = prefix
+            .split('/')
+            .map(canonical_segment_pattern)
+            .collect::<Option<Vec<_>>>()
+            .map(|patterns| prefix_match(&patterns, &scope_segments));
+        let raw: Vec<SegmentPattern> = prefix.split('/').map(SegmentPattern::new).collect();
+        let raw_prefix = prefix_match(&raw, &scope_segments);
+        Self {
+            scope,
+            scope_segments,
+            prefix,
+            canonical_prefix,
+            raw_prefix,
+        }
+    }
+
+    /// Whether the public path `prefix + rest` can fall inside the claim.
+    fn may_enter(&self, rest: &str) -> bool {
+        let rest_segments: Vec<&str> = if rest.is_empty() {
+            Vec::new()
+        } else {
+            rest.split('/').skip(1).collect()
+        };
+        let canonical = self.canonical_prefix.and_then(|prefix| {
+            rest_segments
+                .iter()
+                .map(|segment| canonical_segment_pattern(segment))
+                .collect::<Option<Vec<_>>>()
+                .map(|patterns| (prefix, patterns))
+        });
+        let is_canonical = canonical.is_some();
+        let (prefix, patterns) = canonical.unwrap_or_else(|| {
+            (
+                self.raw_prefix,
+                rest_segments
+                    .iter()
+                    .map(|s| SegmentPattern::new(s))
+                    .collect(),
+            )
+        });
+        let segment_overlap = match prefix {
+            PrefixMatch::Inside => true,
+            PrefixMatch::Outside => false,
+            PrefixMatch::Continue(matched) => {
+                let remaining = &self.scope_segments[matched..];
+                patterns.len() >= remaining.len()
+                    && remaining
+                        .iter()
+                        .zip(&patterns)
+                        .all(|(scope_segment, pattern)| pattern.matches(scope_segment))
+            }
+        };
+        segment_overlap || (!is_canonical && self.reserves_as_written(rest))
+    }
+
+    /// The runtime claim on `prefix + rest` as written, without building it.
+    fn reserves_as_written(&self, rest: &str) -> bool {
+        let (scope, prefix) = (self.scope, self.prefix);
+        if scope.len() <= prefix.len() {
+            if !prefix
+                .get(..scope.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(scope))
+            {
+                return false;
+            }
+            let next = prefix
+                .as_bytes()
+                .get(scope.len())
+                .or_else(|| rest.as_bytes().first());
+            matches!(next, None | Some(b'/' | b'%'))
+        } else {
+            let Some(scope_rest) = scope
+                .get(..prefix.len())
+                .filter(|head| head.eq_ignore_ascii_case(prefix))
+                .and_then(|_| scope.get(prefix.len()..))
+            else {
+                return false;
+            };
+            rest.eq_ignore_ascii_case(scope_rest)
+                || strip_prefix_ignore_ascii_case(rest, scope_rest).is_some_and(continues_scope)
+        }
+    }
+}
+
+fn prefix_match(patterns: &[SegmentPattern], scope_segments: &[&str]) -> PrefixMatch {
+    let compared = patterns.len().min(scope_segments.len());
+    if !patterns[..compared]
+        .iter()
+        .zip(&scope_segments[..compared])
+        .all(|(pattern, segment)| pattern.matches(segment))
+    {
+        PrefixMatch::Outside
+    } else if patterns.len() >= scope_segments.len() {
+        PrefixMatch::Inside
+    } else {
+        PrefixMatch::Continue(patterns.len())
+    }
+}
+
+/// A segment pattern with every literal run canonicalized, `None` when one
+/// does not canonicalize.
+fn canonical_segment_pattern(segment: &str) -> Option<SegmentPattern> {
+    let literals = SegmentPattern::new(segment)
+        .literals
+        .into_iter()
+        .map(|literal| canonical_literal(&literal))
+        .collect::<Option<Vec<_>>>()?;
+    Some(SegmentPattern { literals })
+}
+
+/// One template segment: lower-cased literal runs separated by `{...}`
+/// expressions, which match any text.
+struct SegmentPattern {
+    literals: Vec<String>,
+}
+
+impl SegmentPattern {
+    fn new(segment: &str) -> Self {
+        let mut literals = Vec::new();
+        let mut rest = segment;
+        loop {
+            match rest.find('{') {
+                Some(open) => {
+                    literals.push(rest[..open].to_ascii_lowercase());
+                    rest = match rest[open..].find('}') {
+                        Some(close) => &rest[open + close + 1..],
+                        None => "",
+                    };
+                }
+                None => {
+                    literals.push(rest.to_ascii_lowercase());
+                    return Self { literals };
+                }
+            }
+        }
+    }
+
+    /// Glob match with the first and last literal runs anchoring the ends.
+    fn matches(&self, segment: &str) -> bool {
+        let segment = segment.to_ascii_lowercase();
+        let Some((first, rest)) = self.literals.split_first() else {
+            return segment.is_empty();
+        };
+        let Some(mut remaining) = segment.strip_prefix(first.as_str()) else {
+            return false;
+        };
+        let Some((last, inner)) = rest.split_last() else {
+            return remaining.is_empty();
+        };
+        for literal in inner {
+            let Some(index) = remaining.find(literal.as_str()) else {
+                return false;
+            };
+            remaining = &remaining[index + literal.len()..];
+        }
+        remaining.len() >= last.len() && remaining.ends_with(last.as_str())
+    }
+}
+
+/// A literal run as Edge's canonical request path spells it: percent-escapes
+/// of unreserved characters decoded (`%6d` is `m`) and lower-cased; `None`
+/// when any other escape remains, which Edge does not canonicalize either.
+fn canonical_literal(literal: &str) -> Option<String> {
+    let bytes = literal.as_bytes();
+    let mut out = String::with_capacity(literal.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(at + 1..at + 3)?).ok()?;
+            let byte = u8::from_str_radix(hex, 16).ok()?;
+            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')) {
+                return None;
+            }
+            out.push(char::from(byte));
+            at += 3;
+        } else {
+            let ch = literal[at..].chars().next()?;
+            out.push(ch);
+            at += ch.len_utf8();
+        }
+    }
+    Some(out.to_ascii_lowercase())
 }
 
 #[cfg(test)]

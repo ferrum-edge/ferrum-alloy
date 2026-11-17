@@ -636,9 +636,17 @@ pub enum EdgeMode {
 pub struct EdgeSettings {
     /// Deployment mode.
     pub mode: EdgeMode,
-    /// Accept `X-Consumer-Username` / `X-Consumer-Custom-Id` from a verified
-    /// gateway identity (mTLS). Never accepted from network-boundary trust.
+    /// Accept Edge's gateway-asserted headers (`X-Consumer-Username`,
+    /// `X-Consumer-Custom-Id`, `X-Authenticated-Identity`, and the rest of
+    /// the pinned vocabulary's assertions) from a verified gateway identity
+    /// (mTLS). Never accepted from network-boundary trust; otherwise they
+    /// are removed.
     pub accept_consumer_identity: bool,
+    /// Edge's `FERRUM_TRUSTED_PROXIES` (the same CIDRs): Alloy repeats
+    /// Edge's `X-Forwarded-For` resolution with them for
+    /// `GatewayContext::client_address`. Empty when clients reach Edge
+    /// directly or Edge uses `FERRUM_REAL_IP_HEADER`.
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 /// CORS settings. Nothing is permitted unless listed.
@@ -1935,6 +1943,21 @@ impl AlloyConfig {
         }
         if self.edge.mode == EdgeMode::GatewayRequired && self.trust.identities.is_empty() {
             error("edge.mode = gateway_required needs at least one trust.identities entry (verified mTLS identity)".into());
+        }
+        if self
+            .edge
+            .trusted_proxies
+            .iter()
+            .any(|network| match network {
+                // Edge folds `::ffff:0.0.0.0/96` to the IPv4 `/0`.
+                IpNet::V6(v6) => {
+                    v6.prefix_len() == 0
+                        || (v6.prefix_len() == 96 && v6.addr().to_ipv4_mapped().is_some())
+                }
+                IpNet::V4(v4) => v4.prefix_len() == 0,
+            })
+        {
+            error("edge.trusted_proxies must not trust a whole address family (/0); list Edge's FERRUM_TRUSTED_PROXIES".into());
         }
         if self.edge.accept_consumer_identity && self.trust.identities.is_empty() {
             error("edge.accept_consumer_identity requires trust.identities; network trust never authorizes identity headers".into());

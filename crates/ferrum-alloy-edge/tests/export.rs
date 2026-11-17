@@ -194,7 +194,7 @@ fn without_health_checks_the_proxy_targets_the_backend_directly() {
 
 #[test]
 fn file_mode_yaml_matches_snapshots() {
-    for name in ["orders-api", "plain-http"] {
+    for name in ["orders-api", "plain-http", "minimal"] {
         let manifest = ServiceManifest::from_toml(
             &std::fs::read_to_string(fixtures().join(format!("{name}.toml"))).unwrap(),
         )
@@ -284,13 +284,16 @@ fn proxy_id_boundary_accounts_for_the_longest_generated_resource_id() {
     assert!(error.contains("-correlation-id"), "{error}");
 }
 
+/// The `otel_tracing` plugin is generated for every manifest (#307), so its
+/// suffix bounds the proxy id even without health checks, correlation, or
+/// an exporter; the shorter `-upstream` suffix never binds.
 #[test]
 fn each_generated_id_suffix_is_checked_at_its_boundary() {
     for (family, suffix, base_length) in [
         (
             "upstream",
-            "-upstream",
-            EDGE_RESOURCE_ID_MAX_LENGTH - "-upstream".len(),
+            "-otel-tracing",
+            EDGE_RESOURCE_ID_MAX_LENGTH - "-otel-tracing".len(),
         ),
         (
             "correlation",
@@ -299,6 +302,11 @@ fn each_generated_id_suffix_is_checked_at_its_boundary() {
         ),
         (
             "otel",
+            "-otel-tracing",
+            EDGE_RESOURCE_ID_MAX_LENGTH - "-otel-tracing".len(),
+        ),
+        (
+            "propagation-only",
             "-otel-tracing",
             EDGE_RESOURCE_ID_MAX_LENGTH - "-otel-tracing".len(),
         ),
@@ -332,20 +340,74 @@ fn each_generated_id_suffix_is_checked_at_its_boundary() {
 }
 
 #[test]
-fn direct_proxy_id_can_use_the_full_edge_limit_without_derived_resources() {
+fn the_trace_plugin_bounds_a_proxy_id_without_other_derived_resources() {
     let mut manifest = manifest();
     manifest.health = None;
     manifest.gateway.correlation_id = false;
     manifest.gateway.otel_endpoint = None;
-    manifest.gateway.proxy_id = Some("a".repeat(EDGE_RESOURCE_ID_MAX_LENGTH));
+    let max = EDGE_RESOURCE_ID_MAX_LENGTH - "-otel-tracing".len();
+    manifest.gateway.proxy_id = Some("a".repeat(max));
 
     manifest.validate().unwrap();
     let resources = resources(&manifest).unwrap();
-    assert!(generated_ids(&resources).is_empty());
     assert_eq!(
-        resources.proxy["id"].as_str().unwrap().len(),
-        EDGE_RESOURCE_ID_MAX_LENGTH
+        generated_ids(&resources),
+        vec![format!("{}-otel-tracing", "a".repeat(max)).as_str()]
     );
+
+    manifest.gateway.proxy_id = Some("a".repeat(EDGE_RESOURCE_ID_MAX_LENGTH));
+    let error = manifest.validate().unwrap_err().to_string();
+    assert!(error.contains("-otel-tracing"), "{error}");
+}
+
+/// Without `gateway.otel_endpoint`, export still attaches `otel_tracing`,
+/// in Edge's propagation-only mode: it distrusts the caller's context and
+/// generates none, so Edge's `before_proxy` removes every casing of the
+/// caller's `traceparent`/`tracestate` and forwards no trace context (#307).
+#[test]
+fn export_without_an_otel_endpoint_never_relays_caller_trace_context() {
+    let mut manifest = manifest();
+    manifest.gateway.otel_endpoint = None;
+    manifest.gateway.otel_root_sampling_ratio = None;
+    let resources = resources(&manifest).unwrap();
+    let otel = resources
+        .plugin_configs
+        .iter()
+        .find(|plugin| plugin["plugin_name"] == "otel_tracing")
+        .expect("otel_tracing is always attached");
+    assert_eq!(
+        otel["config"],
+        json!({
+            "service_name": "ferrum-edge-ferrum",
+            "trace_context_trust": "untrusted",
+            "generate_trace_id": false,
+            "include_url_path": false,
+        })
+    );
+    assert_eq!(otel["enabled"], true);
+    assert!(
+        resources.proxy["plugins"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({ "plugin_config_id": otel["id"] })),
+        "the proxy references the plugin"
+    );
+
+    // With an endpoint, Edge distrusts the caller's context and starts its
+    // own trace (the default `generate_trace_id: true`).
+    let with_endpoint = resources_for_endpoint();
+    assert_eq!(with_endpoint["trace_context_trust"], "untrusted");
+    assert!(with_endpoint.get("generate_trace_id").is_none());
+}
+
+fn resources_for_endpoint() -> Value {
+    let resources = resources(&manifest()).unwrap();
+    resources
+        .plugin_configs
+        .into_iter()
+        .find(|plugin| plugin["plugin_name"] == "otel_tracing")
+        .unwrap()["config"]
+        .clone()
 }
 
 /// Literal paths outside Alloy's canonical subset. The first four are
@@ -570,5 +632,108 @@ fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
     ] {
         let error = with_endpoint(refused).unwrap_err();
         assert!(error.contains("loopback IP literal"), "{refused}: {error}");
+    }
+}
+
+/// Edge's upper bounds and control-character rules (#309): every field at
+/// its limit is accepted and exports exactly that value; one past it is
+/// refused with a message naming the field, instead of export writing
+/// configuration Edge refuses to load.
+#[test]
+fn manifests_are_held_to_edges_upper_bounds() {
+    use ferrum_alloy_edge::manifest::{
+        EDGE_MAX_BACKEND_HOST_LENGTH, EDGE_MAX_BACKEND_PATH_LENGTH,
+        EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS, EDGE_MAX_LISTEN_PATH_LENGTH, EDGE_MAX_TIMEOUT_MS,
+    };
+    assert_eq!(EDGE_MAX_TIMEOUT_MS, 86_400_000);
+    assert_eq!(EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS, 3_600);
+    assert_eq!(EDGE_MAX_LISTEN_PATH_LENGTH, 500);
+    assert_eq!(EDGE_MAX_BACKEND_PATH_LENGTH, 2_048);
+    assert_eq!(EDGE_MAX_BACKEND_HOST_LENGTH, 255);
+    let path_of = |len: usize| format!("/{}", "p".repeat(len - 1));
+
+    let mut at_limit = manifest();
+    at_limit.timeouts.connect_ms = EDGE_MAX_TIMEOUT_MS;
+    at_limit.timeouts.read_ms = EDGE_MAX_TIMEOUT_MS;
+    at_limit.timeouts.write_ms = EDGE_MAX_TIMEOUT_MS;
+    let health = at_limit.health.as_mut().unwrap();
+    health.interval_seconds = EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS;
+    health.timeout_ms = EDGE_MAX_TIMEOUT_MS;
+    health.path = path_of(EDGE_MAX_BACKEND_PATH_LENGTH);
+    at_limit.api.public_path = path_of(EDGE_MAX_LISTEN_PATH_LENGTH);
+    at_limit.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH - 1));
+    at_limit.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH);
+    at_limit.validate().unwrap();
+    let exported = resources(&at_limit).unwrap();
+    assert_eq!(
+        exported.proxy["backend_read_timeout_ms"],
+        EDGE_MAX_TIMEOUT_MS
+    );
+    assert_eq!(
+        exported.proxy["listen_path"].as_str().unwrap().len(),
+        EDGE_MAX_LISTEN_PATH_LENGTH
+    );
+    let upstream = exported.upstream.unwrap();
+    assert_eq!(
+        upstream["health_checks"]["active"]["interval_seconds"],
+        EDGE_MAX_HEALTH_CHECK_INTERVAL_SECONDS
+    );
+    assert_eq!(
+        upstream["targets"][0]["host"].as_str().unwrap().len(),
+        EDGE_MAX_BACKEND_HOST_LENGTH
+    );
+
+    let refused = |change: &dyn Fn(&mut ServiceManifest), field: &str| {
+        let mut manifest = manifest();
+        change(&mut manifest);
+        let error = manifest.validate().unwrap_err().to_string();
+        assert!(error.contains(field), "{field}: {error}");
+    };
+    refused(
+        &|m| m.timeouts.read_ms = 100_000_000,
+        "timeouts.read_ms must not exceed",
+    );
+    refused(
+        &|m| m.timeouts.connect_ms = EDGE_MAX_TIMEOUT_MS + 1,
+        "timeouts.connect_ms must not exceed",
+    );
+    refused(
+        &|m| m.timeouts.write_ms = EDGE_MAX_TIMEOUT_MS + 1,
+        "timeouts.write_ms must not exceed",
+    );
+    refused(
+        &|m| m.health.as_mut().unwrap().interval_seconds = 7_200,
+        "health.interval_seconds must not exceed",
+    );
+    refused(
+        &|m| m.health.as_mut().unwrap().timeout_ms = EDGE_MAX_TIMEOUT_MS + 1,
+        "health.timeout_ms must not exceed",
+    );
+    refused(
+        &|m| m.health.as_mut().unwrap().path = path_of(EDGE_MAX_BACKEND_PATH_LENGTH + 1),
+        "health.path must not exceed",
+    );
+    refused(
+        &|m| m.api.public_path = path_of(600),
+        "api.public_path must not exceed 500 bytes",
+    );
+    refused(
+        &|m| m.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH)),
+        "api.service_base_path must not exceed",
+    );
+    refused(
+        &|m| m.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH + 1),
+        "upstream.host must not exceed 255 bytes",
+    );
+    for host in [
+        "orders\ninternal",
+        "orders\tinternal",
+        "orders\u{7f}",
+        "orders\u{85}x",
+    ] {
+        refused(
+            &|m| m.upstream.host = host.to_owned(),
+            "upstream.host must not contain control or whitespace characters",
+        );
     }
 }

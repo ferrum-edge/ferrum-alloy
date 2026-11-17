@@ -411,6 +411,9 @@ impl AlloyApp {
                 EdgeMode::GatewayRequired => ferrum_alloy_edge::DeploymentMode::GatewayRequired,
             };
             policy_config.accept_consumer_identity = config.edge.accept_consumer_identity;
+            policy_config
+                .trusted_proxies
+                .clone_from(&config.edge.trusted_proxies);
             let policy = ferrum_alloy_edge::EdgePolicy::new(policy_config, Arc::clone(&classifier))
                 .with_exempt_paths(exempt_paths);
             ferrum_alloy_edge::EdgeLayer::new(policy)

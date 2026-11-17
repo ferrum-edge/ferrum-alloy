@@ -72,6 +72,7 @@ struct Seen {
     context: Option<GatewayContext>,
     verification: Option<GatewayVerification>,
     username_header: Option<String>,
+    headers: http::HeaderMap,
 }
 
 async fn run(
@@ -90,6 +91,7 @@ async fn run(
                     .headers()
                     .get("x-consumer-username")
                     .map(|v| v.to_str().unwrap().to_owned()),
+                headers: req.headers().clone(),
             });
             Ok::<_, Infallible>(Response::new(Body::empty()))
         }
@@ -122,11 +124,364 @@ async fn verified_gateway_identity_is_handed_off() {
     assert_eq!(context.consumer_custom_id.as_deref(), Some("cust-7"));
     assert_eq!(context.client_address.unwrap().to_string(), "203.0.113.44");
     assert_eq!(
+        context.edge_peer_address.unwrap().to_string(),
+        "203.0.113.44"
+    );
+    assert_eq!(
         seen.verification,
         Some(GatewayVerification::Verified {
             identity: GATEWAY.into()
         })
     );
+}
+
+/// Forged copies of every gateway-asserted header, not just the two
+/// Consumer names (GHSA-hh7p-48xw-gwqg), in Edge's spellings.
+const FORGED: &[(&str, &str)] = &[
+    ("x-authenticated-identity", "admin@example.com"),
+    ("x-consumer-role", "admin"),
+    ("X_Consumer_Username", "mallory"),
+    ("x-geo-country", "US"),
+    (
+        "x-ferrum-peer-spiffe-id",
+        "spiffe://ferrum.test/ns/pay/sa/payments",
+    ),
+    (
+        "x-ferrum-source-principal",
+        "spiffe://ferrum.test/ns/pay/sa/payments",
+    ),
+    ("x-ferrum-hops", "1"),
+    ("X_Path_Param_Id", "someone-else"),
+    ("x-api-version", "2"),
+];
+
+fn assertion_names(headers: &http::HeaderMap) -> Vec<String> {
+    headers
+        .keys()
+        .filter(|name| ferrum_alloy_edge::contract::is_gateway_written_header(name.as_str()))
+        .map(|name| name.as_str().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn every_forged_gateway_assertion_is_removed_without_a_verified_gateway() {
+    for (label, mode, accept, peer) in [
+        ("standalone", DeploymentMode::Standalone, false, untrusted()),
+        (
+            "preferred",
+            DeploymentMode::GatewayPreferred,
+            true,
+            untrusted(),
+        ),
+        (
+            "network",
+            DeploymentMode::GatewayPreferred,
+            true,
+            network_trusted(),
+        ),
+        ("exempt", DeploymentMode::GatewayRequired, true, untrusted()),
+        (
+            "handoff off",
+            DeploymentMode::GatewayPreferred,
+            false,
+            verified(),
+        ),
+    ] {
+        let policy = policy(mode, accept);
+        let stats = policy.stats();
+        let (status, seen, _) = run(policy, request("/readyz", peer, FORGED)).await;
+        assert_eq!(status, 200, "{label}");
+        let seen = seen.unwrap();
+        assert!(seen.context.is_none(), "{label}");
+        assert_eq!(
+            assertion_names(&seen.headers),
+            Vec::<String>::new(),
+            "{label}"
+        );
+        assert_eq!(
+            seen.headers.get("x-api-version").unwrap(),
+            "2",
+            "{label}: ordinary headers stay"
+        );
+        assert_eq!(
+            stats.stripped_unverified_identity.load(Ordering::Relaxed),
+            1,
+            "{label}"
+        );
+    }
+}
+
+/// Driven by the pinned vocabulary, so a header it adds is covered here
+/// as soon as `contract::GATEWAY_ASSERTION_HEADERS` lists it.
+#[tokio::test]
+async fn every_pinned_gateway_assertion_header_is_removed_from_direct_callers() {
+    let vocabulary: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/ferrum-contracts/vocabularies/gateway-headers.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let names: Vec<String> = vocabulary["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry["role"] == "gateway_assertion"
+                || (entry["role"] == "ferrum_owned" && entry["direction"] == "gateway_to_backend")
+        })
+        .map(|entry| {
+            let name = entry["name"].as_str().unwrap().to_ascii_lowercase();
+            if entry["match"] == "prefix" {
+                format!("{name}groups")
+            } else {
+                name
+            }
+        })
+        .collect();
+    assert!(names.len() >= 11, "{names:?}");
+    assert!(
+        names.contains(&"x-path-param-groups".to_owned()),
+        "{names:?}"
+    );
+    let forged: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "forged")).collect();
+    let (_, seen, _) = run(
+        policy(DeploymentMode::GatewayPreferred, true),
+        request("/x", untrusted(), &forged),
+    )
+    .await;
+    let seen = seen.unwrap();
+    for name in &names {
+        assert!(
+            !seen.headers.contains_key(name.as_str()),
+            "{name} reached the handler"
+        );
+    }
+}
+
+#[tokio::test]
+async fn verified_gateway_hands_off_the_external_authenticated_identity() {
+    let (_, seen, _) = run(
+        policy(DeploymentMode::GatewayPreferred, true),
+        request("/x", verified(), FORGED),
+    )
+    .await;
+    let seen = seen.unwrap();
+    let context = seen.context.unwrap();
+    assert_eq!(
+        context.authenticated_identity.as_deref(),
+        Some("admin@example.com")
+    );
+    assert_eq!(context.consumer_username, None);
+    assert_eq!(
+        seen.headers.get("x-geo-country").unwrap(),
+        "US",
+        "a verified gateway's assertions reach the handler"
+    );
+}
+
+fn policy_with_trusted_proxies(trusted: &[&str]) -> EdgePolicy {
+    let mut trust = TrustedPeersConfig::default();
+    trust.identities = vec![GATEWAY.into()];
+    let peers = TrustedPeers::new(&trust).unwrap();
+    let mut config = EdgePolicyConfig::default();
+    config.mode = DeploymentMode::GatewayPreferred;
+    config.accept_consumer_identity = true;
+    config.trusted_proxies = trusted.iter().map(|net| net.parse().unwrap()).collect();
+    EdgePolicy::new(config, Arc::new(peers))
+}
+
+/// Edge's outbound `X-Forwarded-For` forms (`build_xff_value`) resolved the
+/// way Edge resolves them (`resolve_client_ip_field_lines`) with the same
+/// trusted list (#308, sol F1): Edge appends the address it accepted the
+/// connection from, so the walk starts at Edge's peer and stops at the
+/// first untrusted address. A position-based pick would hand out a
+/// caller-chosen entry whenever the number of trusted hops varies.
+#[tokio::test]
+async fn client_address_repeats_edges_forwarded_for_resolution() {
+    const LB: &[&str] = &["10.0.0.0/8"];
+    const CDN_AND_LB: &[&str] = &["10.0.0.0/8", "192.0.2.0/24"];
+    for (row, trusted, xff, client, peer) in [
+        // No proxy in front of Edge: `peer`.
+        (
+            "direct",
+            &[][..],
+            vec!["203.0.113.7"],
+            Some("203.0.113.7"),
+            Some("203.0.113.7"),
+        ),
+        // Trusted LB appending to a caller-supplied chain: `spoof, client, lb`.
+        (
+            "lb with xff",
+            LB,
+            vec!["198.51.100.1, 203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // A caller that pads the chain cannot move the boundary: the walk
+        // stops at the address the trusted LB vouched for.
+        (
+            "padded chain",
+            LB,
+            vec!["192.0.2.99, 198.51.100.1, 203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // A request that reached Edge through the CDN and the LB.
+        (
+            "cdn and lb",
+            CDN_AND_LB,
+            vec!["203.0.113.7, 192.0.2.10, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // The same deployment, a request that skipped the CDN.
+        (
+            "lb only",
+            CDN_AND_LB,
+            vec!["203.0.113.8, 10.0.0.5"],
+            Some("203.0.113.8"),
+            Some("10.0.0.5"),
+        ),
+        // A request that bypassed the balancer: Edge dropped its chain and
+        // wrote only the untrusted peer, which Edge resolved as the client.
+        (
+            "bypassed lb",
+            LB,
+            vec!["198.51.100.66"],
+            Some("198.51.100.66"),
+            Some("198.51.100.66"),
+        ),
+        // Without the trusted list the walk stops at Edge's peer.
+        (
+            "lb, list empty",
+            &[][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // Only trusted entries: Edge falls back to its peer.
+        (
+            "all trusted",
+            LB,
+            vec!["10.0.0.9, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // A malformed boundary falls back to the peer, as in Edge, never to a
+        // caller-chosen neighbour further left.
+        (
+            "malformed boundary",
+            LB,
+            vec!["198.51.100.1, unknown, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // Field lines are one chain in order; empty entries are skipped.
+        (
+            "split lines",
+            LB,
+            vec!["2001:db8::7", ", 10.0.0.5"],
+            Some("2001:db8::7"),
+            Some("10.0.0.5"),
+        ),
+        // Obs-text in a caller-supplied entry or field line is one malformed
+        // entry left of the boundary, as in Edge, not a reason to drop the
+        // gateway-written suffix (round 2 sol F1).
+        (
+            "obs-text entry",
+            LB,
+            vec!["caf\u{e9}, 203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        (
+            "obs-text line",
+            LB,
+            vec!["caf\u{e9}", "203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // Edge's CidrSet reads an IPv4-mapped rule of /96 or longer as the
+        // IPv4 network, and a shorter one as matching nothing (round 2 sol F2).
+        (
+            "mapped rule",
+            &["::ffff:10.0.0.0/104"][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        (
+            "short mapped rule",
+            &["::ffff:0:0/80"][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+        // A mapped query matches an IPv4 rule by its embedded address, and
+        // addresses are reported canonically, as Edge's identities are.
+        (
+            "mapped lb",
+            LB,
+            vec!["203.0.113.7, ::ffff:10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        (
+            "mapped client",
+            LB,
+            vec!["203.0.113.7, ::ffff:203.0.113.7, 10.0.0.5"],
+            Some("203.0.113.7"),
+            Some("10.0.0.5"),
+        ),
+        // A native IPv4 address never matches an IPv6 rule.
+        (
+            "v6 rule, v4 lb",
+            &["::/0"][..],
+            vec!["203.0.113.7, 10.0.0.5"],
+            Some("10.0.0.5"),
+            Some("10.0.0.5"),
+        ),
+    ] {
+        let headers: Vec<(&str, &str)> =
+            xff.iter().map(|line| ("x-forwarded-for", *line)).collect();
+        let (_, seen, _) = run(
+            policy_with_trusted_proxies(trusted),
+            request("/x", verified(), &headers),
+        )
+        .await;
+        let context = seen.unwrap().context.unwrap();
+        assert_eq!(
+            context.client_address.map(|a| a.to_string()).as_deref(),
+            client,
+            "{row}"
+        );
+        assert_eq!(
+            context.edge_peer_address.map(|a| a.to_string()).as_deref(),
+            peer,
+            "{row}"
+        );
+    }
+}
+
+/// Edge's real-IP-header mode keeps a trusted LB's passed-through chain and
+/// seeds the authoritative client only when the chain lacks it, so the chain
+/// alone cannot show which entry Edge chose (sol F1). Alloy cannot repeat
+/// that resolution; the documented setting for this layout is an empty
+/// trusted list, which reports Edge's peer, never a caller-chosen entry.
+#[tokio::test]
+async fn real_ip_header_layouts_never_report_a_caller_chosen_entry() {
+    // Edge resolved 203.0.113.7 from the LB's real-IP header; the caller
+    // supplied `203.0.113.7, 192.0.2.99`.
+    let headers = [("x-forwarded-for", "203.0.113.7, 192.0.2.99, 10.0.0.5")];
+    let (_, seen, _) = run(
+        policy_with_trusted_proxies(&[]),
+        request("/x", verified(), &headers),
+    )
+    .await;
+    let context = seen.unwrap().context.unwrap();
+    assert_eq!(context.client_address.unwrap().to_string(), "10.0.0.5");
 }
 
 #[tokio::test]

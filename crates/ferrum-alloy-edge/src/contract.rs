@@ -69,9 +69,104 @@ pub mod span_attributes {
     pub const PROXY_ID: &str = "gateway.proxy.id";
 }
 
-/// Headers whose values Edge asserts about the authenticated caller. Direct
-/// callers can send them too; they are meaningful only from a verified gateway.
+/// External authenticated identity (Edge v0.9.15 and later): the identity
+/// or display claim of a caller that an external auth flow (for example
+/// `jwks_auth`/OIDC) authenticated without mapping a Consumer. Edge sends it
+/// instead of [`CONSUMER_USERNAME`], never with it, and strips client copies
+/// (`src/proxy/headers.rs` `is_consumer_assertion_header`). Trust it only
+/// from a verified gateway identity.
+pub const AUTHENTICATED_IDENTITY: &str = "x-authenticated-identity";
+
+/// The Consumer identity headers Edge asserts about a mapped Consumer.
+/// [`GatewayContext`](crate::GatewayContext) exposes them only from a
+/// verified gateway identity.
 pub const IDENTITY_HEADERS: &[&str] = &[CONSUMER_USERNAME, CONSUMER_CUSTOM_ID];
+
+/// Every exact request header name the pinned `gateway-headers` vocabulary
+/// (`contracts/ferrum-contracts/vocabularies/gateway-headers.json`) gives the
+/// role `gateway_assertion`, lowercase: values only Edge may write, which it
+/// strips from clients before writing its own. Direct callers can send them
+/// too, so Alloy removes every one unless the peer is a verified gateway
+/// identity and `accept_consumer_identity` is on. The pairing test
+/// `gateway_assertion_headers_match_the_pinned_vocabulary` fails when the
+/// vocabulary gains, drops, or renames one.
+pub const GATEWAY_ASSERTION_HEADERS: &[&str] = &[
+    CONSUMER_USERNAME,
+    CONSUMER_CUSTOM_ID,
+    AUTHENTICATED_IDENTITY,
+    "x-geo-country",
+    "x-ferrum-hops",
+    "x-ferrum-peer-spiffe-id",
+    "x-ferrum-source-principal",
+    "x-ferrum-source-namespace",
+    "x-ferrum-source-service-account",
+    "x-ferrum-request-principal",
+];
+
+/// The `gateway_assertion` name prefixes of the same vocabulary: Edge owns
+/// the whole `x-consumer-*` namespace (`X-Consumer-Role`, `X-Consumer-Groups`,
+/// and so on), not just the two names it writes today.
+pub const GATEWAY_ASSERTION_HEADER_PREFIXES: &[&str] = &["x-consumer-"];
+
+/// Request header prefixes the pinned vocabulary gives the role
+/// `ferrum_owned` with direction `gateway_to_backend`: names Edge writes to
+/// the backend itself (route path-parameter captures, `x-path-param-*`) and
+/// strips from clients (`is_path_param_assertion_header`). Not assertions
+/// about the caller, but just as forgeable by a direct caller, so the Edge
+/// policy removes them with the assertions.
+pub const GATEWAY_WRITTEN_HEADER_PREFIXES: &[&str] = &["x-path-param-"];
+
+/// Whether `name` is a request header only Edge may write: a gateway
+/// assertion ([`is_gateway_assertion_header`]) or under
+/// [`GATEWAY_WRITTEN_HEADER_PREFIXES`], matched the same way.
+pub fn is_gateway_written_header(name: &str) -> bool {
+    is_gateway_assertion_header(name)
+        || GATEWAY_WRITTEN_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| folded_starts_with(name, prefix))
+}
+
+/// Whether `name` is a gateway-asserted request header
+/// ([`GATEWAY_ASSERTION_HEADERS`] or under
+/// [`GATEWAY_ASSERTION_HEADER_PREFIXES`]), matched the way Edge matches
+/// them: ASCII case-insensitive, with `_` read as `-`, because CGI-style
+/// frameworks fold `X_Geo_Country` and `X-Geo-Country` to the same variable.
+pub fn is_gateway_assertion_header(name: &str) -> bool {
+    GATEWAY_ASSERTION_HEADERS
+        .iter()
+        .any(|header| folded_eq(name, header))
+        || GATEWAY_ASSERTION_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| folded_starts_with(name, prefix))
+}
+
+/// One header-name byte, lowercased, with `_` read as `-`.
+fn fold(byte: u8) -> u8 {
+    match byte {
+        b'_' => b'-',
+        other => other.to_ascii_lowercase(),
+    }
+}
+
+/// `name` equals the lowercase, dash-spelled `expected` once folded.
+fn folded_eq(name: &str, expected: &str) -> bool {
+    name.len() == expected.len() && folded_eq_bytes(name.as_bytes(), expected.as_bytes())
+}
+
+/// `name` starts with the lowercase, dash-spelled `prefix` once folded.
+fn folded_starts_with(name: &str, prefix: &str) -> bool {
+    name.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| folded_eq_bytes(head, prefix.as_bytes()))
+}
+
+/// Byte-wise [`folded_eq`]; callers ensure equal lengths.
+fn folded_eq_bytes(bytes: &[u8], expected: &[u8]) -> bool {
+    bytes
+        .iter()
+        .zip(expected)
+        .all(|(&byte, &expected)| fold(byte) == expected)
+}
 
 /// Upper bound Alloy accepts for an identity header value.
 pub const MAX_IDENTITY_VALUE_BYTES: usize = 512;

@@ -5,12 +5,18 @@
 //! * *Transport trust* (is the direct peer the gateway?) comes only from the
 //!   shared [`TrustClassifier`](ferrum_alloy_telemetry::peer::TrustClassifier): a verified mTLS identity or a configured
 //!   network boundary.
-//! * *Gateway-asserted identity* (`X-Consumer-Username`) is accepted only
-//!   from a verified mTLS identity, never from network trust, and only when
-//!   enabled. It is authentication performed by Edge; authorization remains
-//!   the application's decision.
-//! * Unverified copies of gateway-asserted headers are removed so handlers
-//!   cannot trust a forged value by accident.
+//! * *Gateway-asserted identity* (`X-Consumer-Username`,
+//!   `X-Authenticated-Identity`) is accepted only from a verified mTLS
+//!   identity, never from network trust, and only when enabled. It is
+//!   authentication performed by Edge; authorization remains the
+//!   application's decision.
+//! * Every gateway-asserted request header of the pinned Edge vocabulary
+//!   (the whole `x-consumer-*` namespace,
+//!   `X-Authenticated-Identity`, `X-Geo-Country`, `X-Ferrum-Hops`, and the
+//!   mesh principal headers, in any letter case and with `_` for `-`), and
+//!   the `x-path-param-*` captures Edge writes ([`is_gateway_written_header`]),
+//!   are removed unless the peer is a verified gateway identity and identity
+//!   handoff is enabled, so handlers cannot trust a forged value by accident.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -20,11 +26,13 @@ use std::task::{Context, Poll};
 use ferrum_alloy_telemetry::peer::{ClassifiedPeer, PeerTrust, SharedClassifier};
 use http::header::{CONTENT_TYPE, HeaderValue};
 use http::{HeaderMap, Request, Response, StatusCode};
+use ipnet::IpNet;
 use tower_layer::Layer;
 use tower_service::Service;
 
 use crate::contract::{
-    CONSUMER_CUSTOM_ID, CONSUMER_USERNAME, IDENTITY_HEADERS, MAX_IDENTITY_VALUE_BYTES,
+    AUTHENTICATED_IDENTITY, CONSUMER_CUSTOM_ID, CONSUMER_USERNAME, MAX_IDENTITY_VALUE_BYTES,
+    is_gateway_written_header,
 };
 
 /// How the service relates to Ferrum Edge.
@@ -47,8 +55,17 @@ pub enum DeploymentMode {
 pub struct EdgePolicyConfig {
     /// Deployment mode.
     pub mode: DeploymentMode,
-    /// Accept consumer identity headers from a verified gateway identity.
+    /// Accept Edge's gateway-asserted headers (consumer and external
+    /// identity, geo country, mesh principals) from a verified gateway
+    /// identity. Off, or from any other peer, they are removed.
     pub accept_consumer_identity: bool,
+    /// Edge's `FERRUM_TRUSTED_PROXIES`: the proxies (load balancers, CDNs)
+    /// Edge trusts in front of itself. [`GatewayContext::client_address`]
+    /// repeats Edge's own `X-Forwarded-For` resolution with this list, so it
+    /// must equal Edge's. Empty (the default) when clients connect to Edge
+    /// directly, and when Edge resolves the client from
+    /// `FERRUM_REAL_IP_HEADER`, which Alloy cannot repeat.
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 /// Counters for gateway handling.
@@ -58,7 +75,7 @@ pub struct EdgeStats {
     pub verified_gateway_requests: AtomicU64,
     /// Requests rejected by `gateway_required`.
     pub rejected_without_gateway: AtomicU64,
-    /// Requests from which unverified identity headers were removed.
+    /// Requests from which unverified gateway-asserted headers were removed.
     pub stripped_unverified_identity: AtomicU64,
 }
 
@@ -117,16 +134,34 @@ pub enum GatewayVerification {
 /// Metadata asserted by a verified gateway. Present only when the peer's
 /// identity was verified and identity handoff is enabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GatewayContext {
     /// Verified gateway identity.
     pub gateway_identity: String,
-    /// `X-Consumer-Username`, when Edge authenticated the caller.
+    /// `X-Consumer-Username`, when Edge authenticated the caller as a
+    /// mapped Consumer.
     pub consumer_username: Option<String>,
     /// `X-Consumer-Custom-Id`, when the consumer has one.
     pub consumer_custom_id: Option<String>,
-    /// The client address Edge observed (rightmost `X-Forwarded-For` hop,
-    /// which Edge writes itself).
+    /// `X-Authenticated-Identity` (Edge v0.9.15 and later): the identity an
+    /// external auth flow such as `jwks_auth`/OIDC authenticated when it
+    /// mapped no Consumer. Edge sends it instead of `X-Consumer-Username`,
+    /// never with it.
+    pub authenticated_identity: Option<String>,
+    /// The client Edge resolved from `X-Forwarded-For`. Edge forwards the
+    /// chain it received from a trusted proxy with the address it accepted
+    /// the connection from appended (`build_xff_value`), so Alloy repeats
+    /// Edge's resolution (`client_ip::resolve_client_ip_field_lines`) with
+    /// [`EdgePolicyConfig::trusted_proxies`]: walking right to left, the first
+    /// address outside the trusted list is the client; a malformed entry
+    /// there, or a chain of trusted addresses only, yields Edge's peer, as in
+    /// Edge. With an empty list this is Edge's peer. It is not Edge's resolved
+    /// client when Edge uses `FERRUM_REAL_IP_HEADER`.
     pub client_address: Option<IpAddr>,
+    /// Edge's immediate peer: the rightmost `X-Forwarded-For` hop, which Edge
+    /// writes itself. It is the client only when nothing sits in front of
+    /// Edge; behind a load balancer it is the balancer.
+    pub edge_peer_address: Option<IpAddr>,
 }
 
 #[cfg(feature = "axum")]
@@ -151,20 +186,86 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     (!text.is_empty() && text.len() <= MAX_IDENTITY_VALUE_BYTES).then(|| text.to_owned())
 }
 
-fn forwarded_client(headers: &HeaderMap) -> Option<IpAddr> {
-    let last = headers
+/// Every `X-Forwarded-For` entry, in wire order across field lines, as raw
+/// bytes with surrounding optional whitespace removed and empty entries
+/// skipped, the way Edge's `resolve_client_ip_field_lines` reads them: one
+/// entry that is not ASCII (obs-text) or not an address does not discard
+/// the others.
+fn forwarded_for_entries(headers: &HeaderMap) -> Vec<&[u8]> {
+    headers
         .get_all("x-forwarded-for")
         .iter()
-        .next_back()?
-        .to_str()
-        .ok()?
-        .rsplit(',')
-        .next()?
-        .trim();
-    last.trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse()
-        .ok()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(|entry| entry.trim_ascii_start().trim_ascii_end())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// An entry as an address, `None` when it is not one.
+fn entry_address(entry: &[u8]) -> Option<IpAddr> {
+    std::str::from_utf8(entry).ok()?.parse().ok()
+}
+
+/// Edge's immediate peer: the rightmost entry, which Edge writes itself
+/// (canonical, so an IPv4-mapped spelling reads as IPv4, as Edge reports
+/// client identities).
+fn edge_peer(entries: &[&[u8]]) -> Option<IpAddr> {
+    let hop = entries.last()?;
+    let hop = hop
+        .strip_prefix(b"[")
+        .and_then(|rest| rest.strip_suffix(b"]"))
+        .unwrap_or(hop);
+    entry_address(hop).map(|ip| ip.to_canonical())
+}
+
+/// Whether Edge's trusted-proxy set (`util::cidr::CidrSet`) contains `ip`.
+/// An IPv4-mapped IPv6 network with a prefix of at least 96 is the
+/// equivalent IPv4 network (a shorter one matches nothing); a mapped query
+/// matches an IPv4 network by its embedded address; a native IPv4 query
+/// never matches an IPv6 network.
+fn trusted_proxy(trusted: &[IpNet], ip: IpAddr) -> bool {
+    trusted.iter().any(|network| {
+        let network = match network {
+            IpNet::V6(v6) => match v6.addr().to_ipv4_mapped() {
+                Some(v4) if v6.prefix_len() >= 96 => {
+                    match ipnet::Ipv4Net::new(v4, v6.prefix_len() - 96) {
+                        Ok(v4) => IpNet::V4(v4.trunc()),
+                        Err(_) => return false,
+                    }
+                }
+                Some(_) => return false,
+                None => *network,
+            },
+            IpNet::V4(_) => *network,
+        };
+        match (network, ip) {
+            (IpNet::V4(network), IpAddr::V4(addr)) => network.contains(&addr),
+            (IpNet::V4(network), IpAddr::V6(addr)) => addr
+                .to_ipv4_mapped()
+                .is_some_and(|v4| network.contains(&v4)),
+            (IpNet::V6(network), IpAddr::V6(addr)) => network.contains(&addr),
+            (IpNet::V6(_), IpAddr::V4(_)) => false,
+        }
+    })
+}
+
+/// Edge's `resolve_client_ip_field_lines` applied to the chain Edge
+/// forwarded: the last entry that is not a trusted proxy decides. A valid
+/// address there is the client (canonical, as Edge's `canonical_ip_string`);
+/// a malformed one, or no untrusted entry at all, falls back to Edge's peer,
+/// which Edge would have used. Since Edge appended its peer, an untrusted
+/// peer (whose inbound chain Edge dropped) is the last untrusted entry, as in
+/// Edge.
+fn resolved_client(entries: &[&[u8]], trusted: &[IpNet], peer: Option<IpAddr>) -> Option<IpAddr> {
+    let mut client = None;
+    for entry in entries {
+        match entry_address(entry) {
+            Some(ip) if trusted_proxy(trusted, ip) => {}
+            Some(ip) => client = Some(ip.to_canonical()),
+            None => client = None,
+        }
+    }
+    client.or(peer)
 }
 
 /// The problem type used for `gateway_required` rejections (kept in sync
@@ -285,9 +386,10 @@ where
             return Box::pin(async move { Ok(response) });
         }
 
-        let identity_present = IDENTITY_HEADERS
-            .iter()
-            .any(|name| request.headers().contains_key(*name));
+        let assertion_present = request
+            .headers()
+            .keys()
+            .any(|name| is_gateway_written_header(name.as_str()));
         match (&verification, policy.config.accept_consumer_identity) {
             (GatewayVerification::Verified { identity }, true) => {
                 policy
@@ -295,11 +397,17 @@ where
                     .verified_gateway_requests
                     .fetch_add(1, Ordering::Relaxed);
                 let headers = request.headers();
+                let entries = forwarded_for_entries(headers);
+                let edge_peer_address = edge_peer(&entries);
+                let client_address =
+                    resolved_client(&entries, &policy.config.trusted_proxies, edge_peer_address);
                 let context = GatewayContext {
                     gateway_identity: identity.clone(),
                     consumer_username: header_value(headers, CONSUMER_USERNAME),
                     consumer_custom_id: header_value(headers, CONSUMER_CUSTOM_ID),
-                    client_address: forwarded_client(headers),
+                    authenticated_identity: header_value(headers, AUTHENTICATED_IDENTITY),
+                    client_address,
+                    edge_peer_address,
                 };
                 request.extensions_mut().insert(context);
             }
@@ -308,9 +416,9 @@ where
                     .stats
                     .verified_gateway_requests
                     .fetch_add(1, Ordering::Relaxed);
-                strip(&mut request, identity_present, &policy.stats);
+                strip(&mut request, assertion_present, &policy.stats);
             }
-            _ => strip(&mut request, identity_present, &policy.stats),
+            _ => strip(&mut request, assertion_present, &policy.stats),
         }
         request.extensions_mut().insert(verification);
         Box::pin(self.inner.call(request))
@@ -321,11 +429,17 @@ fn strip<B>(request: &mut Request<B>, present: bool, stats: &EdgeStats) {
     if !present {
         return;
     }
-    for name in IDENTITY_HEADERS {
-        request.headers_mut().remove(*name);
+    let forged: Vec<_> = request
+        .headers()
+        .keys()
+        .filter(|name| is_gateway_written_header(name.as_str()))
+        .cloned()
+        .collect();
+    for name in forged {
+        request.headers_mut().remove(name);
     }
     stats
         .stripped_unverified_identity
         .fetch_add(1, Ordering::Relaxed);
-    tracing::debug!(target: "ferrum_alloy::edge", "removed gateway identity headers from a request without a verified gateway identity");
+    tracing::debug!(target: "ferrum_alloy::edge", "removed gateway-asserted headers from a request without a verified gateway identity");
 }
