@@ -184,9 +184,14 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    authentication by hand.
 
    When exporting OpenAPI with `--manifest`, the document server URL uses the manifest's
-   `api.public_path`. If `api.strip_public_path` is enabled, `api.service_base_path` is removed
-   from operation paths that start with that prefix; paths already written relative to the
-   service base remain unchanged. With stripping disabled, operation paths are preserved.
+   `api.public_path`, and every operation path is made relative to it. The export removes the
+   prefix the exported proxy puts in front of each forwarded path: `api.service_base_path`
+   (without its trailing `/`) when `api.strip_public_path` is enabled, and
+   `api.service_base_path` followed by `api.public_path` when it is disabled, because Edge then
+   forwards the whole public path. With `public_path = "/public"`, `service_base_path =
+   "/internal/"` and stripping disabled, the service's `/internal/public/items` is exported as
+   `/items`. An operation path outside that prefix can never be reached through Edge, so it fails
+   the export (exit 3) and is named in the error.
 
    To let AI agents call selected operations through Edge's OpenAPI to MCP bridge (supported Edge
    v0.9.20 and v0.9.19), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the

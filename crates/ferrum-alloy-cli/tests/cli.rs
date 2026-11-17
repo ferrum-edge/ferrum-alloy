@@ -1524,53 +1524,112 @@ fn openapi_export_sets_the_gateway_path_and_detects_drift() {
     );
 }
 
-#[test]
-fn openapi_export_maps_service_base_path_when_the_gateway_strips_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = write(
-        dir.path(),
-        "raw.json",
-        r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/internal/items":{},"/internal":{},"/items-already-public":{},"/internalized":{}}}"#,
-    );
+/// The path Edge forwards to the service for a document key, mirroring
+/// Edge: the spec import composes listen path + key (the listen path alone
+/// for `/`, `extractor.rs`), and the proxy forwards `backend_path` plus the
+/// rest after the listen path when stripping, or plus the whole path when
+/// not (`with_backend_path_parts`, `push_backend_path`).
+fn edge_forwarded_path(public_path: &str, base: &str, strip: bool, key: &str) -> String {
+    let listen = public_path.trim_end_matches('/');
+    let public = if key == "/" && !listen.is_empty() {
+        listen.to_owned()
+    } else {
+        format!("{listen}{key}")
+    };
+    let backend_path = base.trim_end_matches('/');
+    let rest = if strip {
+        public.strip_prefix(listen).unwrap().to_owned()
+    } else {
+        public
+    };
+    if backend_path.is_empty() && rest.is_empty() {
+        return "/".to_owned();
+    }
+    let mut path = String::new();
+    let leading = if backend_path.is_empty() {
+        rest.starts_with('/')
+    } else {
+        backend_path.starts_with('/')
+    };
+    if !leading {
+        path.push('/');
+    }
+    path.push_str(backend_path);
+    if !backend_path.is_empty()
+        && !rest.is_empty()
+        && !backend_path.ends_with('/')
+        && !rest.starts_with('/')
+    {
+        path.push('/');
+    }
+    path.push_str(&rest);
+    path
+}
 
-    for (name, service_base_path, strip_public_path, expected_paths) in [
+fn base_path_manifest(dir: &Path, name: &str, base: &str, strip: bool) -> String {
+    write(
+        dir,
+        &format!("{name}.toml"),
+        &format!(
+            "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"{base}\"\nstrip_public_path = {strip}\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n"
+        ),
+    )
+}
+
+/// For every combination of `strip_public_path` and a root or non-root
+/// `service_base_path`, the exported keys are relative to the public path:
+/// the public path plus each key, forwarded by the exported proxy, is the
+/// path the service documented (#87, #306).
+#[test]
+fn openapi_export_keys_round_trip_through_the_exported_proxy() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, base, strip, input_paths, expected_paths) in [
         (
             "stripped",
             "/internal/",
             true,
-            vec!["/", "/items", "/items-already-public", "/internalized"],
+            vec!["/internal/items", "/internal/items/{id}", "/internal"],
+            vec!["/", "/items", "/items/{id}"],
         ),
         (
             "not-stripped",
             "/internal/",
             false,
             vec![
-                "/internal",
-                "/internal/items",
-                "/items-already-public",
-                "/internalized",
+                "/internal/public/items",
+                "/internal/public/items/{id}",
+                "/internal/public",
             ],
+            vec!["/", "/items", "/items/{id}"],
         ),
         (
-            "root-base",
+            "root-stripped",
             "/",
             true,
-            vec![
-                "/internal",
-                "/internal/items",
-                "/items-already-public",
-                "/internalized",
-            ],
+            vec!["/internal/items", "/items"],
+            vec!["/internal/items", "/items"],
+        ),
+        (
+            "root-not-stripped",
+            "/",
+            false,
+            vec!["/public/items", "/public/items/{id}", "/public"],
+            vec!["/", "/items", "/items/{id}"],
         ),
     ] {
-        let manifest = write(
-            dir.path(),
-            &format!("{name}.toml"),
-            &format!(
-                "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"{service_base_path}\"\nstrip_public_path = {strip_public_path}\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n"
-            ),
-        );
-        let out = dir.path().join(format!("{name}.json"));
+        let mut paths = serde_json::Map::new();
+        for path in &input_paths {
+            paths.insert((*path).to_owned(), serde_json::json!({}));
+        }
+        paths.insert("x-extension".into(), serde_json::json!({ "kept": true }));
+        let document = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": paths,
+        });
+        let input = write(dir.path(), &format!("{name}.json"), &document.to_string());
+        let manifest = base_path_manifest(dir.path(), name, base, strip);
+        let out = dir.path().join(format!("{name}.out.json"));
         let output = run(&[
             "openapi",
             "export",
@@ -1581,16 +1640,86 @@ fn openapi_export_maps_service_base_path_when_the_gateway_strips_it() {
             "--output",
             out.to_str().unwrap(),
         ]);
-        assert_eq!(code(&output), 0, "{}", stderr(&output));
-        let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(out).unwrap()).unwrap();
-        assert_eq!(written["servers"][0]["url"], "/public");
-        let paths = written["paths"].as_object().unwrap();
-        let mut actual_paths: Vec<_> = paths.keys().map(String::as_str).collect();
-        actual_paths.sort_unstable();
-        let mut expected_paths = expected_paths;
-        expected_paths.sort_unstable();
-        assert_eq!(actual_paths, expected_paths, "{name}");
+        assert_eq!(code(&output), 0, "{name}: {}", stderr(&output));
+        let written = read_json(&out);
+        assert_eq!(written["servers"][0]["url"], "/public", "{name}");
+        assert_eq!(written["paths"]["x-extension"]["kept"], true, "{name}");
+        let mut actual: Vec<&str> = written["paths"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| key.starts_with('/'))
+            .collect();
+        actual.sort_unstable();
+        let mut expected = expected_paths;
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "{name}");
+        let mut forwarded: Vec<String> = actual
+            .iter()
+            .map(|key| edge_forwarded_path("/public", base, strip, key))
+            .collect();
+        forwarded.sort_unstable();
+        let mut documented: Vec<String> = input_paths.iter().map(|p| (*p).to_owned()).collect();
+        documented.sort_unstable();
+        assert_eq!(forwarded, documented, "{name}: round trip through Edge");
+    }
+}
+
+/// A path the exported proxy can never forward to is refused, with the
+/// path named, instead of written as an operation that 404s through Edge
+/// (#306).
+#[test]
+fn openapi_export_refuses_paths_edge_cannot_reach() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, base, strip, path) in [
+        (
+            "not-stripped-missing-public",
+            "/internal/",
+            false,
+            "/internal/items",
+        ),
+        ("not-stripped-root-base", "/", false, "/items"),
+        (
+            "stripped-outside-base",
+            "/internal/",
+            true,
+            "/items-already-public",
+        ),
+        (
+            "stripped-not-a-segment",
+            "/internal/",
+            true,
+            "/internalized",
+        ),
+        ("not-stripped-not-a-segment", "/", false, "/publicity"),
+    ] {
+        let document = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "t", "version": "1" },
+            "paths": { (path): {} },
+        });
+        let input = write(dir.path(), &format!("{name}.json"), &document.to_string());
+        let manifest = base_path_manifest(dir.path(), name, base, strip);
+        let out = dir.path().join(format!("{name}.out.json"));
+        let output = run(&[
+            "openapi",
+            "export",
+            "--input",
+            &input,
+            "--manifest",
+            &manifest,
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        assert_eq!(code(&output), 3, "{name}: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains(&format!("{path:?}"))
+                && stderr(&output).contains("can never reach them"),
+            "{name}: {}",
+            stderr(&output)
+        );
+        assert!(!out.exists(), "{name}: nothing is written");
     }
 }
 
@@ -1622,7 +1751,7 @@ fn openapi_export_rewrites_path_item_refs_when_stripping_and_refuses_other_strip
     // with no agent metadata anywhere (#224).
     let (output, out) = export(
         "alias",
-        r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/internal/items":{"get":{"responses":{"200":{"description":"OK"}}}},"/alias":{"$ref":"#/paths/~1internal~1items"}}}"##,
+        r##"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/internal/items":{"get":{"responses":{"200":{"description":"OK"}}}},"/internal/alias":{"$ref":"#/paths/~1internal~1items"}}}"##,
     );
     assert_eq!(code(&output), 0, "{}", stderr(&output));
     let written = read_json(&out);
@@ -1670,12 +1799,14 @@ fn openapi_stripped_reference_checks_scale_to_many_unchanged_targets() {
         "strip.toml",
         "schema = \"ferrum.service_manifest\"\nschema_version = \"1.0\"\n[service]\nname = \"review-api\"\n[api]\npublic_path = \"/public\"\nservice_base_path = \"/internal/\"\nstrip_public_path = true\n[upstream]\nhost = \"127.0.0.1\"\nport = 8080\nscheme = \"http\"\n",
     );
+    // The unchanged target is a `paths` extension: every path key under a
+    // non-root service base path is renamed or refused (#306).
     let mut paths = serde_json::Map::new();
-    paths.insert("/target".into(), serde_json::json!({}));
+    paths.insert("x-target".into(), serde_json::json!({}));
     for index in 0..100_000 {
         paths.insert(
             format!("/internal/p{index}"),
-            serde_json::json!({ "$ref": "#/paths/~1target" }),
+            serde_json::json!({ "$ref": "#/paths/x-target" }),
         );
     }
     let document = serde_json::json!({
@@ -1683,8 +1814,8 @@ fn openapi_stripped_reference_checks_scale_to_many_unchanged_targets() {
         "info": { "title": "t", "version": "1" },
         "paths": paths,
         "x-references": [
-            { "$dynamicRef": "#/%70aths/~1target" },
-            { "operationRef": "#/paths/~1target/get" }
+            { "$dynamicRef": "#/%70aths/x-target" },
+            { "operationRef": "#/paths/x-target/get" }
         ]
     })
     .to_string();
@@ -1729,7 +1860,7 @@ fn openapi_stripped_reference_checks_scale_to_many_unchanged_targets() {
     }
     let written = read_json(&out);
     assert_eq!(written["paths"].as_object().unwrap().len(), 100_001);
-    assert_eq!(written["paths"]["/p0"]["$ref"], "#/paths/~1target");
+    assert_eq!(written["paths"]["/p0"]["$ref"], "#/paths/x-target");
     assert!(written["paths"].get("/internal/p0").is_none());
 }
 

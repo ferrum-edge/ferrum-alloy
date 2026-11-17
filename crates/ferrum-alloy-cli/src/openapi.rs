@@ -5,7 +5,11 @@
 //! `ferrum-alloy new --with openapi`), run with `cargo run --bin openapi`
 //! through an explicit argument list (no shell), or from `--input`. With
 //! `--manifest`, `servers` is set to the manifest's gateway-facing
-//! `public_path`, and stripped service base paths are removed from operations.
+//! `public_path`, and operation paths are made relative to it: the prefix
+//! the exported proxy puts in front of every forwarded path (the service
+//! base path, plus the public path when Edge does not strip it) is removed,
+//! and an operation outside that prefix, which Edge can never reach, fails
+//! the export.
 //!
 //! The written document is held to `MAX_OUTPUT_BYTES`: pretty-printing can
 //! make it several times larger than its compact input, but not without
@@ -48,8 +52,8 @@ pub(crate) struct ExportArgs {
     /// Read the document from this file instead of running the project.
     #[arg(long)]
     input: Option<PathBuf>,
-    /// Service manifest; sets `servers` to `api.public_path`, maps stripped base paths, and
-    /// stamps `[agents]` as the document-level `x-ferrum-mcp`.
+    /// Service manifest; sets `servers` to `api.public_path`, makes operation paths relative
+    /// to it, and stamps `[agents]` as the document-level `x-ferrum-mcp`.
     #[arg(long)]
     manifest: Option<PathBuf>,
     /// Output file.
@@ -161,6 +165,33 @@ fn validate(document: &Value) -> Result<(), CliError> {
     Ok(())
 }
 
+/// The prefix every path the exported proxy forwards reaches the service
+/// under. Edge sends `backend_path` (the service base path without its
+/// trailing `/`, nothing for `/`) followed by the rest of the request path
+/// after the listen path when `strip_listen_path` is on, or by the whole
+/// request path when it is off (`with_backend_path_parts`).
+fn forwarded_prefix(manifest: &ferrum_alloy_edge::manifest::ServiceManifest) -> String {
+    let base_path = manifest.api.service_base_path.trim_end_matches('/');
+    if manifest.api.strip_public_path {
+        base_path.to_owned()
+    } else {
+        format!(
+            "{base_path}{}",
+            manifest.api.public_path.trim_end_matches('/')
+        )
+    }
+}
+
+/// Most unreachable paths an export refusal names.
+const MAX_LISTED_PATHS: usize = 5;
+
+/// Makes every operation path relative to `api.public_path`, the way Edge's
+/// spec import composes a public path (listen path, then the server URL,
+/// then the Paths key, whatever `strip_listen_path` says) and clients
+/// resolve `servers`: the [`forwarded_prefix`] is removed, so that the
+/// public path followed by the new key, forwarded by the exported proxy,
+/// reaches the path the service documented (#87, #306). A path outside the
+/// prefix can never be reached through Edge and fails the export.
 fn normalize_paths(
     document: &mut Value,
     manifest: &ferrum_alloy_edge::manifest::ServiceManifest,
@@ -168,32 +199,51 @@ fn normalize_paths(
     let Some(paths) = document.get_mut("paths").and_then(Value::as_object_mut) else {
         return Ok(());
     };
-    if !manifest.api.strip_public_path || manifest.api.service_base_path == "/" {
+    let prefix = forwarded_prefix(manifest);
+    if prefix.is_empty() {
         return Ok(());
     }
 
-    let base_path = manifest.api.service_base_path.trim_end_matches('/');
     let mut normalized_paths = serde_json::Map::new();
     let mut renamed = BTreeMap::new();
+    let mut unreachable = Vec::new();
     for (path, operations) in std::mem::take(paths) {
-        let normalized = if path == base_path {
-            "/"
-        } else if let Some(suffix) = path.strip_prefix(base_path).filter(|s| s.starts_with('/')) {
-            suffix
+        // Keys that are not paths are specification extensions (`x-`).
+        let normalized = if !path.starts_with('/') {
+            path.clone()
+        } else if path == prefix {
+            "/".to_owned()
+        } else if let Some(suffix) = path.strip_prefix(&prefix).filter(|s| s.starts_with('/')) {
+            suffix.to_owned()
         } else {
-            &path
+            unreachable.push(path);
+            continue;
         };
         if normalized != path {
-            renamed.insert(path.clone(), normalized.to_owned());
+            renamed.insert(path.clone(), normalized.clone());
         }
-        if normalized_paths
-            .insert(normalized.to_owned(), operations)
-            .is_some()
-        {
+        if normalized_paths.insert(normalized, operations).is_some() {
             return Err(CliError::Invalid(format!(
-                "OpenAPI paths collide after removing service_base_path {base_path:?}"
+                "OpenAPI paths collide after removing {prefix:?}, the prefix Ferrum Edge forwards requests under"
             )));
         }
+    }
+    if !unreachable.is_empty() {
+        let mut listed: Vec<String> = unreachable
+            .iter()
+            .take(MAX_LISTED_PATHS)
+            .map(|path| format!("{path:?}"))
+            .collect();
+        if unreachable.len() > MAX_LISTED_PATHS {
+            listed.push(format!("and {} more", unreachable.len() - MAX_LISTED_PATHS));
+        }
+        return Err(CliError::Invalid(format!(
+            "OpenAPI path(s) {} are not under {prefix:?}: with service_base_path {:?} and strip_public_path = {}, the exported proxy forwards every request for {:?} under that prefix, so Ferrum Edge can never reach them. Remove them from the document or fix the manifest",
+            listed.join(", "),
+            manifest.api.service_base_path,
+            manifest.api.strip_public_path,
+            manifest.api.public_path,
+        )));
     }
     *paths = normalized_paths;
     if renamed.is_empty() {
@@ -299,7 +349,7 @@ fn refuse_stripped_references(
                         && names_stripped_key(text, stripped)
                     {
                         return Err(CliError::Invalid(format!(
-                            "OpenAPI reference {text:?} names a path removed by service_base_path stripping; repoint it at the stripped path key or remove it before exporting"
+                            "OpenAPI reference {text:?} names a path that export renamed relative to api.public_path; repoint it at the renamed path key or remove it before exporting"
                         )));
                     }
                     stack.push(child);
