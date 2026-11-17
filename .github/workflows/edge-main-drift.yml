@@ -1,0 +1,420 @@
+name: Edge main drift
+
+# Early warning for changes that have landed on Ferrum Edge `main` but are not
+# released yet (ferrum-edge/ferrum-contracts#76, docs/consumer-pins.md
+# "Checking against Edge main" in ferrum-contracts). ci.yml's "Generated Edge
+# configuration validates" job runs Alloy's generated Edge configuration
+# through each supported Edge release (docs/compatibility.json); this workflow
+# runs the same three steps, copied verbatim (ci/tests/test_edge_main_drift.py
+# keeps the copies equal), against the newest signed Edge `main` image.
+#
+# It runs weekly and by hand, is never a required check, and uses no secrets:
+# only the jobs' GITHUB_TOKEN. The job that runs the Edge image holds
+# `contents: read`; only the `issue` job can write, and only issues: it opens
+# or updates one issue labelled `edge-main-drift` on a failure and closes it on
+# a clean run. A pull request that changes this workflow runs the checks
+# without touching the issue.
+
+on:
+  schedule:
+    - cron: "53 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/edge-main-drift.yml
+
+permissions: {}
+
+concurrency:
+  group: edge-main-drift-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Edge main drift check
+    if: github.repository == 'ferrum-edge/ferrum-alloy'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.report.outputs.outcome }}
+      edge-commit: ${{ steps.edge.outputs.commit }}
+      report: ${{ steps.report.outputs.report }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Resolve the Ferrum Edge main image
+        id: edge
+        # Edge's Main Latest Image workflow moves `latest` only to a main
+        # commit whose push CI passed, and signs the image keylessly. The tag
+        # is mutable: the digest is resolved once, its signature is verified
+        # against that workflow on `main`, and every step below runs the
+        # digest. The Edge commit is the image's revision label, part of the
+        # signed image, and it must be on Edge main's history.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repository=ghcr.io/ferrum-edge/ferrum-edge
+          main_head=$(git ls-remote https://github.com/ferrum-edge/ferrum-edge refs/heads/main | cut -f1)
+          if ! [[ "$main_head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve Ferrum Edge main: $main_head"
+            exit 1
+          fi
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:ferrum-edge/ferrum-edge:pull" | jq -er .token)
+          digest=$(curl -fsS --head -o /dev/null -D - \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/ferrum-edge/ferrum-edge/manifests/latest" \
+            | tr -d '\r' | awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }')
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected digest for $repository:latest: $digest"
+            exit 1
+          fi
+          image="$repository@$digest"
+          if ! cosign verify "$image" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity https://github.com/ferrum-edge/ferrum-edge/.github/workflows/main-latest-image.yml@refs/heads/main \
+            --certificate-github-workflow-repository ferrum-edge/ferrum-edge \
+            --certificate-github-workflow-ref refs/heads/main \
+            --certificate-github-workflow-trigger workflow_run \
+            > "$RUNNER_TEMP/cosign-verify.json"; then
+            echo "::error::$image has no valid signature from Edge's Main Latest Image workflow"
+            exit 1
+          fi
+          docker pull --quiet "$image"
+          commit=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")
+          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::$image carries no readable revision label: $commit"
+            exit 1
+          fi
+          read -r on_main behind < <(gh api "repos/ferrum-edge/ferrum-edge/compare/$commit...$main_head" \
+            --jq '"\(.status) \(.ahead_by)"')
+          case "$on_main" in
+            ahead | identical) ;;
+            *)
+              echo "::error::$image names $commit, which is not on Ferrum Edge main's history ($on_main)"
+              exit 1
+              ;;
+          esac
+
+          # ferrum-contracts records what Edge main changes in each
+          # vocabulary's main_branch_delta; its commit is the anchor.
+          contracts=$(git ls-remote https://github.com/ferrum-edge/ferrum-contracts refs/heads/main | cut -f1)
+          if ! [[ "$contracts" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve ferrum-contracts main: $contracts"
+            exit 1
+          fi
+          delta=$(curl -fsS "https://raw.githubusercontent.com/ferrum-edge/ferrum-contracts/$contracts/vocabularies/plugin-catalog.json" \
+            | jq -r '.main_branch_delta.commit // ""')
+          if [[ "$delta" =~ ^[0-9a-f]{40}$ ]]; then
+            case "$(gh api "repos/ferrum-edge/ferrum-edge/compare/$delta...$commit" --jq .status)" in
+              identical) delta_note="read at this commit" ;;
+              ahead) delta_note="read at an older commit; changes after it may not be recorded yet" ;;
+              behind) delta_note="read at a newer commit than this image" ;;
+              *) delta_note="not on this commit's history" ;;
+            esac
+          else
+            delta="none"
+            delta_note="ferrum-contracts main records no main_branch_delta"
+          fi
+
+          {
+            echo "image=$image"
+            echo "release=main-${commit:0:12}"
+            echo "commit=$commit"
+            echo "main-head=$main_head"
+            echo "behind=$behind"
+            echo "contracts=$contracts"
+            echo "delta=$delta"
+            echo "delta-note=$delta_note"
+          } >> "$GITHUB_OUTPUT"
+          echo "Checking Ferrum Edge main at $commit ($image), $behind commit(s) behind main $main_head."
+
+      - name: ferrum-edge validate (Edge main) on the plain-HTTP and minimal fixtures
+        id: validate
+        continue-on-error: true
+        # minimal.edge.yaml carries the propagation-only otel_tracing plugin
+        # export attaches without gateway.otel_endpoint (#307).
+        env:
+          EDGE_IMAGE: ${{ steps.edge.outputs.image }}
+        run: |
+          set -euxo pipefail
+          for fixture in plain-http minimal; do
+            docker run --rm \
+              -e FERRUM_NAMESPACE=retail \
+              -v "$PWD/contracts/fixtures/manifests:/config:ro" \
+              "$EDGE_IMAGE" \
+              validate -m file -c "/config/$fixture.edge.yaml"
+          done
+      - name: Edge main strips a caller's trace context through the minimal fixture
+        id: trace
+        continue-on-error: true
+        # Runtime proof for #307 (dsf F1): minimal.edge.yaml has no
+        # gateway.otel_endpoint, so its otel_tracing plugin is
+        # propagation-only. Edge serves the fixture in file mode in front of
+        # a header-echo backend on 127.0.0.1:8080 (the fixture's upstream);
+        # a client traceparent with the sampled flag and a tracestate must
+        # not reach the backend. x-request-id from the correlation_id plugin
+        # proves the request went through Edge's plugin chain.
+        env:
+          EDGE_IMAGE: ${{ steps.edge.outputs.image }}
+          EDGE_RELEASE: ${{ steps.edge.outputs.release }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/r4-echo-backend.py" <<'PY'
+          import http.server
+          import json
+
+
+          class Echo(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
+                  self.send_response(200)
+                  self.send_header("content-type", "application/json")
+                  self.send_header("content-length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+
+              def log_message(self, *args):
+                  pass
+
+
+          http.server.ThreadingHTTPServer(("127.0.0.1", 8080), Echo).serve_forever()
+          PY
+          python3 "$RUNNER_TEMP/r4-echo-backend.py" &
+          echo_pid=$!
+          trap 'code=$?; if [ "$code" -ne 0 ]; then docker logs edge-trace || true; fi; docker rm -f edge-trace > /dev/null 2>&1 || true; kill "$echo_pid" 2> /dev/null || true' EXIT
+          docker run -d --name edge-trace --network host \
+            -e FERRUM_MODE=file \
+            -e FERRUM_FILE_CONFIG_PATH=/config/minimal.edge.yaml \
+            -e FERRUM_NAMESPACE=retail \
+            -e FERRUM_ADMIN_HTTP_PORT=0 \
+            -v "$PWD/contracts/fixtures/manifests:/config:ro" \
+            "$EDGE_IMAGE" run -m file
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8000/starter/ready; then
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' edge-trace)" != true ]; then
+              echo "::error::Edge exited before serving the minimal fixture"
+              exit 1
+            fi
+            sleep 1
+          done
+          seen=$(curl -fsS http://127.0.0.1:8000/starter/items \
+            -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' \
+            -H 'tracestate: attacker=chosen')
+          echo "backend received: $seen"
+          if ! jq -e 'has("x-request-id")' <<< "$seen" > /dev/null; then
+            echo "::error::the request did not pass Edge's plugin chain"
+            exit 1
+          fi
+          if jq -e 'has("traceparent") or has("tracestate")' <<< "$seen" > /dev/null; then
+            echo "::error::Edge $EDGE_RELEASE relayed the caller's trace context to the backend"
+            exit 1
+          fi
+      - name: POST /api-specs (Edge main) accepts the exported agent-tool document
+        id: api-specs
+        continue-on-error: true
+        # contracts/fixtures/openapi/orders-api.openapi.json is what
+        # `ferrum-alloy openapi export` writes for orders-api.toml's [agents]
+        # section (the CLI test openapi_export_stamps_agent_tool_metadata keeps
+        # it current). It is submitted the way a publisher does: with an
+        # `x-ferrum-proxy` whose listen_path is the exported server URL (the
+        # manifest's public_path), and a root server base, since the listen
+        # path supplies the mount. /api-specs needs database mode, so Edge
+        # runs here with SQLite on a tmpfs and a throwaway admin secret.
+        # Every supported release reads x-ferrum-mcp (Edge #5930, first released
+        # in v0.9.9): the importer must generate the mcp_gateway with exactly the
+        # declared tools (the fixture's undeclared GET /orders/{id}/status must
+        # stay unpublished).
+        env:
+          EDGE_IMAGE: ${{ steps.edge.outputs.image }}
+          EDGE_RELEASE: ${{ steps.edge.outputs.release }}
+        run: |
+          set -euo pipefail
+          trap 'code=$?; if [ "$code" -ne 0 ]; then docker logs edge-api-specs || true; fi; docker rm -f edge-api-specs > /dev/null 2>&1 || true' EXIT
+          secret=$(openssl rand -hex 32)
+          docker run -d --name edge-api-specs \
+            -e FERRUM_MODE=database \
+            -e FERRUM_DB_TYPE=sqlite \
+            -e 'FERRUM_DB_URL=sqlite:///data/ferrum.db?mode=rwc' \
+            -e FERRUM_NAMESPACE=ferrum \
+            -e FERRUM_ADMIN_JWT_SECRET="$secret" \
+            -e FERRUM_ADMIN_BIND_ADDRESS=0.0.0.0 \
+            -e FERRUM_ALLOW_INSECURE_ADMIN_HTTP=true \
+            --tmpfs /data:rw,mode=1777 \
+            -p 127.0.0.1:9000:9000 \
+            "$EDGE_IMAGE" run -m database
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/health; then
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' edge-api-specs)" != true ]; then
+              echo "::error::Edge exited before its admin API was ready"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:9000/health
+
+          # An HS256 admin token with every claim Edge requires.
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)
+          claims=$(jq -cn --argjson now "$now" --arg jti "$(cat /proc/sys/kernel/random/uuid)" \
+            '{sub: "alloy-ci", role: "admin", ns: "ferrum", iss: "ferrum-edge",
+              iat: ($now - 5), nbf: ($now - 5), exp: ($now + 300), jti: $jti}' | b64url)
+          signature=$(printf '%s' "$header.$claims" \
+            | openssl dgst -sha256 -hmac "$secret" -binary | b64url)
+          token="$header.$claims.$signature"
+
+          spec="$RUNNER_TEMP/orders-api.spec.json"
+          jq '. + {"x-ferrum-proxy": {
+                id: "orders-api", listen_path: .servers[0].url, strip_listen_path: true,
+                backend_scheme: "http", backend_host: "orders.internal", backend_port: 8080}}
+              | .servers = [{url: "/"}]' \
+            contracts/fixtures/openapi/orders-api.openapi.json > "$spec"
+          status=$(curl -sS -o "$RUNNER_TEMP/api-specs.json" -w '%{http_code}' \
+            -X POST http://127.0.0.1:9000/api-specs \
+            -H "Authorization: Bearer $token" \
+            -H 'X-Ferrum-Namespace: ferrum' \
+            -H 'Content-Type: application/json' \
+            --data-binary "@$spec")
+          cat "$RUNNER_TEMP/api-specs.json"
+          echo
+          if [ "$status" != 201 ]; then
+            echo "::error::POST /api-specs answered $status"
+            exit 1
+          fi
+
+          generated=$(curl -fsS http://127.0.0.1:9000/plugins/config \
+            -H "Authorization: Bearer $token" \
+            -H 'X-Ferrum-Namespace: ferrum' \
+            | jq -c '[.data[] | select(.plugin_name == "mcp_gateway" and .proxy_id == "orders-api")
+                | .config | {endpoint: .endpoint.path, namespace: .servers.openapi.namespace,
+                  tools: ([.servers.openapi.openapi.operations[].name] | sort)}]')
+          echo "generated mcp_gateway: $generated"
+          expected='[{"endpoint":"/shop/mcp","namespace":"orders","tools":["create_order","get_order","list_orders"]}]'
+          if [ "$generated" != "$expected" ]; then
+            echo "::error::expected $expected from Edge $EDGE_RELEASE"
+            exit 1
+          fi
+
+      - name: Write the report
+        id: report
+        env:
+          EDGE_IMAGE_REF: ${{ steps.edge.outputs.image }}
+          EDGE_COMMIT: ${{ steps.edge.outputs.commit }}
+          MAIN_HEAD: ${{ steps.edge.outputs.main-head }}
+          BEHIND: ${{ steps.edge.outputs.behind }}
+          CONTRACTS: ${{ steps.edge.outputs.contracts }}
+          DELTA: ${{ steps.edge.outputs.delta }}
+          DELTA_NOTE: ${{ steps.edge.outputs.delta-note }}
+          VALIDATE: ${{ steps.validate.outcome }}
+          TRACE: ${{ steps.trace.outcome }}
+          API_SPECS: ${{ steps.api-specs.outcome }}
+        run: |
+          set -euo pipefail
+          verdict() {
+            if [ "$1" = success ]; then echo pass; else echo "**FAIL**"; fi
+          }
+          outcome=clean
+          for result in "$VALIDATE" "$TRACE" "$API_SPECS"; do
+            [ "$result" = success ] || outcome=drift
+          done
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          report="$RUNNER_TEMP/edge-main-drift.md"
+          {
+            echo "<!-- edge-main-drift -->"
+            if [ "$outcome" = drift ]; then
+              echo "\`$GITHUB_REPOSITORY\` fails checks against Ferrum Edge \`main\`. This is an early warning: the change is on Edge \`main\` and not released yet, so there is time to ship a compatible Alloy release before Edge releases it."
+            else
+              echo "\`$GITHUB_REPOSITORY\` passes its checks against Ferrum Edge \`main\`."
+            fi
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Edge commit checked | [\`${EDGE_COMMIT:0:12}\`](https://github.com/ferrum-edge/ferrum-edge/commit/$EDGE_COMMIT), image \`$EDGE_IMAGE_REF\` (signed by Edge's Main Latest Image workflow) |"
+            echo "| Edge \`main\` | \`${MAIN_HEAD:0:12}\`, $BEHIND commit(s) after the checked commit |"
+            echo "| ferrum-contracts \`main_branch_delta\` | \`${DELTA:0:12}\` at contracts \`${CONTRACTS:0:12}\`: $DELTA_NOTE |"
+            echo "| Run | $run_url |"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| \`ferrum-edge validate\` on the plain-HTTP and minimal fixtures | $(verdict "$VALIDATE") |"
+            echo "| Edge strips a caller's trace context through the minimal fixture | $(verdict "$TRACE") |"
+            echo "| \`POST /api-specs\` accepts the exported agent-tool document | $(verdict "$API_SPECS") |"
+            echo
+            echo "These are the steps of CI's \"Generated Edge configuration validates\" job; the run log has each failure. A clean scheduled run closes this issue."
+          } > "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "outcome=$outcome"
+            echo "report=$(base64 -w0 "$report")"
+          } >> "$GITHUB_OUTPUT"
+
+  issue:
+    name: Edge main drift issue
+    needs: check
+    # Checks out and runs nothing; only the default branch's own checks speak
+    # for this repository.
+    if: >-
+      !cancelled() && needs.check.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      issues: write # open, update or close the edge-main-drift issue
+    steps:
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ needs.check.outputs.outcome }}
+          EDGE_COMMIT: ${{ needs.check.outputs.edge-commit }}
+          REPORT: ${{ needs.check.outputs.report }}
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          label=edge-main-drift
+          title="Edge main drift: Alloy fails its checks against Ferrum Edge main"
+          base64 -d <<< "$REPORT" > "$RUNNER_TEMP/report.md"
+          number=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&labels=$label&per_page=100" \
+            --jq '[.[] | select(.pull_request == null)] | sort_by(.number) | .[0].number // empty')
+          case "$OUTCOME" in
+            drift)
+              gh label create "$label" --repo "$GITHUB_REPOSITORY" --color B60205 \
+                --description "Fails its checks against unreleased Ferrum Edge main" --force
+              if [ -n "$number" ]; then
+                gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/report.md"
+                gh issue comment "$number" --repo "$GITHUB_REPOSITORY" \
+                  --body "Still failing against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
+                echo "::notice::Updated tracking issue #$number."
+              else
+                gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label "$label" \
+                  --body-file "$RUNNER_TEMP/report.md"
+                echo "::notice::Opened a tracking issue."
+              fi
+              echo "::error::Alloy fails checks against Ferrum Edge main at $EDGE_COMMIT; see the tracking issue."
+              exit 1
+              ;;
+            clean)
+              if [ -n "$number" ]; then
+                gh issue close "$number" --repo "$GITHUB_REPOSITORY" \
+                  --comment "Clean against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
+                echo "::notice::Closed tracking issue #$number."
+              fi
+              ;;
+            *)
+              echo "::error::Unexpected check outcome: $OUTCOME"
+              exit 1
+              ;;
+          esac
