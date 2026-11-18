@@ -1103,7 +1103,10 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
             unknown_keys(endpoint, ENDPOINT_KEYS, &at, problems);
             match endpoint.get("path") {
                 None | Some(Value::Null) => {}
-                Some(Value::String(path)) => endpoint_path = Some(path.clone()),
+                Some(Value::String(path)) => {
+                    endpoint_path_problems(path, &at, problems);
+                    endpoint_path = Some(path.clone());
+                }
                 Some(_) => problems.push(format!("`{at}.path` must be a string")),
             }
         }
@@ -1159,6 +1162,28 @@ fn document_extension(value: Option<&Value>, problems: &mut Problems) -> Option<
         exclude_operations,
         exclude_tags,
     })
+}
+
+/// Edge's `mcp_gateway` (`validate_path`) refuses an `endpoint.path` that is
+/// not a non-empty absolute path already in canonical policy-path form: the
+/// runtime claim compares the canonical request path with it, so any other
+/// spelling could never match.
+fn endpoint_path_problems(path: &str, at: &str, problems: &mut Problems) {
+    if !path.starts_with('/') {
+        problems.push_with(|| {
+            format!(
+                "`{at}.path` {:?} must be an absolute path (Edge's `mcp_gateway` refuses it)",
+                excerpt_text(path)
+            )
+        });
+    } else if let Some(reason) = crate::policy_path::non_canonical_policy_path_reason(path) {
+        problems.push_with(|| {
+            format!(
+                "`{at}.path` {:?} is not a canonical request path ({reason}); Edge's `mcp_gateway` refuses it",
+                excerpt_text(path)
+            )
+        });
+    }
 }
 
 /// Edge's ceiling for a known `limits` key.
@@ -1327,8 +1352,10 @@ fn operation_extension<'a>(
 /// (`path_template_may_enter_endpoint_scope`, ferrum-edge #7406/#7410): each
 /// operation's public path (listen path, then each effective server base,
 /// then the Paths key) is compared segment by segment with the endpoint
-/// scope, ASCII case-insensitively and on canonical literals, and a path
-/// parameter stands for any value, so `/{name}/status` overlaps `/mcp`.
+/// scope, ASCII case-insensitively and on literals decoded by Edge's own
+/// request-path canonicalizer ([`crate::policy_path`], so `/m%40p` is
+/// `/m@p`), and a path parameter stands for any value, so `/{name}/status`
+/// overlaps `/mcp`.
 /// Root `servers` count as `/` (the publisher replaces the exported ones)
 /// and as written; Path Item and operation `servers` replace them.
 fn endpoint_problems<'a>(
@@ -1495,18 +1522,21 @@ fn join_server_base_and_path(base: &str, path: &str) -> String {
 /// Edge `path_template_may_enter_endpoint_scope` for public paths that all
 /// share the listen prefix: whether any request path a template can produce
 /// falls inside the endpoint scope's runtime claim (the scope and its
-/// descendants or `%`-suffixes, ASCII case-insensitively). Segments are
-/// compared as patterns, literal runs canonically when every run
-/// canonicalizes and as written (with the `%`-suffix rule) otherwise. The
-/// shared prefix is compared with the scope once, so each operation costs
-/// only its own path.
+/// descendants or `%`-suffixes, ASCII case-insensitively).
+///
+/// As in Edge, each literal run of each segment is decoded on its own with
+/// Edge's canonicalizer ([`decoded_literal_run`]); a run Edge cannot decode
+/// is compared as written and does not stop the other runs from being
+/// decoded, and when any run was kept as written the claim's `%`-suffix rule
+/// is also applied to the raw path. The shared prefix is split, decoded, and
+/// compared with the scope once, so each operation costs only its own path.
 struct ScopeClaim<'a> {
     scope: &'a str,
     scope_segments: Vec<&'a str>,
     prefix: &'a str,
-    /// `None` when a literal of the prefix does not canonicalize.
-    canonical_prefix: Option<PrefixMatch>,
-    raw_prefix: PrefixMatch,
+    prefix_match: PrefixMatch,
+    /// Whether a literal run of the prefix had to be kept as written.
+    prefix_raw: bool,
 }
 
 /// How the prefix's segments relate to the scope's.
@@ -1523,47 +1553,33 @@ enum PrefixMatch {
 impl<'a> ScopeClaim<'a> {
     fn new(scope: &'a str, prefix: &'a str) -> Self {
         let scope_segments: Vec<&str> = scope.split('/').collect();
-        let canonical_prefix = prefix
+        let mut prefix_raw = false;
+        let patterns: Vec<SegmentPattern> = prefix
             .split('/')
-            .map(canonical_segment_pattern)
-            .collect::<Option<Vec<_>>>()
-            .map(|patterns| prefix_match(&patterns, &scope_segments));
-        let raw: Vec<SegmentPattern> = prefix.split('/').map(SegmentPattern::new).collect();
-        let raw_prefix = prefix_match(&raw, &scope_segments);
+            .map(|segment| SegmentPattern::new(segment, &mut prefix_raw))
+            .collect();
+        let prefix_match = prefix_match(&patterns, &scope_segments);
         Self {
             scope,
             scope_segments,
             prefix,
-            canonical_prefix,
-            raw_prefix,
+            prefix_match,
+            prefix_raw,
         }
     }
 
     /// Whether the public path `prefix + rest` can fall inside the claim.
     fn may_enter(&self, rest: &str) -> bool {
-        let rest_segments: Vec<&str> = if rest.is_empty() {
+        let mut any_raw = self.prefix_raw;
+        let patterns: Vec<SegmentPattern> = if rest.is_empty() {
             Vec::new()
         } else {
-            rest.split('/').skip(1).collect()
+            rest.split('/')
+                .skip(1)
+                .map(|segment| SegmentPattern::new(segment, &mut any_raw))
+                .collect()
         };
-        let canonical = self.canonical_prefix.and_then(|prefix| {
-            rest_segments
-                .iter()
-                .map(|segment| canonical_segment_pattern(segment))
-                .collect::<Option<Vec<_>>>()
-                .map(|patterns| (prefix, patterns))
-        });
-        let is_canonical = canonical.is_some();
-        let (prefix, patterns) = canonical.unwrap_or_else(|| {
-            (
-                self.raw_prefix,
-                rest_segments
-                    .iter()
-                    .map(|s| SegmentPattern::new(s))
-                    .collect(),
-            )
-        });
-        let segment_overlap = match prefix {
+        let segment_overlap = match self.prefix_match {
             PrefixMatch::Inside => true,
             PrefixMatch::Outside => false,
             PrefixMatch::Continue(matched) => {
@@ -1575,7 +1591,7 @@ impl<'a> ScopeClaim<'a> {
                         .all(|(scope_segment, pattern)| pattern.matches(scope_segment))
             }
         };
-        segment_overlap || (!is_canonical && self.reserves_as_written(rest))
+        segment_overlap || (any_raw && self.reserves_as_written(rest))
     }
 
     /// The runtime claim on `prefix + rest` as written, without building it.
@@ -1622,38 +1638,31 @@ fn prefix_match(patterns: &[SegmentPattern], scope_segments: &[&str]) -> PrefixM
     }
 }
 
-/// A segment pattern with every literal run canonicalized, `None` when one
-/// does not canonicalize.
-fn canonical_segment_pattern(segment: &str) -> Option<SegmentPattern> {
-    let literals = SegmentPattern::new(segment)
-        .literals
-        .into_iter()
-        .map(|literal| canonical_literal(&literal))
-        .collect::<Option<Vec<_>>>()?;
-    Some(SegmentPattern { literals })
-}
-
-/// One template segment: lower-cased literal runs separated by `{...}`
-/// expressions, which match any text.
+/// One template segment: decoded, lower-cased literal runs separated by
+/// `{...}` expressions, which match any text. A whole-segment `{name}` is two
+/// empty runs, so it matches any value; Edge also binds repeated names and
+/// refuses an empty value there, which only makes Edge accept more.
 struct SegmentPattern {
     literals: Vec<String>,
 }
 
 impl SegmentPattern {
-    fn new(segment: &str) -> Self {
+    /// Edge `template_segment_pattern`: sets `any_raw` when a literal run had
+    /// to be kept as written.
+    fn new(segment: &str, any_raw: &mut bool) -> Self {
         let mut literals = Vec::new();
         let mut rest = segment;
         loop {
             match rest.find('{') {
                 Some(open) => {
-                    literals.push(rest[..open].to_ascii_lowercase());
+                    literals.push(decoded_literal_run(&rest[..open], any_raw));
                     rest = match rest[open..].find('}') {
                         Some(close) => &rest[open + close + 1..],
                         None => "",
                     };
                 }
                 None => {
-                    literals.push(rest.to_ascii_lowercase());
+                    literals.push(decoded_literal_run(rest, any_raw));
                     return Self { literals };
                 }
             }
@@ -1682,29 +1691,32 @@ impl SegmentPattern {
     }
 }
 
-/// A literal run as Edge's canonical request path spells it: percent-escapes
-/// of unreserved characters decoded (`%6d` is `m`) and lower-cased; `None`
-/// when any other escape remains, which Edge does not canonicalize either.
-fn canonical_literal(literal: &str) -> Option<String> {
-    let bytes = literal.as_bytes();
-    let mut out = String::with_capacity(literal.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(at + 1..at + 3)?).ok()?;
-            let byte = u8::from_str_radix(hex, 16).ok()?;
-            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')) {
-                return None;
+/// Edge `decoded_literal_run`: one literal run decoded exactly as Edge's
+/// request-path canonicalization decodes it ([`crate::policy_path`]: escapes
+/// of `pchar`s such as `%6d` or `%3B` become the byte), lower-cased. The run
+/// is decoded behind a fixed `/x` prefix so that a fragment such as `.` (from
+/// `{name}.{ext}`) is not judged as a whole dot segment. A run Edge refuses
+/// (an encoded separator, `%25`, an escaped space or non-ASCII byte, a
+/// literal or escaped `\`, a broken escape) is kept as written and sets
+/// `any_raw`.
+fn decoded_literal_run(run: &str, any_raw: &mut bool) -> String {
+    if run.is_empty() {
+        return String::new();
+    }
+    let rooted = format!("/x{run}");
+    match crate::policy_path::canonicalize_policy_path(&rooted) {
+        Ok(canonical) => match canonical.strip_prefix("/x") {
+            Some(decoded) => decoded.to_ascii_lowercase(),
+            None => {
+                *any_raw = true;
+                run.to_ascii_lowercase()
             }
-            out.push(char::from(byte));
-            at += 3;
-        } else {
-            let ch = literal[at..].chars().next()?;
-            out.push(ch);
-            at += ch.len_utf8();
+        },
+        Err(_) => {
+            *any_raw = true;
+            run.to_ascii_lowercase()
         }
     }
-    Some(out.to_ascii_lowercase())
 }
 
 #[cfg(test)]

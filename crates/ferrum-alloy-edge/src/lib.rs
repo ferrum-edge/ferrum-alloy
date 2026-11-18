@@ -18,6 +18,7 @@ pub mod contract;
 pub mod export;
 pub mod manifest;
 pub mod policy;
+mod policy_path;
 pub mod yaml;
 
 pub use policy::{
