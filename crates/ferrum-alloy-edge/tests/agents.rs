@@ -1141,3 +1141,96 @@ fn the_endpoint_overlap_follows_edges_template_aware_admission() {
             .any(|problem| problem.contains("x-ferrum-plugins")),
     );
 }
+
+/// Edge decodes each literal run of an operation path with its request-path
+/// canonicalizer (`canonicalize_policy_path`) before comparing it with the
+/// endpoint scope (ferrum-alloy#315): every `pchar` escape is decoded (`%40`
+/// is `@`, `%3B` is `;`), a run Edge refuses (an encoded separator, a
+/// literal backslash) is compared as written without stopping its
+/// neighbours from being decoded, and then the claim's `%`-suffix rule
+/// applies to the raw path. The first five rows were accepted before.
+#[test]
+fn the_endpoint_overlap_decodes_paths_like_edges_canonicalizer() {
+    for (endpoint, path, shadowed) in [
+        // Sub-delims and `@` decode, not only unreserved characters.
+        ("/shop/m@p", "/m%40p", true),
+        ("/shop/a;b", "/a%3Bb", true),
+        ("/shop/v1,2", "/v1%2C2/items", true),
+        // A run Edge cannot decode does not stop the others.
+        ("/shop/mcp", "/%6dcp/a%2Fb", true),
+        // A literal backslash keeps its run as written, so the `%`-suffix
+        // rule applies to the raw path.
+        ("/shop/mcp", "/mcp%41\\x", true),
+        // Edge's own cases (`api_specs_mcp_bridge_tests.rs`).
+        ("/shop/mcp", "/mc%70/{name}.{ext}", true),
+        ("/shop/mcp", "/mc%70/items", true),
+        ("/shop/mcp", "/mcp%2Fitems", true),
+        ("/shop/mcp", "/mcp%20x", true),
+        ("/shop/mcp", "/%41bc", false),
+        ("/shop/mcp", "/mcpx", false),
+        ("/shop/mcp", "/mcp-tools/items", false),
+        // `%3B` decodes to `;`, and `/shop/mcp;` is outside the scope at
+        // runtime, so Edge admits it.
+        ("/shop/mcp", "/mcp%3B", false),
+    ] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = json!({ "endpoint": { "path": endpoint } });
+        document["paths"][path] = json!({ "get": operation("probe", json!({ "expose": false })) });
+        let problems = lint(&document, Some("/shop"));
+        let found = problems
+            .iter()
+            .any(|problem| problem.contains("inside the MCP endpoint"));
+        assert_eq!(found, shadowed, "{endpoint} {path}: {problems:?}");
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("not a canonical request path")),
+            "{endpoint}: {problems:?}"
+        );
+    }
+}
+
+/// Edge's `mcp_gateway` refuses an `endpoint.path` that is not already a
+/// canonical policy path (`validate_path`), so the export does too.
+#[test]
+fn the_endpoint_path_must_be_canonical_like_edge() {
+    for (endpoint, reason) in [
+        (
+            "/shop/%6dcp",
+            "percent-escapes that canonicalize to a different path",
+        ),
+        ("/shop//mcp", "empty_segment"),
+        ("/shop/;x/mcp", "empty_segment"),
+        ("/shop/../mcp", "literal_dot_segment"),
+        ("/shop/..;/mcp", "literal_dot_segment"),
+        ("/shop/%2e%2e/mcp", "ambiguous_dot_segment"),
+        ("/shop/mcp%2Fx", "encoded_separator"),
+        ("/shop/mcp%20x", "unrepresentable_escape"),
+        ("/shop/mcp%25", "double_encoding"),
+        ("/shop/mcp%", "invalid_escape"),
+        ("/shop\\mcp", "literal_backslash"),
+    ] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = json!({ "endpoint": { "path": endpoint } });
+        assert_problem(
+            &lint(&document, Some("/shop")),
+            &format!("is not a canonical request path ({reason})"),
+        );
+    }
+    let mut document = orders();
+    document[X_FERRUM_MCP] = json!({ "endpoint": { "path": "shop/mcp" } });
+    assert_problem(&lint(&document, None), "must be an absolute path");
+
+    // Canonical endpoints, a `;` parameter included, pass.
+    for endpoint in ["/shop/mcp", "/shop/mcp/", "/shop/v1;x/mcp", "/shop/m@p"] {
+        let mut document = orders();
+        document[X_FERRUM_MCP] = json!({ "endpoint": { "path": endpoint } });
+        let problems = lint(&document, Some("/shop"));
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("endpoint.path")),
+            "{endpoint}: {problems:?}"
+        );
+    }
+}
