@@ -43,9 +43,11 @@ jobs:
       report: ${{ steps.report.outputs.report }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
       - name: Install Cosign
+        id: cosign
         uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
 
       - name: Resolve the Ferrum Edge main image
@@ -309,7 +311,10 @@ jobs:
           fi
 
       - name: Write the report
+        # Always, so a run that could not check anything still reaches the
+        # tracking issue as `error` instead of going silent.
         id: report
+        if: ${{ !cancelled() }}
         env:
           EDGE_IMAGE_REF: ${{ steps.edge.outputs.image }}
           EDGE_COMMIT: ${{ steps.edge.outputs.commit }}
@@ -321,20 +326,36 @@ jobs:
           VALIDATE: ${{ steps.validate.outcome }}
           TRACE: ${{ steps.trace.outcome }}
           API_SPECS: ${{ steps.api-specs.outcome }}
+          SETUP: >-
+            checkout=${{ steps.checkout.outcome }}
+            install-cosign=${{ steps.cosign.outcome }}
+            resolve-edge-main-image=${{ steps.edge.outcome }}
         run: |
           set -euo pipefail
           verdict() {
-            if [ "$1" = success ]; then echo pass; else echo "**FAIL**"; fi
+            case "$1" in
+              success) echo pass ;;
+              skipped) echo "not run" ;;
+              *) echo "**FAIL**" ;;
+            esac
           }
+          # A setup step that did not succeed means nothing was compared.
+          failed_setup=""
+          for entry in $SETUP; do
+            [ "${entry#*=}" = success ] || failed_setup="$failed_setup ${entry%%=*}"
+          done
           outcome=clean
           for result in "$VALIDATE" "$TRACE" "$API_SPECS"; do
             [ "$result" = success ] || outcome=drift
           done
+          [ -z "$failed_setup" ] || outcome=error
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           report="$RUNNER_TEMP/edge-main-drift.md"
           {
             echo "<!-- edge-main-drift -->"
-            if [ "$outcome" = drift ]; then
+            if [ "$outcome" = error ]; then
+              echo "The Edge main drift check could not run: \`${failed_setup# }\` did not succeed, so the steps below did not run against Ferrum Edge \`main\`. See the run log; a clean scheduled run closes this issue."
+            elif [ "$outcome" = drift ]; then
               echo "\`$GITHUB_REPOSITORY\` fails checks against Ferrum Edge \`main\`. This is an early warning: the change is on Edge \`main\` and not released yet, so there is time to ship a compatible Alloy release before Edge releases it."
             else
               echo "\`$GITHUB_REPOSITORY\` passes its checks against Ferrum Edge \`main\`."
@@ -361,13 +382,14 @@ jobs:
             echo "report=$(base64 -w0 "$report")"
           } >> "$GITHUB_OUTPUT"
 
+  # Checks out and runs nothing. Runs whenever the check job ran (so a check
+  # that could not run is filed as `error`), never for pull requests or a
+  # dispatch from another branch. Only a clean run closes the issue.
   issue:
     name: Edge main drift issue
     needs: check
-    # Checks out and runs nothing; only the default branch's own checks speak
-    # for this repository.
     if: >-
-      !cancelled() && needs.check.result == 'success' &&
+      !cancelled() && needs.check.result != 'cancelled' && needs.check.result != 'skipped' &&
       github.event_name != 'pull_request' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-26.04
@@ -378,6 +400,7 @@ jobs:
       - name: Open, update or close the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
+          CHECK_RESULT: ${{ needs.check.result }}
           OUTCOME: ${{ needs.check.outputs.outcome }}
           EDGE_COMMIT: ${{ needs.check.outputs.edge-commit }}
           REPORT: ${{ needs.check.outputs.report }}
@@ -385,25 +408,49 @@ jobs:
           set -euo pipefail
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           label=edge-main-drift
+          marker='<!-- edge-main-drift -->'
           title="Edge main drift: Alloy fails its checks against Ferrum Edge main"
-          base64 -d <<< "$REPORT" > "$RUNNER_TEMP/report.md"
-          number=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&labels=$label&per_page=100" \
-            --jq '[.[] | select(.pull_request == null)] | sort_by(.number) | .[0].number // empty')
+          report="$RUNNER_TEMP/report.md"
           case "$OUTCOME" in
-            drift)
+            clean | drift | error) base64 -d <<< "$REPORT" > "$report" ;;
+            *)
+              # The check job stopped before its report step (a timeout, a
+              # runner loss): nothing was compared, and that is a finding too.
+              OUTCOME=error
+              {
+                echo "$marker"
+                echo "The Edge main drift check did not finish (check job: \`$CHECK_RESULT\`), so it compared nothing against Ferrum Edge \`main\` this run. A clean scheduled run closes this issue."
+                echo
+                echo "Run: $run_url"
+              } > "$report"
+              ;;
+          esac
+          # Only an issue this workflow wrote (its body starts with the marker)
+          # is edited or closed; a human-labelled issue is left alone.
+          number=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues?state=open&labels=$label&per_page=100" \
+            --jq '.[] | select(.pull_request == null and ((.body // "") | startswith("<!-- edge-main-drift -->"))) | .number' \
+            | sort -n | sed -n 1p)
+          case "$OUTCOME" in
+            drift | error)
+              if [ "$OUTCOME" = drift ]; then
+                note="Still failing against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
+                summary="Alloy fails checks against Ferrum Edge main at ${EDGE_COMMIT:-an unknown commit}"
+              else
+                note="The Edge main drift check could not run: $run_url"
+                summary="The Edge main drift check could not run"
+              fi
               gh label create "$label" --repo "$GITHUB_REPOSITORY" --color B60205 \
                 --description "Fails its checks against unreleased Ferrum Edge main" --force
               if [ -n "$number" ]; then
-                gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/report.md"
-                gh issue comment "$number" --repo "$GITHUB_REPOSITORY" \
-                  --body "Still failing against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
+                gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$report"
+                gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$note"
                 echo "::notice::Updated tracking issue #$number."
               else
                 gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label "$label" \
-                  --body-file "$RUNNER_TEMP/report.md"
+                  --body-file "$report"
                 echo "::notice::Opened a tracking issue."
               fi
-              echo "::error::Alloy fails checks against Ferrum Edge main at $EDGE_COMMIT; see the tracking issue."
+              echo "::error::$summary; see the tracking issue."
               exit 1
               ;;
             clean)
@@ -412,9 +459,5 @@ jobs:
                   --comment "Clean against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
                 echo "::notice::Closed tracking issue #$number."
               fi
-              ;;
-            *)
-              echo "::error::Unexpected check outcome: $OUTCOME"
-              exit 1
               ;;
           esac

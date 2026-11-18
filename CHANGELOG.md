@@ -10,10 +10,11 @@
   and `POST /api-specs` with the exported agent-tool document. The Edge image
   is the `latest` tag of `ghcr.io/ferrum-edge/ferrum-edge`, resolved to a
   digest whose keyless Cosign signature from Edge's Main Latest Image workflow
-  is verified; the Edge commit is the signed image's revision label. A failure
-  opens or updates one issue labelled `edge-main-drift`, and a clean run
-  closes it, with the repository's own `GITHUB_TOKEN`; only that job can write
-  issues. `ci/tests/test_edge_main_drift.py` keeps the copied steps equal to
+  is verified; the Edge commit is the signed image's revision label. A
+  failure, or a check that could not run, opens or updates the one issue
+  labelled `edge-main-drift` whose body carries the workflow's marker, and
+  only a clean run closes it, with the repository's own `GITHUB_TOKEN`; only
+  that job can write issues. `ci/tests/test_edge_main_drift.py` keeps the copied steps equal to
   `ci.yml`'s.
 - **Security (GHSA-hh7p-48xw-gwqg), breaking:** the Edge policy removes
   every gateway-asserted request header in the pinned `gateway-headers`

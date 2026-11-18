@@ -77,6 +77,24 @@ class EdgeMainDriftTests(unittest.TestCase):
         )
         self.assertNotIn("secrets.", self.drift)
 
+    def test_a_check_that_could_not_run_still_reaches_the_issue(self):
+        # The report is written even when resolving the image failed, and the
+        # issue job runs for any finished check, so a broken pipeline is filed
+        # as `error` rather than going silent; only a clean run closes it.
+        report = next(step for step in steps(job(self.drift, "check")) if "- name: Write the report" in step)
+        self.assertIn("        if: ${{ !cancelled() }}\n", report)
+        self.assertIn("outcome=error", report)
+        issue = job(self.drift, "issue")
+        self.assertNotIn("needs.check.result == 'success'", issue)
+        self.assertIn("needs.check.result != 'cancelled'", issue)
+        self.assertIn("drift | error)", issue)
+        clean = issue[issue.index("            clean)") :]
+        self.assertIn("gh issue close", clean)
+        self.assertEqual(issue.count("gh issue close"), 1)
+        # Only an issue the workflow wrote, found by its marker on every page.
+        self.assertIn("--paginate", issue)
+        self.assertIn('startswith("<!-- edge-main-drift -->")', issue)
+
     def test_runs_only_the_verified_edge_main_image(self):
         check = job(self.drift, "check")
         self.assertIn(IDENTITY, check)
