@@ -63,11 +63,6 @@ jobs:
         run: |
           set -euo pipefail
           repository=ghcr.io/ferrum-edge/ferrum-edge
-          main_head=$(git ls-remote https://github.com/ferrum-edge/ferrum-edge refs/heads/main | cut -f1)
-          if ! [[ "$main_head" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Could not resolve Ferrum Edge main: $main_head"
-            exit 1
-          fi
           token=$(curl -fsS "https://ghcr.io/token?scope=repository:ferrum-edge/ferrum-edge:pull" | jq -er .token)
           digest=$(curl -fsS --head -o /dev/null -D - \
             -H "Authorization: Bearer $token" \
@@ -96,8 +91,16 @@ jobs:
             echo "::error::$image carries no readable revision label: $commit"
             exit 1
           fi
-          read -r on_main behind < <(gh api "repos/ferrum-edge/ferrum-edge/compare/$commit...$main_head" \
+          # Read main only now: the image can move to a newer commit between an
+          # earlier read and the label, which would look like "behind".
+          main_head=$(git ls-remote https://github.com/ferrum-edge/ferrum-edge refs/heads/main | cut -f1)
+          if ! [[ "$main_head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve Ferrum Edge main: $main_head"
+            exit 1
+          fi
+          compare=$(gh api "repos/ferrum-edge/ferrum-edge/compare/$commit...$main_head" \
             --jq '"\(.status) \(.ahead_by)"')
+          read -r on_main behind <<< "$compare"
           case "$on_main" in
             ahead | identical) ;;
             *)
@@ -113,18 +116,27 @@ jobs:
             echo "::error::Could not resolve ferrum-contracts main: $contracts"
             exit 1
           fi
-          delta=$(curl -fsS "https://raw.githubusercontent.com/ferrum-edge/ferrum-contracts/$contracts/vocabularies/plugin-catalog.json" \
-            | jq -r '.main_branch_delta.commit // ""')
-          if [[ "$delta" =~ ^[0-9a-f]{40}$ ]]; then
-            case "$(gh api "repos/ferrum-edge/ferrum-edge/compare/$delta...$commit" --jq .status)" in
-              identical) delta_note="read at this commit" ;;
-              ahead) delta_note="read at an older commit; changes after it may not be recorded yet" ;;
-              behind) delta_note="read at a newer commit than this image" ;;
-              *) delta_note="not on this commit's history" ;;
-            esac
+          # A missing or unreadable vocabulary, or a failed compare call, is one
+          # report row, never an abort or a claim about history.
+          vocabulary="https://raw.githubusercontent.com/ferrum-edge/ferrum-contracts/$contracts/vocabularies/plugin-catalog.json"
+          if catalog=$(curl -fsS "$vocabulary" 2>/dev/null) &&
+            delta=$(jq -r '.main_branch_delta.commit // ""' <<< "$catalog" 2>/dev/null); then
+            if [[ "$delta" =~ ^[0-9a-f]{40}$ ]]; then
+              status=$(gh api "repos/ferrum-edge/ferrum-edge/compare/$delta...$commit" --jq .status 2>/dev/null || true)
+              case "$status" in
+                identical) delta_note="read at this commit" ;;
+                ahead) delta_note="read at an older commit; changes after it may not be recorded yet" ;;
+                behind) delta_note="read at a newer commit than this image" ;;
+                diverged) delta_note="not on this commit's history" ;;
+                *) delta_note="could not be compared with this commit (the compare API call failed)" ;;
+              esac
+            else
+              delta="none"
+              delta_note="ferrum-contracts main records no main_branch_delta"
+            fi
           else
             delta="none"
-            delta_note="ferrum-contracts main records no main_branch_delta"
+            delta_note="vocabularies/plugin-catalog.json could not be read from ferrum-contracts main"
           fi
 
           {
