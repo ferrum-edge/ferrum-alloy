@@ -41,7 +41,7 @@ Local cargo runs are permitted in this repository; hosted CI remains the source 
 
 | Skill | Worker model | CLI |
 | --- | --- | --- |
-| `astra-agents`, `sol-agents`, `luna-agents` | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna` | `codex` |
+| `astra-agents`, `sol-agents`, `luna-agents` | `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-luna` | `codex` |
 | `opus-agents`, `fable-5-1-agents` | `claude-opus-5-5[1m]`, `claude-fable-5-1` | `claude` |
 | `grok-agents`, `composer-agents` | `cursor-grok-4.6-<effort>`, `composer-2.5` | `cursor-agent` |
 | `muse-agents` | `muse-wonder-full-1.0` | `muse` |
