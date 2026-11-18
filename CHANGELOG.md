@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
+  export` use a port of Edge's request-path canonicalizer
+  (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge
+  refuses. Operation paths decode every `pchar` escape as Edge does, not
+  only unreserved ones (`/m%40p` is `/m@p`, `/a%3Bb` is `/a;b`); each
+  literal run is decoded on its own, so one run Edge cannot decode (an
+  encoded separator, a literal backslash) no longer turns the whole path
+  into a raw comparison, and such a run applies the `%`-suffix rule as in
+  Edge. `/mcp%3B` is now accepted next to an endpoint at `/mcp`, as Edge
+  accepts it. An `x-ferrum-mcp.endpoint.path` that is not absolute or not
+  already a canonical request path (a percent-escape, an empty or
+  parameter-only segment, a dot segment with or without `;`, a backslash)
+  is refused, as Edge's `mcp_gateway` refuses it.
 - A weekly, non-required **Edge main drift** workflow
   (`.github/workflows/edge-main-drift.yml`) runs the steps of CI's "Generated
   Edge configuration validates" job against unreleased Ferrum Edge `main`
