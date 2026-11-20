@@ -41,11 +41,11 @@ Local cargo runs are permitted in this repository; hosted CI remains the source 
 
 | Skill | Worker model | CLI |
 | --- | --- | --- |
-| `astra-agents`, `sol-agents`, `luna-agents` | `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6-luna` | `codex` |
-| `opus-agents`, `fable-5-1-agents` | `claude-opus-5-5[1m]`, `claude-fable-5-1` | `claude` |
-| `grok-agents`, `composer-agents` | `cursor-grok-4.6-<effort>`, `composer-2.5` | `cursor-agent` |
+| `astra-agents`, `sol-agents` | `gpt-6.2-astra`, `gpt-6.2-sol` | `codex` |
+| `opus-agents` | `claude-opus-5-5[1m]` | `claude` |
 | `muse-agents` | `muse-wonder-full-1.0` | `muse` |
-| `opencode-laguna-agents`, `deepseek-pro-agents`, `deepseek-flash-agents`, `qwen-agents` | opencode models pinned per launcher | `opencode` |
+| `antigravity-neon-agents` | `gemini-4-neon` | `agy` |
+| `deepseek-flash-agents`, `qwen-agents` | opencode models pinned per launcher | `opencode` |
 
 "Muse ultra" or "opus high" means: use that skill as the orchestrator and dispatch a worker at that reasoning effort. Workers run the "Before every commit" checks above, treat hosted CI as the source of truth, and never dispatch nested workers.
 
