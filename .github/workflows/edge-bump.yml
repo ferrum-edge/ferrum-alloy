@@ -197,9 +197,14 @@ jobs:
               f'pub const EDGE_SOURCE_COMMIT: &str = "{new["source_commit"]}";',
           )
 
-          for manifest in ("orders-api", "plain-http"):
+          # Every exported Edge fixture carries the release header, and the
+          # export snapshot tests compare each one byte for byte.
+          fixtures = sorted(pathlib.Path("contracts/fixtures/manifests").glob("*.edge.yaml"))
+          if not fixtures:
+              raise SystemExit("no contracts/fixtures/manifests/*.edge.yaml fixtures found")
+          for fixture in fixtures:
               edit(
-                  f"contracts/fixtures/manifests/{manifest}.edge.yaml",
+                  str(fixture),
                   f"for Ferrum Edge {old['release']} ({old['source_commit'][:12]}).",
                   f"for Ferrum Edge {new['release']} ({new['source_commit'][:12]}).",
               )

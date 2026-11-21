@@ -957,6 +957,77 @@ fn unsafe_combinations_fail_validation() {
 }
 
 #[test]
+fn cors_entries_are_checked_as_startup_parses_them() {
+    let errors = |mutate: &dyn Fn(&mut AlloyConfig)| -> Vec<String> {
+        let mut config = AlloyConfig::default();
+        config.cors.enabled = true;
+        config.cors.allowed_origins = vec!["https://app.example".into()];
+        config.cors.allowed_methods = vec!["GET".into(), "POST".into()];
+        config.cors.allowed_headers = vec!["content-type".into()];
+        mutate(&mut config);
+        config
+            .check(&["cors"])
+            .into_iter()
+            .filter(|issue| issue.error)
+            .map(|issue| issue.message)
+            .collect()
+    };
+    let defaults = errors(&|_| {});
+    assert!(defaults.is_empty(), "{defaults:?}");
+    let wildcard = errors(&|c| c.cors.allowed_origins = vec!["*".into()]);
+    assert!(wildcard.is_empty(), "{wildcard:?}");
+    let check = |mutate: &dyn Fn(&mut AlloyConfig), expect: &str| {
+        let errors = errors(mutate);
+        assert!(
+            errors.iter().any(|message| message == expect),
+            "expected {expect:?} in {errors:?}"
+        );
+    };
+    check(
+        &|c| c.cors.allowed_origins = vec!["bad\r\norigin".into()],
+        "cors.allowed_origins[0] is not a valid header value",
+    );
+    check(
+        &|c| c.cors.allowed_origins = vec!["*".into(), "bad\norigin".into()],
+        "cors.allowed_origins[1] is not a valid header value",
+    );
+    check(
+        &|c| c.cors.allowed_methods = vec!["GE T".into()],
+        "cors.allowed_methods[0] is not a valid HTTP method",
+    );
+    check(
+        &|c| c.cors.allowed_headers = vec!["bad header".into()],
+        "cors.allowed_headers[0] is not a valid header name",
+    );
+    check(
+        &|c| {
+            c.cors.allow_credentials = true;
+            c.cors.allowed_methods = vec!["*".into()];
+        },
+        r#"cors.allow_credentials cannot be combined with allowed_methods ["*"]"#,
+    );
+    check(
+        &|c| {
+            c.cors.allow_credentials = true;
+            c.cors.allowed_headers = vec!["*".into()];
+        },
+        r#"cors.allow_credentials cannot be combined with allowed_headers ["*"]"#,
+    );
+    let credentialed = errors(&|c| c.cors.allow_credentials = true);
+    assert!(credentialed.is_empty(), "{credentialed:?}");
+    let mixed = errors(&|c| {
+        c.cors.allow_credentials = true;
+        c.cors.allowed_methods = vec!["PATCH".into(), "*".into()];
+        c.cors.allowed_headers = vec!["x-request-id".into(), "*".into()];
+    });
+    assert!(mixed.is_empty(), "{mixed:?}");
+    let mut config = AlloyConfig::default();
+    config.cors.enabled = true;
+    config.cors.allowed_origins = vec!["*".into(), "bad\r\norigin".into()];
+    assert!(config.validate(&["cors"]).is_err());
+}
+
+#[test]
 fn enabled_otlp_export_is_checked_as_startup_checks_it() {
     let errors = |mutate: &dyn Fn(&mut AlloyConfig)| -> Vec<String> {
         let mut config = AlloyConfig::default();
