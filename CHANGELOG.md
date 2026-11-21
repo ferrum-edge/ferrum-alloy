@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- The Prometheus latency histograms render every series from one read of
+  its buckets (#316). The count is the total of the buckets, with a new
+  bucket for observations past the last finite bound, so in one exposition
+  the cumulative buckets never decrease and `+Inf` always equals `_count`,
+  even while requests are being recorded. Recording no longer updates a
+  separate count.
 - **Security (GHSA-h75r-8j4h-fxcx), breaking:** `AlloyConfig::check` refuses
   `edge.accept_consumer_identity = true` and a non-empty
   `edge.trusted_proxies` without the `edge` feature, in every `edge.mode`,

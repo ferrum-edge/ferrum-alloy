@@ -42,32 +42,55 @@ const DURATION_BUCKET_NANOS: [u64; DURATION_BUCKETS.len()] = [
 ];
 
 /// A fixed-bucket histogram. Buckets hold per-bucket (non-cumulative)
-/// counts, so recording touches one bucket; rendering sums them into the
-/// cumulative counts Prometheus expects. Cache-line aligned so the two
-/// histograms in a series (and neighboring series) do not share lines.
+/// counts, with one more bucket after the last finite bound for longer
+/// observations, so recording touches one bucket; rendering sums them into
+/// the cumulative counts Prometheus expects. The count is the sum of every
+/// bucket rather than a separate counter, so one snapshot of the buckets
+/// yields cumulative buckets, `+Inf`, and `_count` from the same
+/// observations even while requests are being recorded. Cache-line aligned
+/// so the two histograms in a series (and neighboring series) do not share
+/// lines.
 #[derive(Debug, Default)]
 #[repr(align(64))]
 pub struct Histogram {
-    buckets: [AtomicU64; DURATION_BUCKETS.len()],
-    count: AtomicU64,
+    buckets: [AtomicU64; DURATION_BUCKETS.len() + 1],
     sum_nanos: AtomicU64,
+}
+
+/// One read of a [`Histogram`]'s buckets: per-bucket counts, the last for
+/// observations past every finite bound.
+struct HistogramSnapshot {
+    buckets: [u64; DURATION_BUCKETS.len() + 1],
+}
+
+impl HistogramSnapshot {
+    fn count(&self) -> u64 {
+        self.buckets.iter().copied().fold(0, u64::wrapping_add)
+    }
 }
 
 impl Histogram {
     /// Records one duration.
     pub fn record(&self, duration: Duration) {
         let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        // `partition_point` is `DURATION_BUCKETS.len()` past the last bound,
+        // which is the overflow bucket.
         let bucket = DURATION_BUCKET_NANOS.partition_point(|&bound| nanos > bound);
         if let Some(bucket) = self.buckets.get(bucket) {
             bucket.fetch_add(1, Ordering::Relaxed);
         }
-        self.count.fetch_add(1, Ordering::Relaxed);
         self.sum_nanos.fetch_add(nanos, Ordering::Relaxed);
     }
 
     /// Number of recorded values.
     pub fn count(&self) -> u64 {
-        self.count.load(Ordering::Relaxed)
+        self.snapshot().count()
+    }
+
+    fn snapshot(&self) -> HistogramSnapshot {
+        HistogramSnapshot {
+            buckets: std::array::from_fn(|i| self.buckets[i].load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -331,7 +354,9 @@ impl Metrics {
                 .chain(std::iter::once((&overflow_key, &*self.overflow)));
             for (key, series) in rows {
                 let histogram = pick(series);
-                if histogram.count() == 0 {
+                let snapshot = histogram.snapshot();
+                let count = snapshot.count();
+                if count == 0 {
                     continue;
                 }
                 let labels = format!(
@@ -341,11 +366,10 @@ impl Metrics {
                     key.2
                 );
                 let mut cumulative = 0u64;
-                for (bound, bucket) in DURATION_BUCKETS.iter().zip(&histogram.buckets) {
-                    cumulative += bucket.load(Ordering::Relaxed);
+                for (bound, bucket) in DURATION_BUCKETS.iter().zip(&snapshot.buckets) {
+                    cumulative = cumulative.wrapping_add(*bucket);
                     let _ = writeln!(out, "{name}_bucket{{{labels},le=\"{bound}\"}} {cumulative}");
                 }
-                let count = histogram.count();
                 let _ = writeln!(out, "{name}_bucket{{{labels},le=\"+Inf\"}} {count}");
                 let sum = histogram.sum_nanos.load(Ordering::Relaxed) as f64 / 1e9;
                 let _ = writeln!(out, "{name}_sum{{{labels}}} {sum}");
@@ -483,5 +507,217 @@ mod tests {
         assert_eq!(bucket("10"), "3");
         assert_eq!(bucket("+Inf"), "4");
         assert!(out.contains("_count{http_request_method=\"GET\""), "{out}");
+    }
+
+    /// Checks every rendered histogram series in one exposition: cumulative
+    /// buckets never decrease, `+Inf` equals `_count`, and no finite bucket
+    /// exceeds it. Returns the `_count` of each series, by name and labels.
+    fn assert_consistent_histograms(out: &str) -> Vec<(String, u64)> {
+        let mut counts = Vec::new();
+        let mut previous: Option<(String, u64)> = None;
+        for line in out.lines().filter(|l| !l.starts_with('#')) {
+            let (series, value) = line.rsplit_once(' ').unwrap();
+            if let Some((head, le)) = series.split_once(",le=\"") {
+                let value: u64 = value.parse().unwrap();
+                let key = head.to_owned();
+                if let Some((prev_key, prev)) = &previous
+                    && *prev_key == key
+                {
+                    assert!(value >= *prev, "bucket decreased: {line}\n{out}");
+                }
+                previous = Some((key.clone(), value));
+                if le == "+Inf\"}" {
+                    let labels = head.split_once('{').unwrap().1;
+                    let name = head.split_once("_bucket").unwrap().0;
+                    let count_line = format!("{name}_count{{{labels}}} ");
+                    let count: u64 = out
+                        .lines()
+                        .find_map(|l| l.strip_prefix(&count_line))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    assert_eq!(value, count, "+Inf != _count for {head}\n{out}");
+                    counts.push((format!("{name}{{{labels}"), count));
+                }
+            } else {
+                previous = None;
+            }
+        }
+        counts
+    }
+
+    /// The only state a recorder can leave between its two updates is a
+    /// bucket that counts an observation whose duration is not yet in
+    /// `_sum`. Because the count is the bucket total, a scrape at that moment
+    /// still renders consistent buckets, `+Inf`, and `_count` for both
+    /// latency families (#316). With the old separate count, the same pause
+    /// rendered a finite bucket above `+Inf`.
+    #[test]
+    fn a_scrape_between_a_recorders_updates_is_consistent() {
+        let metrics = Metrics::default();
+        let series = metrics.series_for("GET", "/items/{id}", 200);
+        for histogram in [&series.duration, &series.time_to_headers] {
+            histogram.record(Duration::from_millis(3));
+            histogram.record(Duration::from_millis(300));
+        }
+        let before = assert_consistent_histograms(&metrics.render_prometheus());
+        // A recorder paused right after the bucket increment of a 75 ms
+        // (finite) and then a 30 s (past every bound) observation.
+        for bucket in [4, DURATION_BUCKETS.len()] {
+            for histogram in [&series.duration, &series.time_to_headers] {
+                histogram.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+            }
+            let out = metrics.render_prometheus();
+            let counts = assert_consistent_histograms(&out);
+            assert_eq!(counts.len(), 2, "{out}");
+            for ((name, count), (_, earlier)) in counts.iter().zip(&before) {
+                let added = if bucket == 4 { 1 } else { 2 };
+                assert_eq!(*count, earlier + added, "{name}\n{out}");
+                let last_finite = format!("{},le=\"10\"}} ", name.replacen('{', "_bucket{", 1));
+                let finite = out
+                    .lines()
+                    .find(|l| l.starts_with(&last_finite))
+                    .and_then(|l| l.rsplit_once(' '))
+                    .map(|(_, v)| v.parse::<u64>().unwrap())
+                    .unwrap();
+                assert_eq!(finite, earlier + 1, "{name}\n{out}");
+            }
+        }
+    }
+
+    /// [`assert_consistent_histograms`], plus: with only finite durations
+    /// recorded, the last finite bucket equals `+Inf` (and `_count`).
+    fn assert_scrape(out: &str) {
+        assert_consistent_histograms(out);
+        let mut last_finite = None;
+        for line in out.lines() {
+            if line.contains(",le=\"10\"} ") {
+                last_finite = line.rsplit_once(' ').map(|(_, v)| v.to_owned());
+            } else if line.contains(",le=\"+Inf\"} ") {
+                let total = line.rsplit_once(' ').map(|(_, v)| v.to_owned());
+                assert_eq!(last_finite.take(), total, "{line}\n{out}");
+            }
+        }
+    }
+
+    /// Sets the flag when dropped, so recorder threads stop even when an
+    /// assertion fails while they run.
+    struct StopOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Recording on several threads while scraping repeatedly never renders
+    /// a series whose buckets disagree with its count (#316), for both
+    /// latency histograms and the overflow series. Only finite durations
+    /// are recorded while scraping, so no observation past the last bound
+    /// can hide a finite bucket running ahead of the count.
+    #[test]
+    fn concurrent_recording_and_scraping_render_consistent_histograms() {
+        const THREADS: usize = 4;
+        const SCRAPES: usize = 500;
+        let metrics = Arc::new(Metrics::with_max_series(1));
+        let durations = [
+            Duration::from_millis(3),
+            Duration::from_millis(300),
+            Duration::from_secs(10),
+        ];
+        // Both routes and both families are populated before scraping, and
+        // the second route exceeds the one-series cap, so the overflow
+        // series is exercised too.
+        for route in ["/a", "/b"] {
+            let series = metrics.series_for("GET", route, 200);
+            series.record_time_to_headers(durations[0]);
+            series.record_duration(durations[0]);
+        }
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Batches each recorder has completed; scraping starts once every
+        // recorder has completed one and ends only after every recorder has
+        // completed more, so recording overlaps the scrapes. Waits are
+        // bounded, so a recorder that panics fails the test instead of
+        // hanging it.
+        let progress: Arc<Vec<AtomicU64>> =
+            Arc::new((0..THREADS).map(|_| AtomicU64::new(0)).collect());
+        let recorders: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                let metrics = Arc::clone(&metrics);
+                let done = Arc::clone(&done);
+                let progress = Arc::clone(&progress);
+                std::thread::spawn(move || {
+                    let route = if thread % 2 == 0 { "/a" } else { "/b" };
+                    let series = metrics.series_for("GET", route, 200);
+                    let mut recorded = 0u64;
+                    while !done.load(Ordering::Relaxed) {
+                        for duration in durations {
+                            series.record_time_to_headers(duration);
+                            series.record_duration(duration);
+                            recorded += 1;
+                        }
+                        progress[thread].fetch_add(1, Ordering::Relaxed);
+                    }
+                    recorded
+                })
+            })
+            .collect();
+        let batches =
+            || -> Vec<u64> { progress.iter().map(|p| p.load(Ordering::Relaxed)).collect() };
+        let wait_until = |ready: &dyn Fn(&[u64]) -> bool, scrape: bool| -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                if ready(&batches()) {
+                    return true;
+                }
+                if std::time::Instant::now() > deadline {
+                    return false;
+                }
+                if scrape {
+                    assert_scrape(&metrics.render_prometheus());
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+        };
+        let (started, progressed, baseline) = {
+            let _stop = StopOnDrop(Arc::clone(&done));
+            let started = wait_until(&|b| b.iter().all(|&n| n > 0), false);
+            let baseline = batches();
+            if started {
+                for _ in 0..SCRAPES {
+                    assert_scrape(&metrics.render_prometheus());
+                }
+            }
+            let progressed =
+                started && wait_until(&|b| b.iter().zip(&baseline).all(|(n, base)| n > base), true);
+            assert_scrape(&metrics.render_prometheus());
+            (started, progressed, baseline)
+        };
+        let recorded: u64 = recorders.into_iter().map(|r| r.join().unwrap()).sum();
+        assert!(started, "a recorder never completed a batch");
+        assert!(
+            progressed,
+            "a recorder made no progress while scraping: {baseline:?}"
+        );
+        let counts = assert_consistent_histograms(&metrics.render_prometheus());
+        assert_eq!(counts.len(), 4, "{counts:?}");
+        let total: u64 = counts.iter().map(|(_, count)| count).sum();
+        // Two primed observations per route, one in each family.
+        assert_eq!(total, 2 * recorded + 4, "{counts:?}");
+    }
+
+    /// Each observation lands in exactly one bucket, so the count is the
+    /// bucket total, and one past every bound only reaches `+Inf`.
+    #[test]
+    fn count_is_the_bucket_total_including_the_overflow_bucket() {
+        let histogram = Histogram::default();
+        histogram.record(Duration::from_secs(10));
+        histogram.record(Duration::from_nanos(10_000_000_001));
+        histogram.record(Duration::MAX);
+        let snapshot = histogram.snapshot();
+        assert_eq!(snapshot.buckets[DURATION_BUCKETS.len() - 1], 1);
+        assert_eq!(snapshot.buckets[DURATION_BUCKETS.len()], 2);
+        assert_eq!(histogram.count(), 3);
     }
 }
