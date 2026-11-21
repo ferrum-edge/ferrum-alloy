@@ -2894,6 +2894,15 @@ fn generated_code_is_rustfmt_clean_for_short_and_long_names() {
             "a-rather-long-service-name-that-changes-line-widths-oa",
             vec!["openapi"],
         ),
+        // The longest name `new` accepts (63 bytes).
+        (
+            "a-service-name-at-the-sixty-three-byte-limit-for-new-projects-x",
+            vec!["openapi"],
+        ),
+        (
+            "z-service-name-at-the-sixty-three-byte-limit-for-new-projects-x",
+            vec![],
+        ),
         ("ab-starters", vec!["postgres", "jwt", "http-client"]),
         ("ab-oa-db", vec!["openapi", "postgres"]),
         (

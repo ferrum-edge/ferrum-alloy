@@ -12,15 +12,31 @@ The document is served on the management listener at `/openapi.json` (token-prot
 
 `get_item` is offered to AI agents as a read-only MCP tool. Its `#[utoipa::path]` declares `AgentTool::expose()`, and `[agents]` in `ferrum-service.toml` is enabled, so the exported document carries the `x-ferrum-mcp` extension that Ferrum Edge reads on `POST /api-specs`. Nothing else is exposed.
 
-To try it through Edge, publish the exported document with `POST /api-specs` on Edge's admin API (see Ferrum Edge's `docs/api_specs.md`). Edge needs the proxy as `x-ferrum-proxy`, with the listen path from `ferrum-service.toml`, and the root `servers` reset to `/`, because Edge builds each tool's path from the listen path, then the server URL, then the path (keeping the exported `servers` would double the prefix):
+To try it through Edge, publish the exported document with `POST /api-specs` on the admin API of an Edge running in `database` (or `cp`) mode; file, data-plane, and mesh modes answer `403` (see Ferrum Edge's `docs/api_specs.md`). Edge needs the proxy as `x-ferrum-proxy`, with the listen path from `ferrum-service.toml`, and the root `servers` reset to `/`, because Edge builds each tool's path from the listen path, then the server URL, then the path (keeping the exported `servers` would double the prefix):
 
 ```bash
 jq '. + {"x-ferrum-proxy": {id: "{{name}}", listen_path: "/{{name}}", strip_listen_path: true,
-      backend_scheme: "http", backend_host: "SERVICE_HOST", backend_port: 8080}}
+      backend_scheme: "http", backend_host: "127.0.0.1", backend_port: 8080}}
     | .servers = [{url: "/"}]' openapi.json > edge-spec.json
-curl -sS -X POST "$EDGE_ADMIN_URL/api-specs" \
+curl -sS --fail-with-body -X POST "$EDGE_ADMIN_URL/api-specs" \
   -H "Authorization: Bearer $EDGE_ADMIN_TOKEN" -H 'X-Ferrum-Namespace: ferrum' \
   -H 'Content-Type: application/json' --data-binary @edge-spec.json
 ```
 
-Replace `SERVICE_HOST` with the address Edge reaches this service at. Edge then serves MCP at `/{{name}}/mcp` on its proxy listener. Create an item first (the `POST /items` call under Run). After an MCP `initialize`, a `tools/call` of `{{name}}.get_item` with the arguments `{"id": 1}` runs `GET /items/1` against this service and returns that item. An id the service does not know, such as `{"id": 999}`, comes back as a tool error (`isError: true`, `HTTP 404 Not Found`) carrying the documented Problem Details body.
+`127.0.0.1:8080` works when Edge runs on the same host as the service. Otherwise set `backend_host` to an address Edge reaches, and bind the service there (`server.bind` in `alloy.toml`, `127.0.0.1:8080` by default). The admin token must be one Edge accepts for namespace `ferrum` (`gateway.namespace` in `ferrum-service.toml`).
+
+Edge then serves MCP at `/{{name}}/mcp` on its proxy listener. Create an item first (the `POST /items` call under Run), then open an MCP session and call the tool. Each call after `initialize` carries the `Mcp-Session-Id` it returned:
+
+```bash
+MCP="$EDGE_PROXY_URL/{{name}}/mcp"
+ACCEPT='Accept: application/json, text/event-stream'
+SESSION=$(curl -sS -D - -o /dev/null -X POST "$MCP" -H 'Content-Type: application/json' -H "$ACCEPT" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | awk 'tolower($1) == "mcp-session-id:" { print $2 }' | tr -d '\r')
+curl -sS -X POST "$MCP" -H 'Content-Type: application/json' -H "$ACCEPT" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+curl -sS -X POST "$MCP" -H 'Content-Type: application/json' -H "$ACCEPT" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"{{name}}.get_item","arguments":{"id":1}}}'
+```
+
+The `tools/call` runs `GET /items/1` against this service, and its result (on an event-stream `data:` line, inside an HTTP `200`) carries the item with `isError: false`. With `{"id": 999}` the result is `isError: true`, with the text `HTTP 404 Not Found` and the documented Problem Details body.
