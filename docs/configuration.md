@@ -351,9 +351,9 @@ Disabled unless `enabled = true`, and nothing is allowed unless listed.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `false` | Enable CORS handling. |
-| `allowed_origins` | `[]` | Exact origins. `*` is rejected together with credentials. |
-| `allowed_methods` | `[]` | Allowed methods. |
-| `allowed_headers` | `[]` | Allowed request headers. |
+| `allowed_origins` | `[]` | Exact origins. `*` is rejected together with credentials. Every entry, including one next to `*`, must be a valid header value. |
+| `allowed_methods` | `[]` | Allowed methods, each a valid HTTP method token. |
+| `allowed_headers` | `[]` | Allowed request headers, each a valid header name. |
 | `allow_credentials` | `false` | Allow credentials. |
 | `max_age_seconds` | none | Preflight cache duration. |
 

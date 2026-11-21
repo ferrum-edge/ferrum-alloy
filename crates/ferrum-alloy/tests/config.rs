@@ -957,6 +957,55 @@ fn unsafe_combinations_fail_validation() {
 }
 
 #[test]
+fn cors_entries_are_checked_as_startup_parses_them() {
+    let errors = |mutate: &dyn Fn(&mut AlloyConfig)| -> Vec<String> {
+        let mut config = AlloyConfig::default();
+        config.cors.enabled = true;
+        config.cors.allowed_origins = vec!["https://app.example".into()];
+        config.cors.allowed_methods = vec!["GET".into(), "POST".into()];
+        config.cors.allowed_headers = vec!["content-type".into()];
+        mutate(&mut config);
+        config
+            .check(&["cors"])
+            .into_iter()
+            .filter(|issue| issue.error)
+            .map(|issue| issue.message)
+            .collect()
+    };
+    let defaults = errors(&|_| {});
+    assert!(defaults.is_empty(), "{defaults:?}");
+    let wildcard = errors(&|c| c.cors.allowed_origins = vec!["*".into()]);
+    assert!(wildcard.is_empty(), "{wildcard:?}");
+    let check = |mutate: &dyn Fn(&mut AlloyConfig), expect: &str| {
+        let errors = errors(mutate);
+        assert!(
+            errors.iter().any(|message| message == expect),
+            "expected {expect:?} in {errors:?}"
+        );
+    };
+    check(
+        &|c| c.cors.allowed_origins = vec!["bad\r\norigin".into()],
+        r#"cors.allowed_origins entry "bad\r\norigin" is not a valid header value"#,
+    );
+    check(
+        &|c| c.cors.allowed_origins = vec!["*".into(), "bad\norigin".into()],
+        r#"cors.allowed_origins entry "bad\norigin" is not a valid header value"#,
+    );
+    check(
+        &|c| c.cors.allowed_methods = vec!["GE T".into()],
+        r#"cors.allowed_methods entry "GE T" is not a valid HTTP method"#,
+    );
+    check(
+        &|c| c.cors.allowed_headers = vec!["bad header".into()],
+        r#"cors.allowed_headers entry "bad header" is not a valid header name"#,
+    );
+    let mut config = AlloyConfig::default();
+    config.cors.enabled = true;
+    config.cors.allowed_origins = vec!["*".into(), "bad\r\norigin".into()];
+    assert!(config.validate(&["cors"]).is_err());
+}
+
+#[test]
 fn enabled_otlp_export_is_checked_as_startup_checks_it() {
     let errors = |mutate: &dyn Fn(&mut AlloyConfig)| -> Vec<String> {
         let mut config = AlloyConfig::default();

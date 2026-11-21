@@ -827,6 +827,47 @@ fn check_validates_configuration() {
 }
 
 #[test]
+fn check_refuses_cors_entries_startup_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "[cors]\nenabled = true\n";
+    let valid = write(
+        dir.path(),
+        "cors.toml",
+        &format!(
+            "{base}allowed_origins = [\"https://app.example\"]\nallowed_methods = [\"GET\"]\nallowed_headers = [\"content-type\"]\n"
+        ),
+    );
+    let output = run(&["check", "--config", &valid]);
+    assert_eq!(code(&output), 0, "{}", stdout(&output));
+    for (name, entries, expect) in [
+        (
+            "origin.toml",
+            "allowed_origins = [\"*\", \"bad\\norigin\"]\n",
+            "cors.allowed_origins entry",
+        ),
+        (
+            "method.toml",
+            "allowed_origins = [\"*\"]\nallowed_methods = [\"GE T\"]\n",
+            "cors.allowed_methods entry",
+        ),
+        (
+            "header.toml",
+            "allowed_origins = [\"*\"]\nallowed_headers = [\"bad header\"]\n",
+            "cors.allowed_headers entry",
+        ),
+    ] {
+        let path = write(dir.path(), name, &format!("{base}{entries}"));
+        let output = run(&["check", "--config", &path]);
+        assert_eq!(code(&output), 3, "{name}: {}", stdout(&output));
+        assert!(
+            stdout(&output).contains(expect),
+            "{name}: {}",
+            stdout(&output)
+        );
+    }
+}
+
+#[test]
 fn check_never_prints_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- `ferrum-alloy check` and `AlloyConfig::check` refuse every
+  `cors.allowed_origins`, `cors.allowed_methods`, and `cors.allowed_headers`
+  entry that startup cannot parse as a header value, method, or header name
+  (#321). Startup now also parses every origin listed next to `*`, so a
+  malformed entry is refused instead of being hidden by the wildcard.
 - **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
   export` use a port of Edge's request-path canonicalizer
   (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge

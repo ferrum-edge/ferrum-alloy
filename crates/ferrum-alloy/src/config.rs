@@ -668,6 +668,36 @@ pub struct CorsSettings {
     pub max_age_seconds: Option<u64>,
 }
 
+/// The CORS entries startup cannot turn into header values, methods, or
+/// header names (`http_layers::cors`), so the check refuses what startup
+/// refuses. Every origin is checked, `*` included, so a malformed entry next
+/// to `*` is reported too.
+pub(crate) fn cors_syntax_issues(settings: &CorsSettings) -> Vec<String> {
+    let mut issues = Vec::new();
+    for origin in &settings.allowed_origins {
+        if http::HeaderValue::from_str(origin).is_err() {
+            issues.push(format!(
+                "cors.allowed_origins entry {origin:?} is not a valid header value"
+            ));
+        }
+    }
+    for method in &settings.allowed_methods {
+        if method.parse::<http::Method>().is_err() {
+            issues.push(format!(
+                "cors.allowed_methods entry {method:?} is not a valid HTTP method"
+            ));
+        }
+    }
+    for header in &settings.allowed_headers {
+        if header.parse::<http::HeaderName>().is_err() {
+            issues.push(format!(
+                "cors.allowed_headers entry {header:?} is not a valid header name"
+            ));
+        }
+    }
+    issues
+}
+
 /// Compression settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -1974,6 +2004,9 @@ impl AlloyConfig {
             }
             if self.cors.allow_credentials && self.cors.allowed_origins.iter().any(|o| o == "*") {
                 error("cors.allow_credentials cannot be combined with origin '*'".into());
+            }
+            for message in cors_syntax_issues(&self.cors) {
+                error(message);
             }
         }
         if self.openapi.ui {
