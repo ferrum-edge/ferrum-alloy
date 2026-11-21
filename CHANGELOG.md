@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-21
+
+First release, distributed from Git only as the tag `v0.1.0` (nothing is
+published to a registry; see [docs/release.md](docs/release.md)). Release
+notes: [docs/releases/v0.1.0.md](docs/releases/v0.1.0.md).
+
 - The generated starter keeps the items it creates in memory (at most 1000,
   then `507` Problem Details; names are at most 100 bytes), so `GET /items/{id}`, and with
   `--with openapi` the read-only `get_item` agent tool, returns an item the

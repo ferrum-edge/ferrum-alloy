@@ -6,7 +6,7 @@ See the [Edge contract inventory](https://github.com/ferrum-edge/ferrum-alloy/bl
 
 ## Status
 
-Pre-release. This crate is not published to any registry (`publish = false`); depend on it by git revision or path, as [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md) describes. [Release readiness](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/release.md) lists what must happen before any release.
+Released from Git only, starting with the tag `v0.1.0`. This crate is not published to any registry (`publish = false`); depend on it by git tag, revision, or path, as [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md) describes. [Release readiness](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/release.md) lists what every release must satisfy.
 
 ## License
 

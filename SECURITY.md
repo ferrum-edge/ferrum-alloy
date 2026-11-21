@@ -25,8 +25,9 @@ Advisories on this repository. We credit reporters unless you ask us not to.
 
 ## Supported versions
 
-Alloy is pre-release and not yet published to crates.io. Security fixes land
-on `main`; there is no release line to backport to.
+Alloy is released from Git tags (the first is `v0.1.0`) and is not published
+to crates.io or any other registry. Security fixes land on `main` and ship in
+the next tagged release; earlier tags receive no backports.
 
 ## Security model
 

@@ -1,10 +1,13 @@
 # Getting started
 
-Ferrum Alloy is not published to crates.io. Depend on it by git revision, or by path from a checkout. Pin a commit for reproducible builds. Rust 1.94 or newer is required.
+Ferrum Alloy is not published to crates.io. Depend on it by release tag or git revision, or by path from a checkout. Pin a commit for reproducible builds. Rust 1.94 or newer is required.
 
 ```toml
 [dependencies]
-ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<commit>" }
+# A release tag (the first release is v0.1.0) ...
+ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", tag = "v0.1.0" }
+# ... or a commit.
+# ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<commit>" }
 ```
 
 ## Path 1: a new service

@@ -4,7 +4,7 @@ This is the authoritative ledger for [issue #28](https://github.com/ferrum-edge/
 
 The benchmark harness's functional health tests are summarized in [Functional health tests](benchmarks.md#functional-health-tests), including why the test-only #142 diagnostics were removed. They grant no performance acceptance.
 
-Everything is pre-release. No crate is published (`publish = false` everywhere).
+Alloy v0.1.0 is the first release, distributed from Git only as the tag `v0.1.0` ([release notes](releases/v0.1.0.md)). No crate is published to a registry (`publish = false` everywhere).
 
 ## Release-candidate tracker
 
