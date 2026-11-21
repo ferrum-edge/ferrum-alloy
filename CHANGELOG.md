@@ -23,6 +23,21 @@
   vendored and checked against `ServiceManifest::validate`;
   `valid/orders-api.json` is recorded as refused for its cleartext
   `otel_endpoint` until ferrum-contracts#82 corrects it.
+- The Prometheus latency histograms render every series from one read of
+  its buckets (#316). The count is the total of the buckets, with a new
+  bucket for observations past the last finite bound, so in one exposition
+  the cumulative buckets never decrease and `+Inf` always equals `_count`,
+  even while requests are being recorded. Recording no longer updates a
+  separate count.
+- **Security (GHSA-h75r-8j4h-fxcx), breaking:** `AlloyConfig::check` refuses
+  `edge.accept_consumer_identity = true` and a non-empty
+  `edge.trusted_proxies` without the `edge` feature, in every `edge.mode`,
+  `standalone` included. Without the feature no Edge policy layer is
+  installed, so these settings were silently ignored. `AlloyApp` startup
+  checks against the features it was compiled with, and `ferrum-alloy check`
+  against its `--features` list (every feature when omitted), so pass the
+  deployed application's list. `ferrum-alloy check` also reports
+  `edge-integration` as enabled for a non-empty `edge.trusted_proxies`.
 - `ferrum-alloy check` and `AlloyConfig::check` refuse every
   `cors.allowed_origins`, `cors.allowed_methods`, and `cors.allowed_headers`
   entry that startup cannot parse as a header value, method, or header name

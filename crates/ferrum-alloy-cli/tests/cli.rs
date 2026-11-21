@@ -827,6 +827,40 @@ fn check_validates_configuration() {
 }
 
 #[test]
+fn check_refuses_edge_settings_without_the_edge_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [
+        (
+            "identity.toml",
+            "[trust]\nidentities = [\"spiffe://ferrum.test/ns/edge/sa/gateway\"]\n[edge]\naccept_consumer_identity = true\n",
+        ),
+        (
+            "proxies.toml",
+            "[edge]\ntrusted_proxies = [\"10.0.0.0/8\"]\n",
+        ),
+    ] {
+        let path = write(dir.path(), name, text);
+        let output = run(&["check", "--config", &path, "--features", "tls"]);
+        assert_eq!(code(&output), 3, "{name}: {}", stdout(&output));
+        assert!(
+            stdout(&output).contains("requires the `edge` feature"),
+            "{name}: {}",
+            stdout(&output)
+        );
+        let output = run(&["check", "--config", &path, "--format", "json"]);
+        assert_eq!(code(&output), 0, "{name}: {}", stdout(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let edge = json["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "edge-integration")
+            .unwrap_or_else(|| panic!("{name}: {json}"));
+        assert_eq!(edge["enabled"], true, "{name}: {json}");
+    }
+}
+
+#[test]
 fn check_refuses_cors_entries_startup_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let base = "[cors]\nenabled = true\n";
