@@ -56,7 +56,8 @@ in `x-contract`. Its `coordinated_release.contracts_tag` records the original
 v0.9.11 freeze, while local `contracts_tag`/`contracts_commit` track this adoption.
 All 12 diagnostic fixtures remain byte-identical. Canonical deployment
 schemas/fixtures are outside this 16-file scope and grant Alloy no deployment
-capability. All descriptions outside `$id`/`x-contract`, including historical
+capability. (The pin has since grown to 28 files: #319 vendored the 12
+`service-manifest` fixtures of the same `contracts-edge-0.9.20` tag.) All descriptions outside `$id`/`x-contract`, including historical
 PROPOSED/incomplete-import wording, remain exactly paired with the qualified owner. Current status is in `x-contract`; the
 tagged metadata's prepared/pending-publication text records the pre-publication
 state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
