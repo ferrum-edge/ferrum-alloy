@@ -408,7 +408,9 @@ impl ServiceManifest {
             errors
                 .push("api.service_base_path must be a literal absolute path ending in '/'".into());
         }
-        if self.api.service_base_path.len() > EDGE_MAX_BACKEND_PATH_LENGTH {
+        // Export writes the path without its trailing `/` as `backend_path`,
+        // and Edge bounds that value.
+        if self.api.service_base_path.trim_end_matches('/').len() > EDGE_MAX_BACKEND_PATH_LENGTH {
             errors.push(format!(
                 "api.service_base_path must not exceed {EDGE_MAX_BACKEND_PATH_LENGTH} bytes (Ferrum Edge's backend_path limit)"
             ));
@@ -481,23 +483,10 @@ impl ServiceManifest {
                 ));
             }
         }
-        if let Some(endpoint) = &self.gateway.otel_endpoint {
-            let authority = endpoint
-                .split_once("://")
-                .map(|(_, rest)| rest.split('/').next().unwrap_or_default());
-            if !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
-                || authority.is_none_or(|a| a.is_empty() || a.contains('@'))
-            {
-                errors.push(
-                    "gateway.otel_endpoint must be an http(s) URL without credentials".into(),
-                );
-            } else if endpoint.starts_with("http://")
-                && !authority.is_some_and(is_loopback_ip_literal_authority)
-            {
-                errors.push(
-                    "gateway.otel_endpoint must use https:// unless its host is a loopback IP literal: Ferrum Edge v0.9.19 drops a cleartext exporter to any other host".into(),
-                );
-            }
+        if let Some(endpoint) = &self.gateway.otel_endpoint
+            && let Err(reason) = otel_endpoint_issue(endpoint)
+        {
+            errors.push(reason.into());
         }
         if let Some(ratio) = self.gateway.otel_root_sampling_ratio
             && !(0.0..=1.0).contains(&ratio)
@@ -532,19 +521,103 @@ impl ServiceManifest {
     }
 }
 
-/// Whether a URL authority (`host[:port]`, without user information) names a
-/// loopback IP literal, the only host Ferrum Edge v0.9.19 and later accept an
-/// `http://` OTLP exporter for without the `allow_plaintext` opt-in, which
+/// Why Ferrum Edge would refuse `gateway.otel_endpoint` as `otel_tracing`'s
+/// OTLP `endpoint`, if it would. Edge then omits the plugin, and with it the
+/// strip of caller-supplied trace context (#319).
+///
+/// This ports Edge main's `validate_endpoint_for_provider` with
+/// `allow_plaintext` unset, which the export never writes: the endpoint must
+/// parse as an `http` or `https` URL with a host and no user information,
+/// and an `http://` one must name a loopback IP literal as Edge's
+/// `is_loopback_ip_literal_endpoint` reads it. Alloy is stricter in three
+/// places, so nothing it accepts is refused by Edge: control and whitespace
+/// characters (which the URL parser would strip or remove) are refused, as
+/// are an `@` anywhere in the authority and port 0.
+fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
+    const NOT_A_URL: &str = "gateway.otel_endpoint must be an http(s) URL with a host, a valid port, and no credentials";
+    if endpoint
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err("gateway.otel_endpoint must not contain control or whitespace characters");
+    }
+    let url = url::Url::parse(endpoint).map_err(|_| NOT_A_URL)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(NOT_A_URL);
+    }
+    let authority = endpoint
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+        .unwrap_or_default();
+    if authority.is_empty()
+        || authority.contains('@')
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port() == Some(0)
+    {
+        return Err(NOT_A_URL);
+    }
+    match url.host() {
+        Some(url::Host::Domain(host)) if !host.is_empty() => {}
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => {}
+        _ => return Err(NOT_A_URL),
+    }
+    if url.scheme() == "http" && !is_loopback_ip_literal_endpoint(endpoint, url.host()) {
+        return Err(
+            "gateway.otel_endpoint must use https:// unless its host is a loopback IP literal (127.d.d.d or [::1]): Ferrum Edge v0.9.19 and later drop a cleartext exporter to any other host",
+        );
+    }
+    Ok(())
+}
+
+/// Ferrum Edge main's `is_loopback_ip_literal_endpoint`
+/// (`src/plugins/utils/socket_host.rs`): the configured `http://` endpoint
+/// spells its host as a dotted-quad `127.d.d.d` or `[::1]`, optionally with
+/// a numeric port, and the parsed host is loopback. Shortened or expanded
+/// spellings (`127.1`, `[0:0:0:0:0:0:0:1]`) and every name, `localhost`
+/// included, do not qualify. Edge v0.9.19 and later admit a cleartext
+/// exporter only to such a host without the `allow_plaintext` opt-in, which
 /// the export never writes (v0.9.17 refused it as an unknown key).
-fn is_loopback_ip_literal_authority(authority: &str) -> bool {
-    let host = match authority.strip_prefix('[') {
-        Some(rest) => rest.split_once(']').map(|(host, _)| host),
-        None => Some(
-            authority
-                .rsplit_once(':')
-                .map_or(authority, |(host, _)| host),
-        ),
+fn is_loopback_ip_literal_endpoint(endpoint: &str, parsed_host: Option<url::Host<&str>>) -> bool {
+    let parsed_is_loopback = match parsed_host {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
     };
-    host.and_then(|host| host.parse::<std::net::IpAddr>().ok())
-        .is_some_and(|ip| ip.is_loopback())
+    if !parsed_is_loopback {
+        return false;
+    }
+    let Some(rest) = endpoint
+        .get(.."http://".len())
+        .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        .and_then(|_| endpoint.get("http://".len()..))
+    else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = rest.get(..authority_end).unwrap_or_default();
+    let host = if let Some(after) = authority.strip_prefix("[::1]") {
+        if !after.is_empty() && !after.starts_with(':') {
+            return false;
+        }
+        return after
+            .strip_prefix(':')
+            .is_none_or(|port| port.bytes().all(|byte| byte.is_ascii_digit()));
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => {
+                if !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return false;
+                }
+                host
+            }
+            None => authority,
+        }
+    };
+    let mut octets = host.split('.');
+    octets.next() == Some("127")
+        && octets.clone().count() == 3
+        && octets.all(|octet| {
+            (1..=3).contains(&octet.len()) && octet.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }

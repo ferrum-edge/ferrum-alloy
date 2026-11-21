@@ -1,0 +1,44 @@
+{
+  "schema": "ferrum.service_manifest",
+  "schema_version": "1.0",
+  "service": {
+    "name": "orders-api",
+    "version": "0.1.0",
+    "description": "Orders service built with Ferrum Alloy"
+  },
+  "api": {
+    "public_path": "/orders",
+    "service_base_path": "/",
+    "strip_public_path": true,
+    "openapi": "openapi.json"
+  },
+  "upstream": {
+    "host": "orders.internal",
+    "port": 8443,
+    "scheme": "https",
+    "protocols": [
+      "http1",
+      "http2"
+    ],
+    "gateway_client_cert_path": "/etc/ferrum/edge-client.pem",
+    "server_ca_path": "/etc/ferrum/alloy-ca.pem"
+  },
+  "health": {
+    "path": "/readyz",
+    "interval_seconds": 10,
+    "timeout_ms": 2000
+  },
+  "timeouts": {
+    "connect_ms": 2000,
+    "read_ms": 30000,
+    "write_ms": 30000
+  },
+  "gateway": {
+    "namespace": "ferrum",
+    "correlation_id": true,
+    "otel_endpoint": "http://otel-collector:4318/v1/traces"
+  },
+  "auth": {
+    "mode": "service"
+  }
+}

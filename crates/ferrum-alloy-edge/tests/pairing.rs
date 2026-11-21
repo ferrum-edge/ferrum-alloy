@@ -985,3 +985,74 @@ fn schema_errors(
     }
     Ok(())
 }
+
+const SERVICE_MANIFEST_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/service-manifest/";
+
+/// Pinned `valid/` fixtures that Alloy refuses because Ferrum Edge would
+/// drop the configuration they produce, with the one error each must
+/// produce. `orders-api.json` sends OTLP over `http://` to a host that is
+/// not a loopback IP literal, which Edge v0.9.19 and later refuse without
+/// `allow_plaintext` (ferrum-contracts#82 aligns the canonical fixture).
+/// Remove an entry once the pin carries the corrected fixture.
+const KNOWN_REFUSED_VALID_MANIFESTS: &[(&str, &str)] =
+    &[("orders-api.json", "gateway.otel_endpoint must use https://")];
+
+/// Every pinned `ferrum.service_manifest` fixture is judged by
+/// `ServiceManifest` as the shared contract does: each `invalid/` fixture is
+/// refused when parsed or validated, and each `valid/` fixture is accepted,
+/// except the recorded Edge divergences, which must fail for exactly that
+/// reason and pass once it is corrected (#319).
+#[test]
+fn pinned_service_manifest_fixtures_match_validate() {
+    use ferrum_alloy_edge::manifest::ServiceManifest;
+
+    let pin = repo_json(PIN);
+    let mut valid = 0;
+    let mut invalid = 0;
+    for path in pin["files"].as_object().unwrap().keys() {
+        let Some(fixture) = path.strip_prefix(SERVICE_MANIFEST_FIXTURES) else {
+            continue;
+        };
+        let text = repo(path);
+        let parsed = serde_json::from_str::<ServiceManifest>(&text);
+        if let Some(name) = fixture.strip_prefix("valid/") {
+            valid += 1;
+            let mut manifest = parsed.unwrap_or_else(|error| panic!("{fixture}: {error}"));
+            match KNOWN_REFUSED_VALID_MANIFESTS
+                .iter()
+                .find(|(known, _)| *known == name)
+            {
+                None => manifest
+                    .validate()
+                    .unwrap_or_else(|error| panic!("{fixture}: {error}")),
+                Some((_, reason)) => {
+                    let error = manifest.validate().unwrap_err();
+                    assert_eq!(error.0.len(), 1, "{fixture}: {error}");
+                    assert!(error.0[0].starts_with(reason), "{fixture}: {error}");
+                    let endpoint = manifest.gateway.otel_endpoint.as_mut().unwrap();
+                    *endpoint = endpoint.replacen("http://", "https://", 1);
+                    manifest
+                        .validate()
+                        .unwrap_or_else(|error| panic!("{fixture} with https: {error}"));
+                }
+            }
+        } else if fixture.starts_with("invalid/") {
+            invalid += 1;
+            if let Ok(manifest) = parsed {
+                assert!(manifest.validate().is_err(), "{fixture} was accepted");
+            }
+        } else {
+            panic!("unexpected service-manifest fixture {fixture}");
+        }
+    }
+    assert!(valid > 0 && invalid > 0, "{valid} valid, {invalid} invalid");
+    for (known, _) in KNOWN_REFUSED_VALID_MANIFESTS {
+        assert!(
+            pin["files"]
+                .as_object()
+                .unwrap()
+                .contains_key(&format!("{SERVICE_MANIFEST_FIXTURES}valid/{known}")),
+            "{known} is no longer pinned"
+        );
+    }
+}

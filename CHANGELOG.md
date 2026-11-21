@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **Breaking (#319):** manifest validation holds `gateway.otel_endpoint` to
+  Ferrum Edge main's OTLP endpoint rules (`validate_endpoint_for_provider`
+  without `allow_plaintext`), so Alloy no longer exports an endpoint for
+  which Edge omits `otel_tracing`, and with it the strip of caller trace
+  context. The endpoint must parse as an `http(s)` URL with a host, a valid
+  non-zero port, and no user information, and must not contain control or
+  whitespace characters. An `http://` endpoint must spell its host as
+  Edge's canonical loopback literal, `127.d.d.d` or `[::1]`: expanded or
+  shortened forms (`[0:0:0:0:0:0:0:1]`, `127.1`), trailing bytes after `]`,
+  and non-numeric or out-of-range ports are refused. The authority now ends
+  at `?` or `#` as well as `/`, so `http://127.0.0.1#frag` and an `@` in a
+  query are accepted, as in Edge. `api.service_base_path` is bounded by
+  the `backend_path` the export writes (without its trailing `/`), so a
+  2049-byte value is accepted, as in Edge and the ferrum-contracts schema.
+  The service-manifest fixtures of the pinned `contracts-edge-0.9.20` are
+  vendored and checked against `ServiceManifest::validate`;
+  `valid/orders-api.json` is recorded as refused for its cleartext
+  `otel_endpoint` until ferrum-contracts#82 corrects it.
 - **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
   export` use a port of Edge's request-path canonicalizer
   (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge
