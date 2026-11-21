@@ -1,7 +1,7 @@
 //! {{name}}: ordinary Axum handlers served by Ferrum Alloy.
 
-{{starter_modules}}use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+{{starter_modules}}use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::Router;
 use axum::extract::State;
@@ -10,16 +10,29 @@ use axum::routing::{get, post};
 use ferrum_alloy::extract::{Json, Path, ValidJson, Validate, ValidationErrors};
 use ferrum_alloy::{Problem, ProblemKind};
 use serde::{Deserialize, Serialize};
-/// Application state, supplied with `Router::with_state`.
+/// The most items the sample keeps; creating more is refused.
+pub const MAX_ITEMS: usize = 1_000;
+
+/// The longest item name, in bytes, so the stored items stay small.
+pub const MAX_NAME_BYTES: usize = 100;
+
+/// Application state, supplied with `Router::with_state`. Items live in
+/// memory for the life of the process; replace the store with a database.
 #[derive(Clone, Default)]
 pub struct AppState {
-    next_id: Arc<AtomicU64>,
+    store: Arc<Mutex<Store>>,
+}
+
+#[derive(Default)]
+struct Store {
+    next_id: u64,
+    items: BTreeMap<u64, Item>,
 }
 
 /// A request to create an item.
 #[derive(Debug, Deserialize)]
 pub struct NewItem {
-    /// Item name.
+    /// Item name (1 to 100 bytes).
     pub name: String,
     /// Quantity (at least 1).
     pub quantity: u32,
@@ -31,6 +44,9 @@ impl Validate for NewItem {
         if self.name.trim().is_empty() {
             errors.add("/name", "must not be empty");
         }
+        if self.name.len() > MAX_NAME_BYTES {
+            errors.add("/name", "must be at most 100 bytes");
+        }
         if self.quantity == 0 {
             errors.add("/quantity", "must be at least 1");
         }
@@ -39,7 +55,7 @@ impl Validate for NewItem {
 }
 
 /// A created item.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Item {
     /// Identifier.
     pub id: u64,
@@ -52,28 +68,43 @@ pub struct Item {
 async fn create_item(
     State(state): State<AppState>,
     ValidJson(item): ValidJson<NewItem>,
-) -> (StatusCode, Json<Item>) {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-    (
-        StatusCode::CREATED,
-        Json(Item {
-            id,
-            name: item.name,
-            quantity: item.quantity,
-        }),
-    )
+) -> Result<(StatusCode, Json<Item>), Problem> {
+    let mut store = state.store.lock().unwrap_or_else(PoisonError::into_inner);
+    if store.items.len() >= MAX_ITEMS {
+        return Err(Problem::custom(
+            "tag:example.com,2026:{{name}}/problem/item-store-full",
+            "Item store full",
+            StatusCode::INSUFFICIENT_STORAGE,
+        )
+        .with_detail(format!("the sample keeps at most {MAX_ITEMS} items")));
+    }
+    store.next_id += 1;
+    let item = Item {
+        id: store.next_id,
+        name: item.name,
+        quantity: item.quantity,
+    };
+    store.items.insert(item.id, item.clone());
+    Ok((StatusCode::CREATED, Json(item)))
 }
 
-async fn get_item(Path(id): Path<u64>) -> Result<Json<Item>, Problem> {
+async fn get_item(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<Json<Item>, Problem> {
     if id == 0 {
         return Err(Problem::new(ProblemKind::ValidationFailed).with_detail("id must be positive"));
     }
-    Err(Problem::custom(
-        "tag:example.com,2026:{{name}}/problem/item-not-found",
-        "Item not found",
-        StatusCode::NOT_FOUND,
-    )
-    .with_detail(format!("no item with id {id}")))
+    let store = state.store.lock().unwrap_or_else(PoisonError::into_inner);
+    match store.items.get(&id) {
+        Some(item) => Ok(Json(item.clone())),
+        None => Err(Problem::custom(
+            "tag:example.com,2026:{{name}}/problem/item-not-found",
+            "Item not found",
+            StatusCode::NOT_FOUND,
+        )
+        .with_detail(format!("no item with id {id}"))),
+    }
 }
 
 async fn hello() -> &'static str {

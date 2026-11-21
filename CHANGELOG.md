@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- The generated starter keeps the items it creates in memory (at most 1000,
+  then `507` Problem Details; names are at most 100 bytes), so `GET /items/{id}`, and with
+  `--with openapi` the read-only `get_item` agent tool, returns an item the
+  sample created (#323). The OpenAPI starter documents the `200` response,
+  the generated README shows a successful call and the `404` for an unknown
+  id, directly and through Edge (including how to publish the document with
+  `POST /api-specs`), and a generated test fetches a created item.
 - **Breaking (#319):** manifest validation holds `gateway.otel_endpoint` to
   Ferrum Edge main's OTLP endpoint rules (`validate_endpoint_for_provider`
   without `allow_plaintext`), so Alloy no longer exports an endpoint for

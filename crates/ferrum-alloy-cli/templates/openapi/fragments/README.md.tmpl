@@ -12,4 +12,31 @@ The document is served on the management listener at `/openapi.json` (token-prot
 
 `get_item` is offered to AI agents as a read-only MCP tool. Its `#[utoipa::path]` declares `AgentTool::expose()`, and `[agents]` in `ferrum-service.toml` is enabled, so the exported document carries the `x-ferrum-mcp` extension that Ferrum Edge reads on `POST /api-specs`. Nothing else is exposed.
 
-Expose only what an agent should be able to do on a user's behalf, and start with read-only operations. A state-changing operation needs its own `AgentTool::expose()`. The export refuses tool metadata Edge would reject or an agent could not use, such as an exposed operation without a description.
+To try it through Edge, publish the exported document with `POST /api-specs` on the admin API of an Edge running in `database` (or `cp`) mode; file, data-plane, and mesh modes answer `403` (see Ferrum Edge's `docs/api_specs.md`). Edge needs the proxy as `x-ferrum-proxy`, with the listen path from `ferrum-service.toml`, and the root `servers` reset to `/`, because Edge builds each tool's path from the listen path, then the server URL, then the path (keeping the exported `servers` would double the prefix):
+
+```bash
+jq '. + {"x-ferrum-proxy": {id: "{{name}}", listen_path: "/{{name}}", strip_listen_path: true,
+      backend_scheme: "http", backend_host: "127.0.0.1", backend_port: 8080}}
+    | .servers = [{url: "/"}]' openapi.json > edge-spec.json
+curl -sS --fail-with-body -X POST "$EDGE_ADMIN_URL/api-specs" \
+  -H "Authorization: Bearer $EDGE_ADMIN_TOKEN" -H 'X-Ferrum-Namespace: ferrum' \
+  -H 'Content-Type: application/json' --data-binary @edge-spec.json
+```
+
+`127.0.0.1:8080` works only when Edge shares the service's network namespace (both on the host, or in one container network namespace); an Edge container on a Docker bridge network has its own loopback. Otherwise set `backend_host` to an address Edge reaches, and bind the service there (`server.bind` in `alloy.toml`, `127.0.0.1:8080` by default). The commands assume an Edge that serves namespace `ferrum` (`FERRUM_NAMESPACE=ferrum`, matching `gateway.namespace` in `ferrum-service.toml` and the `X-Ferrum-Namespace` header), with an admin token authorized for it; otherwise use one namespace in all three places. In `cp` mode, `EDGE_ADMIN_URL` is the control plane and `EDGE_PROXY_URL` a data plane subscribed to it, and the backend address must be reachable from that data plane. The data plane picks up the import on the control plane's next poll (30 seconds by default), so wait until `curl -sS --fail "$EDGE_PROXY_URL/{{name}}/items/1"` succeeds before opening the MCP session.
+
+Edge then serves MCP at `/{{name}}/mcp` on its proxy listener. Create an item first (the `POST /items` call under Run), then open an MCP session and call the tool. Each call after `initialize` carries the `Mcp-Session-Id` it returned:
+
+```bash
+MCP="$EDGE_PROXY_URL/{{name}}/mcp"
+ACCEPT='Accept: application/json, text/event-stream'
+SESSION=$(curl -sS -D - -o /dev/null -X POST "$MCP" -H 'Content-Type: application/json' -H "$ACCEPT" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
+  | awk 'tolower($1) == "mcp-session-id:" { print $2 }' | tr -d '\r')
+curl -sS -X POST "$MCP" -H 'Content-Type: application/json' -H "$ACCEPT" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+curl -sS -X POST "$MCP" -H 'Content-Type: application/json' -H "$ACCEPT" -H "Mcp-Session-Id: $SESSION" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"{{name}}.get_item","arguments":{"id":1}}}'
+```
+
+The `tools/call` runs `GET /items/1` against this service. Edge answers HTTP `200` with a JSON-RPC response whose `result.structuredContent` is the item and `result.isError` is `false`. With `{"id": 999}`, `result.isError` is `true` and `result.content[0].text` holds `HTTP 404 Not Found` and the documented Problem Details body.
