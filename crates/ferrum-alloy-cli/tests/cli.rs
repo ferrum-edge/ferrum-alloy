@@ -843,17 +843,17 @@ fn check_refuses_cors_entries_startup_refuses() {
         (
             "origin.toml",
             "allowed_origins = [\"*\", \"bad\\norigin\"]\n",
-            "cors.allowed_origins entry",
+            "cors.allowed_origins[1] is not a valid header value",
         ),
         (
             "method.toml",
             "allowed_origins = [\"*\"]\nallowed_methods = [\"GE T\"]\n",
-            "cors.allowed_methods entry",
+            "cors.allowed_methods[0] is not a valid HTTP method",
         ),
         (
             "header.toml",
             "allowed_origins = [\"*\"]\nallowed_headers = [\"bad header\"]\n",
-            "cors.allowed_headers entry",
+            "cors.allowed_headers[0] is not a valid header name",
         ),
     ] {
         let path = write(dir.path(), name, &format!("{base}{entries}"));
@@ -862,6 +862,23 @@ fn check_refuses_cors_entries_startup_refuses() {
         assert!(
             stdout(&output).contains(expect),
             "{name}: {}",
+            stdout(&output)
+        );
+    }
+    let leaky = write(
+        dir.path(),
+        "leaky.toml",
+        &format!(
+            "{base}allowed_origins = [\"*\", \"https://user:EXAMPLE-PASSWORD@app.example\\n\"]\n"
+        ),
+    );
+    for format in ["human", "json"] {
+        let output = run(&["check", "--config", &leaky, "--format", format]);
+        assert_eq!(code(&output), 3, "{format}: {}", stdout(&output));
+        assert!(
+            !stdout(&output).contains("EXAMPLE-PASSWORD")
+                && !stderr(&output).contains("EXAMPLE-PASSWORD"),
+            "{format}: {}",
             stdout(&output)
         );
     }

@@ -985,20 +985,36 @@ fn cors_entries_are_checked_as_startup_parses_them() {
     };
     check(
         &|c| c.cors.allowed_origins = vec!["bad\r\norigin".into()],
-        r#"cors.allowed_origins entry "bad\r\norigin" is not a valid header value"#,
+        "cors.allowed_origins[0] is not a valid header value",
     );
     check(
         &|c| c.cors.allowed_origins = vec!["*".into(), "bad\norigin".into()],
-        r#"cors.allowed_origins entry "bad\norigin" is not a valid header value"#,
+        "cors.allowed_origins[1] is not a valid header value",
     );
     check(
         &|c| c.cors.allowed_methods = vec!["GE T".into()],
-        r#"cors.allowed_methods entry "GE T" is not a valid HTTP method"#,
+        "cors.allowed_methods[0] is not a valid HTTP method",
     );
     check(
         &|c| c.cors.allowed_headers = vec!["bad header".into()],
-        r#"cors.allowed_headers entry "bad header" is not a valid header name"#,
+        "cors.allowed_headers[0] is not a valid header name",
     );
+    check(
+        &|c| {
+            c.cors.allow_credentials = true;
+            c.cors.allowed_methods = vec!["*".into()];
+        },
+        "cors.allow_credentials cannot be combined with allowed_methods '*'",
+    );
+    check(
+        &|c| {
+            c.cors.allow_credentials = true;
+            c.cors.allowed_headers = vec!["*".into()];
+        },
+        "cors.allow_credentials cannot be combined with allowed_headers '*'",
+    );
+    let credentialed = errors(&|c| c.cors.allow_credentials = true);
+    assert!(credentialed.is_empty(), "{credentialed:?}");
     let mut config = AlloyConfig::default();
     config.cors.enabled = true;
     config.cors.allowed_origins = vec!["*".into(), "bad\r\norigin".into()];

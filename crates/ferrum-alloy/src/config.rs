@@ -668,31 +668,48 @@ pub struct CorsSettings {
     pub max_age_seconds: Option<u64>,
 }
 
-/// The CORS entries startup cannot turn into header values, methods, or
-/// header names (`http_layers::cors`), so the check refuses what startup
-/// refuses. Every origin is checked, `*` included, so a malformed entry next
-/// to `*` is reported too.
-pub(crate) fn cors_syntax_issues(settings: &CorsSettings) -> Vec<String> {
+/// The CORS entries startup cannot turn into a layer: entries
+/// `http_layers::cors` cannot parse as header values, methods, or header
+/// names, and the `*` entries `tower-http` refuses to combine with
+/// credentials (it panics when such a layer is applied). `check` reports
+/// these and `http_layers::cors` refuses them, so both agree. Every origin
+/// is checked, `*` included, so a malformed entry next to `*` is reported
+/// too. Entries are named by index, never quoted, so a credential pasted
+/// into one is not echoed.
+pub(crate) fn cors_entry_issues(settings: &CorsSettings) -> Vec<String> {
     let mut issues = Vec::new();
-    for origin in &settings.allowed_origins {
+    for (index, origin) in settings.allowed_origins.iter().enumerate() {
         if http::HeaderValue::from_str(origin).is_err() {
             issues.push(format!(
-                "cors.allowed_origins entry {origin:?} is not a valid header value"
+                "cors.allowed_origins[{index}] is not a valid header value"
             ));
         }
     }
-    for method in &settings.allowed_methods {
+    for (index, method) in settings.allowed_methods.iter().enumerate() {
         if method.parse::<http::Method>().is_err() {
             issues.push(format!(
-                "cors.allowed_methods entry {method:?} is not a valid HTTP method"
+                "cors.allowed_methods[{index}] is not a valid HTTP method"
             ));
         }
     }
-    for header in &settings.allowed_headers {
+    for (index, header) in settings.allowed_headers.iter().enumerate() {
         if header.parse::<http::HeaderName>().is_err() {
             issues.push(format!(
-                "cors.allowed_headers entry {header:?} is not a valid header name"
+                "cors.allowed_headers[{index}] is not a valid header name"
             ));
+        }
+    }
+    if settings.allow_credentials {
+        for (list, entries) in [
+            ("origin", &settings.allowed_origins),
+            ("allowed_methods", &settings.allowed_methods),
+            ("allowed_headers", &settings.allowed_headers),
+        ] {
+            if entries.iter().any(|entry| entry == "*") {
+                issues.push(format!(
+                    "cors.allow_credentials cannot be combined with {list} '*'"
+                ));
+            }
         }
     }
     issues
@@ -2002,10 +2019,7 @@ impl AlloyConfig {
             if self.cors.allowed_origins.is_empty() {
                 error("cors.allowed_origins must list origins when CORS is enabled".into());
             }
-            if self.cors.allow_credentials && self.cors.allowed_origins.iter().any(|o| o == "*") {
-                error("cors.allow_credentials cannot be combined with origin '*'".into());
-            }
-            for message in cors_syntax_issues(&self.cors) {
+            for message in cors_entry_issues(&self.cors) {
                 error(message);
             }
         }
