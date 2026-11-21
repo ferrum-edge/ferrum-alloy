@@ -827,6 +827,64 @@ fn check_validates_configuration() {
 }
 
 #[test]
+fn check_refuses_cors_entries_startup_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "[cors]\nenabled = true\n";
+    let valid = write(
+        dir.path(),
+        "cors.toml",
+        &format!(
+            "{base}allowed_origins = [\"https://app.example\"]\nallowed_methods = [\"GET\"]\nallowed_headers = [\"content-type\"]\n"
+        ),
+    );
+    let output = run(&["check", "--config", &valid]);
+    assert_eq!(code(&output), 0, "{}", stdout(&output));
+    for (name, entries, expect) in [
+        (
+            "origin.toml",
+            "allowed_origins = [\"*\", \"bad\\norigin\"]\n",
+            "cors.allowed_origins[1] is not a valid header value",
+        ),
+        (
+            "method.toml",
+            "allowed_origins = [\"*\"]\nallowed_methods = [\"GE T\"]\n",
+            "cors.allowed_methods[0] is not a valid HTTP method",
+        ),
+        (
+            "header.toml",
+            "allowed_origins = [\"*\"]\nallowed_headers = [\"bad header\"]\n",
+            "cors.allowed_headers[0] is not a valid header name",
+        ),
+    ] {
+        let path = write(dir.path(), name, &format!("{base}{entries}"));
+        let output = run(&["check", "--config", &path]);
+        assert_eq!(code(&output), 3, "{name}: {}", stdout(&output));
+        assert!(
+            stdout(&output).contains(expect),
+            "{name}: {}",
+            stdout(&output)
+        );
+    }
+    let leaky = write(
+        dir.path(),
+        "leaky.toml",
+        &format!(
+            "{base}allowed_origins = [\"*\", \"https://user:EXAMPLE-PASSWORD@app.example\\n\"]\n"
+        ),
+    );
+    for format in ["human", "json"] {
+        let output = run(&["check", "--config", &leaky, "--format", format]);
+        assert_eq!(code(&output), 3, "{format}: {}", stdout(&output));
+        assert!(
+            !stdout(&output).contains("EXAMPLE-PASSWORD")
+                && !stderr(&output).contains("EXAMPLE-PASSWORD"),
+            "{format}: {}",
+            stdout(&output)
+        );
+    }
+}
+
+#[test]
 fn check_never_prints_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(
