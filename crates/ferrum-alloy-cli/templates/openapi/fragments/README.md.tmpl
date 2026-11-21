@@ -12,4 +12,6 @@ The document is served on the management listener at `/openapi.json` (token-prot
 
 `get_item` is offered to AI agents as a read-only MCP tool. Its `#[utoipa::path]` declares `AgentTool::expose()`, and `[agents]` in `ferrum-service.toml` is enabled, so the exported document carries the `x-ferrum-mcp` extension that Ferrum Edge reads on `POST /api-specs`. Nothing else is exposed.
 
+To try it, create an item first (the `POST /items` call under Run). Calling the tool `{{name}}.get_item` through Edge with the arguments `{"id": 1}` runs `GET /items/1` against this service and returns that item. An id the service does not know, such as `{"id": 999}`, comes back as a tool error (`isError: true`, `HTTP 404 Not Found`) carrying the documented Problem Details body.
+
 Expose only what an agent should be able to do on a user's behalf, and start with read-only operations. A state-changing operation needs its own `AgentTool::expose()`. The export refuses tool metadata Edge would reject or an agent could not use, such as an exposed operation without a description.
