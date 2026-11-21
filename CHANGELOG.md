@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **Breaking (#319):** manifest validation holds `gateway.otel_endpoint` to
+  Ferrum Edge main's OTLP endpoint rules (`validate_endpoint_for_provider`
+  without `allow_plaintext`), so Alloy no longer exports an endpoint for
+  which Edge omits `otel_tracing`, and with it the strip of caller trace
+  context. The endpoint must parse as an `http(s)` URL with a host, a valid
+  non-zero port, and no user information, and must not contain control or
+  whitespace characters or a backslash, which Alloy refuses beyond Edge's
+  rules: in the authority or path the URL parser reads a backslash as `/`,
+  so the spelling and the parsed URL would disagree, and Alloy refuses it in
+  a query or fragment too, where Edge would keep it literally. An `http://` endpoint must spell its host as
+  Edge's canonical loopback literal, `127.d.d.d` or `[::1]`: expanded or
+  shortened forms (`[0:0:0:0:0:0:0:1]`, `127.1`), trailing bytes after `]`,
+  and non-numeric or out-of-range ports are refused. The authority now ends
+  at `?` or `#` as well as `/`, so `http://127.0.0.1#frag` and an `@` in a
+  query are accepted, as in Edge. `api.service_base_path` is bounded by
+  the `backend_path` the export writes (without its trailing `/`), so a
+  2049-byte value is accepted, as in Edge and the ferrum-contracts schema.
+  The service-manifest fixtures of the pinned `contracts-edge-0.9.20` are
+  vendored and checked against `ServiceManifest::validate`;
+  `valid/orders-api.json` is recorded as refused for its cleartext
+  `otel_endpoint` until ferrum-contracts#82 corrects it.
 - The Prometheus latency histograms render every series from one read of
   its buckets (#316). The count is the total of the buckets, with a new
   bucket for observations past the last finite bound, so in one exposition
@@ -111,7 +132,8 @@
   upper bounds, so `edge export` no longer writes configuration Edge
   refuses to load: `timeouts.*` and `health.timeout_ms` at most 86400000,
   `health.interval_seconds` at most 3600, `api.public_path` at most 500
-  bytes, `api.service_base_path` and `health.path` at most 2048 bytes, and
+  bytes, `health.path` at most 2048 bytes, `api.service_base_path` at most
+  2048 bytes without its trailing `/` (the exported `backend_path`; #319), and
   `upstream.host` at most 255 bytes without control or whitespace
   characters. The limits are `manifest::EDGE_MAX_*`.
 - **Breaking (#312):** `openapi export` refuses `x-ferrum-mcp` values Edge
