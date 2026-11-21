@@ -13,28 +13,39 @@ pub(crate) fn cors(settings: &CorsSettings) -> Result<tower_http::cors::CorsLaye
     use http::{HeaderName, HeaderValue, Method};
     use tower_http::cors::{AllowOrigin, CorsLayer};
 
-    let invalid = |what: &str, value: &str| {
-        AlloyError::Integration(format!("cors: invalid {what} {value:?}"))
+    // The same rules as `AlloyConfig::check`, so startup refuses exactly what
+    // the check reports, and never builds a layer `tower-http` would panic on.
+    if let Some(issue) = crate::config::cors_entry_issues(settings)
+        .into_iter()
+        .next()
+    {
+        return Err(AlloyError::Integration(format!("cors: {issue}")));
+    }
+    let invalid = |what: &str, index: usize| {
+        AlloyError::Integration(format!("cors: invalid {what} [{index}]"))
     };
+    let values = settings
+        .allowed_origins
+        .iter()
+        .enumerate()
+        .map(|(i, o)| HeaderValue::from_str(o).map_err(|_| invalid("origin", i)))
+        .collect::<Result<Vec<_>, _>>()?;
     let origins = if settings.allowed_origins.iter().any(|o| o == "*") {
         AllowOrigin::any()
     } else {
-        let values = settings
-            .allowed_origins
-            .iter()
-            .map(|o| HeaderValue::from_str(o).map_err(|_| invalid("origin", o)))
-            .collect::<Result<Vec<_>, _>>()?;
         AllowOrigin::list(values)
     };
     let methods = settings
         .allowed_methods
         .iter()
-        .map(|m| m.parse::<Method>().map_err(|_| invalid("method", m)))
+        .enumerate()
+        .map(|(i, m)| m.parse::<Method>().map_err(|_| invalid("method", i)))
         .collect::<Result<Vec<_>, _>>()?;
     let headers = settings
         .allowed_headers
         .iter()
-        .map(|h| h.parse::<HeaderName>().map_err(|_| invalid("header", h)))
+        .enumerate()
+        .map(|(i, h)| h.parse::<HeaderName>().map_err(|_| invalid("header", i)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut layer = CorsLayer::new()
         .allow_origin(origins)
@@ -138,5 +149,126 @@ mod tests {
         let mut cookie = headers(&["public"]);
         cookie.insert(SET_COOKIE, HeaderValue::from_static("id=1"));
         assert!(!compressible(&cookie));
+    }
+}
+
+#[cfg(all(test, feature = "cors"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod cors_tests {
+    use super::cors;
+    use crate::config::{CorsSettings, cors_entry_issues};
+
+    struct Case {
+        origins: &'static [&'static str],
+        methods: &'static [&'static str],
+        headers: &'static [&'static str],
+        credentials: bool,
+        valid: bool,
+    }
+
+    const fn case(
+        origins: &'static [&'static str],
+        methods: &'static [&'static str],
+        headers: &'static [&'static str],
+        credentials: bool,
+        valid: bool,
+    ) -> Case {
+        Case {
+            origins,
+            methods,
+            headers,
+            credentials,
+            valid,
+        }
+    }
+
+    fn owned(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The offline check refuses exactly the entries startup cannot build a
+    /// layer from, including a malformed origin listed next to `*` and the
+    /// wildcards `tower-http` refuses (by panicking) to combine with
+    /// credentials. Every accepted layer is applied, so such a panic fails
+    /// the test.
+    #[test]
+    fn check_and_startup_agree_on_cors_entries() {
+        let cases = [
+            case(
+                &["https://app.example"],
+                &["GET"],
+                &["content-type"],
+                false,
+                true,
+            ),
+            case(
+                &["https://app.example"],
+                &["GET"],
+                &["content-type"],
+                true,
+                true,
+            ),
+            case(&["*"], &["GET", "POST"], &["x-request-id"], false, true),
+            case(&["*"], &["*"], &["*"], false, true),
+            case(&["https://app.example"], &[], &[], false, true),
+            case(&["bad\r\norigin"], &[], &[], false, false),
+            case(&["*", "bad\r\norigin"], &[], &[], false, false),
+            case(&["bad\norigin", "*"], &[], &[], false, false),
+            case(&["*"], &["GE T"], &[], false, false),
+            case(&["*"], &[""], &[], false, false),
+            case(&["*"], &["GET"], &["bad header"], false, false),
+            case(&["*"], &["GET"], &["x-ok", "bad:name"], false, false),
+            case(&["*"], &[], &[], true, false),
+            case(&["https://app.example"], &["*"], &[], true, false),
+            case(&["https://app.example"], &[], &["*"], true, false),
+            case(
+                &["https://app.example"],
+                &["PATCH", "*"],
+                &["x-request-id", "*"],
+                true,
+                true,
+            ),
+            case(&["https://app.example"], &["*", "*"], &[], true, true),
+        ];
+        for case in cases {
+            let settings = CorsSettings {
+                enabled: true,
+                allowed_origins: owned(case.origins),
+                allowed_methods: owned(case.methods),
+                allowed_headers: owned(case.headers),
+                allow_credentials: case.credentials,
+                ..CorsSettings::default()
+            };
+            let issues = cors_entry_issues(&settings);
+            assert_eq!(issues.is_empty(), case.valid, "{settings:?}: {issues:?}");
+            match cors(&settings) {
+                Ok(layer) => {
+                    assert!(case.valid, "{settings:?}");
+                    let _ = tower::Layer::layer(
+                        &layer,
+                        tower::service_fn(|()| async { Ok::<_, std::convert::Infallible>(()) }),
+                    );
+                }
+                Err(error) => assert!(!case.valid, "{settings:?}: {error}"),
+            }
+        }
+    }
+
+    /// Diagnostics name an entry by index, so a credential pasted into an
+    /// origin is not echoed by `ferrum-alloy check` or startup.
+    #[test]
+    fn cors_diagnostics_do_not_quote_entries() {
+        let settings = CorsSettings {
+            enabled: true,
+            allowed_origins: owned(&["*", "https://user:EXAMPLE-PASSWORD@app.example\n"]),
+            ..CorsSettings::default()
+        };
+        let issues = cors_entry_issues(&settings);
+        assert_eq!(
+            issues,
+            ["cors.allowed_origins[1] is not a valid header value"]
+        );
+        let error = cors(&settings).unwrap_err().to_string();
+        assert!(!error.contains("EXAMPLE-PASSWORD"), "{error}");
     }
 }
