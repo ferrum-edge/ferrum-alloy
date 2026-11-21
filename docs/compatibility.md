@@ -4,15 +4,15 @@ This page records the supported pairing and its qualification limits. The v0.9.2
 
 The same pairing in machine-readable form is in [compatibility.json](compatibility.json).
 
-## Alloy release
+## Latest Alloy release
 
 | Item | Value |
 |---|---|
 | Alloy version | **0.1.0**, released as the Git tag `v0.1.0` ([release notes](releases/v0.1.0.md)) |
 | Distribution | Git only: no crate is published to a registry (`publish = false`, [distribution decision](release.md#distribution-decision)) |
 | MSRV | Rust 1.94 |
-| Edge support window | v0.9.20 (baseline) and v0.9.19 |
-| Edge contract pin | `contracts-edge-0.9.20` at `39da322083044c2e92617209e62983c92387f0ad` |
+| Edge support window at release | v0.9.20 (baseline) and v0.9.19 |
+| Edge contract pin at release | `contracts-edge-0.9.20` at `39da322083044c2e92617209e62983c92387f0ad` |
 
 ## Ferrum Edge pairing
 

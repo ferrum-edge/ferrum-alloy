@@ -28,7 +28,9 @@ diagnostic-ref schemas, and diagnostic-finding, diagnostic-ref, and service-mani
 in `ferrum-contracts/PIN`: `contracts-edge-0.9.20` at
 `39da322083044c2e92617209e62983c92387f0ad` (SSH-signed tag object
 `82b277b495e73cfadfacb6f3123de02a984658e4`). Both shared v1 contracts are now
-EXISTING/implemented; Alloy owner availability remains unreleased. The
+EXISTING/implemented; their metadata records Alloy owner availability as
+`unreleased`, the provenance of the original freeze, which the vendored bytes
+keep even though Alloy has since been released as `v0.1.0`. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in
 `crates/ferrum-alloy-edge/tests/pairing.rs` verify every vendored file's

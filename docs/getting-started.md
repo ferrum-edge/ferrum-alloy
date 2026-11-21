@@ -15,7 +15,7 @@ ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", tag = "v0.
 ### With the CLI
 
 ```bash
-cargo install --git https://github.com/ferrum-edge/ferrum-alloy ferrum-alloy-cli
+cargo install --locked --git https://github.com/ferrum-edge/ferrum-alloy --tag v0.1.0 ferrum-alloy-cli
 ferrum-alloy new orders-api --with openapi
 cd orders-api
 cargo test
@@ -123,7 +123,7 @@ Add only the telemetry crate and keep your runtime, subscriber, state, middlewar
 
 ```toml
 [dependencies]
-ferrum-alloy-telemetry = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<commit>" }
+ferrum-alloy-telemetry = { git = "https://github.com/ferrum-edge/ferrum-alloy", tag = "v0.1.0" }
 ```
 
 ```rust

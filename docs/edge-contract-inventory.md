@@ -36,7 +36,7 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 | ferrum-edge/ferrum-nexus | `b803a95cf4afd012d3cbb93324f5beac937b20c0` | OpenAPI 3.x publication through Edge `/api-specs`. |
 | ferrum-edge/ferrum-edge-git-forge-ops | `fa56bd790e848544fdc9fea1a1ac3024d514a3b6` | `kind`/`spec` resource format. |
 | ferrum-edge/ferrumedge | `0b796393b63e12a9fd643430446620dc23f140a8` | Historical website snapshot; its inspected source did not mention Alloy. |
-| ferrum-edge/ferrumedge | `51f3709f1d3f754519dcc0ce5e018716f44dc272` | Current Alloy page: [immutable source](https://github.com/ferrum-edge/ferrumedge/blob/51f3709f1d3f754519dcc0ce5e018716f44dc272/alloy.html); it labels Alloy pre-release and unpublished, with source tested against Edge v0.9.10/v0.9.9. |
+| ferrum-edge/ferrumedge | `51f3709f1d3f754519dcc0ce5e018716f44dc272` | Alloy page at that snapshot (historical; it predates the `v0.1.0` release): [immutable source](https://github.com/ferrum-edge/ferrumedge/blob/51f3709f1d3f754519dcc0ce5e018716f44dc272/alloy.html); it labels Alloy pre-release and unpublished, with source tested against Edge v0.9.10/v0.9.9. |
 
 The historical consumer revisions above support the inventory's source references. Consumer qualification, the shared v1 freeze and the adoption history are recorded in the [owner/adoption record](shared-contract-qualification.md) and the [ledger](implementation-status.md#cross-repository-dependencies).
 
