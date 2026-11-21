@@ -117,7 +117,8 @@
   upper bounds, so `edge export` no longer writes configuration Edge
   refuses to load: `timeouts.*` and `health.timeout_ms` at most 86400000,
   `health.interval_seconds` at most 3600, `api.public_path` at most 500
-  bytes, `api.service_base_path` and `health.path` at most 2048 bytes, and
+  bytes, `health.path` at most 2048 bytes, `api.service_base_path` at most
+  2048 bytes without its trailing `/` (the exported `backend_path`; #319), and
   `upstream.host` at most 255 bytes without control or whitespace
   characters. The limits are `manifest::EDGE_MAX_*`.
 - **Breaking (#312):** `openapi export` refuses `x-ferrum-mcp` values Edge
