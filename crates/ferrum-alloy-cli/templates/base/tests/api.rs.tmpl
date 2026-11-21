@@ -94,3 +94,22 @@ async fn the_sample_store_is_bounded() {
     assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
     assert_eq!(json["title"], "Item store full");
 }
+
+#[tokio::test]
+async fn item_names_are_bounded() {
+    let item = |len: usize| serde_json::json!({ "name": "n".repeat(len), "quantity": 1 }).to_string();
+    let longest = item({{crate_name}}::MAX_NAME_BYTES);
+    let (status, _) = call(post_json_owned("/items", longest)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let too_long = item({{crate_name}}::MAX_NAME_BYTES + 1);
+    let (status, json) = call(post_json_owned("/items", too_long)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["errors"].as_array().map(Vec::len), Some(1));
+}
+
+fn post_json_owned(path: &str, json: String) -> Request<Body> {
+    Request::post(path)
+        .header("content-type", "application/json")
+        .body(Body::from(json))
+        .expect("request")
+}

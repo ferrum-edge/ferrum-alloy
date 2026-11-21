@@ -14,7 +14,7 @@ curl -s localhost:8080/items/1
 curl -s localhost:8080/items/999
 ```
 
-The first item a fresh process creates has id `1`, so `GET /items/1` returns it (`200`). Items are kept in memory until the process exits, at most 1000 of them. An unknown id returns the application's Problem Details response (`404`, `Item not found`).
+The first item a fresh process creates has id `1`, so `GET /items/1` returns it (`200`). Items are kept in memory until the process exits, at most 1000 of them (then `POST /items` returns `507`), with names of at most 100 bytes. An unknown id returns the application's Problem Details response (`404`, `Item not found`).
 
 Management endpoints listen on `127.0.0.1:9090`. `/livez` and `/readyz` are
 minimal token-free probes. `/health`, `/metrics`, and management OpenAPI/UI

@@ -3,12 +3,12 @@
 ## [Unreleased]
 
 - The generated starter keeps the items it creates in memory (at most 1000,
-  then `507` Problem Details), so `GET /items/{id}`, and with
+  then `507` Problem Details; names are at most 100 bytes), so `GET /items/{id}`, and with
   `--with openapi` the read-only `get_item` agent tool, returns an item the
   sample created (#323). The OpenAPI starter documents the `200` response,
   the generated README shows a successful call and the `404` for an unknown
-  id, directly and through Edge, and a generated test fetches a created
-  item.
+  id, directly and through Edge (including how to publish the document with
+  `POST /api-specs`), and a generated test fetches a created item.
 - **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
   export` use a port of Edge's request-path canonicalizer
   (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge

@@ -24,6 +24,9 @@ pub struct ApiDoc;
 /// The most items the sample keeps; creating more is refused.
 pub const MAX_ITEMS: usize = 1_000;
 
+/// The longest item name, in bytes, so the stored items stay small.
+pub const MAX_NAME_BYTES: usize = 100;
+
 /// Application state, supplied with `Router::with_state`. Items live in
 /// memory for the life of the process; replace the store with a database.
 #[derive(Clone, Default)]
@@ -40,7 +43,7 @@ struct Store {
 /// A request to create an item.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct NewItem {
-    /// Item name.
+    /// Item name (1 to 100 bytes).
     pub name: String,
     /// Quantity (at least 1).
     pub quantity: u32,
@@ -51,6 +54,9 @@ impl Validate for NewItem {
         let mut errors = ValidationErrors::default();
         if self.name.trim().is_empty() {
             errors.add("/name", "must not be empty");
+        }
+        if self.name.len() > MAX_NAME_BYTES {
+            errors.add("/name", "must be at most 100 bytes");
         }
         if self.quantity == 0 {
             errors.add("/quantity", "must be at least 1");
