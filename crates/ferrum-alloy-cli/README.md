@@ -12,7 +12,7 @@ See [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs
 
 ## Status
 
-Released from Git only, starting with the tag `v0.1.0`. This crate is not published to any registry (`publish = false`); depend on it by git tag, revision, or path, as [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md) describes. [Release readiness](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/release.md) lists what every release must satisfy.
+Released from Git only, starting with the tag `v0.1.0`. This crate is not published to any registry (`publish = false`); install the `ferrum-alloy` command from Git with `cargo install --locked --git https://github.com/ferrum-edge/ferrum-alloy --tag v0.1.0 ferrum-alloy-cli`, as [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md) describes. [Release readiness](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/release.md) lists what every release must satisfy.
 
 ## License
 
