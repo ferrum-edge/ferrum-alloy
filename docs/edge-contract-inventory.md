@@ -36,7 +36,7 @@ This document lists every Ferrum Edge header, attribute, endpoint, error token, 
 | ferrum-edge/ferrum-nexus | `b803a95cf4afd012d3cbb93324f5beac937b20c0` | OpenAPI 3.x publication through Edge `/api-specs`. |
 | ferrum-edge/ferrum-edge-git-forge-ops | `fa56bd790e848544fdc9fea1a1ac3024d514a3b6` | `kind`/`spec` resource format. |
 | ferrum-edge/ferrumedge | `0b796393b63e12a9fd643430446620dc23f140a8` | Historical website snapshot; its inspected source did not mention Alloy. |
-| ferrum-edge/ferrumedge | `51f3709f1d3f754519dcc0ce5e018716f44dc272` | Alloy page at that snapshot (historical; it predates the `v0.1.0` release): [immutable source](https://github.com/ferrum-edge/ferrumedge/blob/51f3709f1d3f754519dcc0ce5e018716f44dc272/alloy.html); it labels Alloy pre-release and unpublished, with source tested against Edge v0.9.10/v0.9.9. |
+| ferrum-edge/ferrumedge | `7dd3c54cedbb9724804bd5a1e03d3c254a0eba6c` | Alloy page, last changed in that commit and unchanged through website main `1abc99020ffd952a686945131998de93fb334602` (inspected 2026-11-21): [immutable source](https://github.com/ferrum-edge/ferrumedge/blob/7dd3c54cedbb9724804bd5a1e03d3c254a0eba6c/alloy.html). It says Alloy's unreleased main source supports Edge v0.9.20 and v0.9.19 and pins Alloy commit `13d3493530c7b0985ea98261d17ff6a908a167a2`; it still labels Alloy pre-release and does not yet mention the `v0.1.0` tag. |
 
 The historical consumer revisions above support the inventory's source references. Consumer qualification, the shared v1 freeze and the adoption history are recorded in the [owner/adoption record](shared-contract-qualification.md) and the [ledger](implementation-status.md#cross-repository-dependencies).
 
@@ -325,7 +325,7 @@ Released producer contracts and qualified consumer slices are distinguished belo
 4. **Foundry / Nexus / GitForgeOps**: Foundry #540 provides an authenticated manifest preview; diagnostic presentation remains future work. Nexus #519 provides an authenticated, redacted manifest preview and unreleased MCP subset work. GitForgeOps #461 validates two real CLI-generated resource trees through its consumer loader, assembler and released gateway validator; that is resource consumption, not direct manifest JSON adoption, production apply or human release acceptance. Their qualification, owner and freeze status, and how Alloy #27 closed (completed, 2026-10-06) are in the [owner/adoption record](shared-contract-qualification.md).
    **ferrum-contracts**: the shared `service-manifest` v1 schema (EXISTING/implemented, not vendored here) has a closed top level and retains the optional `[agents]` section introduced in #8/r2. Current status is canonical `x-contract`; copied historical PROPOSED report descriptions and prepared/pending source wording remain unchanged.
    **Nexus**: publishes OpenAPI documents through `POST /api-specs`, adding `x-ferrum-proxy` and a root server base. Its `routes` enforcement also adds `x-ferrum-validate`, which Edge v0.9.9 refuses to combine with `x-ferrum-mcp`. Publishing an exported document with agent tools through Nexus therefore uses its docs-only mode. [#519](https://github.com/ferrum-edge/ferrum-nexus/pull/519) merged MCP subset support and closed [#446](https://github.com/ferrum-edge/ferrum-nexus/issues/446) on 2026-10-04; manifest preview alone does not publish tools.
-5. **Website** (historical snapshot predating `v0.1.0`): an Alloy page exists at [immutable website source](https://github.com/ferrum-edge/ferrumedge/blob/51f3709f1d3f754519dcc0ce5e018716f44dc272/alloy.html). It labels Alloy **Pre-release**, says it is not on crates.io, and describes source tested with Edge v0.9.10 and v0.9.9; this source pairing is not a published Alloy release. The inspected `0b796393b63e12a9fd643430446620dc23f140a8` website snapshot remains historical and did not mention Alloy.
+5. **Website**: the Alloy page ([immutable website source](https://github.com/ferrum-edge/ferrumedge/blob/7dd3c54cedbb9724804bd5a1e03d3c254a0eba6c/alloy.html), unchanged through website main `1abc99020ffd952a686945131998de93fb334602`) says Alloy's unreleased main source, pinned at `13d3493530c7b0985ea98261d17ff6a908a167a2`, supports Edge v0.9.20 and v0.9.19, matching the current support window. It still labels Alloy **Pre-release** and not on crates.io, and does not yet mention the `v0.1.0` Git tag; updating it is website work. The inspected `0b796393b63e12a9fd643430446620dc23f140a8` website snapshot remains historical and did not mention Alloy.
 
 ## Historical re-audits
 
@@ -359,7 +359,11 @@ execution of Alloy's new head.
    backend boundary still strips nominated hop-by-hop fields. The set of
    gateway request headers overwritten from forwarding metadata is unchanged.
    Alloy does not read `X-Authenticated-Identity` as a Consumer identity and
-   reserves the name from request-ID configuration.
+   reserves the name from request-ID configuration. (Since
+   GHSA-hh7p-48xw-gwqg, the Edge policy (feature `edge`) hands it to handlers
+   as `GatewayContext.authenticated_identity` from a verified gateway with
+   `accept_consumer_identity` on, and removes it from every other request it
+   processes; see §2.)
 4. **`src/plugins/otel_tracing.rs`: no telemetry contract change.** The new
    Lightstep secret-reference validation and resolution do not change span
    kinds, `gateway.*` attributes, `traceparent` parsing, or timing fields.
@@ -378,7 +382,8 @@ execution of Alloy's new head.
    `x-consumer-*` namespace remains gateway-owned. Edge #6088 adds
    `X-Authenticated-Identity` for external auth without a mapped Consumer; it
    is not emitted with `X-Consumer-Username` and is not proof of a mapped
-   Consumer. No Alloy probe or diagnosis rule reads it. The telemetry layer
+   Consumer. No Alloy probe or diagnosis rule reads it, and it never fills
+   `consumer_username` (current handoff: §2). The telemetry layer
    rejects it as a request-ID header so it cannot be repurposed as correlation
    data.
 9. **Previously unavailable entries.** No new Alloy-consumed header,
