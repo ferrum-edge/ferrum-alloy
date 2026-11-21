@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-21
+
+First release, distributed from Git only as the tag `v0.1.0` (nothing is
+published to a registry; see [docs/release.md](docs/release.md)). Release
+notes: [docs/releases/v0.1.0.md](docs/releases/v0.1.0.md).
+
 - The generated starter keeps the items it creates in memory (at most 1000,
   then `507` Problem Details; names are at most 100 bytes), so `GET /items/{id}`, and with
   `--with openapi` the read-only `get_item` agent tool, returns an item the
@@ -876,15 +882,16 @@
   retry regressions to the existing hosted OS matrix (#137). Shared report
   schema/provenance, Edge pins and G01 are unchanged. These corrections address
   accepted residuals of GHSA-5hmr-6xjc-cpm9 and GHSA-7976-x2f2-r8fc; advisory
-  disposition remains pending independent review and hosted CI. Alloy remains
-  unreleased, `publish = false`, MSRV 1.94; no patched semver is asserted.
+  disposition was then pending independent review and hosted CI. These
+  changes predate the first release (`publish = false`, MSRV 1.94); no patched
+  semver is asserted.
 - Shut down all remaining accepted TCP connections at the drain budget through
   owned `socket2` duplicate handles, including TLS, unawaited `OnUpgrade`, and
   unpolled upgrades. Retain permits/counts until application drop, with a bounded
   final wait. Each accepted connection retains one additional socket handle;
   no per-packet overhead is added. Add real-socket regressions to the existing
-  Linux/macOS/Windows hosted test matrix. These are unreleased source changes;
-  Alloy remains `0.1.0`, `publish = false`, with nothing published.
+  Linux/macOS/Windows hosted test matrix. These source changes predate the
+  first release; nothing was published.
 
 - Enforce `diagnose --url`'s timeout across the complete service request,
   including response headers and the full body, so a peer cannot extend the

@@ -4,7 +4,8 @@
 //! **Status: EXISTING shared v1 at `contracts-edge-0.9.11`.** Root accepted the
 //! unchanged wire freeze at qualified Alloy owner 81cbb410. Foundry #540 and
 //! Nexus #519 qualify authenticated read-only previews of the historical r2 fields;
-//! their immutable slices do not qualify this new pin adoption. Alloy is unreleased.
+//! their immutable slices do not qualify this new pin adoption. Alloy is released
+//! from Git only, starting with the tag `v0.1.0`.
 //! `ferrum-alloy edge export` turns the manifest into Ferrum Edge file-mode
 //! configuration or GitForgeOps resources using Edge's *existing*
 //! file-mode schema; hosted CI validates exports against supported Edge

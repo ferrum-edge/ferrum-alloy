@@ -3,8 +3,8 @@
 Issue #134 / GHSA-68jq-pr65-chjv uses the safe `cap-std` and `cap-fs-ext`
 4.0.3 APIs. Only the CLI depends on them. Workspace `unsafe_code = "forbid"`,
 MSRV 1.94, default/optional integration boundaries, and Linux/macOS/Windows
-support remain in effect. The change merged in #135 (`690aed7`); Alloy is
-unpublished, so this is not a claim about a patched release. Edge pairing and
+support remain in effect. The change merged in #135 (`690aed7`), before Alloy's
+first release, so this is not a claim about a patched release. Edge pairing and
 G01 contracts are unchanged.
 
 ## Static provenance

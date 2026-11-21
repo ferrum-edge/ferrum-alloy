@@ -4,7 +4,7 @@ This is the authoritative ledger for [issue #28](https://github.com/ferrum-edge/
 
 The benchmark harness's functional health tests are summarized in [Functional health tests](benchmarks.md#functional-health-tests), including why the test-only #142 diagnostics were removed. They grant no performance acceptance.
 
-Everything is pre-release. No crate is published (`publish = false` everywhere).
+Alloy v0.1.0 is the first release, distributed from Git only as the tag `v0.1.0` ([release notes](releases/v0.1.0.md)). No crate is published to a registry (`publish = false` everywhere).
 
 ## Release-candidate tracker
 
@@ -41,7 +41,7 @@ Everything is pre-release. No crate is published (`publish = false` everywhere).
 2. **Benchmark acceptance (#15): closed as not planned on 2026-11-04.** Regression budgets and a committed baseline need an isolated benchmark host, and none is planned; shared-runner data is diagnostic only ([status](benchmarks.md#regression-gate)). [Calibration run 41250532573](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41250532573) on `main` derived budgets for AMD EPYC 7763; they and the raw results stay committed as evidence, and the regression gate runs only on manual dispatch. Other runner CPU models are not checked until a calibration gives them five runs.
 3. **Logging acceptance (#16): done 2026-10-31,** under the same policy, with the criteria mapped in [logging cost](benchmarks.md#logging-cost-on-hosted-runners-2026-10-31) (no build from before #47 and no native call-stack profile). Hosted Callgrind profiles of both formatters and the nine calibration runs' interleaved typed/fmt comparison, with byte compatibility checked by `json_log.rs`: the typed layer's throughput gain exceeds measured noise in every `small` and `large` cell and in `stream` over `h1` and `h1-mtls`, and is within noise in the other `stream` cells and every `cancel` cell ([logging cost](benchmarks.md#logging-cost-on-hosted-runners-2026-10-31)). No further logging change is proposed.
 4. **Distribution (owner / #24):** decided Git-only on 2026-10-29 ([release.md](release.md#distribution-decision)). No registry publication; `publish = false` remains. A later registry release first needs the [deferred registry decisions](release.md#deferred-registry-decisions) and explicit owner approval. Packaging success does not authorize publishing.
-5. **Tracker / release decision (root / owner):** #28 closed as completed on 2026-11-05 with the deferrals above. An eventual release commit still needs refreshed compatibility/security/benchmark evidence and its own hosted CI. The qualified owner's [main CI run 37238543236](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37238543236) passed all 18 checks/jobs at `81cbb410`. That is owner evidence, not qualification of a later commit.
+5. **Tracker / release decision (root / owner):** #28 closed as completed on 2026-11-05 with the deferrals above. A release commit needs refreshed compatibility and security evidence and its own hosted CI; the `v0.1.0` evidence is in its [release notes](releases/v0.1.0.md) and GitHub release. The qualified owner's [main CI run 37238543236](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37238543236) passed all 18 checks/jobs at `81cbb410`. That is owner evidence, not qualification of a later commit.
 
 ## Implemented and tested
 

@@ -1,10 +1,13 @@
 # Getting started
 
-Ferrum Alloy is not published to crates.io. Depend on it by git revision, or by path from a checkout. Pin a commit for reproducible builds. Rust 1.94 or newer is required.
+Ferrum Alloy is not published to crates.io. Depend on it by release tag or git revision, or by path from a checkout. Pin a commit for reproducible builds. Rust 1.94 or newer is required.
 
 ```toml
 [dependencies]
-ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<commit>" }
+# A release tag (the first release is v0.1.0) ...
+ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", tag = "v0.1.0" }
+# ... or a commit.
+# ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<commit>" }
 ```
 
 ## Path 1: a new service
@@ -12,8 +15,8 @@ ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<co
 ### With the CLI
 
 ```bash
-cargo install --git https://github.com/ferrum-edge/ferrum-alloy ferrum-alloy-cli
-ferrum-alloy new orders-api --with openapi
+cargo install --locked --git https://github.com/ferrum-edge/ferrum-alloy --tag v0.1.0 ferrum-alloy-cli
+ferrum-alloy new orders-api --with openapi --alloy-tag v0.1.0
 cd orders-api
 cargo test
 cargo run
@@ -120,7 +123,7 @@ Add only the telemetry crate and keep your runtime, subscriber, state, middlewar
 
 ```toml
 [dependencies]
-ferrum-alloy-telemetry = { git = "https://github.com/ferrum-edge/ferrum-alloy", rev = "<commit>" }
+ferrum-alloy-telemetry = { git = "https://github.com/ferrum-edge/ferrum-alloy", tag = "v0.1.0" }
 ```
 
 ```rust

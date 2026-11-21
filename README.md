@@ -12,14 +12,14 @@
   <img src="https://img.shields.io/badge/rust-1.94%2B-orange?logo=rust" alt="Rust 1.94+" />
   <img src="https://img.shields.io/badge/edition-2024-orange" alt="Rust edition 2024" />
   <a href="https://docs.rs/axum"><img src="https://img.shields.io/badge/built%20on-Axum-blueviolet" alt="Built on Axum" /></a>
-  <img src="https://img.shields.io/badge/status-pre--release-yellow" alt="Status: pre-release" />
+  <img src="https://img.shields.io/badge/release-v0.1.0%20(pre--1.0)-yellow" alt="Release: v0.1.0 (pre-1.0)" />
 </p>
 
 Ferrum Alloy is a batteries-included toolkit for Rust API services built on [Axum](https://docs.rs/axum). It takes care of the repetitive production setup: configuration, errors, health, limits, graceful shutdown, and request telemetry. Handlers, extractors, state, routers, and Tower middleware stay ordinary Axum.
 
 Alloy works on its own. Behind [Ferrum Edge](https://github.com/ferrum-edge/ferrum-edge), it also shows a verified request story shared with the gateway. You can see which gateway span each service span belongs to and whether the gateway's identity was cryptographically verified. You can also see what the evidence does and does not prove about where the time went.
 
-> **Pre-release, Git-only.** Alloy is distributed from Git and is not published to crates.io or any other registry (see the [distribution decision](docs/release.md#distribution-decision)), and Rust APIs may change. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
+> **v0.1.0, Git-only.** Alloy is distributed from Git tags and is not published to crates.io or any other registry (see the [distribution decision](docs/release.md#distribution-decision)). Before 1.0, Rust APIs may change in any minor release. The shared diagnostic-report and service-manifest v1 wire contracts have an accepted canonical freeze (see [Contracts](#contracts)). [Implementation status](docs/implementation-status.md) lists exactly what is implemented and tested.
 
 ## Quick start
 
@@ -107,7 +107,7 @@ Detailed health, metrics, and management OpenAPI/UI always require a configured 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
 This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding, diagnostic-ref, and service-manifest fixtures.
 The adopted tag is [`contracts-edge-0.9.20`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20) at `39da322083044c2e92617209e62983c92387f0ad`.
-Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented (see the [owner/adoption record](docs/shared-contract-qualification.md)). Alloy remains unreleased (`publish = false`).
+Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented (see the [owner/adoption record](docs/shared-contract-qualification.md)). Alloy is released from Git only, starting with the tag `v0.1.0`; no crate is published to a registry (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
 The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema; 0.9.19 and 0.9.20 change only the two gateway vocabularies, and the schemas and diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's adoption scope, which is every file listed in the PIN (28 since the service-manifest fixtures were added for #319; 16 before).
