@@ -360,9 +360,10 @@ execution of Alloy's new head.
    gateway request headers overwritten from forwarding metadata is unchanged.
    Alloy does not read `X-Authenticated-Identity` as a Consumer identity and
    reserves the name from request-ID configuration. (Since
-   GHSA-hh7p-48xw-gwqg, a verified gateway with `accept_consumer_identity` on
-   hands it to handlers as `GatewayContext.authenticated_identity`, and every
-   other request has it removed; see §2.)
+   GHSA-hh7p-48xw-gwqg, the Edge policy (feature `edge`) hands it to handlers
+   as `GatewayContext.authenticated_identity` from a verified gateway with
+   `accept_consumer_identity` on, and removes it from every other request it
+   processes; see §2.)
 4. **`src/plugins/otel_tracing.rs`: no telemetry contract change.** The new
    Lightstep secret-reference validation and resolution do not change span
    kinds, `gateway.*` attributes, `traceparent` parsing, or timing fields.
