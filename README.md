@@ -105,12 +105,12 @@ Detailed health, metrics, and management OpenAPI/UI always require a configured 
 ## Contracts
 
 [ferrum-contracts](https://github.com/ferrum-edge/ferrum-contracts) is the org's central store for shared vocabularies, JSON schemas, and fixtures.
-This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures.
+This repo consumes its gateway-errors and gateway-headers vocabularies, diagnostic-report and diagnostic-ref schemas, and diagnostic-finding, diagnostic-ref, and service-manifest fixtures.
 The adopted tag is [`contracts-edge-0.9.20`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20) at `39da322083044c2e92617209e62983c92387f0ad`.
 Alloy owns two contracts published there: `ferrum.diagnostic_report` v1 and `ferrum.service_manifest` v1, both **EXISTING**/implemented (see the [owner/adoption record](docs/shared-contract-qualification.md)). Alloy remains unreleased (`publish = false`).
 The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/ferrum-contracts/PIN) and `contracts/ferrum-contracts/`.
 See the [contracts guide](contracts/README.md) for details.
-The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema; 0.9.19 and 0.9.20 change only the two gateway vocabularies, and the schemas and diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's 16-file adoption scope.
+The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema; 0.9.19 and 0.9.20 change only the two gateway vocabularies, and the schemas and diagnostic fixtures are unchanged. The canonical deployment schemas and fixtures are outside Alloy's adoption scope, which is every file listed in the PIN (28 since the service-manifest fixtures were added for #319; 16 before).
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
 The `contracts-edge-0.9.20` adoption passed on `main` at `3c7a040` by [push CI 41809300101](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41809300101).
 

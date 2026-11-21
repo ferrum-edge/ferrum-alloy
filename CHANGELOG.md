@@ -8,9 +8,10 @@
   which Edge omits `otel_tracing`, and with it the strip of caller trace
   context. The endpoint must parse as an `http(s)` URL with a host, a valid
   non-zero port, and no user information, and must not contain control or
-  whitespace characters or a backslash (anywhere, query and fragment
-  included: the URL parser reads it as `/`, so the spelling and the parsed
-  URL would disagree), which Alloy refuses beyond Edge's rules. An `http://` endpoint must spell its host as
+  whitespace characters or a backslash, which Alloy refuses beyond Edge's
+  rules: in the authority or path the URL parser reads a backslash as `/`,
+  so the spelling and the parsed URL would disagree, and Alloy refuses it in
+  a query or fragment too, where Edge would keep it literally. An `http://` endpoint must spell its host as
   Edge's canonical loopback literal, `127.d.d.d` or `[::1]`: expanded or
   shortened forms (`[0:0:0:0:0:0:0:1]`, `127.1`), trailing bytes after `]`,
   and non-numeric or out-of-range ports are refused. The authority now ends

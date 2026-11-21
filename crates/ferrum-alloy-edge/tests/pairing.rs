@@ -1062,25 +1062,47 @@ fn pinned_service_manifest_fixtures_match_validate() {
                 .unwrap_or_else(|| {
                     panic!("{fixture}: add its expected error to INVALID_MANIFEST_REASONS")
                 });
-            let error = match parsed {
-                Err(error) => error.to_string(),
+            match parsed {
+                Err(error) => {
+                    let error = error.to_string();
+                    assert!(
+                        error.contains(reason),
+                        "{fixture}: expected {reason:?} in {error}"
+                    );
+                }
                 Ok(mut manifest) => {
-                    // Correct a cleartext OTLP endpoint first, so the
-                    // fixture's own violation must be what is reported.
-                    if let Some(endpoint) = manifest.gateway.otel_endpoint.as_mut() {
-                        *endpoint = endpoint.replacen("http://", "https://", 1);
-                    }
-                    manifest
+                    // The fixture as shipped must be refused for its own
+                    // violation.
+                    let error = manifest
                         .validate()
                         .err()
-                        .unwrap_or_else(|| panic!("{fixture} was accepted"))
-                        .to_string()
+                        .unwrap_or_else(|| panic!("{fixture} was accepted"));
+                    assert!(
+                        error.0.iter().any(|message| message.contains(reason)),
+                        "{fixture}: expected {reason:?} in {error}"
+                    );
+                    // One also refused for a cleartext OTLP endpoint must
+                    // still be refused for its own violation once only the
+                    // endpoint's scheme is corrected.
+                    let cleartext = error
+                        .0
+                        .iter()
+                        .any(|message| message.contains("gateway.otel_endpoint must use https://"));
+                    if error.0.len() > 1 && cleartext {
+                        if let Some(endpoint) = manifest.gateway.otel_endpoint.as_mut() {
+                            *endpoint = endpoint.replacen("http://", "https://", 1);
+                        }
+                        let error = manifest
+                            .validate()
+                            .err()
+                            .unwrap_or_else(|| panic!("{fixture} with https was accepted"));
+                        assert!(
+                            error.0.iter().any(|message| message.contains(reason)),
+                            "{fixture} with https: expected {reason:?} in {error}"
+                        );
+                    }
                 }
-            };
-            assert!(
-                error.contains(reason),
-                "{fixture}: expected {reason:?} in {error}"
-            );
+            }
         } else {
             panic!("unexpected service-manifest fixture {fixture}");
         }
