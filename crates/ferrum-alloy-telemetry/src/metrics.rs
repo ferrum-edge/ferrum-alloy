@@ -619,20 +619,29 @@ mod tests {
             series.record_duration(durations[0]);
         }
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Every recorder has recorded before the first scrape, so scraping
+        // overlaps recording rather than finishing before it starts.
+        let started = Arc::new(std::sync::Barrier::new(THREADS + 1));
         let recorders: Vec<_> = (0..THREADS)
             .map(|thread| {
                 let metrics = Arc::clone(&metrics);
                 let done = Arc::clone(&done);
+                let started = Arc::clone(&started);
                 std::thread::spawn(move || {
                     let route = if thread % 2 == 0 { "/a" } else { "/b" };
                     let series = metrics.series_for("GET", route, 200);
                     let mut recorded = 0u64;
-                    while !done.load(Ordering::Relaxed) {
+                    let mut record = || {
                         for duration in durations {
                             series.record_time_to_headers(duration);
                             series.record_duration(duration);
                             recorded += 1;
                         }
+                    };
+                    record();
+                    started.wait();
+                    while !done.load(Ordering::Relaxed) {
+                        record();
                     }
                     recorded
                 })
@@ -640,11 +649,26 @@ mod tests {
             .collect();
         {
             let _stop = StopOnDrop(Arc::clone(&done));
+            started.wait();
             for _ in 0..SCRAPES {
-                assert_consistent_histograms(&metrics.render_prometheus());
+                let out = metrics.render_prometheus();
+                assert_consistent_histograms(&out);
+                // Only finite durations are recorded, so the last finite
+                // bucket must equal `+Inf` (and `_count`) exactly.
+                let mut last_finite = None;
+                for line in out.lines() {
+                    if line.contains(",le=\"10\"} ") {
+                        last_finite = line.rsplit_once(' ').map(|(_, v)| v.to_owned());
+                    } else if line.contains(",le=\"+Inf\"} ") {
+                        let total = line.rsplit_once(' ').map(|(_, v)| v.to_owned());
+                        assert_eq!(last_finite.take(), total, "{line}\n{out}");
+                    }
+                }
             }
         }
-        let recorded: u64 = recorders.into_iter().map(|r| r.join().unwrap()).sum();
+        let per_thread: Vec<u64> = recorders.into_iter().map(|r| r.join().unwrap()).collect();
+        assert!(per_thread.iter().all(|&n| n > 0), "{per_thread:?}");
+        let recorded: u64 = per_thread.iter().sum();
 
         let counts = assert_consistent_histograms(&metrics.render_prometheus());
         assert_eq!(counts.len(), 4, "{counts:?}");
