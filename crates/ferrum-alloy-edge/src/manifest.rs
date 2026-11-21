@@ -412,7 +412,7 @@ impl ServiceManifest {
         // and Edge bounds that value.
         if self.api.service_base_path.trim_end_matches('/').len() > EDGE_MAX_BACKEND_PATH_LENGTH {
             errors.push(format!(
-                "api.service_base_path must not exceed {EDGE_MAX_BACKEND_PATH_LENGTH} bytes (Ferrum Edge's backend_path limit)"
+                "api.service_base_path without its trailing '/' must not exceed {EDGE_MAX_BACKEND_PATH_LENGTH} bytes (Ferrum Edge's backend_path limit)"
             ));
         }
         let host = &self.upstream.host;
@@ -542,6 +542,9 @@ fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
     {
         return Err("gateway.otel_endpoint must not contain control or whitespace characters");
     }
+    if endpoint.contains('\\') {
+        return Err("gateway.otel_endpoint must not contain a backslash");
+    }
     let url = url::Url::parse(endpoint).map_err(|_| NOT_A_URL)?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(NOT_A_URL);
@@ -552,7 +555,6 @@ fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
         .unwrap_or_default();
     if authority.is_empty()
         || authority.contains('@')
-        || endpoint.contains('\\')
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port() == Some(0)

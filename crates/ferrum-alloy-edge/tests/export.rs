@@ -695,12 +695,21 @@ fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
         "https:///v1/traces",
         "https://",
         "http:127.0.0.1:4318",
-        "https://collector.example\\traces@ops",
-        "http://127.0.0.1\\v1/traces",
     ] {
         let error = with_endpoint(refused).unwrap_err();
         assert!(
             error.contains("must be an http(s) URL with a host, a valid port, and no credentials"),
+            "{refused}: {error}"
+        );
+    }
+    for refused in [
+        "https://collector.example\\traces@ops",
+        "http://127.0.0.1\\v1/traces",
+        "https://collector.example/v1/traces?tag=a\\b",
+    ] {
+        let error = with_endpoint(refused).unwrap_err();
+        assert!(
+            error.contains("must not contain a backslash"),
             "{refused}: {error}"
         );
     }
@@ -809,7 +818,7 @@ fn manifests_are_held_to_edges_upper_bounds() {
     );
     refused(
         &|m| m.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH + 1)),
-        "api.service_base_path must not exceed",
+        "api.service_base_path without its trailing '/' must not exceed 2048 bytes",
     );
     refused(
         &|m| m.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH + 1),
