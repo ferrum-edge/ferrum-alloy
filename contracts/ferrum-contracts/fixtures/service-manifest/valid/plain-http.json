@@ -1,0 +1,32 @@
+{
+  "schema": "ferrum.service_manifest",
+  "schema_version": "1.0",
+  "service": {
+    "name": "catalog-api"
+  },
+  "api": {
+    "public_path": "/catalog",
+    "service_base_path": "/v1/",
+    "strip_public_path": true
+  },
+  "upstream": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "scheme": "http",
+    "protocols": [
+      "http1"
+    ]
+  },
+  "timeouts": {
+    "connect_ms": 1000,
+    "read_ms": 0,
+    "write_ms": 15000
+  },
+  "gateway": {
+    "namespace": "retail",
+    "proxy_id": "catalog",
+    "correlation_id": true,
+    "otel_endpoint": "http://127.0.0.1:4318/v1/traces",
+    "otel_root_sampling_ratio": 0.25
+  }
+}

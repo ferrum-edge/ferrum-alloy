@@ -985,3 +985,136 @@ fn schema_errors(
     }
     Ok(())
 }
+
+const SERVICE_MANIFEST_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/service-manifest/";
+
+/// Pinned `valid/` fixtures that Alloy refuses because Ferrum Edge would
+/// drop the configuration they produce, with the one error each must
+/// produce. `orders-api.json` sends OTLP over `http://` to a host that is
+/// not a loopback IP literal, which Edge v0.9.19 and later refuse without
+/// `allow_plaintext` (ferrum-contracts#82 aligns the canonical fixture).
+/// Remove an entry once the pin carries the corrected fixture.
+const KNOWN_REFUSED_VALID_MANIFESTS: &[(&str, &str)] =
+    &[("orders-api.json", "gateway.otel_endpoint must use https://")];
+
+/// Why each pinned `invalid/` service-manifest fixture is refused: a part
+/// of the parse or validation error it must produce.
+const INVALID_MANIFEST_REASONS: &[(&str, &str)] = &[
+    ("agents-bad-namespace.json", "agents.namespace"),
+    ("agents-enabled-not-boolean.json", "invalid type"),
+    ("agents-unknown-key.json", "unknown field"),
+    (
+        "base-path-without-trailing-slash.json",
+        "api.service_base_path",
+    ),
+    ("client-cert-without-key.json", "set together"),
+    ("http3-protocol.json", "HTTP/3"),
+    ("tls-path-with-http-scheme.json", "TLS paths require"),
+    ("unknown-field.json", "unknown field"),
+    ("unsupported-major.json", "unsupported schema_version"),
+];
+
+/// Every pinned `ferrum.service_manifest` fixture is judged by
+/// `ServiceManifest` as the shared contract does: each `invalid/` fixture is
+/// refused when parsed or validated, and each `valid/` fixture is accepted,
+/// except the recorded Edge divergences, which must fail for exactly that
+/// reason and pass once it is corrected (#319).
+#[test]
+fn pinned_service_manifest_fixtures_match_validate() {
+    use ferrum_alloy_edge::manifest::ServiceManifest;
+
+    let pin = repo_json(PIN);
+    let mut valid = 0;
+    let mut invalid = 0;
+    for path in pin["files"].as_object().unwrap().keys() {
+        let Some(fixture) = path.strip_prefix(SERVICE_MANIFEST_FIXTURES) else {
+            continue;
+        };
+        let text = repo(path);
+        let parsed = serde_json::from_str::<ServiceManifest>(&text);
+        if let Some(name) = fixture.strip_prefix("valid/") {
+            valid += 1;
+            let mut manifest = parsed.unwrap_or_else(|error| panic!("{fixture}: {error}"));
+            match KNOWN_REFUSED_VALID_MANIFESTS
+                .iter()
+                .find(|(known, _)| *known == name)
+            {
+                None => manifest
+                    .validate()
+                    .unwrap_or_else(|error| panic!("{fixture}: {error}")),
+                Some((_, reason)) => {
+                    let error = manifest.validate().unwrap_err();
+                    assert_eq!(error.0.len(), 1, "{fixture}: {error}");
+                    assert!(error.0[0].starts_with(reason), "{fixture}: {error}");
+                    let endpoint = manifest.gateway.otel_endpoint.as_mut().unwrap();
+                    *endpoint = endpoint.replacen("http://", "https://", 1);
+                    manifest
+                        .validate()
+                        .unwrap_or_else(|error| panic!("{fixture} with https: {error}"));
+                }
+            }
+        } else if let Some(name) = fixture.strip_prefix("invalid/") {
+            invalid += 1;
+            let reason = INVALID_MANIFEST_REASONS
+                .iter()
+                .find(|(known, _)| *known == name)
+                .map(|(_, reason)| *reason)
+                .unwrap_or_else(|| {
+                    panic!("{fixture}: add its expected error to INVALID_MANIFEST_REASONS")
+                });
+            match parsed {
+                Err(error) => {
+                    let error = error.to_string();
+                    assert!(
+                        error.contains(reason),
+                        "{fixture}: expected {reason:?} in {error}"
+                    );
+                }
+                Ok(mut manifest) => {
+                    // The fixture as shipped must be refused for its own
+                    // violation.
+                    let error = manifest
+                        .validate()
+                        .err()
+                        .unwrap_or_else(|| panic!("{fixture} was accepted"));
+                    assert!(
+                        error.0.iter().any(|message| message.contains(reason)),
+                        "{fixture}: expected {reason:?} in {error}"
+                    );
+                    // One also refused for a cleartext OTLP endpoint must
+                    // still be refused for its own violation once only the
+                    // endpoint's scheme is corrected.
+                    let cleartext = error
+                        .0
+                        .iter()
+                        .any(|message| message.contains("gateway.otel_endpoint must use https://"));
+                    if error.0.len() > 1 && cleartext {
+                        if let Some(endpoint) = manifest.gateway.otel_endpoint.as_mut() {
+                            *endpoint = endpoint.replacen("http://", "https://", 1);
+                        }
+                        let error = manifest
+                            .validate()
+                            .err()
+                            .unwrap_or_else(|| panic!("{fixture} with https was accepted"));
+                        assert!(
+                            error.0.iter().any(|message| message.contains(reason)),
+                            "{fixture} with https: expected {reason:?} in {error}"
+                        );
+                    }
+                }
+            }
+        } else {
+            panic!("unexpected service-manifest fixture {fixture}");
+        }
+    }
+    assert!(valid > 0 && invalid > 0, "{valid} valid, {invalid} invalid");
+    for (known, _) in KNOWN_REFUSED_VALID_MANIFESTS {
+        assert!(
+            pin["files"]
+                .as_object()
+                .unwrap()
+                .contains_key(&format!("{SERVICE_MANIFEST_FIXTURES}valid/{known}")),
+            "{known} is no longer pinned"
+        );
+    }
+}

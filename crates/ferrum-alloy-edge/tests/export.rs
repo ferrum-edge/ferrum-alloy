@@ -562,6 +562,28 @@ fn invalid_manifests_are_rejected_with_every_problem_listed() {
     );
 }
 
+/// Characters YAML parsers refuse or fold in a double-quoted scalar are
+/// written as `\u` escapes, so Edge loads the document and reads back the
+/// exact string (#319: an accepted `gateway.otel_endpoint` may carry one).
+#[test]
+fn yaml_escapes_characters_yaml_cannot_carry_verbatim() {
+    let value = json!({ "k": "a\u{7f}b\u{85}c\u{2028}d\u{feff}e\u{fffe}f\u{ffff}g\u{e9}" });
+    let text = yaml::to_string(&value);
+    assert_eq!(
+        text,
+        "k: \"a\\u007Fb\\u0085c\\u2028d\\uFEFFe\\uFFFEf\\uFFFFg\u{e9}\"\n"
+    );
+    let mut manifest = manifest();
+    manifest.gateway.otel_endpoint = Some("HTTPS://collector.example/traces\u{fffe}".to_owned());
+    manifest.validate().unwrap();
+    let yaml = file_mode_yaml(&resources(&manifest).unwrap());
+    assert!(
+        yaml.contains(r#""HTTPS://collector.example/traces\uFFFE""#),
+        "{yaml}"
+    );
+    assert!(!yaml.contains('\u{fffe}'), "{yaml}");
+}
+
 #[test]
 fn yaml_strings_cannot_change_type_or_inject_structure() {
     let value = json!({
@@ -607,6 +629,10 @@ fn yaml_nested_sequences_are_valid_block_sequences() {
     }
 }
 
+/// `gateway.otel_endpoint` is held to Ferrum Edge main's OTLP endpoint
+/// rules (`validate_endpoint_for_provider` without `allow_plaintext`): Edge
+/// omits an `otel_tracing` plugin whose endpoint it refuses, and with it the
+/// strip of caller trace context (#319).
 #[test]
 fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
     let with_endpoint = |endpoint: &str| {
@@ -616,22 +642,89 @@ fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
     };
     for accepted in [
         "https://otel-collector:4318/v1/traces",
+        "https://otel.example.com/v1/traces",
         "https://10.0.0.5/v1/traces",
+        "https://[2001:db8::1]:4318/v1/traces",
+        "https://otel.example.com?contact=ops@example.com",
+        "https://otel.example.com/v1/traces?tenant=a#frag",
+        "HTTPS://otel.example.com/v1/traces",
         "http://127.0.0.1:4318/v1/traces",
+        "http://127.0.0.1",
+        "http://127.0.0.1#frag",
+        "http://127.0.0.1?q=1",
         "http://127.8.9.10/v1/traces",
+        "http://127.0.0.1:65535/v1/traces",
         "http://[::1]:4318/v1/traces",
+        "http://[::1]",
+        "HTTP://127.0.0.1:4318/v1/traces",
     ] {
-        assert!(with_endpoint(accepted).is_ok(), "{accepted} was refused");
+        assert!(
+            with_endpoint(accepted).is_ok(),
+            "{accepted} was refused: {:?}",
+            with_endpoint(accepted)
+        );
     }
     for refused in [
         "http://otel-collector:4318/v1/traces",
         "http://localhost:4318/v1/traces",
         "http://10.0.0.5:4318/v1/traces",
         "http://[::2]:4318/v1/traces",
-        "http://[::1/v1/traces",
+        "http://[0:0:0:0:0:0:0:1]:4318/v1/traces",
+        "http://127.1:4318/v1/traces",
+        "http://0x7f.0.0.1:4318/v1/traces",
+        "http://2130706433:4318/v1/traces",
+        "http://[::ffff:127.0.0.1]:4318/v1/traces",
     ] {
         let error = with_endpoint(refused).unwrap_err();
         assert!(error.contains("loopback IP literal"), "{refused}: {error}");
+    }
+    for refused in [
+        "http://[::1/v1/traces",
+        "http://[::1]garbage/v1/traces",
+        "http://[::1]foo/v1/traces",
+        "http://[::1]:notaport/v1/traces",
+        "http://127.0.0.1:notaport/v1/traces",
+        "http://127.0.0.1:99999/v1/traces",
+        "http://127.0.0.1:0/v1/traces",
+        "https://otel.example.com:0/v1/traces",
+        "https://user:pass@otel.example.com/v1/traces",
+        "https://@otel.example.com/v1/traces",
+        "http://user@127.0.0.1:4318/v1/traces",
+        "ftp://127.0.0.1/v1/traces",
+        "otel.example.com/v1/traces",
+        "https:///v1/traces",
+        "https://",
+        "http:127.0.0.1:4318",
+    ] {
+        let error = with_endpoint(refused).unwrap_err();
+        assert!(
+            error.contains("must be an http(s) URL with a host, a valid port, and no credentials"),
+            "{refused}: {error}"
+        );
+    }
+    for refused in [
+        "https://collector.example\\traces@ops",
+        "http://127.0.0.1\\v1/traces",
+        "https://collector.example/v1/traces?tag=a\\b",
+    ] {
+        let error = with_endpoint(refused).unwrap_err();
+        assert!(
+            error.contains("must not contain a backslash"),
+            "{refused}: {error}"
+        );
+    }
+    for refused in [
+        "http://127.0.0.1:4318/v1/tr\naces",
+        "https://otel.example.com/v1/\ttraces",
+        " https://otel.example.com/v1/traces",
+        "https://otel.example.com/v1/traces\u{7f}",
+        "https://otel.example.com/v1/traces\u{85}",
+    ] {
+        let error = with_endpoint(refused).unwrap_err();
+        assert!(
+            error.contains("must not contain control or whitespace characters"),
+            "{refused:?}: {error}"
+        );
     }
 }
 
@@ -661,7 +754,9 @@ fn manifests_are_held_to_edges_upper_bounds() {
     health.timeout_ms = EDGE_MAX_TIMEOUT_MS;
     health.path = path_of(EDGE_MAX_BACKEND_PATH_LENGTH);
     at_limit.api.public_path = path_of(EDGE_MAX_LISTEN_PATH_LENGTH);
-    at_limit.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH - 1));
+    // Export writes it without the trailing `/` as `backend_path`, which Edge
+    // bounds, so the manifest value may be one byte longer.
+    at_limit.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH));
     at_limit.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH);
     at_limit.validate().unwrap();
     let exported = resources(&at_limit).unwrap();
@@ -672,6 +767,10 @@ fn manifests_are_held_to_edges_upper_bounds() {
     assert_eq!(
         exported.proxy["listen_path"].as_str().unwrap().len(),
         EDGE_MAX_LISTEN_PATH_LENGTH
+    );
+    assert_eq!(
+        exported.proxy["backend_path"].as_str().unwrap().len(),
+        EDGE_MAX_BACKEND_PATH_LENGTH
     );
     let upstream = exported.upstream.unwrap();
     assert_eq!(
@@ -718,8 +817,8 @@ fn manifests_are_held_to_edges_upper_bounds() {
         "api.public_path must not exceed 500 bytes",
     );
     refused(
-        &|m| m.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH)),
-        "api.service_base_path must not exceed",
+        &|m| m.api.service_base_path = format!("{}/", path_of(EDGE_MAX_BACKEND_PATH_LENGTH + 1)),
+        "api.service_base_path without its trailing '/' must not exceed 2048 bytes",
     );
     refused(
         &|m| m.upstream.host = "h".repeat(EDGE_MAX_BACKEND_HOST_LENGTH + 1),

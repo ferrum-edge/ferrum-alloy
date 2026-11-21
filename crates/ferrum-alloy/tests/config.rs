@@ -1252,6 +1252,57 @@ fn gateway_modes_require_verified_identities() {
     );
 }
 
+/// Every `[edge]` setting the Edge policy layer applies needs the `edge`
+/// feature, in `standalone` mode too: without it no layer is installed, so
+/// the setting would be silently ignored.
+#[test]
+fn edge_settings_require_the_edge_feature_in_every_mode() {
+    let errors = |mutate: &dyn Fn(&mut AlloyConfig), features: &[&str]| -> Vec<String> {
+        let mut config = AlloyConfig::default();
+        config.trust.identities = vec!["spiffe://ferrum.test/ns/edge/sa/gateway".into()];
+        mutate(&mut config);
+        config
+            .check(features)
+            .into_iter()
+            .filter(|issue| issue.error)
+            .map(|issue| issue.message)
+            .collect()
+    };
+    let requires_edge = |mutate: &dyn Fn(&mut AlloyConfig), expect: &str| {
+        let without = errors(mutate, &["tls"]);
+        assert!(
+            without.iter().any(|message| message == expect),
+            "expected {expect:?} in {without:?}"
+        );
+        let with = errors(mutate, &["tls", "edge"]);
+        assert!(with.is_empty(), "{with:?}");
+    };
+    requires_edge(
+        &|c| c.edge.accept_consumer_identity = true,
+        "edge.accept_consumer_identity requires the `edge` feature",
+    );
+    requires_edge(
+        &|c| c.edge.trusted_proxies = vec!["10.0.0.0/8".parse().unwrap()],
+        "edge.trusted_proxies requires the `edge` feature",
+    );
+    requires_edge(
+        &|c| c.edge.mode = EdgeMode::GatewayPreferred,
+        "edge.mode requires the `edge` feature",
+    );
+    let mut config = AlloyConfig::default();
+    config.trust.identities = vec!["spiffe://ferrum.test/ns/edge/sa/gateway".into()];
+    config.edge.accept_consumer_identity = true;
+    assert!(
+        config
+            .validate(&["tls"])
+            .unwrap_err()
+            .to_string()
+            .contains("`edge` feature")
+    );
+    let defaults = errors(&|_| {}, &["tls"]);
+    assert!(defaults.is_empty(), "{defaults:?}");
+}
+
 /// `edge.trusted_proxies` mirrors Edge's `FERRUM_TRUSTED_PROXIES`; a `/0`
 /// would trust every forwarded entry, so it is refused (#308).
 #[test]

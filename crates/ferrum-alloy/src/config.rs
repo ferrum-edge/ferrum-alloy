@@ -1992,8 +1992,19 @@ impl AlloyConfig {
                 error(format!("otlp.{reason}"));
             }
         }
-        if self.edge.mode != EdgeMode::Standalone && !has("edge") {
-            error("edge.mode requires the `edge` feature".into());
+        // Without the `edge` feature no Edge policy layer is installed, so
+        // every `[edge]` setting that relies on it is refused rather than
+        // silently ignored, whatever the mode.
+        if !has("edge") {
+            if self.edge.mode != EdgeMode::Standalone {
+                error("edge.mode requires the `edge` feature".into());
+            }
+            if self.edge.accept_consumer_identity {
+                error("edge.accept_consumer_identity requires the `edge` feature".into());
+            }
+            if !self.edge.trusted_proxies.is_empty() {
+                error("edge.trusted_proxies requires the `edge` feature".into());
+            }
         }
         if self.edge.mode == EdgeMode::GatewayRequired && self.trust.identities.is_empty() {
             error("edge.mode = gateway_required needs at least one trust.identities entry (verified mTLS identity)".into());

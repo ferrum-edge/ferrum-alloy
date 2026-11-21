@@ -5,6 +5,7 @@
 | `diagnostics/diagnostic-report.v1.schema.json` | `ferrum.diagnostic_report` v1, JSON Schema 2020-12 | Implemented by `ferrum-alloy-diagnostics`; vendored and pinned from `contracts-edge-0.9.20` under `ferrum-contracts/`; shared status **EXISTING**/implemented with root's accepted unchanged v1 freeze. Anvil's read-only importer is merged and qualified in [#312](https://github.com/ferrum-edge/ferrum-anvil/pull/312). |
 | `ferrum-contracts/schemas/diagnostic-ref/v1.schema.json` | `ferrum.diagnostic_ref` v1, JSON Schema 2020-12 | Vendored and pinned from `contracts-edge-0.9.20` (byte-identical to `contracts-edge-0.9.17`); Alloy validates and binds authenticated lookup records per ADR 0009 |
 | `ferrum-contracts/fixtures/diagnostic-ref/{valid,invalid}/*.json` | Ten selected released lookup record fixtures | Byte-exact from `contracts-edge-0.9.20`, unchanged from r2; parser, binding, and hosted HTTP fixture tests |
+| `ferrum-contracts/fixtures/service-manifest/{valid,invalid}/*.json` | The shared `ferrum.service_manifest` v1 fixtures | Byte-exact from `contracts-edge-0.9.20`; `pinned_service_manifest_fixtures_match_validate` in `crates/ferrum-alloy-edge/tests/pairing.rs` requires `ServiceManifest` to accept every valid fixture and refuse every invalid one, except `valid/orders-api.json`, which Alloy refuses because its `http://otel-collector` OTLP endpoint is one Edge drops (ferrum-contracts#82) |
 | `fixtures/reports/*.json` | Reports exercising rules r001–r004, r006, and r007 (including an observed Ferrum Edge diagnostic reference), a forged `verified` claim, a newer minor version (1.1), and an unsupported major version (2.0) | Used by `crates/ferrum-alloy-diagnostics/tests` and the CLI tests; `fixtures/reports/gateway-diagnostic-ref.json` is a candidate for upstreaming to ferrum-contracts |
 | `fixtures/reports/*.expected.txt` | Deterministic rendering snapshots | Regenerate with `UPDATE_SNAPSHOTS=1` and review the diff |
 | `fixtures/otlp/*.jsonl` | OTLP/JSON trace exports (Collector `file` exporter format) with Ferrum Edge and Alloy spans | Importer tests |
@@ -23,7 +24,7 @@ Owner and consumer qualification, the shared v1 freeze and the adoption history
 ## Ferrum contracts pin
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
-diagnostic-ref schemas, and diagnostic-finding and diagnostic-ref fixtures from the tag recorded
+diagnostic-ref schemas, and diagnostic-finding, diagnostic-ref, and service-manifest fixtures from the tag recorded
 in `ferrum-contracts/PIN`: `contracts-edge-0.9.20` at
 `39da322083044c2e92617209e62983c92387f0ad` (SSH-signed tag object
 `82b277b495e73cfadfacb6f3123de02a984658e4`). Both shared v1 contracts are now
@@ -55,7 +56,8 @@ in `x-contract`. Its `coordinated_release.contracts_tag` records the original
 v0.9.11 freeze, while local `contracts_tag`/`contracts_commit` track this adoption.
 All 12 diagnostic fixtures remain byte-identical. Canonical deployment
 schemas/fixtures are outside this 16-file scope and grant Alloy no deployment
-capability. All descriptions outside `$id`/`x-contract`, including historical
+capability. (The pin has since grown to 28 files: #319 vendored the 12
+`service-manifest` fixtures of the same `contracts-edge-0.9.20` tag.) All descriptions outside `$id`/`x-contract`, including historical
 PROPOSED/incomplete-import wording, remain exactly paired with the qualified owner. Current status is in `x-contract`; the
 tagged metadata's prepared/pending-publication text records the pre-publication
 state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
