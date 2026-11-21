@@ -562,6 +562,28 @@ fn invalid_manifests_are_rejected_with_every_problem_listed() {
     );
 }
 
+/// Characters YAML parsers refuse or fold in a double-quoted scalar are
+/// written as `\u` escapes, so Edge loads the document and reads back the
+/// exact string (#319: an accepted `gateway.otel_endpoint` may carry one).
+#[test]
+fn yaml_escapes_characters_yaml_cannot_carry_verbatim() {
+    let value = json!({ "k": "a\u{7f}b\u{85}c\u{2028}d\u{feff}e\u{fffe}f\u{ffff}g\u{e9}" });
+    let text = yaml::to_string(&value);
+    assert_eq!(
+        text,
+        "k: \"a\\u007Fb\\u0085c\\u2028d\\uFEFFe\\uFFFEf\\uFFFFg\u{e9}\"\n"
+    );
+    let mut manifest = manifest();
+    manifest.gateway.otel_endpoint = Some("HTTPS://collector.example/traces\u{fffe}".to_owned());
+    manifest.validate().unwrap();
+    let yaml = file_mode_yaml(&resources(&manifest).unwrap());
+    assert!(
+        yaml.contains(r#""HTTPS://collector.example/traces\uFFFE""#),
+        "{yaml}"
+    );
+    assert!(!yaml.contains('\u{fffe}'), "{yaml}");
+}
+
 #[test]
 fn yaml_strings_cannot_change_type_or_inject_structure() {
     let value = json!({
@@ -673,6 +695,8 @@ fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
         "https:///v1/traces",
         "https://",
         "http:127.0.0.1:4318",
+        "https://collector.example\\traces@ops",
+        "http://127.0.0.1\\v1/traces",
     ] {
         let error = with_endpoint(refused).unwrap_err();
         assert!(

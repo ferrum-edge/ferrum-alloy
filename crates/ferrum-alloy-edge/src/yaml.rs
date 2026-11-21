@@ -20,7 +20,34 @@ pub fn to_string(value: &Value) -> String {
 }
 
 fn quoted(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
+    let json = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned());
+    if !json.chars().any(needs_yaml_escape) {
+        return json;
+    }
+    // JSON escapes only C0 controls, `"` and `\`. A raw character outside
+    // that set is never part of an escape, so it can be replaced in place.
+    let mut out = String::with_capacity(json.len() + 8);
+    for c in json.chars() {
+        if needs_yaml_escape(c) {
+            let _ = write!(out, "\\u{:04X}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Characters a YAML parser may not read back verbatim from a double-quoted
+/// scalar: DEL, the C1 controls and U+FFFE/U+FFFF are not YAML printable
+/// characters, so a parser refuses the whole document (Ferrum Edge's YAML
+/// loader does); NEL, LS and PS are line breaks to a YAML 1.1 parser, which
+/// would fold them; and a BOM is reserved for the stream start. All are
+/// written as `\u` escapes, which both YAML versions decode.
+fn needs_yaml_escape(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x7F..=0x9F | 0x2028 | 0x2029 | 0xFEFF | 0xFFFE | 0xFFFF
+    )
 }
 
 fn key(text: &str) -> String {

@@ -997,6 +997,23 @@ const SERVICE_MANIFEST_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/ser
 const KNOWN_REFUSED_VALID_MANIFESTS: &[(&str, &str)] =
     &[("orders-api.json", "gateway.otel_endpoint must use https://")];
 
+/// Why each pinned `invalid/` service-manifest fixture is refused: a part
+/// of the parse or validation error it must produce.
+const INVALID_MANIFEST_REASONS: &[(&str, &str)] = &[
+    ("agents-bad-namespace.json", "agents.namespace"),
+    ("agents-enabled-not-boolean.json", "invalid type"),
+    ("agents-unknown-key.json", "unknown field"),
+    (
+        "base-path-without-trailing-slash.json",
+        "api.service_base_path",
+    ),
+    ("client-cert-without-key.json", "set together"),
+    ("http3-protocol.json", "HTTP/3"),
+    ("tls-path-with-http-scheme.json", "TLS paths require"),
+    ("unknown-field.json", "unknown field"),
+    ("unsupported-major.json", "unsupported schema_version"),
+];
+
 /// Every pinned `ferrum.service_manifest` fixture is judged by
 /// `ServiceManifest` as the shared contract does: each `invalid/` fixture is
 /// refused when parsed or validated, and each `valid/` fixture is accepted,
@@ -1036,11 +1053,34 @@ fn pinned_service_manifest_fixtures_match_validate() {
                         .unwrap_or_else(|error| panic!("{fixture} with https: {error}"));
                 }
             }
-        } else if fixture.starts_with("invalid/") {
+        } else if let Some(name) = fixture.strip_prefix("invalid/") {
             invalid += 1;
-            if let Ok(manifest) = parsed {
-                assert!(manifest.validate().is_err(), "{fixture} was accepted");
-            }
+            let reason = INVALID_MANIFEST_REASONS
+                .iter()
+                .find(|(known, _)| *known == name)
+                .map(|(_, reason)| *reason)
+                .unwrap_or_else(|| {
+                    panic!("{fixture}: add its expected error to INVALID_MANIFEST_REASONS")
+                });
+            let error = match parsed {
+                Err(error) => error.to_string(),
+                Ok(mut manifest) => {
+                    // Correct a cleartext OTLP endpoint first, so the
+                    // fixture's own violation must be what is reported.
+                    if let Some(endpoint) = manifest.gateway.otel_endpoint.as_mut() {
+                        *endpoint = endpoint.replacen("http://", "https://", 1);
+                    }
+                    manifest
+                        .validate()
+                        .err()
+                        .unwrap_or_else(|| panic!("{fixture} was accepted"))
+                        .to_string()
+                }
+            };
+            assert!(
+                error.contains(reason),
+                "{fixture}: expected {reason:?} in {error}"
+            );
         } else {
             panic!("unexpected service-manifest fixture {fixture}");
         }

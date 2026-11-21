@@ -529,10 +529,11 @@ impl ServiceManifest {
 /// `allow_plaintext` unset, which the export never writes: the endpoint must
 /// parse as an `http` or `https` URL with a host and no user information,
 /// and an `http://` one must name a loopback IP literal as Edge's
-/// `is_loopback_ip_literal_endpoint` reads it. Alloy is stricter in three
+/// `is_loopback_ip_literal_endpoint` reads it. Alloy is stricter in a few
 /// places, so nothing it accepts is refused by Edge: control and whitespace
 /// characters (which the URL parser would strip or remove) are refused, as
-/// are an `@` anywhere in the authority and port 0.
+/// are an `@` anywhere in the authority, a backslash (which the parser reads
+/// as `/`, so the spelling and the parsed URL would disagree), and port 0.
 fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
     const NOT_A_URL: &str = "gateway.otel_endpoint must be an http(s) URL with a host, a valid port, and no credentials";
     if endpoint
@@ -551,6 +552,7 @@ fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
         .unwrap_or_default();
     if authority.is_empty()
         || authority.contains('@')
+        || endpoint.contains('\\')
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port() == Some(0)
