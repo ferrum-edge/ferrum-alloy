@@ -7,6 +7,7 @@ The `ferrum-alloy` command:
 - `openapi export`: with drift detection, and the AI-agent tool metadata (`x-ferrum-mcp`) Ferrum Edge reads, checked against Edge's rules ([AI-agent tools](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/agent-tools.md)).
 - `edge export`: Ferrum Edge file-mode YAML or a GitForgeOps tree.
 - `diagnose`: deterministic explanations of evidence from files, or a service report fetched with `--url` (`FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or `--token-file`). An explicit `--edge-admin-url` and separate trusted `--edge-observation` capture resolve a released Edge G01 record using only `FERRUM_ALLOY_EDGE_DIAGNOSTICS_TOKEN`; only its bound record finding may be confirmed (ADR 0009). Credentials never come from arguments.
+- `version`: the tool version, the diagnostic-report and service-manifest schema versions, and the pinned Edge contract release and source commit (`--format human`, the default, or `json`).
 
 See [getting started](https://github.com/ferrum-edge/ferrum-alloy/blob/main/docs/getting-started.md).
 
