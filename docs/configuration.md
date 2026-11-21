@@ -338,6 +338,8 @@ Trust affects only propagation metadata and gateway-asserted headers. It never a
 
 ### `[edge]` (feature `edge`)
 
+Without the `edge` feature, a non-`standalone` `mode`, `accept_consumer_identity = true`, or a non-empty `trusted_proxies` is refused, because no Edge policy layer would apply it.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `standalone` | `standalone`, `gateway_preferred`, or `gateway_required`. `gateway_required` needs `trust.identities`. The health paths are exempt from it only when `health.app_endpoints = true`, where Alloy's status-only handlers serve them. With `app_endpoints = false`, probe the management listener, bound to an address the node can reach rather than loopback. |

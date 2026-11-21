@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **Security (GHSA-h75r-8j4h-fxcx), breaking:** `AlloyConfig::check` (and so
+  `AlloyApp` startup and `ferrum-alloy check`) refuses
+  `edge.accept_consumer_identity = true` and a non-empty
+  `edge.trusted_proxies` when the `edge` feature is not compiled, in every
+  `edge.mode`, `standalone` included. Without the feature no Edge policy layer
+  is installed, so these settings were silently ignored. `ferrum-alloy check`
+  also reports `edge-integration` as enabled for a non-empty
+  `edge.trusted_proxies`.
 - **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
   export` use a port of Edge's request-path canonicalizer
   (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge

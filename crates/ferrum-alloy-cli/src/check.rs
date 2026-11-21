@@ -102,7 +102,9 @@ fn capabilities(config: &AlloyConfig) -> Vec<(&'static str, bool, &'static str)>
         ("otlp-export", config.otlp.enabled, "otel"),
         (
             "edge-integration",
-            config.edge.mode != EdgeMode::Standalone || config.edge.accept_consumer_identity,
+            config.edge.mode != EdgeMode::Standalone
+                || config.edge.accept_consumer_identity
+                || !config.edge.trusted_proxies.is_empty(),
             "edge",
         ),
         ("cors", config.cors.enabled, "cors"),
