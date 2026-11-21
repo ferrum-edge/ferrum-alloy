@@ -546,10 +546,60 @@ mod tests {
         counts
     }
 
+    /// The only state a recorder can leave between its two updates is a
+    /// bucket that counts an observation whose duration is not yet in
+    /// `_sum`. Because the count is the bucket total, a scrape at that moment
+    /// still renders consistent buckets, `+Inf`, and `_count` for both
+    /// latency families (#316). With the old separate count, the same pause
+    /// rendered a finite bucket above `+Inf`.
+    #[test]
+    fn a_scrape_between_a_recorders_updates_is_consistent() {
+        let metrics = Metrics::default();
+        let series = metrics.series_for("GET", "/items/{id}", 200);
+        for histogram in [&series.duration, &series.time_to_headers] {
+            histogram.record(Duration::from_millis(3));
+            histogram.record(Duration::from_millis(300));
+        }
+        let before = assert_consistent_histograms(&metrics.render_prometheus());
+        // A recorder paused right after the bucket increment of a 75 ms
+        // (finite) and then a 30 s (past every bound) observation.
+        for bucket in [4, DURATION_BUCKETS.len()] {
+            for histogram in [&series.duration, &series.time_to_headers] {
+                histogram.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+            }
+            let out = metrics.render_prometheus();
+            let counts = assert_consistent_histograms(&out);
+            assert_eq!(counts.len(), 2, "{out}");
+            for ((name, count), (_, earlier)) in counts.iter().zip(&before) {
+                let added = if bucket == 4 { 1 } else { 2 };
+                assert_eq!(*count, earlier + added, "{name}\n{out}");
+                let last_finite = format!("{},le=\"10\"}} ", name.replacen('{', "_bucket{", 1));
+                let finite = out
+                    .lines()
+                    .find(|l| l.starts_with(&last_finite))
+                    .and_then(|l| l.rsplit_once(' '))
+                    .map(|(_, v)| v.parse::<u64>().unwrap())
+                    .unwrap();
+                assert_eq!(finite, earlier + 1, "{name}\n{out}");
+            }
+        }
+    }
+
+    /// Sets the flag when dropped, so recorder threads stop even when an
+    /// assertion fails while they run.
+    struct StopOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Recording on several threads while scraping repeatedly never renders
     /// a series whose buckets disagree with its count (#316), for both
-    /// latency histograms, including observations past every finite bound
-    /// and the overflow series.
+    /// latency histograms and the overflow series. Only finite durations
+    /// are recorded while scraping, so no observation past the last bound
+    /// can hide a finite bucket running ahead of the count.
     #[test]
     fn concurrent_recording_and_scraping_render_consistent_histograms() {
         const THREADS: usize = 4;
@@ -559,22 +609,25 @@ mod tests {
             Duration::from_millis(3),
             Duration::from_millis(300),
             Duration::from_secs(10),
-            Duration::from_secs(30),
         ];
+        // Both routes and both families are populated before scraping, and
+        // the second route exceeds the one-series cap, so the overflow
+        // series is exercised too.
+        for route in ["/a", "/b"] {
+            let series = metrics.series_for("GET", route, 200);
+            series.record_time_to_headers(durations[0]);
+            series.record_duration(durations[0]);
+        }
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // Recorders run until the scraper has finished, so every scrape races
-        // with recording.
         let recorders: Vec<_> = (0..THREADS)
             .map(|thread| {
                 let metrics = Arc::clone(&metrics);
                 let done = Arc::clone(&done);
                 std::thread::spawn(move || {
-                    // The second route exceeds the one-series cap, so the
-                    // overflow series is exercised too.
                     let route = if thread % 2 == 0 { "/a" } else { "/b" };
                     let series = metrics.series_for("GET", route, 200);
                     let mut recorded = 0u64;
-                    while !done.load(Ordering::Relaxed) || recorded == 0 {
+                    while !done.load(Ordering::Relaxed) {
                         for duration in durations {
                             series.record_time_to_headers(duration);
                             series.record_duration(duration);
@@ -585,16 +638,19 @@ mod tests {
                 })
             })
             .collect();
-        for _ in 0..SCRAPES {
-            assert_consistent_histograms(&metrics.render_prometheus());
+        {
+            let _stop = StopOnDrop(Arc::clone(&done));
+            for _ in 0..SCRAPES {
+                assert_consistent_histograms(&metrics.render_prometheus());
+            }
         }
-        done.store(true, Ordering::Relaxed);
         let recorded: u64 = recorders.into_iter().map(|r| r.join().unwrap()).sum();
 
         let counts = assert_consistent_histograms(&metrics.render_prometheus());
         assert_eq!(counts.len(), 4, "{counts:?}");
         let total: u64 = counts.iter().map(|(_, count)| count).sum();
-        assert_eq!(total, 2 * recorded, "{counts:?}");
+        // Two primed observations per route, one in each family.
+        assert_eq!(total, 2 * recorded + 4, "{counts:?}");
     }
 
     /// Each observation lands in exactly one bucket, so the count is the
