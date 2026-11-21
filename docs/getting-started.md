@@ -16,7 +16,7 @@ ferrum-alloy = { git = "https://github.com/ferrum-edge/ferrum-alloy", tag = "v0.
 
 ```bash
 cargo install --locked --git https://github.com/ferrum-edge/ferrum-alloy --tag v0.1.0 ferrum-alloy-cli
-ferrum-alloy new orders-api --with openapi
+ferrum-alloy new orders-api --with openapi --alloy-tag v0.1.0
 cd orders-api
 cargo test
 cargo run
