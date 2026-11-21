@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- The Prometheus latency histograms render every series from one read of
+  its buckets (#316). The count is the total of the buckets, with a new
+  bucket for observations past the last finite bound, so in one exposition
+  the cumulative buckets never decrease and `+Inf` always equals `_count`,
+  even while requests are being recorded. Recording no longer updates a
+  separate count.
 - **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
   export` use a port of Edge's request-path canonicalizer
   (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge
