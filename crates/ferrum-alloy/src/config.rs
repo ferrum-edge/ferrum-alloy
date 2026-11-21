@@ -670,7 +670,7 @@ pub struct CorsSettings {
 
 /// The CORS entries startup cannot turn into a layer: entries
 /// `http_layers::cors` cannot parse as header values, methods, or header
-/// names, and the `*` entries `tower-http` refuses to combine with
+/// names, and the wildcards `tower-http` refuses to combine with
 /// credentials (it panics when such a layer is applied). `check` reports
 /// these and `http_layers::cors` refuses them, so both agree. Every origin
 /// is checked, `*` included, so a malformed entry next to `*` is reported
@@ -700,16 +700,23 @@ pub(crate) fn cors_entry_issues(settings: &CorsSettings) -> Vec<String> {
         }
     }
     if settings.allow_credentials {
-        for (list, entries) in [
-            ("origin", &settings.allowed_origins),
-            ("allowed_methods", &settings.allowed_methods),
-            ("allowed_headers", &settings.allowed_headers),
-        ] {
-            if entries.iter().any(|entry| entry == "*") {
-                issues.push(format!(
-                    "cors.allow_credentials cannot be combined with {list} '*'"
-                ));
-            }
+        // Any `*` origin makes the layer allow every origin. A method or
+        // header list is the wildcard only when it is exactly `["*"]`
+        // (`tower-http` compares the joined list with `*`); elsewhere `*` is
+        // a literal token, as it is to browsers for credentialed requests.
+        let singleton_wildcard = |entries: &[String]| matches!(entries, [only] if only == "*");
+        if settings.allowed_origins.iter().any(|o| o == "*") {
+            issues.push("cors.allow_credentials cannot be combined with origin '*'".into());
+        }
+        if singleton_wildcard(&settings.allowed_methods) {
+            issues.push(
+                "cors.allow_credentials cannot be combined with allowed_methods [\"*\"]".into(),
+            );
+        }
+        if singleton_wildcard(&settings.allowed_headers) {
+            issues.push(
+                "cors.allow_credentials cannot be combined with allowed_headers [\"*\"]".into(),
+            );
         }
     }
     issues

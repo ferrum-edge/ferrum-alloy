@@ -1004,17 +1004,23 @@ fn cors_entries_are_checked_as_startup_parses_them() {
             c.cors.allow_credentials = true;
             c.cors.allowed_methods = vec!["*".into()];
         },
-        "cors.allow_credentials cannot be combined with allowed_methods '*'",
+        r#"cors.allow_credentials cannot be combined with allowed_methods ["*"]"#,
     );
     check(
         &|c| {
             c.cors.allow_credentials = true;
             c.cors.allowed_headers = vec!["*".into()];
         },
-        "cors.allow_credentials cannot be combined with allowed_headers '*'",
+        r#"cors.allow_credentials cannot be combined with allowed_headers ["*"]"#,
     );
     let credentialed = errors(&|c| c.cors.allow_credentials = true);
     assert!(credentialed.is_empty(), "{credentialed:?}");
+    let mixed = errors(&|c| {
+        c.cors.allow_credentials = true;
+        c.cors.allowed_methods = vec!["PATCH".into(), "*".into()];
+        c.cors.allowed_headers = vec!["x-request-id".into(), "*".into()];
+    });
+    assert!(mixed.is_empty(), "{mixed:?}");
     let mut config = AlloyConfig::default();
     config.cors.enabled = true;
     config.cors.allowed_origins = vec!["*".into(), "bad\r\norigin".into()];

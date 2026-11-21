@@ -188,7 +188,7 @@ mod cors_tests {
 
     /// The offline check refuses exactly the entries startup cannot build a
     /// layer from, including a malformed origin listed next to `*` and the
-    /// `*` entries `tower-http` refuses (by panicking) to combine with
+    /// wildcards `tower-http` refuses (by panicking) to combine with
     /// credentials. Every accepted layer is applied, so such a panic fails
     /// the test.
     #[test]
@@ -221,6 +221,14 @@ mod cors_tests {
             case(&["*"], &[], &[], true, false),
             case(&["https://app.example"], &["*"], &[], true, false),
             case(&["https://app.example"], &[], &["*"], true, false),
+            case(
+                &["https://app.example"],
+                &["PATCH", "*"],
+                &["x-request-id", "*"],
+                true,
+                true,
+            ),
+            case(&["https://app.example"], &["*", "*"], &[], true, true),
         ];
         for case in cases {
             let settings = CorsSettings {
