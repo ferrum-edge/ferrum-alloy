@@ -8,6 +8,15 @@
   the cumulative buckets never decrease and `+Inf` always equals `_count`,
   even while requests are being recorded. Recording no longer updates a
   separate count.
+- `ferrum-alloy check` and `AlloyConfig::check` refuse every
+  `cors.allowed_origins`, `cors.allowed_methods`, and `cors.allowed_headers`
+  entry that startup cannot parse as a header value, method, or header name
+  (#321), and `cors.allowed_methods = ["*"]` or `cors.allowed_headers =
+  ["*"]` together with `cors.allow_credentials`, which `tower-http` refuses
+  by panicking while the router is built. Startup applies the same rules, so it
+  also refuses a malformed origin listed next to `*` instead of hiding it
+  behind the wildcard. Diagnostics name entries by index and no longer quote
+  them.
 - **Breaking (#315):** the `x-ferrum-mcp` endpoint checks in `openapi
   export` use a port of Edge's request-path canonicalizer
   (`canonicalize_policy_path`), so Alloy no longer accepts a document Edge
