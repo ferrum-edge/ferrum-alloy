@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Security:** `url` is bumped from 2.5.8 to 2.5.9 in `Cargo.lock` (with
+  its `form_urlencoded` dependency bumped from 1.2.2 to 1.2.3 in `Cargo.lock`
+  and `fuzz/Cargo.lock`) for RUSTSEC-2026-0592 (`Url::origin()` recursed on
+  nested `blob:` URLs without a depth limit and could overflow the stack).
+  `cargo deny check` passes again.
+
 ## [0.1.0] - 2026-11-21
 
 First release, distributed from Git only as the tag `v0.1.0` (nothing is
