@@ -36,7 +36,7 @@
   "gateway": {
     "namespace": "ferrum",
     "correlation_id": true,
-    "otel_endpoint": "http://otel-collector:4318/v1/traces"
+    "otel_endpoint": "https://otel-collector:4318/v1/traces"
   },
   "auth": {
     "mode": "service"
