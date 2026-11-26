@@ -162,6 +162,46 @@ fn validate(document: &Value) -> Result<(), CliError> {
             "OpenAPI document has no `info` object".into(),
         ));
     }
+    unsupported_path_item_fields(document)
+}
+
+/// OpenAPI 3.2 Path Item operation fields Ferrum Edge refuses. From v0.9.21,
+/// `POST /api-specs` answers `422 UnsupportedOperationField` for the whole
+/// document when a Path Item under `paths` or `components.pathItems`
+/// declares one (`reject_unsupported_operation_fields`), because its
+/// validator, MCP bridge and operation count cannot represent them.
+const UNSUPPORTED_PATH_ITEM_FIELDS: &[&str] = &["query", "additionalOperations"];
+
+/// Refuses a document Edge v0.9.21 refuses for [`UNSUPPORTED_PATH_ITEM_FIELDS`],
+/// checking the same Path Item objects Edge checks.
+fn unsupported_path_item_fields(document: &Value) -> Result<(), CliError> {
+    let sections = [
+        ("paths", document.get("paths")),
+        (
+            "components.pathItems",
+            document
+                .get("components")
+                .and_then(|components| components.get("pathItems")),
+        ),
+    ];
+    for (section, items) in sections {
+        let Some(items) = items.and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, item) in items {
+            let Some(item) = item.as_object() else {
+                continue;
+            };
+            if let Some(field) = UNSUPPORTED_PATH_ITEM_FIELDS
+                .iter()
+                .find(|field| item.contains_key(**field))
+            {
+                return Err(CliError::Invalid(format!(
+                    "{section} {name:?} declares the OpenAPI 3.2 Path Item field `{field}`, which Ferrum Edge v0.9.21 refuses for the whole document (422 UnsupportedOperationField); describe the operation with get, put, post, delete, options, head, patch or trace instead"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -498,5 +538,35 @@ mod tests {
             matches!(&error, CliError::Invalid(message) if message.contains("larger than")),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn openapi_3_2_path_item_operation_fields_are_refused() {
+        let base = serde_json::json!({
+            "openapi": "3.2.0",
+            "info": { "title": "orders", "version": "1" },
+            "paths": { "/orders": { "get": { "responses": {} } } },
+        });
+        validate(&base).unwrap();
+        for (pointer, field) in [
+            ("/paths/~1search", "query"),
+            ("/paths/~1search", "additionalOperations"),
+            ("/components/pathItems/Search", "query"),
+            ("/components/pathItems/Search", "additionalOperations"),
+        ] {
+            let mut document = base.clone();
+            let item = serde_json::json!({ field: { "responses": {} } });
+            if pointer.starts_with("/paths/") {
+                document["paths"]["/search"] = item;
+            } else {
+                document["components"] = serde_json::json!({ "pathItems": { "Search": item } });
+            }
+            let error = validate(&document).unwrap_err();
+            assert!(
+                matches!(&error, CliError::Invalid(message)
+                    if message.contains(&format!("`{field}`")) && message.contains("UnsupportedOperationField")),
+                "{pointer} {field}: {error:?}"
+            );
+        }
     }
 }

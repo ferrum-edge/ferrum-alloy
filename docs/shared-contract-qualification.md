@@ -20,8 +20,7 @@ to a host that is not a loopback IP literal. `main` then adopted
 [`contracts-edge-0.9.20`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20)
 at `39da322083044c2e92617209e62983c92387f0ad` (SSH-signed tag object
 `82b277b495e73cfadfacb6f3123de02a984658e4`) with Edge v0.9.20 (baseline) and
-v0.9.19 (previous), as recorded in [compatibility.json](compatibility.json) and
-`contracts/ferrum-contracts/PIN`; both pairings passed on `main` at `3c7a040`
+v0.9.19 (previous); both pairings passed on `main` at `3c7a040`
 by [push CI 41809300101](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41809300101). Only the two gateway vocabularies change: their
 `edge_release` and Edge provenance, Edge's notes, a new `docs/size_limits.md`
 source, and the `protocol_error` `ErrorClass` meaning (a gRPC backend failure
@@ -39,7 +38,8 @@ adopts
 at `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` (SSH-signed tag object
 `3e7e10ef6d4aefa9874319326943ec2186b29981`, verified against the tag's
 `docs/allowed_signers`) with Edge v0.9.21 (baseline) and v0.9.20 (previous),
-for the same 28 files. The two gateway vocabularies change their
+as recorded in [compatibility.json](compatibility.json) and
+`contracts/ferrum-contracts/PIN`, for the same 28 files. The two gateway vocabularies change their
 `edge_release` and Edge provenance, header `availability` values move to the
 first published release that has the header, and `circuit_breaker_open` drops
 the removed `circuit_breaker` rejection-phase alias (Edge #7158). No

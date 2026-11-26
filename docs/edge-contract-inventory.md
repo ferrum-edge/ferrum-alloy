@@ -103,10 +103,17 @@ pull-request CI (#334) runs the release-specific Edge jobs.
    `FERRUM_TLS_CA_BUNDLE_PATH`) still exist. The `x-ferrum-mcp` endpoint
    overlap rule (any operation path, bridged or not, under every effective
    server base; Edge #7406, #7410) is the one `ferrum_alloy_edge::agents`
-   already ports (#313, #318); v0.9.21 also refuses a Path Item with the
-   OpenAPI 3.2 `query` or `additionalOperations` fields, which the export
-   never writes, and refuses `If-Match` on `POST /api-specs`, which Alloy and
-   CI never send.
+   ports (#313, #318), with two known gaps that need a document Alloy's own
+   export does not produce: Alloy reads a referenced Path Item's `servers`
+   from the `$ref` target and does not apply Edge's sibling overlay on the
+   referring item, and it does not enforce Edge v0.9.21's per-document
+   overlap budget (65,536 operation and server-base paths, 16 MiB of path
+   text). v0.9.21 also refuses, for the whole document (`422
+   UnsupportedOperationField`), a Path Item under `paths` or
+   `components.pathItems` with the OpenAPI 3.2 `query` or
+   `additionalOperations` fields; `openapi export` now refuses such a
+   document too, since `--input` would otherwise pass them through. It
+   refuses `If-Match` on `POST /api-specs`, which Alloy and CI never send.
 7. **Plugin ordering and rejection phases.** All 17 earlier
    `catalog::EDGE_PRE_UPSTREAM_PHASES` are still emitted. New
    transaction-log phases: `grpc_post_required` (a non-`POST` gRPC or

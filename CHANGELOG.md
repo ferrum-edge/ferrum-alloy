@@ -12,8 +12,11 @@
   canonical `orders-api.json` service-manifest fixture now uses an
   `https://` OTLP endpoint, which Alloy accepts. Rule `alloy.r001` now treats
   Edge v0.9.21's `grpc_post_required` and `request_body_refused_before_*`
-  transaction-log phases as pre-upstream. The item-by-item `v0.9.20..v0.9.21`
-  source re-audit is recorded in `docs/edge-contract-inventory.md`.
+  transaction-log phases as pre-upstream, and `openapi export` refuses a
+  document whose Path Item declares the OpenAPI 3.2 `query` or
+  `additionalOperations` fields, which Edge v0.9.21 refuses for the whole
+  document. The item-by-item `v0.9.20..v0.9.21` source re-audit is recorded in
+  `docs/edge-contract-inventory.md`.
 - **Security:** `url` is bumped from 2.5.8 to 2.5.9 in `Cargo.lock` (with
   its `form_urlencoded` dependency bumped from 1.2.2 to 1.2.3 in `Cargo.lock`
   and `fuzz/Cargo.lock`) for RUSTSEC-2026-0592 (`Url::origin()` recursed on
