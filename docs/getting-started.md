@@ -200,7 +200,7 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
    fails the export too.
 
    To let AI agents call selected operations through Edge's OpenAPI to MCP bridge (supported Edge
-   v0.9.20 and v0.9.19), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
+   v0.9.21 and v0.9.20), declare them with `ferrum_alloy::agents::AgentTool` and enable `[agents]` in the
    manifest. The export then writes the `x-ferrum-mcp` extension and refuses metadata Edge
    would reject. Read [AI-agent tools](agent-tools.md) for what is safe to expose first.
 
@@ -223,7 +223,7 @@ If you terminate TLS yourself, insert `PeerInfo` with `TlsPeer::from_verified_le
 
    Build with `features = ["tls", "edge"]`, and add `"otel"` for trace export. Handlers can take `Option<ferrum_alloy::edge::GatewayContext>` for Edge's authenticated consumer.
 
-3. `examples/edge-observability` runs Edge v0.9.20 (the contract baseline; set `EDGE_IMAGE` to the v0.9.19 image in [compatibility.json](compatibility.json) to try the previous supported release), Alloy, and an OpenTelemetry Collector together (Edge exports to the Collector over TLS; see [compatibility](compatibility.md#topology-tested-end-to-end)):
+3. `examples/edge-observability` runs Edge v0.9.21 (the contract baseline; set `EDGE_IMAGE` to the v0.9.20 image in [compatibility.json](compatibility.json) to try the previous supported release), Alloy, and an OpenTelemetry Collector together (Edge exports to the Collector over TLS; see [compatibility](compatibility.md#topology-tested-end-to-end)):
 
    ```bash
    docker compose -f examples/edge-observability/compose.yaml up -d --build

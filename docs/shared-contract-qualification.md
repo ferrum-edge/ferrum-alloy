@@ -33,6 +33,26 @@ new pin. No producer wire fields, bounds, enums, reader rules or fixture
 payloads change. The only generated snapshot changes are the known Edge
 release/source headers.
 
+The Edge v0.9.21 bump ([#334](https://github.com/ferrum-edge/ferrum-alloy/pull/334))
+adopts
+[`contracts-edge-0.9.21`](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.21)
+at `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` (SSH-signed tag object
+`3e7e10ef6d4aefa9874319326943ec2186b29981`, verified against the tag's
+`docs/allowed_signers`) with Edge v0.9.21 (baseline) and v0.9.20 (previous),
+for the same 28 files. The two gateway vocabularies change their
+`edge_release` and Edge provenance, header `availability` values move to the
+first published release that has the header, and `circuit_breaker_open` drops
+the removed `circuit_breaker` rejection-phase alias (Edge #7158). No
+`X-Gateway-Error` token, token meaning, `ErrorClass` value or header name,
+role or direction changes. The canonical `valid/orders-api.json` and
+`invalid/client-cert-without-key.json` service-manifest fixtures move to an
+`https://` OTLP endpoint (ferrum-contracts#82), so Alloy now accepts every
+pinned valid fixture without an exception. The report and diagnostic-ref
+schemas and all 12 diagnostic fixtures are byte-identical to
+`contracts-edge-0.9.20`, and the local report `x-contract`
+`contracts_tag`/`contracts_commit` name the new pin. The tag's new
+service-manifest and diagnostic-ref fixtures are not in the PIN selection.
+
 ## v0.9.12 adoption (2026-10-05, historical)
 
 The canonical v0.9.12 release was published at 13:58:38 UTC after its sole
