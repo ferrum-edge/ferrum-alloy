@@ -7,9 +7,9 @@
 //! id, attempt number, or diagnostics header to backends.
 
 /// The Ferrum Edge release these contracts were verified against.
-pub const EDGE_RELEASE: &str = "v0.9.20";
+pub const EDGE_RELEASE: &str = "v0.9.21";
 /// Source commit of [`EDGE_RELEASE`].
-pub const EDGE_SOURCE_COMMIT: &str = "e4a606a00352674daaef08636e3e359e6c48ba18";
+pub const EDGE_SOURCE_COMMIT: &str = "f9915358c8032214f4034a17c28cdf72d14006c3";
 
 /// Authenticated consumer username injected by Edge after authentication.
 /// Edge strips client-supplied copies at admission: v0.9.9 drops the whole

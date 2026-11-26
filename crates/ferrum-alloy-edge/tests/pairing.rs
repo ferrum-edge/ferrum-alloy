@@ -213,7 +213,7 @@ const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.js
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
 /// The release-specific `X-Gateway-Error` meanings pinned in
-/// `contracts-edge-0.9.20`. They are
+/// `contracts-edge-0.9.21`. They are
 /// recorded here only to detect drift and are never rendered: rule
 /// `alloy.r007` renders the version-neutral explanations in
 /// `catalog::EDGE_GATEWAY_ERROR_TOKENS`, which must never narrow a token's
@@ -307,8 +307,8 @@ fn finding_fixtures() -> Vec<String> {
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
     let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.20");
-    assert_eq!(pin["commit"], "39da322083044c2e92617209e62983c92387f0ad");
+    assert_eq!(pin["tag"], "contracts-edge-0.9.21");
+    assert_eq!(pin["commit"], "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f");
 
     let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
@@ -990,12 +990,11 @@ const SERVICE_MANIFEST_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/ser
 
 /// Pinned `valid/` fixtures that Alloy refuses because Ferrum Edge would
 /// drop the configuration they produce, with the one error each must
-/// produce. `orders-api.json` sends OTLP over `http://` to a host that is
-/// not a loopback IP literal, which Edge v0.9.19 and later refuse without
-/// `allow_plaintext` (ferrum-contracts#82 aligns the canonical fixture).
-/// Remove an entry once the pin carries the corrected fixture.
-const KNOWN_REFUSED_VALID_MANIFESTS: &[(&str, &str)] =
-    &[("orders-api.json", "gateway.otel_endpoint must use https://")];
+/// produce. Remove an entry once the pin carries the corrected fixture.
+/// None remain: `contracts-edge-0.9.21` moved `orders-api.json` from a
+/// cleartext `http://otel-collector` OTLP endpoint, which Edge v0.9.19 and
+/// later drop without `allow_plaintext`, to `https://` (ferrum-contracts#82).
+const KNOWN_REFUSED_VALID_MANIFESTS: &[(&str, &str)] = &[];
 
 /// Why each pinned `invalid/` service-manifest fixture is refused: a part
 /// of the parse or validation error it must produce.

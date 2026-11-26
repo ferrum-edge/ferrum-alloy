@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- Pin Ferrum Edge v0.9.21 at `f9915358c8032214f4034a17c28cdf72d14006c3`
+  (Cosign-verified multi-arch index), with v0.9.20 as the previous supported
+  release; v0.9.19 leaves the window. Adopt `contracts-edge-0.9.21` at
+  `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` (SSH-signed tag object
+  `3e7e10ef6d4aefa9874319326943ec2186b29981`) for the same 28 files. No
+  `X-Gateway-Error` token, token meaning or header entry changed, so Alloy's
+  token lists, catalog explanations and `alloy.r007` are unchanged; the
+  canonical `orders-api.json` service-manifest fixture now uses an
+  `https://` OTLP endpoint, which Alloy accepts. Rule `alloy.r001` now treats
+  Edge v0.9.21's `grpc_post_required` and `request_body_refused_before_*`
+  transaction-log phases as pre-upstream, and `openapi export` refuses a
+  document whose Path Item declares the OpenAPI 3.2 `query` or
+  `additionalOperations` fields, which Edge v0.9.21 refuses for the whole
+  document. The item-by-item `v0.9.20..v0.9.21` source re-audit is recorded in
+  `docs/edge-contract-inventory.md`.
 - **Security:** `url` is bumped from 2.5.8 to 2.5.9 in `Cargo.lock` (with
   its `form_urlencoded` dependency bumped from 1.2.2 to 1.2.3 in `Cargo.lock`
   and `fuzz/Cargo.lock`) for RUSTSEC-2026-0592 (`Url::origin()` recursed on

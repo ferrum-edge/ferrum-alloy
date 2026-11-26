@@ -1,8 +1,8 @@
 # OpenTelemetry Collector (contrib 0.161.0) for the end-to-end demo.
 # Ferrum Edge (OTLP/HTTP JSON, over TLS on 4319) and Alloy (OTLP/HTTP
 # protobuf, cleartext on 4318 inside the compose network) export here; spans
-# are written as OTLP/JSON lines for offline verification. Edge v0.9.19 drops
-# a cleartext exporter to a host that is not a loopback IP literal.
+# are written as OTLP/JSON lines for offline verification. Edge v0.9.19 and
+# later drop a cleartext exporter to a host that is not a loopback IP literal.
 receivers:
   otlp:
     protocols:

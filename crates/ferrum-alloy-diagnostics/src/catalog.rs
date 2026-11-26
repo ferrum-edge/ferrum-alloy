@@ -268,7 +268,15 @@ pub fn is_known(name: &str) -> bool {
 /// v0.9.19's client-abort phases (`client_disconnect_before_response`,
 /// `protocol_error_before_response`, `connection_closed_before_response` and
 /// the `gateway_close_*` phases) can fire while Edge awaits backend response
-/// headers, so they are not pre-upstream either.
+/// headers, so they are not pre-upstream either. v0.9.21 logs a non-`POST`
+/// gRPC or gRPC-Web refusal before any plugin as `grpc_post_required`, and an
+/// HTTP/1.1 or HTTP/2 request body refused while it is buffered (`413`, `408`,
+/// `503`) by the collector before `authenticate`, `authorize`, `before_proxy`
+/// or dispatch as `request_body_refused_before_*` (Edge #7163); both are
+/// pre-upstream. Its gateway-internal exits `invalid_backend_path`,
+/// `websocket_upgrade_unavailable` and `mesh_transport_dispatch_required`
+/// (Edge #7156, #7157) are not mapped, because not every site that logs them
+/// is shown to precede every upstream attempt.
 pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "allowed_methods",
     "on_request_received",
@@ -284,6 +292,11 @@ pub const EDGE_PRE_UPSTREAM_PHASES: &[&str] = &[
     "route_request_timeout_early_upload",
     "route_protocol_admission",
     "query_trigger_admission",
+    "grpc_post_required",
+    "request_body_refused_before_authenticate",
+    "request_body_refused_before_authorize",
+    "request_body_refused_before_before_proxy",
+    "request_body_refused_before_dispatch",
     "backend_max_connections",
     "websocket_connection_limit",
     "adaptive_concurrency",

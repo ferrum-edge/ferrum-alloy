@@ -1,6 +1,6 @@
 {
-  "tag": "contracts-edge-0.9.20",
-  "commit": "39da322083044c2e92617209e62983c92387f0ad",
+  "tag": "contracts-edge-0.9.21",
+  "commit": "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f",
   "files": {
     "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json": "a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410",
     "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-connection-failure.json": "05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310",
@@ -18,17 +18,17 @@
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/agents-enabled-not-boolean.json": "112341075e1e64ad0e1c4e652ec78de2eebae3c50303f7d81a1a931309c668c5",
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/agents-unknown-key.json": "07ce370e9fbc5a4f8f704773bda051843704d7be1c8f3a0f92413b9cf2154068",
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/base-path-without-trailing-slash.json": "11a4e6bb8eb43ee740a49823bf61aa1f1fe07a5bac4334f69ef497b4f1cab847",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/client-cert-without-key.json": "5b628e77054b4132a3424710cf9420dadb61fc330912406e3c90bf4064130d5c",
+    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/client-cert-without-key.json": "191d6af11742e42afbcef63f4fada37c26b3bf095a113be33c646d1b0d1af888",
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/http3-protocol.json": "838850fc453772c832cc8d41e31848692489f3e833bf58d6bf7bbde791dae46b",
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/tls-path-with-http-scheme.json": "21e4e15ea3e8c218703c7cf478425d8789e84d3780313ae66c819b8a64298417",
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/unknown-field.json": "64efb979feb88b240f3474a94af42d3061e40e98e9066d57488a3e018dd6ab2e",
     "contracts/ferrum-contracts/fixtures/service-manifest/invalid/unsupported-major.json": "5d878d704cc07c2271b0cdb899d645365f8336246089959d416f8f7f8fab3c20",
     "contracts/ferrum-contracts/fixtures/service-manifest/valid/agents-enabled.json": "f1e8f091f7d5d8e2062721105844dc446176eae3cc36bd86515654a5197a7d6f",
-    "contracts/ferrum-contracts/fixtures/service-manifest/valid/orders-api.json": "ea0fdf43ee0a88d25e96cb15fdf4980481bbfea41f23807ec98151fbf4ba05e1",
+    "contracts/ferrum-contracts/fixtures/service-manifest/valid/orders-api.json": "6648737bc8ab6ee9523efd95487aba0cda295c850617635cf221dccdfefcf649",
     "contracts/ferrum-contracts/fixtures/service-manifest/valid/plain-http.json": "406524f908fe1d9bac6f73031cfad3fd4a646cf065872eeeb2b60857e1a98cdd",
     "contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json": "11508c19f571b57be7e755b5f17409ebc73cd270debd015d1a4ea49a37950520",
     "contracts/ferrum-contracts/schemas/diagnostic-report/v1.schema.json": "f4562508329516dc18b7df481ffb6586ef48d19ab90da1ba7514e2d97ba8b177",
-    "contracts/ferrum-contracts/vocabularies/gateway-errors.json": "e848d644ed84e6e56c0e1125a1e050b92966c3643c2330cf281bd1dfa0ef2dea",
-    "contracts/ferrum-contracts/vocabularies/gateway-headers.json": "654de900fc67e579417c5c5a8e778d8a8ff0061e8601945e91c370c43dde3446"
+    "contracts/ferrum-contracts/vocabularies/gateway-errors.json": "34d7c50b8a797c29990d5014d34909915bd49148f053a3f2182e2fd7009c797b",
+    "contracts/ferrum-contracts/vocabularies/gateway-headers.json": "cb528f7a1f50c0efd971765358d355307c7718ec40b462d71f88e554aaf76ad6"
   }
 }
