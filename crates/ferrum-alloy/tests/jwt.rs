@@ -1216,6 +1216,29 @@ async fn the_authorizer_decides_after_authentication() {
 /// understand, JWE/compression markers, nested-JWT `cty`, and non-access
 /// `typ` values are rejected even on an otherwise valid token, while the
 /// access-token types keep working.
+/// A `b64` header member other than `true` is refused: unencoded payloads
+/// (RFC 7797) are not supported. `b64: true` changes nothing and verifies.
+#[tokio::test]
+async fn b64_header_members_other_than_true_are_rejected() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let router = protected(&verifier);
+    for (value, expected) in [
+        (json!(true), 200),
+        (json!(false), 401),
+        (json!("yes"), 401),
+        (json!(1), 401),
+        (Value::Null, 401),
+    ] {
+        let token = key.sign_with_header(&claims(), Some("k1"), |h| {
+            h.extras.insert("b64", value.clone());
+        });
+        let (status, body, _) = call(&router, Some(&token)).await;
+        assert_eq!(status, expected, "b64 {value}: {body}");
+    }
+}
+
 #[tokio::test]
 async fn non_plain_jwt_headers_are_rejected() {
     let key = SigningKey::new("k1");
