@@ -100,7 +100,7 @@ Detailed health, metrics, and management OpenAPI/UI always require a configured 
 | [Implementation status](docs/implementation-status.md) | What is built and tested |
 | [Testing](docs/testing.md) | Property tests and fuzz targets for untrusted input |
 | [Benchmarks](docs/benchmarks.md) | Overhead measurements, the hosted regression gate and its budgets, and their limits |
-| [Release readiness](docs/release.md) | The Git-only distribution decision, packaging checks, the release checklist, and deferred registry decisions |
+| [Release readiness](docs/release.md) | The Git-only distribution decision, the 1.0 stability policy, packaging checks, the release checklist, and deferred registry decisions |
 
 ## Contracts
 
@@ -112,7 +112,11 @@ The pin and vendored files live in [`contracts/ferrum-contracts/PIN`](contracts/
 See the [contracts guide](contracts/README.md) for details.
 The report keeps its original v0.9.11 freeze metadata; 0.9.17 adds the `loop_detected` token to the vocabularies and diagnostic-ref schema; 0.9.19, 0.9.20 and 0.9.21 change only the two gateway vocabularies, and the schemas and diagnostic fixtures are unchanged; 0.9.21 also moves two service-manifest fixtures to an `https://` OTLP endpoint. The canonical deployment schemas and fixtures are outside Alloy's adoption scope, which is every file listed in the PIN (28 since the service-manifest fixtures were added for #319; 16 before).
 Shared contract changes land in ferrum-contracts first, then are re-vendored here; shared contracts are never edited locally.
-The previous `contracts-edge-0.9.20` adoption passed on `main` at `3c7a040` by [push CI 41809300101](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41809300101); the `contracts-edge-0.9.21` adoption is gated by the CI of the Edge v0.9.21 bump ([#334](https://github.com/ferrum-edge/ferrum-alloy/pull/334)).
+The previous `contracts-edge-0.9.20` adoption passed on `main` at `3c7a040` by [push CI 41809300101](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/41809300101); the `contracts-edge-0.9.21` adoption, made with the Edge v0.9.21 bump ([#334](https://github.com/ferrum-edge/ferrum-alloy/pull/334)), passed on `main` at `d54999f` by [push CI 45810462627](https://github.com/ferrum-edge/ferrum-alloy/actions/runs/45810462627).
+
+## Stability
+
+Alloy v0.1.0 is pre-1.0: Rust APIs may change in any minor release. From 1.0.0 onward, tagged releases follow semantic versioning across the public Rust API of the five crates, the `ferrum-alloy` command line and its exit codes, configuration (including the documented `RUST_LOG` and `OTEL_*` variables), the generated project layout and `ferrum-service.toml`, the diagnostic-report and service-manifest v1 wire contracts, and the built-in endpoints and metric names. Upgrading a public dependency (such as `axum`, `tower-layer`/`tower-service`, `sqlx`, `utoipa-axum`, `tracing-subscriber`, or `reqwest`) across an incompatible version, or removing a deprecated item, happens only in a major release, except under the policy's security exception, which takes precedence over its other rules; raising the MSRV (now 1.94) is a minor release, never a patch. Manifest checks that mirror Ferrum Edge's own admission rules may change, in minor releases, as the supported Edge window rolls. The [stability policy](docs/release.md#stability-policy) lists what is and is not covered, forward-only starter migrations, the deprecation process, and the 1.x support window.
 
 ## Development
 

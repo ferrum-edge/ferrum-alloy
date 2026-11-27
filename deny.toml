@@ -17,20 +17,34 @@ unused-ignored-advisory = "deny"
 # dependency-policy job and the weekly advisories workflow, and fails on a
 # missing, malformed, or past date.
 ignore = [
-    # rsa 0.9 (via jsonwebtoken's rust_crypto backend, feature `jwt`):
-    # timing side channel in RSA *private-key* operations (decryption and
-    # signing). Alloy's JWT support only verifies signatures with public
-    # keys from a configured JWKS; it never loads private keys or signs.
-    # No patched release exists. Re-evaluate by the expiry date or when
-    # jsonwebtoken offers a backend without this crate. [expires:2026-12-26]
-    { id = "RUSTSEC-2023-0071", reason = "public-key verification only; see comment [expires:2026-12-26]" },
+    # rsa 0.9.10 (via jsonwebtoken 11.1.0's rust_crypto backend, feature
+    # `jwt`): timing side channel (Marvin) in RSA *private-key* operations
+    # (decryption and signing). In production code, Alloy's JWT support only
+    # verifies signatures with public keys from a configured JWKS; it never
+    # loads private keys or signs. The only RSA private-key operation in the
+    # workspace is test signing: crates/ferrum-alloy/tests/jwt.rs signs RS256
+    # and PS256 tokens with a static, published RSA-2048 fixture (jsonwebtoken
+    # 11.1.0's own test key), which protects nothing. The generated `jwt`
+    # starter's tests do not use RSA.
+    # Re-reviewed 2026-11-27 (renewal pending owner acceptance): the advisory
+    # now lists rsa >= 0.10.0 as patched (rsa 0.10.0, 2026-11-08), but there
+    # is no fixed 0.9.x, and jsonwebtoken 11.x requires rsa ^0.9.
+    # jsonwebtoken 12.0.0 (2026-11-13) moves its rust_crypto backend to rsa
+    # 0.10 and p256/p384 0.14, which removes this advisory and
+    # RUSTSEC-2026-0387. That is a semver-major upgrade (the workspace
+    # requirement, src/jwt.rs where its API changed, and the generated `jwt`
+    # starter's dev-dependency), not a lockfile-only update. Exposure is
+    # unchanged. Exit: remove this entry with the jsonwebtoken 12 upgrade.
+    # The expiry is shorter than 90 days because that exit now exists.
+    # [expires:2027-01-31]
+    { id = "RUSTSEC-2023-0071", reason = "production code verifies with public keys only; RSA signing only in JWT tests with a published fixture key; re-reviewed 2026-11-27, renewal pending owner acceptance; exit is jsonwebtoken 12 (rsa 0.10); see comment [expires:2027-01-31]" },
     # crypto-bigint 0.5.5 (via jsonwebtoken 11.1.0's rust_crypto backend ->
     # p256 0.13.2 / p384 0.13.1 -> elliptic-curve 0.13.8): RUSTSEC-2026-0387,
     # timing variability in operations meant to be constant-time. Fixed only in
-    # >= 0.7.6; there is no patched 0.5.x, and jsonwebtoken 11.1.0 (latest)
-    # still requires p256 ^0.13. Time-boxed risk acceptance, accepted by the
-    # owner on 2026-11-14 (#294): only public-key verification and throwaway
-    # test keys reach the crate. It is reached in two ways:
+    # >= 0.7.6; there is no patched 0.5.x, and jsonwebtoken 11.x requires
+    # p256 ^0.13. Time-boxed risk acceptance, accepted by the owner on
+    # 2026-11-14 (#294): only public-key verification and throwaway test keys
+    # reach the crate. It is reached in two ways:
     #   - The optional `jwt` feature (also in `full`, and enabled by
     #     `ferrum-alloy new --with jwt` projects). It is not in the CLI binary
     #     or the default features. src/jwt.rs only builds `DecodingKey`s from
@@ -41,17 +55,19 @@ ignore = [
     #     in the generated `jwt` starter.
     # No private key from a deployment ever reaches this code, so no
     # secret-dependent use is reachable in Alloy or in generated services.
-    # Exit: jsonwebtoken moves to p256/p384 0.14 (elliptic-curve 0.14 /
-    # crypto-bigint >= 0.7.6), or Alloy switches its backend. Revisit when a
-    # jsonwebtoken release adopts p256/p384 0.14, and re-review by the expiry
-    # (aligned with RUSTSEC-2023-0071, which has the same exit).
+    # Re-reviewed 2026-11-27 (renewal pending owner acceptance): the revisit
+    # trigger has fired. jsonwebtoken 12.0.0 (2026-11-13) requires p256/p384
+    # ^0.14, whose elliptic-curve 0.14 requires crypto-bigint ^0.7.8 (patched),
+    # so the exit is the jsonwebtoken 12 upgrade described for
+    # RUSTSEC-2023-0071 above; no lockfile-only update removes the crate.
+    # Exposure is unchanged. The expiry is aligned with RUSTSEC-2023-0071.
     # jsonwebtoken's only other backend, `aws_lc_rs`, would remove the crate
     # today, but `aws-lc-sys` is banned below (the crypto stack stays on
     # ring), so that is a policy change for the owner, not a drop-in fix.
     # Installing a ring-backed jsonwebtoken CryptoProvider instead would mean
     # a process-global install from library code, which AGENTS.md forbids.
-    # [expires:2026-12-26]
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; owner-accepted 2026-11-14 (#294); revisit when jsonwebtoken adopts p256/p384 0.14; see comment [expires:2026-12-26]" },
+    # [expires:2027-01-31]
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken 11 rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; owner-accepted 2026-11-14 (#294); re-reviewed 2026-11-27, renewal pending owner acceptance; exit is jsonwebtoken 12 (p256/p384 0.14); see comment [expires:2027-01-31]" },
 ]
 
 [licenses]

@@ -26,8 +26,27 @@ Advisories on this repository. We credit reporters unless you ask us not to.
 ## Supported versions
 
 Alloy is released from Git tags (the first is `v0.1.0`) and is not published
-to crates.io or any other registry. Security fixes land on `main` and ship in
-the next tagged release; earlier tags receive no backports.
+to crates.io or any other registry. Before 1.0.0, security fixes land on
+`main` and ship in the next tagged release; earlier 0.x tags receive no
+backports.
+
+From 1.0.0 onward, the [stability policy](docs/release.md#stability-policy)
+sets the support window:
+
+- The latest 1.x release is supported. A security fix ships in a new 1.x
+  release, a patch release when the fix changes no covered surface. Earlier
+  1.x releases receive no backports, because upgrading within 1.x is
+  compatible.
+- After 2.0.0 is released, the last 1.x minor line receives security fixes
+  for six months from the 2.0.0 release date, as patch releases.
+- 0.x tags receive no fixes once 1.0.0 is released.
+- The [security exception](docs/release.md#security-exception) takes
+  precedence over all of the above and over the rest of the stability policy:
+  a fix that cannot be made without a breaking change (including an upgrade of
+  a public dependency across an incompatible version) ships in a new 1.x minor
+  release, also during the six months after 2.0.0, when that release becomes
+  the last 1.x minor line for the rest of the same window. Its advisory and
+  release notes state what breaks and how to migrate.
 
 ## Security model
 
