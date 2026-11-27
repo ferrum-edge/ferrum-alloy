@@ -224,6 +224,12 @@ impl TlsServer {
             .write()
             .unwrap_or_else(PoisonError::into_inner);
         *serving = current;
+        drop(serving);
+        // The key just swapped in, as read: warn once per swap, not on every
+        // comparison read.
+        if let Some(warning) = &sources.key_warning {
+            tracing::warn!(target: "ferrum_alloy::tls", "reloaded TLS private key: {warning}");
+        }
         Ok(Settled::Swapped)
     }
 
@@ -504,6 +510,9 @@ pub(crate) struct Sources<'a> {
     cert: Vec<u8>,
     /// Zeroed when dropped.
     key: Zeroizing<Vec<u8>>,
+    /// Why others could replace the key file that was read
+    /// ([`crate::files::read_secret_file_bounded`]).
+    key_warning: Option<String>,
     client_ca: Option<Vec<u8>>,
     crls: Vec<(&'a Path, Vec<u8>)>,
 }
@@ -511,8 +520,10 @@ pub(crate) struct Sources<'a> {
 impl<'a> Sources<'a> {
     pub(crate) fn read(settings: &'a TlsSettings) -> Result<Self, TlsError> {
         let cert = read_file(CHAIN, &settings.cert_path, MAX_PEM_FILE_BYTES)?;
-        let key = crate::files::read_sensitive_file_bounded(&settings.key_path, MAX_PEM_FILE_BYTES)
+        let key = crate::files::read_secret_file_bounded(&settings.key_path, MAX_PEM_FILE_BYTES)
             .map_err(|e| pem_error(KEY, &settings.key_path, e))?;
+        let key_warning = key.permission_warning;
+        let key = key.bytes;
         let client_auth = settings.client_auth != ClientAuth::None;
         let client_ca = match &settings.client_ca_path {
             Some(path) if client_auth => Some(read_file(CLIENT_CA, path, MAX_PEM_FILE_BYTES)?),
@@ -528,6 +539,7 @@ impl<'a> Sources<'a> {
         Ok(Self {
             cert,
             key,
+            key_warning,
             client_ca,
             crls,
         })
@@ -573,11 +585,19 @@ fn certificates(
 
 /// Loads certificates, key, and client verification policy.
 pub fn load(settings: &TlsSettings) -> Result<TlsServer, TlsError> {
+    load_at(settings, UnixTime::now()).map(|(server, _)| server)
+}
+
+/// [`load`], also returning why others could replace the private key file
+/// it read ([`crate::files::read_secret_file_bounded`]).
+pub(crate) fn load_reporting_key(
+    settings: &TlsSettings,
+) -> Result<(TlsServer, Option<String>), TlsError> {
     load_at(settings, UnixTime::now())
 }
 
-/// [`load`], with `now` deciding whether a CRL has expired.
-fn load_at(settings: &TlsSettings, now: UnixTime) -> Result<TlsServer, TlsError> {
+/// [`load_reporting_key`], with `now` deciding whether a CRL has expired.
+fn load_at(settings: &TlsSettings, now: UnixTime) -> Result<(TlsServer, Option<String>), TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let sources = Sources::read(settings)?;
     let current = build(settings, &sources, &provider, now)?;
@@ -595,7 +615,7 @@ fn load_at(settings: &TlsSettings, now: UnixTime) -> Result<TlsServer, TlsError>
         reload_interval,
     };
     server.log_crl_next_update(now, false);
-    Ok(server)
+    Ok((server, sources.key_warning))
 }
 
 /// Parses and validates `sources` into a server configuration: every
@@ -1040,7 +1060,7 @@ mod tests {
             // September 2020, while the CRL is current.
             let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
 
-            let config = serving(&load_at(&settings, startup).unwrap());
+            let config = serving(&load_at(&settings, startup).unwrap().0);
             assert!(!config.session_storage.can_cache(), "{case}");
             assert_eq!(config.send_tls13_tickets, 0, "{case}");
             assert!(!config.ticketer.enabled(), "{case}");
@@ -1105,7 +1125,7 @@ mod tests {
             let clock = Arc::new(Clock(AtomicU64::new(before)));
             let time: Arc<dyn TimeProvider> = Arc::<Clock>::clone(&clock);
             let startup = UnixTime::since_unix_epoch(Duration::from_secs(before));
-            let server = load_at(&settings, startup).unwrap();
+            let server = load_at(&settings, startup).unwrap().0;
             let mut config = rustls::ServerConfig::clone(&serving(&server));
             config.time_provider = Arc::clone(&time);
             let config = Arc::new(config);
@@ -1411,7 +1431,7 @@ mod tests {
         // Loaded in September 2020, while the CRL was current. It has
         // expired since, so handshakes fail.
         let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
-        let server = load_at(&settings, startup).unwrap();
+        let server = load_at(&settings, startup).unwrap().0;
         let refused = handshake(serving(&server), Arc::clone(&client));
         let refused = refused.unwrap_err().to_string();
         assert!(refused.contains("revocation list expired"), "{refused}");

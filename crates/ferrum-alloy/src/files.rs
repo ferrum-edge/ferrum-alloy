@@ -9,8 +9,9 @@
 //! certificates, keys, and CRLs are read this way, as are the files the
 //! `ferrum-alloy` command reads.
 //!
-//! [`secret_file_permission_warning`] reports a secret file that others
-//! could replace: on Unix, one writable by its group or by everyone, or one
+//! [`read_secret_file_bounded`] (from the file it read) and
+//! [`secret_file_permission_warning`] (from a path, for offline checks)
+//! report a secret file that others could replace: on Unix, one writable by its group or by everyone, or one
 //! owned by a user other than this process's (effective) user and root.
 //! World-readable files are not reported, so the default `0644` of a
 //! Kubernetes secret volume stays quiet.
@@ -46,52 +47,125 @@ pub enum ReadError {
 /// process's effective user nor root. Readable-by-everyone is not reported.
 /// A file that cannot be inspected yields `None`; reading it reports the
 /// error. Always `None` on other platforms.
+///
+/// This inspects the path, for offline checks such as `ferrum-alloy check`.
+/// Code that reads the secret uses [`read_secret_file_bounded`], whose
+/// warning describes the file it actually read.
 pub fn secret_file_permission_warning(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    permission_warning(path, &metadata)
+}
+
+/// A secret read by [`read_secret_file_bounded`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SecretFile {
+    /// The file's bytes, zeroized when dropped.
+    pub bytes: Zeroizing<Vec<u8>>,
+    /// [`secret_file_permission_warning`] for the file that was read, from
+    /// the metadata of the opened handle, so a file swapped in after the
+    /// read cannot change it.
+    pub permission_warning: Option<String>,
+}
+
+/// [`read_sensitive_file_bounded`], with the permission warning of the file
+/// it read, taken from the opened handle.
+///
+/// # Errors
+///
+/// As [`read_sensitive_file_bounded`].
+pub fn read_secret_file_bounded(path: &Path, max: u64) -> Result<SecretFile, ReadError> {
+    check(&std::fs::metadata(path).map_err(ReadError::Io)?, max)?;
+    let mut bytes = sensitive_buffer(max)?;
+    let metadata = read_opened_into(path, max, &mut bytes)?;
+    Ok(SecretFile {
+        bytes,
+        permission_warning: permission_warning(path, &metadata),
+    })
+}
+
+/// The warning for the file at `path` whose metadata is `metadata`.
+fn permission_warning(path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        let metadata = std::fs::metadata(path).ok()?;
-        let mode = metadata.permissions().mode();
-        let mut problems = Vec::new();
-        if mode & 0o022 != 0 {
-            problems.push(format!(
-                "is writable by its group or by everyone (mode {:03o})",
-                mode & 0o777
-            ));
-        }
-        let owner = metadata.uid();
-        if owner != 0
-            && let Some(user) = effective_uid()
-            && owner != user
-        {
-            problems.push(format!(
-                "is owned by uid {owner}, neither this process's user (uid {user}) nor root"
-            ));
-        }
+        let problems = permission_problems(
+            metadata.permissions().mode(),
+            metadata.uid(),
+            effective_uid(),
+        );
         if problems.is_empty() {
             return None;
         }
+        // Debug formatting quotes the path and escapes control and format
+        // characters, so the warning stays one line in text output.
         Some(format!(
-            "secret file {} {}; restrict it so only the service account (or root) can change it",
-            path.display(),
+            "secret file {:?} {}; restrict it so only the service account (or root) can change it",
+            path.to_string_lossy(),
             problems.join(" and ")
         ))
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, metadata);
         None
     }
 }
 
-/// This process's effective user id: the owner of a pipe it creates, which
-/// is the creating process's effective user. `None` if that fails.
+/// What lets someone other than `user` (the effective user, when known) or
+/// root replace a file with `mode` owned by `owner`.
+#[cfg(unix)]
+fn permission_problems(mode: u32, owner: u32, user: Option<u32>) -> Vec<String> {
+    let mut problems = Vec::new();
+    if mode & 0o022 != 0 {
+        problems.push(format!(
+            "is writable by its group or by everyone (mode {:03o})",
+            mode & 0o777
+        ));
+    }
+    if owner != 0
+        && let Some(user) = user
+        && owner != user
+    {
+        problems.push(format!(
+            "is owned by uid {owner}, neither this process's user (uid {user}) nor root"
+        ));
+    }
+    problems
+}
+
+/// This process's effective user id, or `None` when it cannot be read.
+///
+/// On Linux it is the second `Uid:` field of `/proc/self/status`: the owner
+/// of a new file or pipe there is the filesystem user, which can differ.
+/// Elsewhere on Unix, where there is no separate filesystem user, it is the
+/// owner of a pipe this process creates.
 #[cfg(unix)]
 fn effective_uid() -> Option<u32> {
-    use std::os::unix::fs::MetadataExt as _;
-    let (reader, _writer) = std::io::pipe().ok()?;
-    let file = std::fs::File::from(std::os::fd::OwnedFd::from(reader));
-    file.metadata().ok().map(|metadata| metadata.uid())
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        effective_uid_from_status(&status)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let (reader, _writer) = std::io::pipe().ok()?;
+        let file = std::fs::File::from(std::os::fd::OwnedFd::from(reader));
+        file.metadata().ok().map(|metadata| metadata.uid())
+    }
+}
+
+/// The effective uid in a Linux `/proc/<pid>/status` text: the second of
+/// the real, effective, saved, and filesystem uids on its `Uid:` line.
+#[cfg(unix)]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "android", test)),
+    allow(dead_code)
+)]
+fn effective_uid_from_status(status: &str) -> Option<u32> {
+    let line = status.lines().find_map(|line| line.strip_prefix("Uid:"))?;
+    line.split_ascii_whitespace().nth(1)?.parse().ok()
 }
 
 /// Reads the regular file at `path` (symbolic links followed), holding at
@@ -112,11 +186,17 @@ pub fn read_regular_file_bounded(path: &Path, max: u64) -> Result<Vec<u8>, ReadE
 /// behind) and is zeroized on every path, a refusal or an I/O error included.
 pub fn read_sensitive_file_bounded(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>, ReadError> {
     check(&std::fs::metadata(path).map_err(ReadError::Io)?, max)?;
-    let capacity =
-        usize::try_from(max.saturating_add(1)).map_err(|_| ReadError::TooLarge { limit: max })?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    let mut bytes = sensitive_buffer(max)?;
     read_opened_into(path, max, &mut bytes)?;
     Ok(bytes)
+}
+
+/// A zeroizing buffer of `max + 1` bytes, so reading at most that many never
+/// reallocates it.
+fn sensitive_buffer(max: u64) -> Result<Zeroizing<Vec<u8>>, ReadError> {
+    let capacity =
+        usize::try_from(max.saturating_add(1)).map_err(|_| ReadError::TooLarge { limit: max })?;
+    Ok(Zeroizing::new(Vec::with_capacity(capacity)))
 }
 
 /// Opens `path` and reads it, checking the type on the opened handle.
@@ -129,7 +209,11 @@ fn read_opened(path: &Path, max: u64) -> Result<Vec<u8>, ReadError> {
 /// Opens `path` and reads at most `max` bytes of it into `bytes`, checking
 /// the type on the opened handle. Reserves the reported length when `bytes`
 /// has less spare capacity.
-fn read_opened_into(path: &Path, max: u64, bytes: &mut Vec<u8>) -> Result<(), ReadError> {
+fn read_opened_into(
+    path: &Path,
+    max: u64,
+    bytes: &mut Vec<u8>,
+) -> Result<std::fs::Metadata, ReadError> {
     let file = open(path).map_err(ReadError::Io)?;
     let metadata = file.metadata().map_err(ReadError::Io)?;
     check(&metadata, max)?;
@@ -141,7 +225,7 @@ fn read_opened_into(path: &Path, max: u64, bytes: &mut Vec<u8>) -> Result<(), Re
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
         return Err(ReadError::TooLarge { limit: max });
     }
-    Ok(())
+    Ok(metadata)
 }
 
 /// Opens `path` for reading. `O_NONBLOCK` makes opening a FIFO return at
@@ -212,10 +296,72 @@ mod tests {
             secret_file_permission_warning(Path::new("/etc/passwd")),
             None
         );
-        // The pipe probe finds this process's user: the owner of a file it
-        // just created.
+        // The read reports the file it read, from the opened handle.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+        let read = read_secret_file_bounded(&path, 64)?;
+        assert_eq!(read.bytes.as_slice(), b"secret");
+        let warning = read.permission_warning.unwrap_or_default();
+        assert!(warning.contains("(mode 666)"), "{warning}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        assert!(
+            read_secret_file_bounded(&path, 64)?
+                .permission_warning
+                .is_none()
+        );
+        Ok(())
+    }
+
+    /// The ownership rule: a file owned by another user is reported even
+    /// when only its owner can write it; root and this process's user are
+    /// not; an unknown effective user disables the ownership half.
+    #[cfg(unix)]
+    #[test]
+    fn files_owned_by_a_third_user_are_reported() {
+        let problems = permission_problems(0o644, 4242, Some(1000));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("owned by uid 4242"), "{problems:?}");
+        assert!(problems[0].contains("(uid 1000)"), "{problems:?}");
+        assert!(permission_problems(0o644, 0, Some(1000)).is_empty(), "root");
+        assert!(permission_problems(0o600, 1000, Some(1000)).is_empty());
+        assert!(permission_problems(0o644, 4242, None).is_empty());
+        assert_eq!(permission_problems(0o666, 4242, Some(1000)).len(), 2);
+    }
+
+    /// The effective uid is the second `Uid:` field, not the filesystem uid
+    /// (the fourth) that owns new files and pipes on Linux.
+    #[cfg(unix)]
+    #[test]
+    fn the_effective_uid_is_read_from_the_status_uid_line() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let status = "Name:\tservice\nUmask:\t0022\nUid:\t1000\t1001\t1001\t2000\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(effective_uid_from_status(status), Some(1001));
+        assert_eq!(effective_uid_from_status("Name:\tx\n"), None);
+        assert_eq!(effective_uid_from_status("Uid:\t1000\n"), None);
+        // This process: on Linux, a file it creates is owned by its
+        // filesystem uid, which equals the effective uid unless changed.
         use std::os::unix::fs::MetadataExt as _;
-        assert_eq!(effective_uid(), Some(std::fs::metadata(&path)?.uid()));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("owned");
+        std::fs::write(&path, b"x")?;
+        let owner = std::fs::metadata(&path)?.uid();
+        assert_eq!(effective_uid(), Some(owner));
+        Ok(())
+    }
+
+    /// A control character in a path is escaped in the warning, which stays
+    /// one line.
+    #[cfg(unix)]
+    #[test]
+    fn warnings_escape_control_characters_in_paths() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("to\nken\u{1b}[31m");
+        std::fs::write(&path, b"secret")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+        let warning = secret_file_permission_warning(&path).unwrap_or_default();
+        assert!(!warning.contains('\n'), "{warning:?}");
+        assert!(!warning.contains('\u{1b}'), "{warning:?}");
+        assert!(warning.contains("to\\nken\\u{1b}[31m"), "{warning:?}");
         Ok(())
     }
 

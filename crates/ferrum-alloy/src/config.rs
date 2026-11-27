@@ -1613,7 +1613,7 @@ pub(crate) fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
 
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
 /// Also returns a warning for each `*_FILE` secret file others could
-/// replace ([`crate::files::secret_file_permission_warning`]).
+/// replace, from the file read ([`crate::files::read_secret_file_bounded`]).
 #[allow(clippy::type_complexity)]
 pub(crate) fn env_table<I>(
     vars: I,
@@ -1663,13 +1663,14 @@ where
             .map_err(|_| env_error("value is not valid UTF-8".into()))?;
         let value = if from_file {
             // The file's bytes are zeroized once the trimmed value is copied.
-            let bytes =
-                crate::files::read_sensitive_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
+            let secret =
+                crate::files::read_secret_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
                     .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
-            if let Some(warning) = crate::files::secret_file_permission_warning(Path::new(&value)) {
+            // From the file that was read, not the path inspected again.
+            if let Some(warning) = &secret.permission_warning {
                 warnings.push(format!("{name}: {warning}"));
             }
-            let text = std::str::from_utf8(&bytes)
+            let text = std::str::from_utf8(&secret.bytes)
                 .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
             text.trim_end_matches(['\n', '\r']).to_owned()
         } else {
@@ -2278,11 +2279,6 @@ impl AlloyConfig {
             ("server.tls", server.tls.as_ref()),
             ("management.tls", management.tls.as_ref()),
         ] {
-            if let Some(tls) = tls
-                && let Some(warning) = crate::files::secret_file_permission_warning(&tls.key_path)
-            {
-                warn(format!("{name}.key_path: {warning}"));
-            }
             if let Some(tls) = tls
                 && !tls.client_crl_paths.is_empty()
             {

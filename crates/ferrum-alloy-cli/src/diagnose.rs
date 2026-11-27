@@ -112,16 +112,21 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     let mut redactor = CredentialRedactor::from_env();
     // Resolve the service credential before any fetch or output so the
     // redactor covers it, including when it comes from `--token-file`.
-    let service_token = if args.url.is_some() {
+    let (service_token, warning) = if args.url.is_some() {
         match crate::live::token(args.token_file.as_deref()) {
-            Ok(token) => token,
+            Ok(found) => found,
             Err(error) => return Err(redactor.redact_error(error)),
         }
     } else {
-        None
+        (None, None)
     };
     if let Some(token) = &service_token {
         redactor.add_credential(token);
+    }
+    // The warning names the credential file's path, so it is printed only
+    // once the credential it holds can be redacted from it.
+    if let Some(warning) = warning {
+        crate::eprint(&format!("warning: {}\n", redactor.redact(&warning)));
     }
     run_redacted(args, &redactor, service_token).map_err(|error| redactor.redact_error(error))
 }

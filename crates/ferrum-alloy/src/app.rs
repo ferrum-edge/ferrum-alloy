@@ -526,30 +526,50 @@ impl AlloyApp {
             )
         });
 
+        #[allow(unused_mut)]
+        let mut warnings = prepared.warnings;
+        // A private key others could replace is warned about from the file
+        // the load actually read.
         #[cfg(feature = "tls")]
-        let tls = config
-            .server
-            .tls
-            .as_ref()
-            .map(crate::tls::load)
-            .transpose()
-            .map_err(|e| AlloyError::Tls(e.to_string()))?;
+        let mut key_warning = |name: &str, warning: Option<String>| {
+            if let Some(warning) = warning {
+                let message = format!("{name}.key_path: {warning}");
+                tracing::warn!(target: "ferrum_alloy::config", "{message}");
+                warnings.push(ConfigIssue::warning(message));
+            }
+        };
         #[cfg(feature = "tls")]
-        let management_tls = config
+        let tls = match config.server.tls.as_ref() {
+            Some(settings) => {
+                let (server, warning) = crate::tls::load_reporting_key(settings)
+                    .map_err(|e| AlloyError::Tls(e.to_string()))?;
+                key_warning("server.tls", warning);
+                Some(server)
+            }
+            None => None,
+        };
+        #[cfg(feature = "tls")]
+        let management_tls = match config
             .management
             .tls
             .as_ref()
             .filter(|_| config.management.enabled)
-            .map(crate::tls::load)
-            .transpose()
-            .map_err(|e| AlloyError::Tls(format!("management.tls: {e}")))?;
+        {
+            Some(settings) => {
+                let (server, warning) = crate::tls::load_reporting_key(settings)
+                    .map_err(|e| AlloyError::Tls(format!("management.tls: {e}")))?;
+                key_warning("management.tls", warning);
+                Some(server)
+            }
+            None => None,
+        };
 
         Ok(AlloyParts {
             router: app,
             management_router,
             lifecycle,
             config,
-            warnings: prepared.warnings,
+            warnings,
             telemetry: prepared.telemetry,
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
@@ -730,8 +750,18 @@ impl AlloyParts {
             }
             errors.push(message);
         }
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = tls;
+        // Validation does not warn about cleartext when `management.tls` is
+        // set, but a listener the application serves itself gets none of it.
+        if errors.is_empty()
+            && !tls
+            && !addr.ip().is_loopback()
+            && self.config.management.tls.is_some()
+        {
+            tracing::warn!(
+                target: "ferrum_alloy::config",
+                "the management listener on {addr} is served as plain TCP: management.tls applies only to a listener Alloy serves itself (AlloyParts::serve or serve_on), so the management token crosses the network in cleartext on every request"
+            );
+        }
         if errors.is_empty() {
             Ok(())
         } else {

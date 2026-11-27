@@ -912,9 +912,9 @@ fn special_configuration_files_are_refused() {
     }
 }
 
-/// A `_FILE` secret or TLS private key that others could replace (writable
-/// by its group or everyone) is loaded, with a warning naming its source;
-/// one readable by everyone is not reported.
+/// A `_FILE` secret that others could replace (writable by its group or
+/// everyone) is loaded, with a warning naming its source; one readable by
+/// everyone is not reported.
 #[cfg(unix)]
 #[test]
 fn secret_files_others_could_replace_are_warned_about() {
@@ -952,12 +952,13 @@ fn secret_files_others_could_replace_are_warned_about() {
         assert!(!warning.contains("0123456789abcdef"), "quoted: {warning}");
     }
 
-    // The TLS private key, for either listener.
+    // TLS private keys are warned about where they are read: by the TLS
+    // load at startup (tests/management_tls.rs) and, offline, by
+    // `ferrum-alloy check`. Validation reads no files.
     let key = write(&dir, "key.pem", "not checked here");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o602)).unwrap();
     let mut config = AlloyConfig::default();
-    config.server.tls = Some(TlsSettings::new("cert.pem", key.clone()));
-    config.management.tls = Some(TlsSettings::new("cert.pem", key.clone()));
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+    config.server.tls = Some(TlsSettings::new("cert.pem", key));
     let warnings = config.validate(&["tls"]).unwrap();
     assert!(
         warnings
@@ -965,16 +966,6 @@ fn secret_files_others_could_replace_are_warned_about() {
             .all(|issue| !issue.message.contains("key_path")),
         "{warnings:?}"
     );
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o602)).unwrap();
-    let warnings = config.validate(&["tls"]).unwrap();
-    for name in ["server.tls.key_path", "management.tls.key_path"] {
-        let warned = warnings.iter().any(|issue| {
-            !issue.error
-                && issue.message.starts_with(&format!("{name}: secret file "))
-                && issue.message.contains("(mode 602)")
-        });
-        assert!(warned, "{name}: {warnings:?}");
-    }
 }
 
 /// A `_FILE` secret read stops at its limit, and the refusal names the
