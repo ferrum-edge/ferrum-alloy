@@ -912,6 +912,71 @@ fn special_configuration_files_are_refused() {
     }
 }
 
+/// A `_FILE` secret or TLS private key that others could replace (writable
+/// by its group or everyone) is loaded, with a warning naming its source;
+/// one readable by everyone is not reported.
+#[cfg(unix)]
+#[test]
+fn secret_files_others_could_replace_are_warned_about() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write(&dir, "token", "0123456789abcdef0123456789abcdef\n");
+    let file = secret.to_str().unwrap();
+    let load = || {
+        let vars = env(&[("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", file)]);
+        load_from(None, vars, &Overrides::default()).unwrap()
+    };
+    for mode in [0o600, 0o644] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (_, sources) = load();
+        assert!(
+            sources.warnings.is_empty(),
+            "{mode:o}: {:?}",
+            sources.warnings
+        );
+    }
+    for mode in [0o620, 0o666] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (config, sources) = load();
+        assert!(config.management.token.is_some(), "still loaded");
+        assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
+        let warning = &sources.warnings[0];
+        assert!(
+            warning.starts_with("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE: secret file "),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("writable by its group or by everyone"),
+            "{warning}"
+        );
+        assert!(!warning.contains("0123456789abcdef"), "quoted: {warning}");
+    }
+
+    // The TLS private key, for either listener.
+    let key = write(&dir, "key.pem", "not checked here");
+    let mut config = AlloyConfig::default();
+    config.server.tls = Some(TlsSettings::new("cert.pem", key.clone()));
+    config.management.tls = Some(TlsSettings::new("cert.pem", key.clone()));
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let warnings = config.validate(&["tls"]).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|issue| !issue.message.contains("key_path")),
+        "{warnings:?}"
+    );
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o602)).unwrap();
+    let warnings = config.validate(&["tls"]).unwrap();
+    for name in ["server.tls.key_path", "management.tls.key_path"] {
+        let warned = warnings.iter().any(|issue| {
+            !issue.error
+                && issue.message.starts_with(&format!("{name}: secret file "))
+                && issue.message.contains("(mode 602)")
+        });
+        assert!(warned, "{name}: {warnings:?}");
+    }
+}
+
 /// A `_FILE` secret read stops at its limit, and the refusal names the
 /// variable without quoting the file.
 #[test]
