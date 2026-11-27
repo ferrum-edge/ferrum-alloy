@@ -47,6 +47,7 @@ pub const EDGE_MAX_BACKEND_HOST_LENGTH: usize = 255;
 /// A service manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ServiceManifest {
     /// Always [`MANIFEST_SCHEMA`].
     pub schema: String,
@@ -80,6 +81,7 @@ pub struct ServiceManifest {
 /// Service identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ManifestService {
     /// Service name (`[a-z0-9][a-z0-9-]{0,62}`).
     pub name: String,
@@ -94,6 +96,7 @@ pub struct ManifestService {
 /// Public API surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ManifestApi {
     /// Gateway listen path prefix, e.g. `/orders`.
     pub public_path: String,
@@ -121,6 +124,7 @@ fn default_true() -> bool {
 /// Upstream location.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ManifestUpstream {
     /// Host the gateway connects to (no scheme).
     pub host: String,
@@ -153,6 +157,7 @@ fn default_protocols() -> Vec<String> {
 /// Health check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ManifestHealth {
     /// Readiness path on the application listener.
     pub path: String,
@@ -176,6 +181,7 @@ fn default_probe_timeout() -> u64 {
 /// streams such as SSE).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManifestTimeouts {
     /// `backend_connect_timeout_ms`.
     pub connect_ms: u64,
@@ -198,6 +204,7 @@ impl Default for ManifestTimeouts {
 /// Gateway resources to generate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManifestGateway {
     /// Edge namespace.
     pub namespace: String,
@@ -229,6 +236,7 @@ impl Default for ManifestGateway {
 /// Declared authentication requirement.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManifestAuth {
     /// `none`, `gateway` (Edge authenticates), or `service` (the service
     /// verifies tokens itself). Export does not generate Edge
@@ -244,6 +252,7 @@ pub struct ManifestAuth {
 /// `include`, so Edge's default of publishing every `GET` never applies.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ManifestAgents {
     /// Publish the exposed operations as MCP tools. Off by default; `false`
     /// exports `x-ferrum-mcp: false`.
@@ -259,7 +268,15 @@ pub struct ManifestAgents {
 /// Manifest validation error.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("invalid service manifest:\n  - {}", .0.join("\n  - "))]
+#[non_exhaustive]
 pub struct ManifestError(pub Vec<String>);
+
+impl ManifestError {
+    /// Every validation problem, one per entry.
+    pub fn reasons(&self) -> &[String] {
+        &self.0
+    }
+}
 
 fn valid_id(value: &str) -> bool {
     // Edge proxy/upstream id rule: ^[a-zA-Z0-9][a-zA-Z0-9._-]*$, <= 254.

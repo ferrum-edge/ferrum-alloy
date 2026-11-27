@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 /// Transport facts about the connection a request arrived on.
 ///
 /// Servers insert this into request extensions. Alloy's own server does so
-/// automatically; applications that terminate TLS themselves can insert it.
+/// automatically; applications that terminate TLS themselves can insert it,
+/// built with [`PeerInfo::new`] (or `Default`) since fields may be added.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PeerInfo {
     /// Remote socket address of the direct peer.
     pub remote_addr: Option<SocketAddr>,
@@ -29,8 +31,27 @@ pub struct PeerInfo {
     pub tls: Option<TlsPeer>,
 }
 
+impl PeerInfo {
+    /// A plain-TCP peer at `remote_addr`. Add a TLS identity with
+    /// [`PeerInfo::with_tls`].
+    pub fn new(remote_addr: SocketAddr) -> Self {
+        Self {
+            remote_addr: Some(remote_addr),
+            tls: None,
+        }
+    }
+
+    /// Records the TLS identity the peer presented.
+    #[must_use]
+    pub fn with_tls(mut self, tls: TlsPeer) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+}
+
 /// Identity presented by a TLS client.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TlsPeer {
     /// `true` only when the TLS stack verified the client certificate chain
     /// against configured trust anchors. Unverified certificates never
@@ -42,8 +63,29 @@ pub struct TlsPeer {
     pub dns_names: Vec<String>,
 }
 
+impl TlsPeer {
+    /// A TLS peer whose client certificate chain the TLS stack did or did
+    /// not verify, with no SANs. Assign `spiffe_id` and `dns_names` from the
+    /// leaf certificate.
+    pub fn new(client_cert_verified: bool) -> Self {
+        Self {
+            client_cert_verified,
+            spiffe_id: None,
+            dns_names: Vec::new(),
+        }
+    }
+}
+
 /// Why a peer is trusted.
+///
+/// Later releases may add classifications. Code that grants anything on
+/// the basis of trust must match the trusted variants it accepts by name
+/// and treat every other value, including variants it does not know, as
+/// untrusted (fail closed), as [`PeerTrust::is_trusted`] and
+/// [`PeerTrust::is_verified_identity`] do. Never write a wildcard arm that
+/// grants trust.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerTrust {
     /// A verified client certificate matched a configured identity.
     VerifiedIdentity(String),
@@ -54,9 +96,14 @@ pub enum PeerTrust {
 }
 
 impl PeerTrust {
-    /// Returns `true` for either trusted variant.
+    /// Returns `true` for either trusted variant. Each variant is decided
+    /// by name, so a classification added later is untrusted until this
+    /// predicate is deliberately extended.
     pub fn is_trusted(&self) -> bool {
-        !matches!(self, Self::Untrusted)
+        match self {
+            Self::VerifiedIdentity(_) | Self::NetworkBoundary(_) => true,
+            Self::Untrusted => false,
+        }
     }
 
     /// Returns `true` only for a verified transport identity.
@@ -161,6 +208,7 @@ pub struct TrustedPeersConfig {
 
 /// Why a trusted-peer configuration was rejected.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrustedPeersError {
     /// An identity is neither a SPIFFE id nor `dns:<name>`.
     #[error("trusted identity {0:?} must be a spiffe:// id or dns:<name>")]
@@ -294,6 +342,7 @@ pub type SharedClassifier = Arc<dyn TrustClassifier>;
 /// Why a peer certificate could not be read.
 #[cfg(feature = "x509")]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerCertificateError {
     /// The DER encoding is invalid.
     #[error("peer certificate is not valid DER X.509")]

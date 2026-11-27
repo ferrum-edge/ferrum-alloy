@@ -193,12 +193,6 @@ impl AlloyClient {
         })
     }
 
-    /// The underlying reqwest client, for requests that need no Alloy
-    /// instrumentation or propagation.
-    pub fn inner(&self) -> &reqwest::Client {
-        &self.client
-    }
-
     /// Starts a request. Send it with [`AlloyClient::execute`].
     pub fn request(
         &self,

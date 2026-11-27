@@ -37,6 +37,7 @@ pub(crate) const OTEL_TRACING_PLUGIN_ID_SUFFIX: &str = "-otel-tracing";
 
 /// Generated gateway resources.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct EdgeResources {
     /// The proxy.
     pub proxy: Value,
@@ -48,6 +49,7 @@ pub struct EdgeResources {
 
 /// One file of a GitForgeOps resource tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResourceFile {
     /// Path relative to the repository root, e.g.
     /// `resources/ferrum/proxies/orders-api.yaml`.
@@ -62,7 +64,15 @@ pub struct ResourceFile {
 /// silently leaves it out.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("cannot export this manifest:\n  - {}", .0.join("\n  - "))]
+#[non_exhaustive]
 pub struct ExportError(pub Vec<String>);
+
+impl ExportError {
+    /// Every reason the manifest cannot be exported, one per entry.
+    pub fn reasons(&self) -> &[String] {
+        &self.0
+    }
+}
 
 /// Every reason the manifest cannot be exported, empty when it can. Modes
 /// are allowlisted, so a manifest built without [`ServiceManifest::validate`]

@@ -65,6 +65,7 @@ use ferrum_alloy_telemetry::cache::CacheControl;
 
 /// A verified caller.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Principal {
     /// `sub`.
     pub subject: Option<String>,
@@ -79,6 +80,20 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// A principal from issuer `issuer` with no subject, audiences, scopes,
+    /// or claims. [`JwtLayer`] builds principals only from verified tokens;
+    /// this constructor is for tests and for handlers driven outside it.
+    /// Assign the other fields as needed.
+    pub fn new(issuer: impl Into<String>) -> Self {
+        Self {
+            subject: None,
+            issuer: issuer.into(),
+            audiences: Vec::new(),
+            scopes: Vec::new(),
+            claims: Map::new(),
+        }
+    }
+
     /// Returns `true` when the token grants `scope`.
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
@@ -99,6 +114,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Principal {
 
 /// Why a token was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AuthError {
     /// No bearer token.
     #[error("missing bearer token")]

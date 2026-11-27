@@ -84,12 +84,7 @@ fn environment_endpoint_errors_never_disclose_the_endpoint() {
 #[test]
 #[ignore = "runs in an isolated process with endpoint environment variables set"]
 fn environment_endpoint_error_child_never_discloses_the_endpoint() {
-    let resource = ServiceResource {
-        name: "env-endpoint-test".to_owned(),
-        version: None,
-        instance_id: None,
-        environment: None,
-    };
+    let resource = ServiceResource::new("env-endpoint-test");
     let error = OtelPipeline::otlp(
         &resource,
         &OtlpConfig::default(),

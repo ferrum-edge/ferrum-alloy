@@ -34,7 +34,11 @@ use crate::model::{
 };
 
 /// Tunable thresholds. Defaults are documented in `docs/measurement-semantics.md`.
+///
+/// Start from [`Thresholds::default`] and assign the thresholds to change; a
+/// later release may add one.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Thresholds {
     /// Minimum share of time-to-headers a single operation must take to be
     /// reported as dominating.

@@ -25,6 +25,7 @@ pub const NOT_ROUTED: &str = "__not_routed__";
 
 /// A route label.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RouteLabel {
     /// A matched route template, e.g. `/orders/{id}`.
     Template(Arc<str>),
@@ -105,7 +106,20 @@ fn intern_template(template: &str) -> Arc<str> {
 /// A route template set by non-axum routers or by Alloy's own built-in
 /// endpoints (for example health checks).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExplicitRoute(pub Arc<str>);
+
+impl ExplicitRoute {
+    /// The route template `template`, e.g. `/orders/{id}`.
+    pub fn new(template: impl Into<Arc<str>>) -> Self {
+        Self(template.into())
+    }
+
+    /// The route template.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Layer that records the matched route into the request's [`RouteSlot`].
 #[derive(Debug, Clone, Copy, Default)]

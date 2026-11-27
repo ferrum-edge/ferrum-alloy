@@ -6,6 +6,7 @@ use crate::trace_context::{SpanId, TraceId, TraceParent, TraceState};
 
 /// How the trace for this request was rooted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TraceDecision {
     /// A valid `traceparent` was accepted as the parent (trusted peer, or an
     /// `any` policy).
@@ -134,7 +135,8 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for RequestContext {
 }
 
 /// Rejection when the telemetry layer is not installed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("request context unavailable: the Ferrum Alloy telemetry layer is not installed")]
 pub struct MissingRequestContext;
 
 #[cfg(feature = "axum")]

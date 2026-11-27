@@ -34,13 +34,7 @@ fn input() -> String {
 }
 
 fn collector() -> Producer {
-    Producer {
-        kind: ProducerKind::Collector,
-        name: "ferrum-alloy-cli".into(),
-        version: None,
-        instance: None,
-        unrecognized: std::collections::BTreeMap::new(),
-    }
+    Producer::new(ProducerKind::Collector, "ferrum-alloy-cli")
 }
 
 #[test]
@@ -86,11 +80,10 @@ fn imported_evidence_is_unverified_and_linked_by_parent_ids() {
     );
     assert_eq!(
         server.interval,
-        Some(Interval {
-            start_unix_nano: 1_790_000_000_700_000_000,
-            end_unix_nano: 1_790_000_000_830_000_000,
-            unrecognized: std::collections::BTreeMap::new(),
-        }),
+        Some(Interval::new(
+            1_790_000_000_700_000_000,
+            1_790_000_000_830_000_000
+        )),
         "the header phase ends at span start plus time to headers, not at the span end"
     );
     let op = report
@@ -351,11 +344,10 @@ fn header_interval_anchors_at_middleware_entry_not_span_creation() {
         .unwrap();
     assert_eq!(
         server.interval,
-        Some(Interval {
-            start_unix_nano: 1_790_000_000_600_000_000,
-            end_unix_nano: 1_790_000_000_730_000_000,
-            unrecognized: std::collections::BTreeMap::new(),
-        }),
+        Some(Interval::new(
+            1_790_000_000_600_000_000,
+            1_790_000_000_730_000_000
+        )),
         "span start (700 ms) minus preparation (100 ms), plus time to headers (130 ms)"
     );
 }
@@ -608,14 +600,7 @@ fn header_interval_ends_at_time_to_headers_not_at_span_end() {
     let server = report
         .observation("alloy:b7ad6b7169203331:time_to_headers")
         .unwrap();
-    assert_eq!(
-        server.interval,
-        Some(Interval {
-            start_unix_nano: T0,
-            end_unix_nano: T0 + 100 * MS,
-            unrecognized: std::collections::BTreeMap::new(),
-        })
-    );
+    assert_eq!(server.interval, Some(Interval::new(T0, T0 + 100 * MS)));
 }
 
 #[test]
@@ -653,14 +638,7 @@ fn body_phase_fixture_does_not_blame_the_database_on_time_to_headers() {
     let server = report
         .observation("alloy:b7ad6b7169203331:time_to_headers")
         .unwrap();
-    assert_eq!(
-        server.interval,
-        Some(Interval {
-            start_unix_nano: T0,
-            end_unix_nano: T0 + 100 * MS,
-            unrecognized: std::collections::BTreeMap::new(),
-        })
-    );
+    assert_eq!(server.interval, Some(Interval::new(T0, T0 + 100 * MS)));
     let findings = analyze(&report, &Thresholds::default());
     for code in HEADER_PHASE_CODES {
         assert!(!codes(&findings).contains(code), "{:?}", codes(&findings));

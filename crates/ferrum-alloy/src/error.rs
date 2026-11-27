@@ -7,6 +7,7 @@ use crate::config::ConfigError;
 
 /// Errors from building or running an Alloy application.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AlloyError {
     /// Configuration is invalid.
     #[error(transparent)]
@@ -19,6 +20,7 @@ pub enum AlloyError {
     Telemetry(String),
     /// A listener could not bind.
     #[error("cannot bind {listener} listener to {addr}: {source}")]
+    #[non_exhaustive]
     Bind {
         /// Which listener.
         listener: &'static str,
@@ -40,6 +42,7 @@ pub enum AlloyError {
         "Alloy serves paths on the application listener ahead of the application's router: {}; change the settings named or the routes",
         conflict_list(.conflicts)
     )]
+    #[non_exhaustive]
     ShadowedRoute {
         /// Every conflict, in the order Alloy's paths are served.
         conflicts: Vec<RouteConflict>,
@@ -55,6 +58,7 @@ pub enum AlloyError {
 /// An application route that a path Alloy serves on the application listener
 /// would shadow.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RouteConflict {
     /// The application route's pattern, or `None` for a `nest_service` whose
     /// prefix contains `path` (axum reports no pattern for it).

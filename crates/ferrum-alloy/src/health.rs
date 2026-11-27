@@ -25,6 +25,7 @@ use crate::lifecycle::Lifecycle;
 /// A readiness check failure. The message is shown only on the protected
 /// management listener; keep it free of secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CheckError(pub String);
 
 impl CheckError {
@@ -32,13 +33,26 @@ impl CheckError {
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
-}
 
-impl<E: std::error::Error> From<E> for CheckError {
-    fn from(error: E) -> Self {
+    /// A failure described by `error`'s message, for
+    /// `.map_err(CheckError::from_error)` in a check.
+    pub fn from_error(error: impl std::error::Error) -> Self {
         Self(error.to_string())
     }
+
+    /// The failure message.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
 }
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CheckError {}
 
 /// Boxed check future.
 pub type CheckFuture = Pin<Box<dyn Future<Output = Result<(), CheckError>> + Send>>;
@@ -61,6 +75,7 @@ where
 
 /// Result of one check.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct CheckResult {
     /// Check name.
     pub name: String,

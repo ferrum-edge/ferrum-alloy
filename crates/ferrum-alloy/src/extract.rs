@@ -114,6 +114,7 @@ fn query_problem(rejection: &QueryRejection) -> Problem {
 
 /// A field-level validation error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct FieldError {
     /// JSON pointer or field name.
     pub field: String,
@@ -123,15 +124,28 @@ pub struct FieldError {
 
 /// Validation errors returned by [`Validate`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidationErrors(pub Vec<FieldError>);
+
+impl FieldError {
+    /// An error for `field`.
+    pub fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
 
 impl ValidationErrors {
     /// Adds an error.
     pub fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
-        self.0.push(FieldError {
-            field: field.into(),
-            message: message.into(),
-        });
+        self.0.push(FieldError::new(field, message));
+    }
+
+    /// The errors added so far, in order.
+    pub fn errors(&self) -> &[FieldError] {
+        &self.0
     }
 
     /// Returns `Err(self)` when any error was added.
@@ -139,6 +153,20 @@ impl ValidationErrors {
         if self.0.is_empty() { Ok(()) } else { Err(self) }
     }
 }
+
+impl std::fmt::Display for ValidationErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, error) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{}: {}", error.field, error.message)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ValidationErrors {}
 
 /// Application-defined validation, run after deserialization.
 pub trait Validate {

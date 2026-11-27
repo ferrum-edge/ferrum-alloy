@@ -759,17 +759,10 @@ async fn main() -> Result<(), Failure> {
     }
 
     // 8. Offline diagnosis of the exported evidence.
-    let collector = Producer {
-        kind: ProducerKind::Collector,
-        name: "edge-e2e".into(),
-        version: None,
-        instance: None,
-        unrecognized: std::collections::BTreeMap::new(),
-    };
     let mut diagnosis: DiagnosticReport = otlp::import(
         &text,
         Some(&item_trace),
-        collector,
+        collector(),
         &ImportLimits::default(),
     )?;
     let findings = analyze(&diagnosis, &Thresholds::default());
@@ -817,13 +810,7 @@ async fn main() -> Result<(), Failure> {
 }
 
 fn collector() -> Producer {
-    Producer {
-        kind: ProducerKind::Collector,
-        name: "edge-e2e".into(),
-        version: None,
-        instance: None,
-        unrecognized: std::collections::BTreeMap::new(),
-    }
+    Producer::new(ProducerKind::Collector, "edge-e2e")
 }
 
 /// Exported spans, where per-case diagnoses are kept, and the Edge release
@@ -862,39 +849,20 @@ impl Evidence<'_> {
 
 /// A response header the client observed, as diagnosis input.
 fn client_header(name: &str, value: &str) -> Observation {
-    Observation {
-        id: format!("client:response-header:{}", name.to_ascii_lowercase()),
-        producer: Producer {
-            kind: ProducerKind::Client,
-            name: "edge-e2e".into(),
-            version: None,
-            instance: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        },
-        kind: ObservationKind::Event,
-        name: catalog::CLIENT_RESPONSE_HEADER.into(),
-        availability: Availability::Measured,
-        value: None,
-        unit: None,
-        boundaries: None,
-        clock: None,
-        interval: None,
-        scope: Scope {
-            leg: Leg::ClientToGateway,
-            service: None,
-            gateway: None,
-            attempt: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        },
-        span: None,
-        attributes: BTreeMap::from([
-            ("header".to_owned(), name.to_owned()),
-            ("value".to_owned(), value.to_owned()),
-        ]),
-        trust: Trust::Unverified,
-        evidence_ref: None,
-        unrecognized: BTreeMap::new(),
-    }
+    let mut observation = Observation::new(
+        format!("client:response-header:{}", name.to_ascii_lowercase()),
+        Producer::new(ProducerKind::Client, "edge-e2e"),
+        ObservationKind::Event,
+        catalog::CLIENT_RESPONSE_HEADER,
+        Availability::Measured,
+        Scope::new(Leg::ClientToGateway),
+        Trust::Unverified,
+    );
+    observation.attributes = BTreeMap::from([
+        ("header".to_owned(), name.to_owned()),
+        ("value".to_owned(), value.to_owned()),
+    ]);
+    observation
 }
 
 fn codes(findings: &[Finding]) -> String {

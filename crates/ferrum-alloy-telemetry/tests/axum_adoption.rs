@@ -275,9 +275,7 @@ async fn prometheus_rendering_escapes_labels() {
         |_request: Request<Body>| async { Ok::<_, Infallible>(StatusCode::OK.into_response()) },
     )));
     let mut request = Request::builder().uri("/q").body(Body::empty()).unwrap();
-    request
-        .extensions_mut()
-        .insert(ExplicitRoute(Arc::from(route)));
+    request.extensions_mut().insert(ExplicitRoute::new(route));
     let response = service.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     response.into_body().collect().await.unwrap();

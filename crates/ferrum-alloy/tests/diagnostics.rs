@@ -125,10 +125,7 @@ async fn serve_owned_from(
         builder = builder.header(*name, *value);
     }
     let mut request = builder.body(Body::empty()).unwrap();
-    let peer = PeerInfo {
-        remote_addr: Some(peer.parse().unwrap()),
-        ..PeerInfo::default()
-    };
+    let peer = PeerInfo::new(peer.parse().unwrap());
     request.extensions_mut().insert(peer);
     let response = parts.router.clone().oneshot(request).await.unwrap();
     let status = response.status();
@@ -187,10 +184,7 @@ async fn manage(parts: &AlloyParts, peer: IpAddr, path: &str, token: Option<&str
         builder = builder.header("authorization", format!("Bearer {token}"));
     }
     let mut request = builder.body(Body::empty()).unwrap();
-    let info = PeerInfo {
-        remote_addr: Some(SocketAddr::new(peer, 40_000)),
-        ..PeerInfo::default()
-    };
+    let info = PeerInfo::new(SocketAddr::new(peer, 40_000));
     request.extensions_mut().insert(info);
     let response = router.oneshot(request).await.unwrap();
     let status = response.status();

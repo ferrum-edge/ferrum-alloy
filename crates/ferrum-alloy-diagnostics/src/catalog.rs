@@ -6,6 +6,7 @@
 
 /// A catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CatalogEntry {
     /// Observation name.
     pub name: &'static str,

@@ -862,17 +862,12 @@ async fn handle(
                 return;
             }
         };
-        let peer = PeerInfo {
-            remote_addr: Some(remote),
-            tls: crate::tls::peer_identity(stream.get_ref().1),
-        };
+        let mut peer = PeerInfo::new(remote);
+        peer.tls = crate::tls::peer_identity(stream.get_ref().1);
         serve_io(stream, peer, active, builder, app, options, drain).await;
         return;
     }
-    let peer = PeerInfo {
-        remote_addr: Some(remote),
-        tls: None,
-    };
+    let peer = PeerInfo::new(remote);
     serve_io(stream, peer, active, builder, app, options, drain).await;
 }
 

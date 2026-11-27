@@ -100,6 +100,13 @@ fn report_bytes(report: &impl serde::Serialize, limits: &Limits) -> Result<Vec<u
     Ok(json)
 }
 
+/// This command as the collector of the reports it assembles.
+fn cli_collector() -> Producer {
+    let mut collector = Producer::new(ProducerKind::Collector, "ferrum-alloy-cli");
+    collector.version = Some(env!("CARGO_PKG_VERSION").into());
+    collector
+}
+
 /// Runs `diagnose`.
 pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     let mut redactor = CredentialRedactor::from_env();
@@ -169,13 +176,7 @@ fn run_redacted(
             crate::print(&out)?;
             return Ok(ExitCode::SUCCESS);
         }
-        let collector = Producer {
-            unrecognized: std::collections::BTreeMap::new(),
-            kind: ProducerKind::Collector,
-            name: "ferrum-alloy-cli".into(),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            instance: None,
-        };
+        let collector = cli_collector();
         // Strict even without --write-report; see the module documentation.
         let report = otlp::import(&text, args.trace_id.as_deref(), collector, &import_limits)
             .map_err(|e| CliError::Invalid(e.to_string()))?;
@@ -196,19 +197,11 @@ fn run_redacted(
             Some(parsed.claimed_verification),
         )
     } else if observation.is_some() {
-        let report = DiagnosticReport::new(Collection {
-            unrecognized: std::collections::BTreeMap::new(),
-            collector: Producer {
-                kind: ProducerKind::Collector,
-                name: "ferrum-alloy-cli".into(),
-                version: Some(env!("CARGO_PKG_VERSION").into()),
-                instance: None,
-                unrecognized: std::collections::BTreeMap::new(),
-            },
-            method: CollectionMethod::OfflineImport,
-            verification: Verification::Unverified,
-            notes: Vec::new(),
-        });
+        let report = DiagnosticReport::new(Collection::new(
+            cli_collector(),
+            CollectionMethod::OfflineImport,
+            Verification::Unverified,
+        ));
         (report, Vec::new(), None)
     } else {
         return Err(CliError::Invalid("pass --input, --otlp, or --url".into()));
@@ -275,28 +268,20 @@ mod tests {
 
     #[test]
     fn written_reports_fall_back_to_compact_json_to_fit_the_limit() {
-        let report = DiagnosticReport::new(Collection {
-            unrecognized: std::collections::BTreeMap::new(),
-            collector: Producer {
-                kind: ProducerKind::Collector,
-                name: "ferrum-alloy-cli".into(),
-                version: None,
-                instance: None,
-                unrecognized: std::collections::BTreeMap::new(),
-            },
-            method: CollectionMethod::OtlpFileImport,
-            verification: Verification::Unverified,
-            notes: vec!["compact when pretty does not fit".into()],
-        });
+        let mut collection = Collection::new(
+            Producer::new(ProducerKind::Collector, "ferrum-alloy-cli"),
+            CollectionMethod::OtlpFileImport,
+            Verification::Unverified,
+        );
+        collection.notes = vec!["compact when pretty does not fit".into()];
+        let report = DiagnosticReport::new(collection);
         let pretty = serde_json::to_vec_pretty(&report).unwrap();
         let compact = serde_json::to_vec(&report).unwrap();
         assert!(compact.len() < pretty.len());
         // The pretty form plus its newline fits exactly, then by one byte less.
         for (max_bytes, form) in [(pretty.len() + 1, &pretty), (pretty.len(), &compact)] {
-            let limits = Limits {
-                max_bytes,
-                ..Limits::default()
-            };
+            let mut limits = Limits::default();
+            limits.max_bytes = max_bytes;
             let mut expected = form.clone();
             expected.push(b'\n');
             assert_eq!(report_bytes(&report, &limits).unwrap(), expected);

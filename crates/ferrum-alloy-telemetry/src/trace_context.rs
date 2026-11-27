@@ -207,13 +207,17 @@ impl TraceParent {
 }
 
 /// Why an incoming trace context was not usable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TraceContextError {
     /// No `traceparent` header.
+    #[error("no traceparent header")]
     Missing,
     /// More than one `traceparent` header.
+    #[error("more than one traceparent header")]
     Duplicate,
     /// The value is malformed.
+    #[error("malformed traceparent")]
     Malformed,
 }
 

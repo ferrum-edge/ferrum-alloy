@@ -89,6 +89,7 @@ pub enum ImportError {
     TooLarge(String),
     /// A line is not valid JSON.
     #[error("line {line}: invalid JSON: {message}")]
+    #[non_exhaustive]
     InvalidJson {
         /// 1-based line number.
         line: usize,
