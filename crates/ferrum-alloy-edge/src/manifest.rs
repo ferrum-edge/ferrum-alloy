@@ -553,7 +553,10 @@ impl ServiceManifest {
 /// are an `@` anywhere in the authority, a backslash anywhere (in the
 /// authority or path the parser reads it as `/`, so the spelling and the
 /// parsed URL would disagree; a query or fragment one is refused too, for
-/// one simple rule), and port 0.
+/// one simple rule), and port 0. An upper-case scheme and an `@` before the
+/// first `/` (in a query or fragment too) are refused because the shared
+/// service-manifest v1 schema refuses them, so every endpoint Alloy accepts
+/// is valid under v1.
 fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
     const NOT_A_URL: &str = "gateway.otel_endpoint must be an http(s) URL with a host, a valid port, and no credentials";
     if endpoint
@@ -580,6 +583,20 @@ fn otel_endpoint_issue(endpoint: &str) -> Result<(), &'static str> {
         || url.port() == Some(0)
     {
         return Err(NOT_A_URL);
+    }
+    // The shared service-manifest v1 schema spells the scheme in lower case
+    // and admits no `@` before the first `/`, a query or fragment included.
+    // Refusing both keeps every endpoint Alloy accepts valid under v1, so
+    // other v1 readers (Foundry and Nexus previews) accept the manifest too.
+    if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
+        return Err("gateway.otel_endpoint must start with a lower-case http:// or https://");
+    }
+    let before_path = endpoint
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .unwrap_or_default();
+    if before_path.contains('@') {
+        return Err("gateway.otel_endpoint must not contain @ before the first /");
     }
     match url.host() {
         Some(url::Host::Domain(host)) if !host.is_empty() => {}

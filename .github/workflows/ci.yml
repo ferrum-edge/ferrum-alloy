@@ -279,10 +279,11 @@ jobs:
           tool: cargo-semver-checks@0.51.0
       - name: Every feature configuration against ${{ needs.semver-baseline.outputs.tag }}
         # The public API is covered under every combination of documented
-        # Cargo features. This compares default features, no default
-        # features, all features, and each feature alone (except `full`,
-        # which --all-features covers); a feature added since the baseline
-        # is compared only within --all-features. A change merged to main
+        # Cargo features, with the default feature set fixed for 1.x. This
+        # compares the default feature set itself, then the API with default
+        # features, no default features, all features, and each feature alone
+        # (except `full`, which --all-features covers); a feature added since
+        # the baseline is compared only within --all-features. A change merged to main
         # must be releasable as a 1.x minor release: breaking changes need a
         # new major version. Every crate is `publish = false`, which
         # --workspace skips, so the crate is named.
@@ -316,6 +317,18 @@ jobs:
             fi
           done
           failed=()
+          # The policy makes any change to a default feature set a major
+          # change; cargo-semver-checks only reports removals, so compare
+          # the sets themselves. A removed feature is its feature_missing lint.
+          default_features() {
+            python3 -I -c 'import sys, tomllib; print(" ".join(sorted(tomllib.load(sys.stdin.buffer).get("features", {}).get("default", []))))'
+          }
+          current_defaults=$(default_features < "$manifest")
+          released_defaults=$(git show "$BASELINE:$manifest" | default_features)
+          if [ "$current_defaults" != "$released_defaults" ]; then
+            echo "::error title=Semver checks ($PACKAGE)::the default feature set changed from [$released_defaults] to [$current_defaults], which only a major release may do"
+            failed+=("default feature set")
+          fi
           for config in "${configs[@]}"; do
             echo "::group::$PACKAGE $config"
             # Word splitting of $config is intended: it holds the flags.
@@ -327,7 +340,7 @@ jobs:
           done
           if [ "${#failed[@]}" -gt 0 ]; then
             for config in "${failed[@]}"; do
-              echo "::error title=Semver checks ($PACKAGE)::not releasable as a 1.x minor release with $config"
+              echo "::error title=Semver checks ($PACKAGE)::not releasable as a 1.x minor release: $config"
             done
             exit 1
           fi

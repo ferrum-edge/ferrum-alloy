@@ -56,7 +56,7 @@ The `fuzz-smoke` CI job builds every target with a pinned nightly and runs each 
 
 ### Scheduled runs
 
-`.github/workflows/fuzz-scheduled.yml` fuzzes every target for 30 minutes each week (Sunday 04:23 UTC), one runner per target, and can be dispatched by hand with another duration; a pull request that changes the workflow runs it for 60 seconds per target without saving the corpus. Each target starts from the corpus its earlier scheduled runs grew, kept in the Actions cache, plus the seed directories above, and saves the grown corpus for the next run. A crash fails the target's job and uploads the crashing input as the `fuzz-artifacts-<target>` artifact; reproduce and fix it as below.
+`.github/workflows/fuzz-scheduled.yml` fuzzes every target for 30 minutes each week (Sunday 04:23 UTC), one runner per target, and can be dispatched by hand with another duration; a pull request that changes the workflow runs it for 60 seconds per target without saving the corpus. Each target starts from the corpus its earlier default-branch runs grew plus the seed directories above, and saves the grown corpus for the next run. The corpus is kept in the Actions cache and as a `fuzz-corpus-<target>` artifact retained for 90 days; when the cache has been evicted (it expires after seven days unused), the run restores the newest retained artifact, so a skipped week does not lose the corpus. The dispatch duration must be 1 to 3600 seconds. A crash fails the target's job and uploads the crashing input as the `fuzz-artifacts-<target>` artifact; reproduce and fix it as below.
 
 ### Local runs
 

@@ -36,12 +36,16 @@ fn collect_files(root: &Path, current: &Path, files: &mut BTreeSet<String>) {
         if kind.is_dir() {
             collect_files(root, &path, files);
         } else {
-            files.insert(
-                path.strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
+            // Joined one native component at a time: a `\` inside a Unix
+            // file name stays part of that name instead of turning into a
+            // separator that could alias a pinned path.
+            let relative: Vec<String> = path
+                .strip_prefix(root)
+                .unwrap()
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            files.insert(relative.join("/"));
         }
     }
 }
@@ -350,31 +354,53 @@ fn is_pin_path(path: &str) -> bool {
         })
 }
 
+/// Why `parse_pin` refused a `PIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinError {
+    /// A byte order mark or another non-ASCII byte.
+    NotAscii,
+    CarriageReturn,
+    NoFinalNewline,
+    /// Line 1 is not `tag contracts-edge-X.Y.Z[-rN]`.
+    Tag,
+    /// Line 2 is not `commit <40 lowercase hex>`.
+    Commit,
+    /// The optional `edge_version` line is not `vX.Y.Z`.
+    EdgeVersion,
+    /// A file row does not start with 64 lowercase hex digits.
+    RowHash,
+    /// The hash is not followed by exactly two spaces.
+    RowSeparator,
+    /// The path breaks the path rules (or names `PIN`).
+    RowPath,
+    /// A path is not strictly after the previous one (unsorted or duplicate).
+    Order,
+    NoRows,
+}
+
 /// Parses `PIN` strictly by line position: every line must match its
 /// position in the format, and nothing is skipped.
-fn parse_pin(bytes: &[u8]) -> Result<Pin, String> {
+fn parse_pin(bytes: &[u8]) -> Result<Pin, PinError> {
     if !bytes.is_ascii() {
-        return Err("not ASCII (a byte order mark or other non-ASCII byte)".into());
+        return Err(PinError::NotAscii);
     }
-    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let text = std::str::from_utf8(bytes).map_err(|_| PinError::NotAscii)?;
     if text.contains('\r') {
-        return Err("carriage return".into());
+        return Err(PinError::CarriageReturn);
     }
-    let Some(body) = text.strip_suffix('\n') else {
-        return Err("no final newline".into());
-    };
+    let body = text.strip_suffix('\n').ok_or(PinError::NoFinalNewline)?;
     let mut lines = body.split('\n').peekable();
     let tag = lines
         .next()
         .and_then(|line| line.strip_prefix("tag "))
         .filter(|tag| is_contracts_tag(tag))
-        .ok_or("line 1 is not `tag contracts-edge-X.Y.Z[-rN]`")?
+        .ok_or(PinError::Tag)?
         .to_owned();
     let commit = lines
         .next()
         .and_then(|line| line.strip_prefix("commit "))
         .filter(|commit| is_lower_hex(commit, 40))
-        .ok_or("line 2 is not `commit <40 lowercase hex>`")?
+        .ok_or(PinError::Commit)?
         .to_owned();
     let mut edge_version = None;
     if let Some(version) = lines
@@ -382,30 +408,33 @@ fn parse_pin(bytes: &[u8]) -> Result<Pin, String> {
         .and_then(|line| line.strip_prefix("edge_version "))
     {
         if !is_release_tag(version) {
-            return Err(format!("edge_version {version:?} is not vX.Y.Z"));
+            return Err(PinError::EdgeVersion);
         }
         edge_version = Some(version.to_owned());
         lines.next();
     }
     let mut rows: Vec<(String, String)> = Vec::new();
     for line in lines {
-        let (hash, path) = match (line.get(..64), line.get(64..66), line.get(66..)) {
-            (Some(hash), Some("  "), Some(path)) if is_lower_hex(hash, 64) && is_pin_path(path) => {
-                (hash, path)
-            }
-            _ => return Err(format!("not a `<sha256>  <path>` row: {line:?}")),
-        };
+        let hash = line
+            .get(..64)
+            .filter(|hash| is_lower_hex(hash, 64))
+            .ok_or(PinError::RowHash)?;
+        if line.get(64..66) != Some("  ") {
+            return Err(PinError::RowSeparator);
+        }
+        let path = line
+            .get(66..)
+            .filter(|path| is_pin_path(path))
+            .ok_or(PinError::RowPath)?;
         if let Some((_, previous)) = rows.last()
             && previous.as_str() >= path
         {
-            return Err(format!(
-                "{path} is not after {previous} (unsorted or duplicate)"
-            ));
+            return Err(PinError::Order);
         }
         rows.push((hash.to_owned(), path.to_owned()));
     }
     if rows.is_empty() {
-        return Err("no file rows".into());
+        return Err(PinError::NoRows);
     }
     Ok(Pin {
         tag,
@@ -416,8 +445,11 @@ fn parse_pin(bytes: &[u8]) -> Result<Pin, String> {
 }
 
 fn pin() -> Pin {
-    let bytes = std::fs::read(repo_root().join(PIN)).unwrap();
-    parse_pin(&bytes).unwrap_or_else(|error| panic!("{PIN}: {error}"))
+    let path = repo_root().join(PIN);
+    let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
+    assert!(kind.is_file(), "{PIN} is not a regular file");
+    let bytes = std::fs::read(&path).unwrap();
+    parse_pin(&bytes).unwrap_or_else(|error| panic!("{PIN}: {error:?}"))
 }
 
 /// The pinned valid Finding fixtures, by repository path.
@@ -443,9 +475,33 @@ fn ferrum_contracts_pin_matches_the_vendored_files() {
         Some(ferrum_alloy_edge::contract::EDGE_RELEASE)
     );
 
-    let mut pinned_files = BTreeSet::new();
+    // The tree first: the vendored root itself must be a real directory
+    // (checked without following a link), and every entry under it a
+    // regular file or directory, before any pinned file is opened.
+    let vendored_root = root.join(VENDORED.trim_end_matches('/'));
+    let root_kind = std::fs::symlink_metadata(&vendored_root)
+        .unwrap()
+        .file_type();
+    assert!(
+        root_kind.is_dir(),
+        "{VENDORED} is not a real directory (a symbolic link is refused)"
+    );
+    let mut vendored_files = BTreeSet::new();
+    collect_files(&vendored_root, &vendored_root, &mut vendored_files);
+    vendored_files.remove("PIN");
+    let pinned_paths: BTreeSet<String> = pin.rows.iter().map(|(_, path)| path.clone()).collect();
+    let (missing, extra) = differences(&pinned_paths, &vendored_files);
+    assert!(
+        missing.is_empty(),
+        "vendored files missing from PIN: {missing:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "vendored files absent from PIN: {extra:?}"
+    );
+
     for (expected_hash, path) in &pin.rows {
-        let bytes = std::fs::read(root.join(VENDORED).join(path)).unwrap();
+        let bytes = std::fs::read(vendored_root.join(path)).unwrap();
         let actual_hash = ring::digest::digest(&ring::digest::SHA256, &bytes);
         let actual_hash = actual_hash
             .as_ref()
@@ -456,33 +512,20 @@ fn ferrum_contracts_pin_matches_the_vendored_files() {
             expected_hash, &actual_hash,
             "pinned contract file changed: {path}"
         );
-        pinned_files.insert(path.clone());
     }
-    let vendored_root = root.join(VENDORED);
-    let mut vendored_files = BTreeSet::new();
-    collect_files(&vendored_root, &vendored_root, &mut vendored_files);
-    vendored_files.remove("PIN");
-    let (missing, extra) = differences(&pinned_files, &vendored_files);
-    assert!(
-        missing.is_empty(),
-        "vendored files missing from PIN: {missing:?}"
-    );
-    assert!(
-        extra.is_empty(),
-        "vendored files absent from PIN: {extra:?}"
-    );
 }
 
 /// The strict parse refuses every malformed `PIN` the canonical format
-/// forbids, and accepts the optional `edge_version` header.
+/// forbids, each for the reason its case names, and accepts the optional
+/// `edge_version` header.
 #[test]
 fn pin_parser_refuses_every_malformed_line() {
     const A: &str = "a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410";
     const B: &str = "05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310";
     const COMMIT: &str = "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f";
-    let valid = format!(
-        "tag contracts-edge-0.9.21\ncommit {COMMIT}\nedge_version v0.9.21\n{A}  a-b/x.json\n{B}  a/x.json\n"
-    );
+    const TAG: &str = "tag contracts-edge-0.9.21\n";
+    let header = format!("{TAG}commit {COMMIT}\nedge_version v0.9.21\n");
+    let valid = format!("{header}{A}  a-b/x.json\n{B}  a/x.json\n");
     let parsed = parse_pin(valid.as_bytes()).unwrap();
     assert_eq!(parsed.edge_version.as_deref(), Some("v0.9.21"));
     assert_eq!(parsed.rows.len(), 2);
@@ -491,55 +534,136 @@ fn pin_parser_refuses_every_malformed_line() {
         parse_pin(without_edge.as_bytes()).unwrap().edge_version,
         None
     );
+    // One row after the headers: the row alone decides.
+    let one_row = |row: &str| format!("{header}{row}\n");
+    assert!(parse_pin(one_row(&format!("{A}  x.json")).as_bytes()).is_ok());
 
     let upper = A.to_ascii_uppercase();
-    for (case, text) in [
-        ("carriage returns", valid.replace('\n', "\r\n")),
-        ("byte order mark", format!("\u{feff}{valid}")),
-        ("no final newline", valid.trim_end().to_owned()),
-        ("blank line", valid.replace("v0.9.21\n", "v0.9.21\n\n")),
-        ("comment", format!("{valid}# note\n")),
-        ("unknown key", valid.replace("edge_version", "edge_release")),
+    for (case, text, expected) in [
         (
-            "repeated tag",
-            format!("{valid}tag contracts-edge-0.9.21\n"),
+            "carriage returns",
+            valid.replace('\n', "\r\n"),
+            PinError::CarriageReturn,
         ),
         (
+            "byte order mark",
+            format!("\u{feff}{valid}"),
+            PinError::NotAscii,
+        ),
+        (
+            "no final newline",
+            valid.trim_end().to_owned(),
+            PinError::NoFinalNewline,
+        ),
+        (
+            "blank line",
+            valid.replace("v0.9.21\n", "v0.9.21\n\n"),
+            PinError::RowHash,
+        ),
+        ("comment", format!("{valid}# note\n"), PinError::RowHash),
+        (
+            "unknown key",
+            valid.replace("edge_version", "edge_release"),
+            PinError::RowHash,
+        ),
+        ("repeated tag", format!("{valid}{TAG}"), PinError::RowHash),
+        (
             "headers out of order",
-            format!("commit {COMMIT}\ntag contracts-edge-0.9.21\n{A}  x.json\n"),
+            format!("commit {COMMIT}\n{TAG}{A}  x.json\n"),
+            PinError::Tag,
         ),
         (
             "edge_version after a row",
             format!("{valid}edge_version v0.9.21\n"),
+            PinError::RowHash,
         ),
-        ("revision 1", valid.replace("0.9.21\n", "0.9.21-r1\n")),
-        ("short commit", valid.replace(COMMIT, &COMMIT[..39])),
-        ("bad edge_version", valid.replace("v0.9.21", "v0.9.21-rc.1")),
-        ("uppercase hash", valid.replace(A, &upper)),
+        (
+            "revision 1",
+            valid.replacen(TAG, "tag contracts-edge-0.9.21-r1\n", 1),
+            PinError::Tag,
+        ),
+        (
+            "short commit",
+            valid.replace(COMMIT, &COMMIT[..39]),
+            PinError::Commit,
+        ),
+        (
+            "bad edge_version",
+            valid.replace("v0.9.21", "v0.9.21-rc.1"),
+            PinError::EdgeVersion,
+        ),
+        (
+            "uppercase hash",
+            one_row(&format!("{upper}  x.json")),
+            PinError::RowHash,
+        ),
+        (
+            "short hash",
+            one_row(&format!("{}  x.json", &A[..63])),
+            PinError::RowHash,
+        ),
         (
             "one space",
-            valid.replace(&format!("{A}  "), &format!("{A} ")),
+            one_row(&format!("{A} x.json")),
+            PinError::RowSeparator,
+        ),
+        (
+            "tab separator",
+            one_row(&format!("{A}\t\tx.json")),
+            PinError::RowSeparator,
         ),
         (
             "three spaces",
-            valid.replace(&format!("{A}  "), &format!("{A}   ")),
+            one_row(&format!("{A}   x.json")),
+            PinError::RowPath,
         ),
-        ("trailing space", valid.replace("a/x.json", "a/x.json ")),
-        ("unsorted", valid.replace("a-b/x.json", "b/x.json")),
-        ("duplicate", valid.replace("a-b/x.json", "a/x.json")),
-        ("PIN row", valid.replace("a/x.json", "PIN")),
-        ("dot segment", valid.replace("a/x.json", "a/../x.json")),
-        ("leading slash", valid.replace("a/x.json", "/x.json")),
-        ("trailing slash", valid.replace("a/x.json", "a/")),
-        ("empty segment", valid.replace("a/x.json", "a//x.json")),
         (
-            "no rows",
-            format!("tag contracts-edge-0.9.21\ncommit {COMMIT}\n"),
+            "trailing space",
+            one_row(&format!("{A}  x.json ")),
+            PinError::RowPath,
         ),
+        ("PIN row", one_row(&format!("{A}  PIN")), PinError::RowPath),
+        (
+            "dot segment",
+            one_row(&format!("{A}  a/../x.json")),
+            PinError::RowPath,
+        ),
+        (
+            "leading slash",
+            one_row(&format!("{A}  /x.json")),
+            PinError::RowPath,
+        ),
+        (
+            "trailing slash",
+            one_row(&format!("{A}  a/")),
+            PinError::RowPath,
+        ),
+        (
+            "empty segment",
+            one_row(&format!("{A}  a//x.json")),
+            PinError::RowPath,
+        ),
+        (
+            "backslash",
+            one_row(&format!("{A}  a\\x.json")),
+            PinError::RowPath,
+        ),
+        (
+            "unsorted",
+            valid.replace("a-b/x.json", "b/x.json"),
+            PinError::Order,
+        ),
+        (
+            "duplicate",
+            valid.replace("a-b/x.json", "a/x.json"),
+            PinError::Order,
+        ),
+        ("no rows", header.clone(), PinError::NoRows),
     ] {
-        assert!(
-            parse_pin(text.as_bytes()).is_err(),
-            "{case} was accepted: {text:?}"
+        assert_eq!(
+            parse_pin(text.as_bytes()).err(),
+            Some(expected),
+            "{case}: {text:?}"
         );
     }
 }
