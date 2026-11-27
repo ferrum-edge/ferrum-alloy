@@ -647,13 +647,13 @@ mod tests {
         assert_eq!(canonical("/api/a%2e/b"), "/api/a./b");
     }
 
-    /// CI submits every path of `contracts/fixtures/edge-parity/policy-paths.json`
+    /// CI submits every path of `fixtures/edge-parity/policy-paths.json`
     /// to a real Ferrum Edge and checks the recorded verdicts there; this
     /// checks that the port reaches the same ones.
     #[test]
     fn the_edge_parity_fixture_matches_the_port() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../contracts/fixtures/edge-parity/policy-paths.json");
+            .join("fixtures/edge-parity/policy-paths.json");
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{e}"));
         let fixture: serde_json::Value =
             serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}"));

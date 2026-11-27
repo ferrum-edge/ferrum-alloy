@@ -924,8 +924,9 @@ jobs:
         # Alloy repeats two Edge decisions: the canonical policy path
         # (crates/ferrum-alloy-edge/src/policy_path.rs) and the client resolved
         # from X-Forwarded-For with FERRUM_TRUSTED_PROXIES
-        # (GatewayContext::client_address). contracts/fixtures/edge-parity/
-        # records the verdicts Alloy's unit tests reach; ci/edge_parity.py
+        # (GatewayContext::client_address). crates/ferrum-alloy-edge/fixtures/
+        # edge-parity/ records the verdicts Alloy's unit tests reach;
+        # ci/edge_parity.py
         # sends every fixture path and chain through this Edge in front of an
         # echo backend and compares what the backend receives and what Edge's
         # access log resolves.

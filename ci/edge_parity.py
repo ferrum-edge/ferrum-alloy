@@ -8,8 +8,8 @@ Alloy repeats two decisions Edge makes, and must reach the same verdicts:
   `FERRUM_TRUSTED_PROXIES` (repeated by `GatewayContext::client_address`,
   crates/ferrum-alloy-edge/src/policy.rs).
 
-The expected verdicts live in contracts/fixtures/edge-parity/, and unit tests
-of those two modules check that Alloy reaches them. This script checks that
+The expected verdicts live in crates/ferrum-alloy-edge/fixtures/edge-parity/,
+and unit tests of those two modules check that Alloy reaches them. This script checks that
 the Edge image given on the command line reaches them too. It serves a
 header-echo backend on 127.0.0.1:8080 and runs Edge in file mode on the host
 network, in front of it through one catch-all proxy (`allow_path_parameters`
@@ -21,9 +21,16 @@ on, so the per-proxy `;` rule is not part of the comparison), with a global
   must reach the backend with exactly the canonical path, and a rejected one
   must get Edge's `400` with the error for that reason, without reaching the
   backend;
-* every forwarded-for case is sent from 127.0.0.1 with its inbound
-  `X-Forwarded-For`: the backend must receive exactly `forwarded`, and Edge's
-  access log must name `client`.
+* every forwarded-for case is sent from its peer address (127.0.0.1, which
+  is trusted, or 127.0.0.2, which is not) with its inbound `X-Forwarded-For`
+  field lines, raw bytes included: the backend must receive exactly
+  `forwarded`, and Edge's access log must name `client`. A case marked
+  `known_divergence` (Alloy, reading `forwarded`, resolves `alloy_client`)
+  must reproduce exactly, so a release that fixes it fails until the case
+  requires equality.
+
+The backend compares the request target from the raw request line, not the
+path the HTTP server library normalizes.
 
 Run: python3 -I ci/edge_parity.py --image <image> --release <label>
 Exit status 1 lists every disagreement; 2 means Edge could not be run.
@@ -43,7 +50,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-FIXTURES = REPO / "contracts/fixtures/edge-parity"
+FIXTURES = REPO / "crates/ferrum-alloy-edge/fixtures/edge-parity"
 CONTAINER = "edge-parity"
 BACKEND_PORT = 8080
 EDGE_PORT = 8000
@@ -81,7 +88,10 @@ class Echo(http.server.BaseHTTPRequestHandler):
     seen: list[dict] = []
 
     def do_GET(self):
-        record = {"path": self.path, "xff": self.headers.get_all("X-Forwarded-For") or []}
+        # `self.path` collapses a run of leading slashes; the raw request line
+        # holds the target exactly as Edge sent it.
+        target = self.raw_requestline.decode("latin-1").split(" ")[1]
+        record = {"path": target, "xff": self.headers.get_all("X-Forwarded-For") or []}
         Echo.seen.append(record)
         body = json.dumps(record).encode()
         self.send_response(200)
@@ -94,13 +104,20 @@ class Echo(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def send(target: str, headers: dict[str, str] | None = None) -> tuple[int, str]:
-    """Sends `target` byte for byte as the request target of one GET."""
-    connection = http.client.HTTPConnection("127.0.0.1", EDGE_PORT, timeout=10)
+def send(
+    target: str,
+    headers: list[tuple[str, bytes]] | None = None,
+    source: str = "127.0.0.1",
+) -> tuple[int, str]:
+    """Sends `target` byte for byte as the request target of one GET from
+    `source`, with each of `headers` as its own field line."""
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", EDGE_PORT, timeout=10, source_address=(source, 0)
+    )
     try:
         connection.putrequest("GET", target, skip_host=True, skip_accept_encoding=True)
         connection.putheader("Host", "localhost")
-        for name, value in (headers or {}).items():
+        for name, value in headers or []:
             connection.putheader(name, value)
         connection.endheaders()
         response = connection.getresponse()
@@ -185,17 +202,30 @@ def check_paths(fixture: dict, failures: list[str]) -> int:
     return len(fixture["cases"])
 
 
+def field_lines(case: dict) -> list[bytes]:
+    if "x_forwarded_for" in case:
+        return [case["x_forwarded_for"].encode("latin-1")]
+    return [line.encode("latin-1") for line in case.get("field_lines_latin1", [])]
+
+
+def describe(case: dict) -> str:
+    lines = field_lines(case)
+    peer = case.get("peer")
+    return f"X-Forwarded-For {lines!r}" + (f" from {peer}" if peer else "")
+
+
 def check_forwarded(fixture: dict, failures: list[str]) -> int:
     cases = fixture["cases"]
     for index, case in enumerate(cases):
         before = len(Echo.seen)
-        status, _ = send(f"/xff/{index}", {"X-Forwarded-For": case["x_forwarded_for"]})
+        headers = [("X-Forwarded-For", line) for line in field_lines(case)]
+        status, _ = send(f"/xff/{index}", headers, case.get("peer", fixture["edge_peer"]))
         reached = Echo.seen[before:]
         got = ", ".join(reached[-1]["xff"]) if reached else None
         if status != 200 or got != case["forwarded"]:
             failures.append(
-                f"X-Forwarded-For {case['x_forwarded_for']!r}: expected Edge to forward "
-                f"{case['forwarded']!r}; it answered {status} and forwarded {got!r}"
+                f"{describe(case)}: expected Edge to forward {case['forwarded']!r}; "
+                f"it answered {status} and forwarded {got!r}"
             )
     # The access log is written off the request path; wait for every record.
     wanted = {f"/xff/{index}" for index in range(len(cases))}
@@ -211,10 +241,18 @@ def check_forwarded(fixture: dict, failures: list[str]) -> int:
         time.sleep(0.5)
     for index, case in enumerate(cases):
         got = resolved.get(f"/xff/{index}")
-        if got != case["client"]:
+        if got == case["client"]:
+            continue
+        if "known_divergence" in case:
             failures.append(
-                f"X-Forwarded-For {case['x_forwarded_for']!r}: Alloy resolves client "
-                f"{case['client']}; Edge's access log says {got!r}"
+                f"{describe(case)}: the recorded divergence changed: Edge was expected to "
+                f"resolve {case['client']} (Alloy resolves {case['alloy_client']}); its "
+                f"access log says {got!r}. If Edge now agrees with Alloy, require equality."
+            )
+        else:
+            failures.append(
+                f"{describe(case)}: Alloy resolves client {case['client']}; "
+                f"Edge's access log says {got!r}"
             )
     return len(cases)
 
