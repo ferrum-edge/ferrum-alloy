@@ -21,11 +21,19 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Every regular file under `current`, relative to `root`. A symbolic link,
+/// or any entry that is neither a regular file nor a directory, fails.
 fn collect_files(root: &Path, current: &Path, files: &mut BTreeSet<String>) {
     for entry in std::fs::read_dir(current).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.is_dir() {
+        let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
+        assert!(
+            kind.is_dir() || kind.is_file(),
+            "{} is neither a regular file nor a directory",
+            path.display()
+        );
+        if kind.is_dir() {
             collect_files(root, &path, files);
         } else {
             files.insert(
@@ -209,6 +217,8 @@ fn gateway_error_tokens_match_the_diagnostics_catalog() {
 }
 
 const PIN: &str = "contracts/ferrum-contracts/PIN";
+/// The vendored directory; `PIN` rows are relative to it.
+const VENDORED: &str = "contracts/ferrum-contracts/";
 const LOCAL_SCHEMA: &str = "contracts/diagnostics/diagnostic-report.v1.schema.json";
 const FINDING_FIXTURES: &str = "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/";
 
@@ -289,15 +299,133 @@ fn pinned_json(path: &str) -> serde_json::Value {
     repo_json(&format!("contracts/ferrum-contracts/{path}"))
 }
 
+/// A parsed `contracts/ferrum-contracts/PIN` in the canonical consumer
+/// format (ferrum-contracts `docs/consumer-pins.md`).
+#[derive(Debug)]
+struct Pin {
+    tag: String,
+    commit: String,
+    edge_version: Option<String>,
+    /// `(sha256, path relative to the vendored directory)`, sorted by path.
+    rows: Vec<(String, String)>,
+}
+
+impl Pin {
+    /// Every pinned file's path in this repository.
+    fn repo_paths(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .map(|(_, path)| format!("{VENDORED}{path}"))
+            .collect()
+    }
+}
+
+/// `contracts-edge-X.Y.Z`, optionally `-rN` with N from 2.
+fn is_contracts_tag(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("contracts-edge-") else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let (version, revision) = match rest.split_once("-r") {
+        Some((version, revision)) => (version, Some(revision)),
+        None => (rest, None),
+    };
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3
+        && parts.into_iter().all(digits)
+        && revision.is_none_or(|r| digits(r) && !r.starts_with('0') && r != "1")
+}
+
+/// A row path: `/`-separated segments of `[A-Za-z0-9._-]`, none empty, `.`
+/// or `..`, and never `PIN` itself.
+fn is_pin_path(path: &str) -> bool {
+    path != "PIN"
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+}
+
+/// Parses `PIN` strictly by line position: every line must match its
+/// position in the format, and nothing is skipped.
+fn parse_pin(bytes: &[u8]) -> Result<Pin, String> {
+    if !bytes.is_ascii() {
+        return Err("not ASCII (a byte order mark or other non-ASCII byte)".into());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    if text.contains('\r') {
+        return Err("carriage return".into());
+    }
+    let Some(body) = text.strip_suffix('\n') else {
+        return Err("no final newline".into());
+    };
+    let mut lines = body.split('\n').peekable();
+    let tag = lines
+        .next()
+        .and_then(|line| line.strip_prefix("tag "))
+        .filter(|tag| is_contracts_tag(tag))
+        .ok_or("line 1 is not `tag contracts-edge-X.Y.Z[-rN]`")?
+        .to_owned();
+    let commit = lines
+        .next()
+        .and_then(|line| line.strip_prefix("commit "))
+        .filter(|commit| is_lower_hex(commit, 40))
+        .ok_or("line 2 is not `commit <40 lowercase hex>`")?
+        .to_owned();
+    let mut edge_version = None;
+    if let Some(version) = lines
+        .peek()
+        .and_then(|line| line.strip_prefix("edge_version "))
+    {
+        if !is_release_tag(version) {
+            return Err(format!("edge_version {version:?} is not vX.Y.Z"));
+        }
+        edge_version = Some(version.to_owned());
+        lines.next();
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for line in lines {
+        let (hash, path) = match (line.get(..64), line.get(64..66), line.get(66..)) {
+            (Some(hash), Some("  "), Some(path)) if is_lower_hex(hash, 64) && is_pin_path(path) => {
+                (hash, path)
+            }
+            _ => return Err(format!("not a `<sha256>  <path>` row: {line:?}")),
+        };
+        if let Some((_, previous)) = rows.last()
+            && previous.as_str() >= path
+        {
+            return Err(format!(
+                "{path} is not after {previous} (unsorted or duplicate)"
+            ));
+        }
+        rows.push((hash.to_owned(), path.to_owned()));
+    }
+    if rows.is_empty() {
+        return Err("no file rows".into());
+    }
+    Ok(Pin {
+        tag,
+        commit,
+        edge_version,
+        rows,
+    })
+}
+
+fn pin() -> Pin {
+    let bytes = std::fs::read(repo_root().join(PIN)).unwrap();
+    parse_pin(&bytes).unwrap_or_else(|error| panic!("{PIN}: {error}"))
+}
+
 /// The pinned valid Finding fixtures, by repository path.
 fn finding_fixtures() -> Vec<String> {
-    let pin = repo_json(PIN);
-    let fixtures: Vec<String> = pin["files"]
-        .as_object()
-        .unwrap()
-        .keys()
+    let fixtures: Vec<String> = pin()
+        .repo_paths()
+        .into_iter()
         .filter(|path| path.starts_with(FINDING_FIXTURES))
-        .cloned()
         .collect();
     assert!(!fixtures.is_empty(), "PIN has no valid Finding fixtures");
     fixtures
@@ -306,15 +434,18 @@ fn finding_fixtures() -> Vec<String> {
 #[test]
 fn ferrum_contracts_pin_matches_the_vendored_files() {
     let root = repo_root();
-    let pin = repo_json(PIN);
-    assert_eq!(pin["tag"], "contracts-edge-0.9.21");
-    assert_eq!(pin["commit"], "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f");
+    let pin = pin();
+    assert_eq!(pin.tag, "contracts-edge-0.9.21");
+    assert_eq!(pin.commit, "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f");
+    // The Edge release this pin targets is the contract baseline.
+    assert_eq!(
+        pin.edge_version.as_deref(),
+        Some(ferrum_alloy_edge::contract::EDGE_RELEASE)
+    );
 
-    let hashes = pin["files"].as_object().unwrap();
     let mut pinned_files = BTreeSet::new();
-    for (path, expected_hash) in hashes {
-        let full_path = root.join(path);
-        let bytes = std::fs::read(&full_path).unwrap();
+    for (expected_hash, path) in &pin.rows {
+        let bytes = std::fs::read(root.join(VENDORED).join(path)).unwrap();
         let actual_hash = ring::digest::digest(&ring::digest::SHA256, &bytes);
         let actual_hash = actual_hash
             .as_ref()
@@ -322,17 +453,12 @@ fn ferrum_contracts_pin_matches_the_vendored_files() {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            expected_hash.as_str().unwrap(),
-            actual_hash,
+            expected_hash, &actual_hash,
             "pinned contract file changed: {path}"
         );
-        pinned_files.insert(
-            path.strip_prefix("contracts/ferrum-contracts/")
-                .unwrap()
-                .to_owned(),
-        );
+        pinned_files.insert(path.clone());
     }
-    let vendored_root = root.join("contracts/ferrum-contracts");
+    let vendored_root = root.join(VENDORED);
     let mut vendored_files = BTreeSet::new();
     collect_files(&vendored_root, &vendored_root, &mut vendored_files);
     vendored_files.remove("PIN");
@@ -345,6 +471,77 @@ fn ferrum_contracts_pin_matches_the_vendored_files() {
         extra.is_empty(),
         "vendored files absent from PIN: {extra:?}"
     );
+}
+
+/// The strict parse refuses every malformed `PIN` the canonical format
+/// forbids, and accepts the optional `edge_version` header.
+#[test]
+fn pin_parser_refuses_every_malformed_line() {
+    const A: &str = "a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410";
+    const B: &str = "05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310";
+    const COMMIT: &str = "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f";
+    let valid = format!(
+        "tag contracts-edge-0.9.21\ncommit {COMMIT}\nedge_version v0.9.21\n{A}  a-b/x.json\n{B}  a/x.json\n"
+    );
+    let parsed = parse_pin(valid.as_bytes()).unwrap();
+    assert_eq!(parsed.edge_version.as_deref(), Some("v0.9.21"));
+    assert_eq!(parsed.rows.len(), 2);
+    let without_edge = format!("tag contracts-edge-0.9.9-r2\ncommit {COMMIT}\n{A}  x.json\n");
+    assert_eq!(
+        parse_pin(without_edge.as_bytes()).unwrap().edge_version,
+        None
+    );
+
+    let upper = A.to_ascii_uppercase();
+    for (case, text) in [
+        ("carriage returns", valid.replace('\n', "\r\n")),
+        ("byte order mark", format!("\u{feff}{valid}")),
+        ("no final newline", valid.trim_end().to_owned()),
+        ("blank line", valid.replace("v0.9.21\n", "v0.9.21\n\n")),
+        ("comment", format!("{valid}# note\n")),
+        ("unknown key", valid.replace("edge_version", "edge_release")),
+        (
+            "repeated tag",
+            format!("{valid}tag contracts-edge-0.9.21\n"),
+        ),
+        (
+            "headers out of order",
+            format!("commit {COMMIT}\ntag contracts-edge-0.9.21\n{A}  x.json\n"),
+        ),
+        (
+            "edge_version after a row",
+            format!("{valid}edge_version v0.9.21\n"),
+        ),
+        ("revision 1", valid.replace("0.9.21\n", "0.9.21-r1\n")),
+        ("short commit", valid.replace(COMMIT, &COMMIT[..39])),
+        ("bad edge_version", valid.replace("v0.9.21", "v0.9.21-rc.1")),
+        ("uppercase hash", valid.replace(A, &upper)),
+        (
+            "one space",
+            valid.replace(&format!("{A}  "), &format!("{A} ")),
+        ),
+        (
+            "three spaces",
+            valid.replace(&format!("{A}  "), &format!("{A}   ")),
+        ),
+        ("trailing space", valid.replace("a/x.json", "a/x.json ")),
+        ("unsorted", valid.replace("a-b/x.json", "b/x.json")),
+        ("duplicate", valid.replace("a-b/x.json", "a/x.json")),
+        ("PIN row", valid.replace("a/x.json", "PIN")),
+        ("dot segment", valid.replace("a/x.json", "a/../x.json")),
+        ("leading slash", valid.replace("a/x.json", "/x.json")),
+        ("trailing slash", valid.replace("a/x.json", "a/")),
+        ("empty segment", valid.replace("a/x.json", "a//x.json")),
+        (
+            "no rows",
+            format!("tag contracts-edge-0.9.21\ncommit {COMMIT}\n"),
+        ),
+    ] {
+        assert!(
+            parse_pin(text.as_bytes()).is_err(),
+            "{case} was accepted: {text:?}"
+        );
+    }
 }
 
 #[test]
@@ -646,7 +843,7 @@ fn pinned_diagnostic_schema_and_finding_fixtures_match_alloy() {
     let root = repo_root();
     let local_schema = repo_json(LOCAL_SCHEMA);
     let pinned_schema = pinned_json("schemas/diagnostic-report/v1.schema.json");
-    let pin = repo_json(PIN);
+    let pin = pin();
     let local_contract = &local_schema["x-contract"];
     let pinned_contract = &pinned_schema["x-contract"];
     for contract in [local_contract, pinned_contract] {
@@ -659,9 +856,17 @@ fn pinned_diagnostic_schema_and_finding_fixtures_match_alloy() {
                 .starts_with("EXISTING shared v1")
         );
     }
-    assert_eq!(local_contract["availability"], "unreleased");
-    assert_eq!(local_contract["contracts_tag"], pin["tag"]);
-    assert_eq!(local_contract["contracts_commit"], pin["commit"]);
+    // Alloy's own copy records its first release; the wire is unchanged
+    // since the qualified owner commit (the canonical metadata below keeps
+    // the freeze-time `unreleased`).
+    assert_eq!(local_contract["availability"], "released");
+    assert_eq!(local_contract["released_in"], "v0.1.0");
+    assert_eq!(
+        local_contract["released_commit"],
+        "c949978d7e90be33bac6a16e23744bcdd4ee3924"
+    );
+    assert_eq!(local_contract["contracts_tag"], pin.tag.as_str());
+    assert_eq!(local_contract["contracts_commit"], pin.commit.as_str());
     let release = &pinned_contract["coordinated_release"];
     // The unchanged canonical report records the original shared v1 freeze,
     // separately from the later tag whose bytes this consumer adopts.
@@ -1022,10 +1227,10 @@ const INVALID_MANIFEST_REASONS: &[(&str, &str)] = &[
 fn pinned_service_manifest_fixtures_match_validate() {
     use ferrum_alloy_edge::manifest::ServiceManifest;
 
-    let pin = repo_json(PIN);
+    let pinned = pin().repo_paths();
     let mut valid = 0;
     let mut invalid = 0;
-    for path in pin["files"].as_object().unwrap().keys() {
+    for path in &pinned {
         let Some(fixture) = path.strip_prefix(SERVICE_MANIFEST_FIXTURES) else {
             continue;
         };
@@ -1109,10 +1314,7 @@ fn pinned_service_manifest_fixtures_match_validate() {
     assert!(valid > 0 && invalid > 0, "{valid} valid, {invalid} invalid");
     for (known, _) in KNOWN_REFUSED_VALID_MANIFESTS {
         assert!(
-            pin["files"]
-                .as_object()
-                .unwrap()
-                .contains_key(&format!("{SERVICE_MANIFEST_FIXTURES}valid/{known}")),
+            pinned.contains(&format!("{SERVICE_MANIFEST_FIXTURES}valid/{known}")),
             "{known} is no longer pinned"
         );
     }

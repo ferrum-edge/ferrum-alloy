@@ -1,34 +1,31 @@
-{
-  "tag": "contracts-edge-0.9.21",
-  "commit": "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f",
-  "files": {
-    "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json": "a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410",
-    "contracts/ferrum-contracts/fixtures/diagnostic-finding/valid/ferrum-token-connection-failure.json": "05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/invalid/created-at-not-rfc3339.json": "5dd238f7181e62614efc6b37101ef91efe769f69dfb48c7da29eaffedd2acfa3",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/invalid/detail-missing-backend-dispatch.json": "732ed45d87cd3b7c3e156db0fe6b9f40d158e0b92942852080a74799ac414a0d",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/invalid/granular-class-as-token.json": "878490e5931cb23e63f8d8977d395fe12a1cbed823f93a31a2caa651c34d589a",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/invalid/malformed-ref.json": "7414870f66bc07ead1a1144390bd294ab21d30eb368df9f11d948cc8e0f9d483",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/invalid/unknown-schema-version.json": "9a05cc4aa1233698a40b509d38286232a54d6689ecea8f3948eee0502af24181",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/invalid/uppercase-replica-id.json": "b787676718fcce4ba65c5851c148b4d77e5fc087255e9c3fceb36b8c2f1ba056",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/connection-failure.json": "24cd4021a57682921fa8949befdffa40a530029636739e2f4eb0346d79d3d11c",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/plugin-rejection.json": "dc9fff20406f7854c7a6af245664502a0781585271b756e2cfec276ea6a94937",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/replica-tagged-reference.json": "3f4db86a4234d1d546675e479e6fc1b355b29063af79a0c7159a9fcd4a16532d",
-    "contracts/ferrum-contracts/fixtures/diagnostic-ref/valid/tls-retry.json": "65f56506897b83a08a4aef6fc490096813bac4a5faba1f91768c6bdc8c92f7a8",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/agents-bad-namespace.json": "db87d1f238f6f81e258dfcc2c7ff400f34c807866fd4cd354258386622130316",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/agents-enabled-not-boolean.json": "112341075e1e64ad0e1c4e652ec78de2eebae3c50303f7d81a1a931309c668c5",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/agents-unknown-key.json": "07ce370e9fbc5a4f8f704773bda051843704d7be1c8f3a0f92413b9cf2154068",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/base-path-without-trailing-slash.json": "11a4e6bb8eb43ee740a49823bf61aa1f1fe07a5bac4334f69ef497b4f1cab847",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/client-cert-without-key.json": "191d6af11742e42afbcef63f4fada37c26b3bf095a113be33c646d1b0d1af888",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/http3-protocol.json": "838850fc453772c832cc8d41e31848692489f3e833bf58d6bf7bbde791dae46b",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/tls-path-with-http-scheme.json": "21e4e15ea3e8c218703c7cf478425d8789e84d3780313ae66c819b8a64298417",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/unknown-field.json": "64efb979feb88b240f3474a94af42d3061e40e98e9066d57488a3e018dd6ab2e",
-    "contracts/ferrum-contracts/fixtures/service-manifest/invalid/unsupported-major.json": "5d878d704cc07c2271b0cdb899d645365f8336246089959d416f8f7f8fab3c20",
-    "contracts/ferrum-contracts/fixtures/service-manifest/valid/agents-enabled.json": "f1e8f091f7d5d8e2062721105844dc446176eae3cc36bd86515654a5197a7d6f",
-    "contracts/ferrum-contracts/fixtures/service-manifest/valid/orders-api.json": "6648737bc8ab6ee9523efd95487aba0cda295c850617635cf221dccdfefcf649",
-    "contracts/ferrum-contracts/fixtures/service-manifest/valid/plain-http.json": "406524f908fe1d9bac6f73031cfad3fd4a646cf065872eeeb2b60857e1a98cdd",
-    "contracts/ferrum-contracts/schemas/diagnostic-ref/v1.schema.json": "11508c19f571b57be7e755b5f17409ebc73cd270debd015d1a4ea49a37950520",
-    "contracts/ferrum-contracts/schemas/diagnostic-report/v1.schema.json": "f4562508329516dc18b7df481ffb6586ef48d19ab90da1ba7514e2d97ba8b177",
-    "contracts/ferrum-contracts/vocabularies/gateway-errors.json": "34d7c50b8a797c29990d5014d34909915bd49148f053a3f2182e2fd7009c797b",
-    "contracts/ferrum-contracts/vocabularies/gateway-headers.json": "cb528f7a1f50c0efd971765358d355307c7718ec40b462d71f88e554aaf76ad6"
-  }
-}
+tag contracts-edge-0.9.21
+commit 92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f
+edge_version v0.9.21
+a5c04514fa38df6b27182c142fcd7abcf9f0c8829a9f0a0b49e5cab80240e410  fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json
+05dfe77ea86095ac2478eae53a8c7d06b0c0b15d63d964fc4dfa206a6983b310  fixtures/diagnostic-finding/valid/ferrum-token-connection-failure.json
+5dd238f7181e62614efc6b37101ef91efe769f69dfb48c7da29eaffedd2acfa3  fixtures/diagnostic-ref/invalid/created-at-not-rfc3339.json
+732ed45d87cd3b7c3e156db0fe6b9f40d158e0b92942852080a74799ac414a0d  fixtures/diagnostic-ref/invalid/detail-missing-backend-dispatch.json
+878490e5931cb23e63f8d8977d395fe12a1cbed823f93a31a2caa651c34d589a  fixtures/diagnostic-ref/invalid/granular-class-as-token.json
+7414870f66bc07ead1a1144390bd294ab21d30eb368df9f11d948cc8e0f9d483  fixtures/diagnostic-ref/invalid/malformed-ref.json
+9a05cc4aa1233698a40b509d38286232a54d6689ecea8f3948eee0502af24181  fixtures/diagnostic-ref/invalid/unknown-schema-version.json
+b787676718fcce4ba65c5851c148b4d77e5fc087255e9c3fceb36b8c2f1ba056  fixtures/diagnostic-ref/invalid/uppercase-replica-id.json
+24cd4021a57682921fa8949befdffa40a530029636739e2f4eb0346d79d3d11c  fixtures/diagnostic-ref/valid/connection-failure.json
+dc9fff20406f7854c7a6af245664502a0781585271b756e2cfec276ea6a94937  fixtures/diagnostic-ref/valid/plugin-rejection.json
+3f4db86a4234d1d546675e479e6fc1b355b29063af79a0c7159a9fcd4a16532d  fixtures/diagnostic-ref/valid/replica-tagged-reference.json
+65f56506897b83a08a4aef6fc490096813bac4a5faba1f91768c6bdc8c92f7a8  fixtures/diagnostic-ref/valid/tls-retry.json
+db87d1f238f6f81e258dfcc2c7ff400f34c807866fd4cd354258386622130316  fixtures/service-manifest/invalid/agents-bad-namespace.json
+112341075e1e64ad0e1c4e652ec78de2eebae3c50303f7d81a1a931309c668c5  fixtures/service-manifest/invalid/agents-enabled-not-boolean.json
+07ce370e9fbc5a4f8f704773bda051843704d7be1c8f3a0f92413b9cf2154068  fixtures/service-manifest/invalid/agents-unknown-key.json
+11a4e6bb8eb43ee740a49823bf61aa1f1fe07a5bac4334f69ef497b4f1cab847  fixtures/service-manifest/invalid/base-path-without-trailing-slash.json
+191d6af11742e42afbcef63f4fada37c26b3bf095a113be33c646d1b0d1af888  fixtures/service-manifest/invalid/client-cert-without-key.json
+838850fc453772c832cc8d41e31848692489f3e833bf58d6bf7bbde791dae46b  fixtures/service-manifest/invalid/http3-protocol.json
+21e4e15ea3e8c218703c7cf478425d8789e84d3780313ae66c819b8a64298417  fixtures/service-manifest/invalid/tls-path-with-http-scheme.json
+64efb979feb88b240f3474a94af42d3061e40e98e9066d57488a3e018dd6ab2e  fixtures/service-manifest/invalid/unknown-field.json
+5d878d704cc07c2271b0cdb899d645365f8336246089959d416f8f7f8fab3c20  fixtures/service-manifest/invalid/unsupported-major.json
+f1e8f091f7d5d8e2062721105844dc446176eae3cc36bd86515654a5197a7d6f  fixtures/service-manifest/valid/agents-enabled.json
+6648737bc8ab6ee9523efd95487aba0cda295c850617635cf221dccdfefcf649  fixtures/service-manifest/valid/orders-api.json
+406524f908fe1d9bac6f73031cfad3fd4a646cf065872eeeb2b60857e1a98cdd  fixtures/service-manifest/valid/plain-http.json
+11508c19f571b57be7e755b5f17409ebc73cd270debd015d1a4ea49a37950520  schemas/diagnostic-ref/v1.schema.json
+f4562508329516dc18b7df481ffb6586ef48d19ab90da1ba7514e2d97ba8b177  schemas/diagnostic-report/v1.schema.json
+34d7c50b8a797c29990d5014d34909915bd49148f053a3f2182e2fd7009c797b  vocabularies/gateway-errors.json
+cb528f7a1f50c0efd971765358d355307c7718ec40b462d71f88e554aaf76ad6  vocabularies/gateway-headers.json

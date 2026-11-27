@@ -54,9 +54,13 @@ To run it locally, start `cargo run -p example-openapi-ui` with `FERRUM_ALLOY_MA
 
 The `fuzz-smoke` CI job builds every target with a pinned nightly and runs each for 60 seconds, starting from the seed corpus and with the target's dictionary from `fuzz/dicts/` when there is one. It first checks that `fuzz/Cargo.lock` is complete: if cargo would change it, the job fails and prints the difference. If a target fails, the job uploads the crashing inputs as the `fuzz-artifacts` artifact.
 
-### Longer runs
+### Scheduled runs
 
-Longer runs are manual:
+`.github/workflows/fuzz-scheduled.yml` fuzzes every target for 30 minutes each week (Sunday 04:23 UTC), one runner per target, and can be dispatched by hand with another duration. Each target starts from the corpus its earlier scheduled runs grew, kept in the Actions cache, plus the seed directories above, and saves the grown corpus for the next run. A crash fails the target's job and uploads the crashing input as the `fuzz-artifacts-<target>` artifact; reproduce and fix it as below.
+
+### Local runs
+
+Runs of any length can also be made locally:
 
 ```bash
 cargo install cargo-fuzz --locked

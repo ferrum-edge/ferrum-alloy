@@ -1,0 +1,107 @@
+name: Scheduled fuzzing
+
+# Long fuzzing runs, beyond ci.yml's 60-second "Fuzz smoke" per target. Each
+# target runs for FUZZ_SECONDS on its own runner, starting from its corpus of
+# earlier scheduled runs (kept in the Actions cache) plus the committed seeds,
+# and saves the grown corpus for the next run. A crash fails the job and
+# uploads the crashing input (docs/testing.md#fuzzing).
+
+on:
+  schedule:
+    # Weekly, Sunday 04:23 UTC.
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        required: false
+        default: "1800"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-scheduled
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: traceparent
+            seeds: fuzz/seeds/traceparent
+          - target: request_id
+            seeds: fuzz/seeds/request_id
+          - target: diagnostic_report
+            seeds: contracts/fixtures/reports
+          - target: otlp_import
+            seeds: contracts/fixtures/otlp
+          - target: config_file
+            seeds: contracts/fixtures/manifests fuzz/seeds/config_file
+          - target: edge_record
+            seeds: fuzz/seeds/edge_record
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-15
+      FUZZ_SECONDS: ${{ inputs.seconds || '1800' }}
+      TARGET: ${{ matrix.target }}
+      SEEDS: ${{ matrix.seeds }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Check the committed fuzz lockfile
+        # cargo-fuzz has no --locked flag. Resolve first and fail, showing the
+        # difference, if fuzz/Cargo.lock would change.
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- fuzz/Cargo.lock
+          cargo "+$FUZZ_TOOLCHAIN" fetch --manifest-path fuzz/Cargo.toml --locked
+      - name: Restore the corpus of earlier runs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Build ${{ matrix.target }}
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build "$TARGET"
+      - name: Fuzz ${{ matrix.target }} for ${{ env.FUZZ_SECONDS }} seconds
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          mkdir -p "$root/fuzz/corpus/$TARGET"
+          dirs=()
+          for seed in $SEEDS; do
+            dirs+=("$root/$seed")
+          done
+          dict=()
+          if [ -f "$root/fuzz/dicts/$TARGET.dict" ]; then
+            dict=("-dict=$root/fuzz/dicts/$TARGET.dict")
+          fi
+          cargo "+$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$root/fuzz/corpus/$TARGET" "${dirs[@]}" -- \
+            -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 "${dict[@]}"
+      - name: Save the corpus for the next run
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

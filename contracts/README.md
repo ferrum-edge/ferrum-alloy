@@ -25,12 +25,22 @@ Owner and consumer qualification, the shared v1 freeze and the adoption history
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
 diagnostic-ref schemas, and diagnostic-finding, diagnostic-ref, and service-manifest fixtures from the tag recorded
-in `ferrum-contracts/PIN`: `contracts-edge-0.9.21` at
+in `ferrum-contracts/PIN`. The PIN uses the canonical consumer format of
+ferrum-contracts' [consumer-pins.md](https://github.com/ferrum-edge/ferrum-contracts/blob/main/docs/consumer-pins.md):
+plain text with `tag`, `commit` and `edge_version` lines, then one
+`<sha256>  <path>` row per vendored file, paths relative to
+`ferrum-contracts/` and sorted byte by byte (`sha256sum -c` checks it from that
+directory). The pairing test parses it strictly by line position and runs every
+required check (strict parse, headers, sorted unique rows, tree equality with
+no symbolic links, content hashes). The pin is `contracts-edge-0.9.21` at
 `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` (SSH-signed tag object
 `3e7e10ef6d4aefa9874319326943ec2186b29981`). Both shared v1 contracts are now
 EXISTING/implemented; their metadata records Alloy owner availability as
 `unreleased`, the provenance of the original freeze, which the vendored bytes
-keep even though Alloy has since been released as `v0.1.0`. The
+keep even though Alloy has since been released as `v0.1.0`. Alloy's own copy,
+`diagnostics/diagnostic-report.v1.schema.json`, records `availability:
+released` in `v0.1.0` (`c949978d7e90be33bac6a16e23744bcdd4ee3924`); its wire
+is unchanged since the qualified owner commit. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in
 `crates/ferrum-alloy-edge/tests/pairing.rs` verify every vendored file's
@@ -47,8 +57,9 @@ pinned meanings separately so that a pin bump that changes one fails until
 Alloy's explanations are re-reviewed.
 
 To bump the pin, select a released `contracts-edge-*` tag, download the adopted
-files from that tag into the same paths, update the tag, commit SHA, and file
-hashes in `ferrum-contracts/PIN` and the pinned tag/commit assertion in
+files from that tag into the same paths, update the `tag`, `commit`,
+`edge_version` and file rows in `ferrum-contracts/PIN` (keeping the rows
+sorted) and the pinned tag/commit assertion in
 `crates/ferrum-alloy-edge/tests/pairing.rs`, then run CI. Update local
 vocabulary copies to match and review any reported drift, including the
 recorded pinned meanings.
