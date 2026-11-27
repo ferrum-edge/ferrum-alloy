@@ -20,7 +20,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use http::{Method, Request, Response, StatusCode, Version};
@@ -34,7 +34,9 @@ use tracing::field::Empty;
 use crate::body::InstrumentedBody;
 use crate::cache::is_shared_cacheable;
 use crate::context::{RequestContext, TraceDecision};
-use crate::evidence::{EvidenceSink, Pending, RequestEvidence, RequestIdOrigin, TenantTag};
+use crate::evidence::{
+    Collector, EvidenceSink, Pending, RequestEvidence, RequestIdOrigin, RequestScope, TenantTag,
+};
 use crate::metrics::{Metrics, method_label};
 use crate::peer::{ClassifiedPeer, PeerTrust, SharedClassifier, TrustNobody, peer_info};
 use crate::request_id::{DEFAULT_REQUEST_ID_HEADER, RequestId, RequestIdSource};
@@ -593,6 +595,12 @@ where
                 tenant,
                 trace_decision: trace.decision,
                 peer_trust: peer_trust.label(),
+                // Middleware entry on the wall clock: now, less the
+                // monotonic time already spent since `start`.
+                started_at: SystemTime::now()
+                    .checked_sub(start.elapsed())
+                    .unwrap_or(SystemTime::UNIX_EPOCH),
+                collector: Arc::new(Collector::new(start, span_id)),
             })
         });
         request.extensions_mut().insert(RequestContext {
@@ -632,6 +640,7 @@ where
         };
         let inner = {
             let _entered = span.enter();
+            let _scope = RequestScope::enter(finalizer.collector());
             self.inner.call(request)
         };
         ResponseFuture {
@@ -690,6 +699,7 @@ where
         };
         let result = {
             let _entered = state.span.enter();
+            let _scope = RequestScope::enter(state.finalizer.collector());
             ready!(this.inner.poll(cx))
         };
         let Some(mut state) = this.state.take() else {
@@ -806,6 +816,12 @@ fn millis(duration: Duration) -> f64 {
 impl Finalizer {
     pub(crate) fn span(&self) -> &Span {
         &self.span
+    }
+
+    /// Where the request's operations are gathered, while an evidence sink
+    /// waits for it.
+    pub(crate) fn collector(&self) -> Option<&Arc<Collector>> {
+        self.evidence.as_ref().map(|pending| &pending.collector)
     }
 
     fn route_label(&self) -> &str {
@@ -929,7 +945,10 @@ impl Finalizer {
                 tenant,
                 trace_decision,
                 peer_trust,
+                started_at,
+                collector,
             } = *pending;
+            let collected = collector.close();
             sink.record(RequestEvidence {
                 diagnostic_id,
                 request_id,
@@ -945,6 +964,10 @@ impl Finalizer {
                 outcome,
                 trace_decision,
                 peer_trust,
+                started_at,
+                admission_wait: collected.admission_wait,
+                operations: collected.operations,
+                operations_dropped: collected.operations_dropped,
             });
         }
 
