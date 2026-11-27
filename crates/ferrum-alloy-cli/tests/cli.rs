@@ -860,6 +860,43 @@ fn check_refuses_edge_settings_without_the_edge_feature() {
     }
 }
 
+/// Management TLS and its client verification are reported apart from the
+/// application listener's.
+#[test]
+fn check_reports_management_tls_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "management-tls.toml",
+        "[management.tls]\ncert_path = \"cert.pem\"\nkey_path = \"key.pem\"\nclient_ca_path = \"ca.pem\"\nclient_auth = \"required\"\n",
+    );
+    let output = run(&[
+        "check",
+        "--no-env",
+        "--config",
+        &path,
+        "--features",
+        "tls",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stdout(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let enabled = |name: &str| {
+        json["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {json}"))["enabled"]
+            .clone()
+    };
+    assert_eq!(enabled("management-tls"), true, "{json}");
+    assert_eq!(enabled("management-mtls"), true, "{json}");
+    assert_eq!(enabled("tls"), false, "the application listener: {json}");
+    assert_eq!(enabled("mtls-client-verification"), false, "{json}");
+}
+
 #[test]
 fn check_refuses_cors_entries_startup_refuses() {
     let dir = tempfile::tempdir().unwrap();

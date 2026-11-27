@@ -606,8 +606,10 @@ pub struct AlloyParts {
     /// trust can be evaluated.
     pub router: Router,
     /// The management router, when enabled. [`AlloyParts::serve`] and
-    /// [`AlloyParts::serve_on`] refuse to serve it on a listener that
-    /// [`AlloyParts::check_management_listener`] refuses. Without a
+    /// [`AlloyParts::serve_on`] apply the policy of
+    /// [`AlloyParts::check_management_listener`] to the listener they serve,
+    /// except that they serve diagnostic retrieval off loopback over the
+    /// management TLS loaded from `management.tls`. Without a
     /// management token only minimal probes and separately authorized
     /// diagnostics are accessible. When you serve it yourself, call
     /// [`AlloyParts::check_management_listener`] on your
@@ -667,20 +669,45 @@ impl AlloyParts {
     }
 
     /// Checks that [`AlloyParts::management_router`] may be served on
-    /// `listener`, by the address it is actually bound to: any loopback
-    /// address is accepted, and another address only with a management
-    /// token. With diagnostic retrieval installed (feature `diagnostics`),
-    /// another address also needs `management.tls`. An address that cannot
-    /// be read is refused.
+    /// `listener`, a plain TCP listener you serve yourself, by the address it
+    /// is actually bound to: any loopback address is accepted, and another
+    /// address only with a management token. With diagnostic retrieval
+    /// installed (feature `diagnostics`), another address is refused even
+    /// with `management.tls`: Alloy applies that TLS only on the listeners it
+    /// serves itself, so serve retrieval off loopback with
+    /// [`AlloyParts::serve`] or [`AlloyParts::serve_on`]. An address that
+    /// cannot be read is refused.
     ///
-    /// [`AlloyParts::serve_on`] calls this before serving. Call it yourself
-    /// before serving the management router on your own listener.
+    /// Call it before serving the management router on your own listener.
+    /// [`AlloyParts::serve_on`] applies the same policy, counting
+    /// `management.tls` only when its certificate was loaded when the parts
+    /// were composed.
     ///
     /// # Errors
     ///
     /// [`AlloyError::Config`] when the policy refuses the address, and
     /// [`AlloyError::Serve`] when the address cannot be read.
     pub fn check_management_listener(&self, listener: &TcpListener) -> Result<(), AlloyError> {
+        self.check_served_listener(listener, false)
+    }
+
+    /// Whether Alloy's own management listener serves TLS: the certificate
+    /// loaded when the parts were composed, not the (public, mutable)
+    /// settings. Reloads replace the material, never the TLS itself.
+    fn management_tls_loaded(&self) -> bool {
+        #[cfg(feature = "tls")]
+        {
+            self.management_tls.is_some()
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            false
+        }
+    }
+
+    /// The listener policy, with `tls` saying whether the listener will be
+    /// served over TLS.
+    fn check_served_listener(&self, listener: &TcpListener, tls: bool) -> Result<(), AlloyError> {
         let addr = listener.local_addr().map_err(AlloyError::Serve)?;
         let mut errors = Vec::new();
         if let Err(message) = management::check_listener(addr, self.management_token) {
@@ -688,14 +715,18 @@ impl AlloyParts {
         }
         #[cfg(feature = "diagnostics")]
         if self.diagnostics_retrieval
-            && let Err(message) = crate::diagnostics::check_listener(
-                addr,
-                self.config.management.tls.is_some(),
-                self.management_token,
-            )
+            && let Err(mut message) =
+                crate::diagnostics::check_listener(addr, tls, self.management_token)
         {
+            if !tls && self.config.management.tls.is_some() {
+                message.push_str(
+                    "; management.tls applies only to a listener Alloy serves itself (AlloyParts::serve or serve_on), with the certificate loaded when the parts were composed",
+                );
+            }
             errors.push(message);
         }
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = tls;
         if errors.is_empty() {
             Ok(())
         } else {
@@ -734,8 +765,10 @@ impl AlloyParts {
     /// `management.bind`, but it gets the same access policy, checked against
     /// the address it is actually bound to before either listener serves:
     /// off loopback, a management token is required, and diagnostic
-    /// retrieval (feature `diagnostics`) also needs `management.tls`. It
-    /// fails with [`AlloyError::Config`] otherwise.
+    /// retrieval (feature `diagnostics`) also needs management TLS, as
+    /// loaded from `management.tls` when the parts were composed (editing
+    /// [`AlloyParts::config`] afterwards changes neither). It fails with
+    /// [`AlloyError::Config`] otherwise.
     ///
     /// After shutdown it returns only once no HTTP/2 stream handler is still
     /// running and every TCP connection on both listeners is shut down:
@@ -759,10 +792,12 @@ impl AlloyParts {
         // Validation checked `management.bind`, but a listener passed here
         // can be bound anywhere, so the policy is applied again to the
         // address that is actually served, before anything is.
+        // TLS counts only as the acceptor actually handed to the server.
+        let management_tls = self.management_tls_loaded();
         if self.management_router.is_some()
             && let Some(listener) = &management_listener
         {
-            self.check_management_listener(listener)?;
+            self.check_served_listener(listener, management_tls)?;
         }
         let config = &self.config;
         let options = ServeOptions {
@@ -792,7 +827,7 @@ impl AlloyParts {
             listen = ?app_addr,
             management = ?management_addr,
             tls = config.server.tls.is_some(),
-            management_tls = config.management.tls.is_some(),
+            management_tls,
             features = ?crate::enabled_features(),
             "serving"
         );

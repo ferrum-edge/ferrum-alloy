@@ -113,6 +113,21 @@ fn capabilities(config: &AlloyConfig) -> Vec<(&'static str, bool, &'static str)>
         ("postgres", config.database.url.is_some(), "postgres"),
         ("jwt", config.auth.jwt.is_some(), "jwt"),
         ("management-listener", config.management.enabled, "-"),
+        (
+            "management-tls",
+            config.management.enabled && config.management.tls.is_some(),
+            "tls",
+        ),
+        (
+            "management-mtls",
+            config.management.enabled
+                && config
+                    .management
+                    .tls
+                    .as_ref()
+                    .is_some_and(|t| t.client_auth != ClientAuth::None),
+            "tls",
+        ),
         ("app-health-endpoints", config.health.app_endpoints, "-"),
         (
             "server-timing",

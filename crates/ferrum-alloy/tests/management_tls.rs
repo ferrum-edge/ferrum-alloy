@@ -122,3 +122,77 @@ async fn the_management_listener_serves_over_tls_only() {
     assert_eq!(reply.status, StatusCode::OK);
     server.lifecycle.trigger_shutdown();
 }
+
+/// Off loopback, Alloy's own listener serves retrieval over the management
+/// TLS it loaded, even after the settings are edited, and plain HTTP gets
+/// no answer; the preflight for a listener the application would serve
+/// itself refuses the same address.
+#[cfg(feature = "diagnostics")]
+#[tokio::test]
+async fn retrieval_is_served_off_loopback_over_the_loaded_management_tls() {
+    use ferrum_alloy::TelemetryInit;
+    use ferrum_alloy::diagnostics::{DiagnosticsAccess, DiagnosticsRequest};
+
+    let dir = tempfile::tempdir().unwrap();
+    let ca = Ca::new("management-ca");
+    let leaf = ca.server();
+    let mut tls = TlsSettings::new(
+        pki::write(dir.path(), "management.pem", &leaf.cert_pem),
+        pki::write(dir.path(), "management.key", &leaf.key_pem),
+    );
+    tls.handshake_timeout_ms = 2_000;
+    let mut cfg = config();
+    cfg.management.bind = "0.0.0.0:9090".parse().unwrap();
+    cfg.management.tls = Some(tls);
+    let mut parts = AlloyApp::new("management-tls-retrieval")
+        .router(Router::new().route("/hello", get(|| async { "hello" })))
+        .diagnostics_authorizer(|_: DiagnosticsRequest| async {
+            DiagnosticsAccess::tenant("tenant-a")
+        })
+        .config(cfg)
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .shutdown_signal(std::future::pending())
+        .into_parts()
+        .unwrap();
+
+    let off_loopback = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let error = parts
+        .check_management_listener(&off_loopback)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("applies only to a listener Alloy serves itself"),
+        "{error}"
+    );
+
+    // The loaded certificate decides, not the editable settings.
+    parts.config.management.tls = None;
+    let addr = SocketAddr::from(([127, 0, 0, 1], off_loopback.local_addr().unwrap().port()));
+    let app = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lifecycle = parts.lifecycle.clone();
+    let task = tokio::spawn(parts.serve_on(app, Some(off_loopback)));
+
+    let client = pki::client_config(&ca, None);
+    let path = "/diagnostics/v1/requests/req-unknown";
+    let (status, body) = tls_get(addr, client, path, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("route-not-found"), "{body}");
+
+    let plain = tokio::time::timeout(
+        Duration::from_secs(5),
+        support::raw(
+            addr,
+            b"GET /diagnostics/v1/requests/req-unknown HTTP/1.1\r\nhost: localhost\r\n\r\n",
+            Duration::from_secs(2),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&plain).starts_with("HTTP/"),
+        "{}",
+        String::from_utf8_lossy(&plain)
+    );
+    lifecycle.trigger_shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+}
