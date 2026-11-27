@@ -10,6 +10,11 @@ on:
   schedule:
     # Weekly, Sunday 04:23 UTC.
     - cron: "23 4 * * 0"
+  # A pull request that changes this workflow runs it briefly (60 seconds
+  # per target), so the workflow itself is checked before it merges.
+  pull_request:
+    paths:
+      - .github/workflows/fuzz-scheduled.yml
   workflow_dispatch:
     inputs:
       seconds:
@@ -21,8 +26,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-scheduled
-  cancel-in-progress: false
+  group: fuzz-scheduled-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fuzz:
@@ -47,7 +52,7 @@ jobs:
             seeds: fuzz/seeds/edge_record
     env:
       FUZZ_TOOLCHAIN: nightly-2026-09-15
-      FUZZ_SECONDS: ${{ inputs.seconds || '1800' }}
+      FUZZ_SECONDS: ${{ inputs.seconds || (github.event_name == 'pull_request' && '60') || '1800' }}
       TARGET: ${{ matrix.target }}
       SEEDS: ${{ matrix.seeds }}
     steps:
@@ -93,7 +98,9 @@ jobs:
           cargo "+$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$root/fuzz/corpus/$TARGET" "${dirs[@]}" -- \
             -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 "${dict[@]}"
       - name: Save the corpus for the next run
-        if: ${{ !cancelled() }}
+        # Only scheduled and dispatched runs on the default branch grow the
+        # shared corpus.
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
