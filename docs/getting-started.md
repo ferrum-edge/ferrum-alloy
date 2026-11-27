@@ -332,7 +332,7 @@ for the trust assumptions and limits.
 | `postgres` | SQLx pool, readiness, measured acquisition, migrations | sqlx 0.9 (postgres, rustls/ring) |
 | `openapi` | Serve a registered utoipa document; re-exports utoipa and utoipa-axum | utoipa 6, utoipa-axum 0.3 |
 | `openapi-ui` | A documentation UI for that document, under the same access policy (implies `openapi`; off until `openapi.ui = true`) | Swagger UI 5.33.0, embedded (Apache-2.0) |
-| `jwt` | JWT/JWKS verification and an authorization hook (implies `http-client`) | jsonwebtoken 11 (rust_crypto) |
+| `jwt` | JWT/JWKS verification and an authorization hook (implies `http-client`) | jsonwebtoken 12 (rust_crypto) |
 | `http-client` | Instrumented outbound client | reqwest 0.13 (rustls/ring), rustls-platform-verifier |
 | `compression` | gzip/br, never for SSE, `Set-Cookie`, or `no-store` responses | tower-http |
 | `cors` | Explicit allowlist CORS | tower-http |
