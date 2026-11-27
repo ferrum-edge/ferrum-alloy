@@ -1,0 +1,161 @@
+name: Scheduled fuzzing
+
+# Long fuzzing runs, beyond ci.yml's 60-second "Fuzz smoke" per target. Each
+# target runs for FUZZ_SECONDS on its own runner, starting from its corpus of
+# earlier default-branch runs plus the committed seeds, and saves the grown
+# corpus for the next run. The corpus is kept twice: in the Actions cache
+# (fast, but evicted after seven days unused) and as a `fuzz-corpus-<target>`
+# artifact retained for 90 days, which a run restores when the cache missed,
+# so a skipped or delayed week does not lose it. A crash fails the job and
+# uploads the crashing input (docs/testing.md#fuzzing).
+
+on:
+  schedule:
+    # Weekly, Sunday 04:23 UTC.
+    - cron: "23 4 * * 0"
+  # A pull request that changes this workflow runs it briefly (60 seconds
+  # per target), so the workflow itself is checked before it merges.
+  pull_request:
+    paths:
+      - .github/workflows/fuzz-scheduled.yml
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target, 1 to 3600
+        required: false
+        default: "1800"
+
+permissions:
+  contents: read
+  # Listing and downloading earlier runs' corpus artifacts.
+  actions: read
+
+concurrency:
+  group: fuzz-scheduled-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: traceparent
+            seeds: fuzz/seeds/traceparent
+          - target: request_id
+            seeds: fuzz/seeds/request_id
+          - target: diagnostic_report
+            seeds: contracts/fixtures/reports
+          - target: otlp_import
+            seeds: contracts/fixtures/otlp
+          - target: config_file
+            seeds: contracts/fixtures/manifests fuzz/seeds/config_file
+          - target: edge_record
+            seeds: fuzz/seeds/edge_record
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-15
+      FUZZ_SECONDS: ${{ inputs.seconds || (github.event_name == 'pull_request' && '60') || '1800' }}
+      TARGET: ${{ matrix.target }}
+      SEEDS: ${{ matrix.seeds }}
+      # Only default-branch scheduled and dispatched runs grow the corpus.
+      SAVES_CORPUS: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    steps:
+      - name: Check the duration
+        # libFuzzer reads -max_total_time=0 as "no limit"; the job would run
+        # until its timeout and save nothing.
+        run: |
+          if ! [[ "$FUZZ_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]] || [ "$FUZZ_SECONDS" -gt 3600 ]; then
+            echo "::error::seconds must be a whole number from 1 to 3600, not \"$FUZZ_SECONDS\""
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.98.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Check the committed fuzz lockfile
+        # cargo-fuzz has no --locked flag. Resolve first and fail, showing the
+        # difference, if fuzz/Cargo.lock would change.
+        run: |
+          cargo "+$FUZZ_TOOLCHAIN" metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+          git diff --exit-code -- fuzz/Cargo.lock
+          cargo "+$FUZZ_TOOLCHAIN" fetch --manifest-path fuzz/Cargo.toml --locked
+      - name: Restore the corpus of earlier runs
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Restore the corpus from the newest retained artifact
+        # The cache missed (evicted, or never written): take the newest
+        # unexpired corpus artifact of a default-branch run instead. A failed
+        # lookup or download fails the job rather than starting over silently.
+        if: steps.cache.outputs.cache-matched-key == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          id=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/artifacts" \
+            -f name="fuzz-corpus-$TARGET" -f per_page=100 \
+            --jq "[.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == \"$DEFAULT_BRANCH\")]
+              | sort_by(.created_at) | last | .id // empty")
+          if [ -z "$id" ]; then
+            echo "::notice title=Fuzz $TARGET::no retained corpus artifact; starting from the seeds"
+            exit 0
+          fi
+          mkdir -p "fuzz/corpus/$TARGET"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$RUNNER_TEMP/corpus.zip"
+          unzip -q -o "$RUNNER_TEMP/corpus.zip" -d "fuzz/corpus/$TARGET"
+          echo "Restored $(find "fuzz/corpus/$TARGET" -type f | wc -l) inputs from artifact $id"
+      - name: Build ${{ matrix.target }}
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build "$TARGET"
+      - name: Fuzz ${{ matrix.target }} for ${{ env.FUZZ_SECONDS }} seconds
+        run: |
+          set -euxo pipefail
+          root="$GITHUB_WORKSPACE"
+          mkdir -p "$root/fuzz/corpus/$TARGET"
+          dirs=()
+          for seed in $SEEDS; do
+            dirs+=("$root/$seed")
+          done
+          dict=()
+          if [ -f "$root/fuzz/dicts/$TARGET.dict" ]; then
+            dict=("-dict=$root/fuzz/dicts/$TARGET.dict")
+          fi
+          cargo "+$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$root/fuzz/corpus/$TARGET" "${dirs[@]}" -- \
+            -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 "${dict[@]}"
+      - name: Save the corpus for the next run
+        # A rerun has its own key (run attempt), since cache entries are
+        # immutable.
+        if: ${{ !cancelled() && env.SAVES_CORPUS == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Keep the corpus as an artifact
+        if: ${{ !cancelled() && env.SAVES_CORPUS == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 90
+          if-no-files-found: ignore
+          overwrite: true
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

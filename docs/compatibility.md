@@ -155,7 +155,7 @@ Dependabot ignores the Collector, `rust` and `debian` images in `examples/edge-o
   2. updating `ferrum_alloy_edge::contract::{EDGE_RELEASE, EDGE_SOURCE_COMMIT}`, the headers of `contracts/fixtures/manifests/*.edge.yaml` (`UPDATE_SNAPSHOTS=1`), and the release the CLI test expects;
   3. re-auditing the contract inventory (checklist below);
   4. passing the `Ferrum Edge end-to-end` and `Generated Edge configuration validates` jobs for every supported release.
-- The canonical pin must match the baseline release: adopt every file listed in `contracts/ferrum-contracts/PIN` (currently 28) from the matching published `contracts-edge-*` tag, verify every byte/hash, and update local adoption metadata. The unchanged report retains its original shared-freeze tag separately.
+- The canonical pin must match the baseline release: adopt every file listed in `contracts/ferrum-contracts/PIN` (currently 29) from the matching published `contracts-edge-*` tag, verify every byte/hash, and update local adoption metadata. The unchanged report retains its original shared-freeze tag separately.
 - `crates/ferrum-alloy-edge/tests/pairing.rs` fails when steps 1 and 2 disagree, when the window is not two releases led by the baseline, when `ci.yml` stops reading its Edge matrix from `compatibility.json` or pins an Edge image itself, or when `contract::GATEWAY_ERROR_TOKENS` and the diagnostics catalog differ.
 - Unreleased Edge main is never pinned.
 

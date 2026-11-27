@@ -575,11 +575,11 @@ fn yaml_escapes_characters_yaml_cannot_carry_verbatim() {
         "k: \"a\\u007Fb\\u0085c\\u2028d\\uFEFFe\\uFFFEf\\uFFFFg\u{e9}\"\n"
     );
     let mut manifest = manifest();
-    manifest.gateway.otel_endpoint = Some("HTTPS://collector.example/traces\u{fffe}".to_owned());
+    manifest.gateway.otel_endpoint = Some("https://collector.example/traces\u{fffe}".to_owned());
     manifest.validate().unwrap();
     let yaml = file_mode_yaml(&resources(&manifest).unwrap());
     assert!(
-        yaml.contains(r#""HTTPS://collector.example/traces\uFFFE""#),
+        yaml.contains(r#""https://collector.example/traces\uFFFE""#),
         "{yaml}"
     );
     assert!(!yaml.contains('\u{fffe}'), "{yaml}");
@@ -630,102 +630,288 @@ fn yaml_nested_sequences_are_valid_block_sequences() {
     }
 }
 
+/// Endpoints `ServiceManifest::validate` accepts.
+const ACCEPTED_OTEL_ENDPOINTS: &[&str] = &[
+    "https://otel-collector:4318/v1/traces",
+    "https://otel.example.com/v1/traces",
+    "https://10.0.0.5/v1/traces",
+    "https://[2001:db8::1]:4318/v1/traces",
+    "https://otel.example.com?contact=ops",
+    "https://otel.example.com/v1/traces?contact=ops@example.com",
+    "https://otel.example.com/v1/traces?tenant=a#frag",
+    "http://127.0.0.1:4318/v1/traces",
+    "http://127.0.0.1",
+    "http://127.0.0.1#frag",
+    "http://127.0.0.1?q=1",
+    "http://127.8.9.10/v1/traces",
+    "http://127.0.0.1:65535/v1/traces",
+    "http://[::1]:4318/v1/traces",
+    "http://[::1]",
+];
+
+/// Refused: cleartext to anything but a loopback IP literal.
+const NOT_LOOPBACK_OTEL_ENDPOINTS: &[&str] = &[
+    "http://otel-collector:4318/v1/traces",
+    "http://localhost:4318/v1/traces",
+    "http://10.0.0.5:4318/v1/traces",
+    "http://[::2]:4318/v1/traces",
+    "http://[0:0:0:0:0:0:0:1]:4318/v1/traces",
+    "http://127.1:4318/v1/traces",
+    "http://0x7f.0.0.1:4318/v1/traces",
+    "http://2130706433:4318/v1/traces",
+    "http://[::ffff:127.0.0.1]:4318/v1/traces",
+];
+
+/// Refused: not an http(s) URL with a host, a valid port, and no credentials.
+const NOT_A_URL_OTEL_ENDPOINTS: &[&str] = &[
+    "http://[::1/v1/traces",
+    "http://[::1]garbage/v1/traces",
+    "http://[::1]foo/v1/traces",
+    "http://[::1]:notaport/v1/traces",
+    "http://127.0.0.1:notaport/v1/traces",
+    "http://127.0.0.1:99999/v1/traces",
+    "http://127.0.0.1:0/v1/traces",
+    "https://otel.example.com:0/v1/traces",
+    "https://user:pass@otel.example.com/v1/traces",
+    "https://@otel.example.com/v1/traces",
+    "http://user@127.0.0.1:4318/v1/traces",
+    "ftp://127.0.0.1/v1/traces",
+    "otel.example.com/v1/traces",
+    "https:///v1/traces",
+    "https://",
+    "http:127.0.0.1:4318",
+];
+
+/// Refused: an upper-case scheme, which service-manifest v1 refuses.
+const UPPER_CASE_SCHEME_OTEL_ENDPOINTS: &[&str] = &[
+    "HTTPS://otel.example.com/v1/traces",
+    "Https://otel.example.com/v1/traces",
+    "HTTP://127.0.0.1:4318/v1/traces",
+];
+
+/// Refused: an `@` before the first `/`, in a query or fragment too, which
+/// service-manifest v1 refuses.
+const AT_BEFORE_PATH_OTEL_ENDPOINTS: &[&str] = &[
+    "https://otel.example.com?contact=ops@example.com",
+    "https://otel.example.com#ops@example.com",
+    "http://127.0.0.1?contact=ops@example.com",
+];
+
+/// Refused: a backslash anywhere.
+const BACKSLASH_OTEL_ENDPOINTS: &[&str] = &[
+    "https://collector.example\\traces@ops",
+    "http://127.0.0.1\\v1/traces",
+    "https://collector.example/v1/traces?tag=a\\b",
+];
+
+/// Refused: control or whitespace characters.
+const CONTROL_OTEL_ENDPOINTS: &[&str] = &[
+    "http://127.0.0.1:4318/v1/tr\naces",
+    "https://otel.example.com/v1/\ttraces",
+    " https://otel.example.com/v1/traces",
+    "https://otel.example.com/v1/traces\u{7f}",
+    "https://otel.example.com/v1/traces\u{85}",
+];
+
+fn otel_endpoint_result(endpoint: &str) -> Result<(), String> {
+    let mut manifest = manifest();
+    manifest.gateway.otel_endpoint = Some(endpoint.to_owned());
+    manifest.validate().map_err(|error| error.to_string())
+}
+
 /// `gateway.otel_endpoint` is held to Ferrum Edge main's OTLP endpoint
 /// rules (`validate_endpoint_for_provider` without `allow_plaintext`): Edge
 /// omits an `otel_tracing` plugin whose endpoint it refuses, and with it the
-/// strip of caller trace context (#319).
+/// strip of caller trace context (#319). The service-manifest v1 schema's
+/// spelling rules apply too (see
+/// `every_accepted_otel_endpoint_validates_against_service_manifest_v1`).
 #[test]
 fn cleartext_otel_endpoints_are_limited_to_loopback_ip_literals() {
-    let with_endpoint = |endpoint: &str| {
-        let mut manifest = manifest();
-        manifest.gateway.otel_endpoint = Some(endpoint.to_owned());
-        manifest.validate().map_err(|error| error.to_string())
+    for accepted in ACCEPTED_OTEL_ENDPOINTS {
+        let result = otel_endpoint_result(accepted);
+        assert!(result.is_ok(), "{accepted} was refused: {result:?}");
+    }
+    for (cases, reason) in [
+        (NOT_LOOPBACK_OTEL_ENDPOINTS, "loopback IP literal"),
+        (
+            NOT_A_URL_OTEL_ENDPOINTS,
+            "must be an http(s) URL with a host, a valid port, and no credentials",
+        ),
+        (
+            UPPER_CASE_SCHEME_OTEL_ENDPOINTS,
+            "must start with a lower-case http:// or https://",
+        ),
+        (
+            AT_BEFORE_PATH_OTEL_ENDPOINTS,
+            "must not contain @ before the first /",
+        ),
+        (BACKSLASH_OTEL_ENDPOINTS, "must not contain a backslash"),
+        (
+            CONTROL_OTEL_ENDPOINTS,
+            "must not contain control or whitespace characters",
+        ),
+    ] {
+        for refused in cases {
+            let error = otel_endpoint_result(refused).unwrap_err();
+            assert!(error.contains(reason), "{refused:?}: {error}");
+        }
+    }
+}
+
+/// The two `gateway.otel_endpoint` patterns of the vendored
+/// `schemas/service-manifest/v1.schema.json` (`contracts-edge-0.9.21`). The
+/// matchers below implement exactly these; the test fails if the vendored
+/// schema's patterns change.
+const V1_OTEL_ENDPOINT_PATTERN: &str = "^https?://[^/@]+(/.*)?$";
+const V1_OTEL_ENDPOINT_PLAINTEXT_PATTERN: &str = "^(?:https://|http://(?:127(?:\\.[0-9]{1,3}){3}|\\[::1\\])(?::[0-9]*)?(?:[/?#]|[\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(?![\\s\\S])))";
+
+/// ECMA-262 line terminators, which `.` does not match.
+fn is_line_terminator(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+}
+
+/// `^https?://[^/@]+(/.*)?$`.
+fn matches_v1_endpoint(endpoint: &str) -> bool {
+    let Some(rest) = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+    else {
+        return false;
     };
-    for accepted in [
-        "https://otel-collector:4318/v1/traces",
-        "https://otel.example.com/v1/traces",
-        "https://10.0.0.5/v1/traces",
-        "https://[2001:db8::1]:4318/v1/traces",
-        "https://otel.example.com?contact=ops@example.com",
-        "https://otel.example.com/v1/traces?tenant=a#frag",
-        "HTTPS://otel.example.com/v1/traces",
-        "http://127.0.0.1:4318/v1/traces",
-        "http://127.0.0.1",
-        "http://127.0.0.1#frag",
-        "http://127.0.0.1?q=1",
-        "http://127.8.9.10/v1/traces",
-        "http://127.0.0.1:65535/v1/traces",
-        "http://[::1]:4318/v1/traces",
-        "http://[::1]",
-        "HTTP://127.0.0.1:4318/v1/traces",
-    ] {
-        assert!(
-            with_endpoint(accepted).is_ok(),
-            "{accepted} was refused: {:?}",
-            with_endpoint(accepted)
-        );
+    let (host, path) = match rest.find('/') {
+        Some(at) => (&rest[..at], Some(&rest[at..])),
+        None => (rest, None),
+    };
+    !host.is_empty()
+        && !host.contains('@')
+        && path.is_none_or(|path| !path.chars().any(is_line_terminator))
+}
+
+/// The pattern's whitespace class.
+fn is_v1_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{9}'..='\u{D}'
+            | '\u{20}'
+            | '\u{85}'
+            | '\u{A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+    )
+}
+
+/// After the host: an optional `:` and digits, then one of `/?#`, or only
+/// whitespace to the end.
+fn v1_plaintext_tail(rest: &str) -> bool {
+    let rest = match rest.strip_prefix(':') {
+        Some(port) => port.trim_start_matches(|c: char| c.is_ascii_digit()),
+        None => rest,
+    };
+    rest.starts_with(['/', '?', '#']) || rest.chars().all(is_v1_space)
+}
+
+/// `127(?:\.[0-9]{1,3}){3}` followed by [`v1_plaintext_tail`], trying every
+/// digit count the pattern can backtrack to.
+fn v1_loopback_v4(rest: &str, groups: usize) -> bool {
+    if groups == 0 {
+        return v1_plaintext_tail(rest);
     }
-    for refused in [
-        "http://otel-collector:4318/v1/traces",
-        "http://localhost:4318/v1/traces",
-        "http://10.0.0.5:4318/v1/traces",
-        "http://[::2]:4318/v1/traces",
-        "http://[0:0:0:0:0:0:0:1]:4318/v1/traces",
-        "http://127.1:4318/v1/traces",
-        "http://0x7f.0.0.1:4318/v1/traces",
-        "http://2130706433:4318/v1/traces",
-        "http://[::ffff:127.0.0.1]:4318/v1/traces",
-    ] {
-        let error = with_endpoint(refused).unwrap_err();
-        assert!(error.contains("loopback IP literal"), "{refused}: {error}");
+    let Some(rest) = rest.strip_prefix('.') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count().min(3);
+    (1..=digits).any(|count| v1_loopback_v4(&rest[count..], groups - 1))
+}
+
+/// The plaintext pattern above (a prefix match).
+fn matches_v1_plaintext_rule(endpoint: &str) -> bool {
+    if endpoint.starts_with("https://") {
+        return true;
     }
-    for refused in [
-        "http://[::1/v1/traces",
-        "http://[::1]garbage/v1/traces",
-        "http://[::1]foo/v1/traces",
-        "http://[::1]:notaport/v1/traces",
-        "http://127.0.0.1:notaport/v1/traces",
-        "http://127.0.0.1:99999/v1/traces",
-        "http://127.0.0.1:0/v1/traces",
-        "https://otel.example.com:0/v1/traces",
-        "https://user:pass@otel.example.com/v1/traces",
-        "https://@otel.example.com/v1/traces",
-        "http://user@127.0.0.1:4318/v1/traces",
-        "ftp://127.0.0.1/v1/traces",
-        "otel.example.com/v1/traces",
-        "https:///v1/traces",
-        "https://",
-        "http:127.0.0.1:4318",
-    ] {
-        let error = with_endpoint(refused).unwrap_err();
-        assert!(
-            error.contains("must be an http(s) URL with a host, a valid port, and no credentials"),
-            "{refused}: {error}"
-        );
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    if let Some(rest) = rest.strip_prefix("[::1]") {
+        return v1_plaintext_tail(rest);
     }
-    for refused in [
-        "https://collector.example\\traces@ops",
-        "http://127.0.0.1\\v1/traces",
-        "https://collector.example/v1/traces?tag=a\\b",
+    rest.strip_prefix("127")
+        .is_some_and(|rest| v1_loopback_v4(rest, 3))
+}
+
+/// Everything `ServiceManifest::validate` accepts in `gateway.otel_endpoint`
+/// matches the vendored service-manifest v1 schema, so Foundry's and Nexus's
+/// v1 previews accept the manifest too. Alloy may refuse more than v1 (it
+/// also follows Edge's URL parser), never less.
+#[test]
+fn every_accepted_otel_endpoint_validates_against_service_manifest_v1() {
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/ferrum-contracts/schemas/service-manifest/v1.schema.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let property = &schema["properties"]["gateway"]["properties"]["otel_endpoint"];
+    assert_eq!(property["pattern"], V1_OTEL_ENDPOINT_PATTERN);
+    assert_eq!(
+        property["allOf"][0]["pattern"],
+        V1_OTEL_ENDPOINT_PLAINTEXT_PATTERN
+    );
+    let v1 = |endpoint: &str| matches_v1_endpoint(endpoint) && matches_v1_plaintext_rule(endpoint);
+
+    // The matchers themselves, on cases the patterns decide plainly.
+    for (endpoint, expected) in [
+        ("https://otel.example.com/v1/traces", true),
+        ("http://127.0.0.1:4318/v1/traces", true),
+        ("http://127.0.0.1", true),
+        ("http://[::1]", true),
+        ("http://127.0.0.1 ", true),
+        ("http://127.0.0.10/x", true),
+        ("http://127.0.0.1234/x", false),
+        ("http://127.0.0/x", false),
+        ("http://10.0.0.1/x", false),
+        ("HTTPS://otel.example.com", false),
+        ("https://otel.example.com?a=b@c", false),
+        ("https://otel.example.com/a?b=c@d", true),
+        ("https://otel.example.com/a\nb", false),
+        ("https://", false),
     ] {
-        let error = with_endpoint(refused).unwrap_err();
-        assert!(
-            error.contains("must not contain a backslash"),
-            "{refused}: {error}"
-        );
+        assert_eq!(v1(endpoint), expected, "{endpoint:?}");
     }
-    for refused in [
-        "http://127.0.0.1:4318/v1/tr\naces",
-        "https://otel.example.com/v1/\ttraces",
-        " https://otel.example.com/v1/traces",
-        "https://otel.example.com/v1/traces\u{7f}",
-        "https://otel.example.com/v1/traces\u{85}",
-    ] {
-        let error = with_endpoint(refused).unwrap_err();
-        assert!(
-            error.contains("must not contain control or whitespace characters"),
-            "{refused:?}: {error}"
-        );
+
+    let refused = [
+        NOT_LOOPBACK_OTEL_ENDPOINTS,
+        NOT_A_URL_OTEL_ENDPOINTS,
+        UPPER_CASE_SCHEME_OTEL_ENDPOINTS,
+        AT_BEFORE_PATH_OTEL_ENDPOINTS,
+        BACKSLASH_OTEL_ENDPOINTS,
+        CONTROL_OTEL_ENDPOINTS,
+    ];
+    for endpoint in ACCEPTED_OTEL_ENDPOINTS
+        .iter()
+        .chain(refused.iter().flat_map(|cases| cases.iter()))
+    {
+        if otel_endpoint_result(endpoint).is_ok() {
+            assert!(v1(endpoint), "Alloy accepts {endpoint:?}, which v1 refuses");
+        }
+        if !v1(endpoint) {
+            assert!(
+                otel_endpoint_result(endpoint).is_err(),
+                "v1 refuses {endpoint:?}, which Alloy accepts"
+            );
+        }
+    }
+    for endpoint in UPPER_CASE_SCHEME_OTEL_ENDPOINTS
+        .iter()
+        .chain(AT_BEFORE_PATH_OTEL_ENDPOINTS)
+    {
+        assert!(!v1(endpoint), "{endpoint:?} is refused by v1 as well");
     }
 }
 
