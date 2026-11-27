@@ -66,15 +66,21 @@ use ferrum_alloy_telemetry::cache::CacheControl;
 /// A verified caller.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Principal {
-    /// `sub`.
+    /// `sub`, when the token has one. A token whose `sub` is present but
+    /// not a string is rejected.
     pub subject: Option<String>,
     /// `iss`.
     pub issuer: String,
     /// `aud` values.
     pub audiences: Vec<String>,
-    /// Scopes from `scope` (space-separated) or `scp` (array).
+    /// Scopes from `scope` (a space-separated string) or, without it, `scp`
+    /// (an array of strings). Any other shape yields no scopes (array
+    /// members that are not strings are skipped), so scope checks fail
+    /// closed; the raw claim stays in [`Principal::claims`].
     pub scopes: Vec<String>,
-    /// All claims.
+    /// All claims, as the token carries them. `exp`, `nbf`, `iss`, `aud`
+    /// and `sub` are validated; every other claim (`iat`, `jti`, custom
+    /// claims) is passed through uninterpreted.
     pub claims: Map<String, Value>,
 }
 
@@ -837,6 +843,15 @@ impl JwtVerifier {
         if claims.get("iss").and_then(Value::as_str) != Some(self.inner.issuer.as_str()) {
             return Err(AuthError::Invalid("signature or claims rejected"));
         }
+        // `sub` is optional, but a present one must be a StringOrURI (RFC
+        // 7519 §4.1.2). The validation library type-checks it only when a
+        // subject is required, so a numeric or null `sub` is refused here
+        // instead of becoming a principal without a subject.
+        let subject = match claims.get("sub") {
+            None => None,
+            Some(Value::String(subject)) => Some(subject.clone()),
+            Some(_) => return Err(AuthError::Invalid("signature or claims rejected")),
+        };
         let audiences = match claims.get("aud") {
             Some(Value::String(aud)) => vec![aud.clone()],
             Some(Value::Array(items)) => items
@@ -858,7 +873,7 @@ impl JwtVerifier {
             _ => Vec::new(),
         };
         Ok(Principal {
-            subject: claims.get("sub").and_then(Value::as_str).map(str::to_owned),
+            subject,
             issuer: self.inner.issuer.clone(),
             audiences,
             scopes,
