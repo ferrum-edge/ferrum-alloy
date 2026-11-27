@@ -75,7 +75,7 @@ Alloy's public API exposes types and traits from other crates, so the versions o
 | `tracing-subscriber` | 0.3 | yes | `telemetry::init::{fmt_layer, build_filter}` return a boxed `Layer` and an `EnvFilter`; `telemetry::json::JsonLayer` implements `Layer` and accepts `MakeWriter` and `FormatTime` implementations; `telemetry::otel::OtelPipeline::layer` returns a `Layer` (features `subscriber`, `otel`). |
 | `tracing` | 0.1 | yes | The `RequestContext::span` field and `Operation::span` are `tracing::Span`s; subscriber bounds on the functions above. |
 | `opentelemetry_sdk` (and the `opentelemetry` types its exporter API carries) | 0.33 | yes | `OtelPipeline::with_exporter` and `BoundedSpanProcessor::spawn` take a `SpanExporter`; `BoundedSpanProcessor` implements `SpanProcessor` (feature `otel`). |
-| `reqwest` | 0.13 | yes | `http_client::AlloyClient::{inner, request, execute}` take and return `reqwest::Client`, `Method`, `Request`, `RequestBuilder`, `Response`, and `Error` (feature `http-client`, also enabled by `jwt`). |
+| `reqwest` | 0.13 | yes | `http_client::AlloyClient::{request, execute}` take and return `reqwest::Method`, `IntoUrl`, `Request`, `RequestBuilder`, `Response`, and `Error` (feature `http-client`, also enabled by `jwt`). |
 | `tokio-util` | 0.7 | yes | `Lifecycle::shutdown_token` returns a `CancellationToken`. |
 | `http`, `http-body` | 1 | no | Request, response, header, and extension types throughout; `InstrumentedBody` implements `http_body::Body`. |
 | `tokio` | 1 | no | `AlloyParts::{serve_on, check_management_listener}` take `tokio::net::TcpListener`. |
@@ -112,7 +112,7 @@ Each Alloy release supports the latest Ferrum Edge release and the release befor
 
 This is the only exception to the stability policy, and it takes precedence over every other rule on this page, including the rules that something happens only in a major release and the patch-only window after 2.0.0. If a vulnerability cannot be fixed without a breaking change, including an upgrade of a public dependency across an incompatible version, the fix ships in a new 1.x minor release. During the six months after 2.0.0, that minor release (for example 1.(Y+1).0 after 1.Y.Z) becomes the last 1.x minor line for the rest of the same window; the window is not extended. The security advisory and the release notes state exactly what breaks and how to migrate. See [SECURITY.md](../SECURITY.md).
 
-Every pull request is reviewed against this policy. Automated semver checking of the public Rust API supplements that review where CI runs it; it cannot see the command line, configuration, wire formats, or behavior, so review remains the gate.
+Every pull request is reviewed against this policy. CI's `Semver checks` jobs supplement that review: from the first `v1.*` tag on, `cargo-semver-checks` compares each library crate's public Rust API with the newest `v1.*` release tag reachable from the commit, under default features, no default features, all features, and each feature alone, and fails on a change that a 1.x minor release may not make; the jobs also fail when a crate's default feature set changes in either direction, which cargo-semver-checks alone reports only for removals. Before that tag exists the jobs are skipped with a notice. They cannot see the command line, configuration, wire formats, or behavior, so review remains the gate.
 
 ## What CI checks now
 
