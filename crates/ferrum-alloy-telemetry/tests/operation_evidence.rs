@@ -19,7 +19,7 @@ use ferrum_alloy_telemetry::evidence::{
 use ferrum_alloy_telemetry::operation::{
     Operation, OperationKind, OperationRecorder, record_pool_wait,
 };
-use ferrum_alloy_telemetry::{TelemetryConfig, TelemetryLayer};
+use ferrum_alloy_telemetry::{TelemetryConfig, TelemetryLayer, TelemetryService};
 use http_body_util::BodyExt;
 use tower::{Layer, ServiceExt};
 
@@ -213,4 +213,129 @@ async fn outside_a_request_nothing_is_collected() {
         .await
         .unwrap();
     response.into_body().collect().await.unwrap();
+}
+
+/// An inner telemetry-wrapped service, with `sink` when given, whose
+/// handler records a pool wait and runs one operation.
+fn inner_service(sink: Option<Arc<Collect>>) -> TelemetryService<Router> {
+    let layer = TelemetryLayer::new(TelemetryConfig::default()).unwrap();
+    let layer = match sink {
+        Some(sink) => layer.with_evidence_sink(sink),
+        None => layer,
+    };
+    layer.layer(Router::new().route(
+        "/",
+        get(|| async {
+            record_pool_wait(Duration::from_millis(7));
+            Operation::new("inner.op").run(async {}).await;
+            "inner"
+        }),
+    ))
+}
+
+#[tokio::test]
+async fn a_nested_request_keeps_its_own_evidence() {
+    for inner_sunk in [true, false] {
+        let inner_sink = Arc::new(Collect::default());
+        let inner = inner_service(inner_sunk.then(|| inner_sink.clone()));
+        let evidence = evidence_of(Router::new().route(
+            "/",
+            get(move || {
+                let inner = inner.clone();
+                async move {
+                    Operation::new("outer.call")
+                        .run(async move {
+                            let response = inner
+                                .oneshot(Request::get("/").body(Body::empty()).unwrap())
+                                .await
+                                .unwrap();
+                            response.into_body().collect().await.unwrap();
+                            // Back in the outer operation after the inner
+                            // request finished.
+                            Operation::new("outer.after").run(async {}).await;
+                        })
+                        .await;
+                    "outer"
+                }
+            }),
+        ))
+        .await;
+
+        let names: Vec<&str> = evidence.operations.iter().map(|o| o.name).collect();
+        assert_eq!(
+            names,
+            ["outer.after", "outer.call"],
+            "inner_sunk={inner_sunk}: no inner operation in the outer record"
+        );
+        let (after, call) = (&evidence.operations[0], &evidence.operations[1]);
+        assert_eq!(call.parent_span_id, evidence.span_id);
+        assert_eq!(after.parent_span_id, call.span_id, "outer scope restored");
+        assert_eq!(
+            call.pool_wait, None,
+            "inner_sunk={inner_sunk}: the inner request's pool wait is its own"
+        );
+
+        let inner_records = inner_sink.0.lock().unwrap();
+        if inner_sunk {
+            assert_eq!(inner_records.len(), 1);
+            let inner = &inner_records[0];
+            assert_ne!(inner.span_id, evidence.span_id);
+            let names: Vec<&str> = inner.operations.iter().map(|o| o.name).collect();
+            assert_eq!(names, ["inner.op"]);
+            assert_eq!(
+                inner.operations[0].parent_span_id, inner.span_id,
+                "parented on the inner server span, not outer.call"
+            );
+        } else {
+            assert!(inner_records.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn interleaved_requests_on_one_task_keep_their_own_evidence() {
+    let sink = Arc::new(Collect::default());
+    let service = TelemetryLayer::new(TelemetryConfig::default())
+        .unwrap()
+        .with_evidence_sink(sink.clone())
+        .layer(Router::new().route(
+            "/{name}",
+            get(
+                |axum::extract::Path(name): axum::extract::Path<String>| async move {
+                    let name: &'static str = if name == "a" { "op.a" } else { "op.b" };
+                    for _ in 0..3 {
+                        Operation::new(name)
+                            .run(async {
+                                // Yield so the other request is polled in
+                                // between, on the same task.
+                                tokio::task::yield_now().await;
+                            })
+                            .await;
+                        tokio::task::yield_now().await;
+                    }
+                    "ok"
+                },
+            ),
+        ));
+    let request = |path: &str| {
+        let service = service.clone();
+        let request = Request::get(path).body(Body::empty()).unwrap();
+        async move {
+            let response = service.oneshot(request).await.unwrap();
+            response.into_body().collect().await.unwrap();
+        }
+    };
+    tokio::join!(request("/a"), request("/b"));
+
+    let records = sink.0.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    for record in records.iter() {
+        assert_eq!(record.operations.len(), 3, "{:?}", record.operations);
+        let first = record.operations[0].name;
+        for operation in &record.operations {
+            assert_eq!(operation.name, first, "no cross-attribution");
+            assert_eq!(operation.parent_span_id, record.span_id);
+        }
+    }
+    assert_ne!(records[0].operations[0].name, records[1].operations[0].name);
 }

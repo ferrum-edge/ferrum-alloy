@@ -207,7 +207,7 @@ const NO_POOL_WAIT: u64 = u64::MAX;
 
 /// What a running operation gathers for its request's evidence.
 #[derive(Debug)]
-struct OperationSlot {
+pub(crate) struct OperationSlot {
     span_id: SpanId,
     /// The last recorded pool wait, or [`NO_POOL_WAIT`].
     pool_wait_nanos: AtomicU64,
@@ -216,6 +216,19 @@ struct OperationSlot {
 thread_local! {
     /// The operation whose future this thread is polling.
     static ACTIVE_OPERATION: RefCell<Option<Arc<OperationSlot>>> = const { RefCell::new(None) };
+}
+
+/// What [`replace_active_operation`] returns, to be put back later.
+pub(crate) type ActiveOperation = Option<Arc<OperationSlot>>;
+
+/// Makes `operation` the current operation on this thread and returns the
+/// previous one. A request scope clears it, so a nested request's
+/// operations and pool waits never attach to the outer request's operation.
+pub(crate) fn replace_active_operation(operation: ActiveOperation) -> ActiveOperation {
+    ACTIVE_OPERATION
+        .try_with(|active| active.replace(operation))
+        .ok()
+        .flatten()
 }
 
 /// Makes an operation current on this thread until dropped, so pool waits
@@ -262,17 +275,44 @@ struct RecorderEvidence {
 }
 
 impl OperationRecorder {
-    /// Starts timing operation `name` of `kind`, whose span is `span`.
+    /// Starts timing operation `name` of `kind`, whose span is `span`. Its
+    /// parent is the operation current on this thread, or else the
+    /// request's server span, as for a span created as a child of the
+    /// current span.
     pub fn start(name: &'static str, kind: OperationKind, span: &Span) -> Self {
+        Self::start_inner(name, kind, span, None)
+    }
+
+    /// Like [`OperationRecorder::start`], for a span created with an
+    /// explicit parent (`parent: &context.span`): `parent` is that span's id
+    /// (for the request's server span, `RequestContext::span_id`), so live
+    /// evidence and exported spans agree on the parent.
+    pub fn start_with_parent(
+        name: &'static str,
+        kind: OperationKind,
+        span: &Span,
+        parent: SpanId,
+    ) -> Self {
+        Self::start_inner(name, kind, span, Some(parent))
+    }
+
+    fn start_inner(
+        name: &'static str,
+        kind: OperationKind,
+        span: &Span,
+        parent: Option<SpanId>,
+    ) -> Self {
         let start = Instant::now();
         let evidence = current_request().map(|request| {
             let span_id =
                 crate::otel_bridge::exported_ids(span).map_or_else(SpanId::random, |ids| ids.1);
-            let parent_span_id = ACTIVE_OPERATION
-                .try_with(|active| active.borrow().as_ref().map(|slot| slot.span_id))
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| request.span_id());
+            let parent_span_id = parent.unwrap_or_else(|| {
+                ACTIVE_OPERATION
+                    .try_with(|active| active.borrow().as_ref().map(|slot| slot.span_id))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| request.span_id())
+            });
             RecorderEvidence {
                 request,
                 slot: Arc::new(OperationSlot {

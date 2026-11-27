@@ -402,19 +402,31 @@ thread_local! {
     static ACTIVE_REQUEST: RefCell<Option<Arc<Collector>>> = const { RefCell::new(None) };
 }
 
-/// Makes `collector` the current request on this thread until dropped,
-/// then restores the previous one (polls can nest).
+/// Makes one instrumented request current on this thread until dropped,
+/// then restores whatever was current before (polls can nest: a handler
+/// may drive another instrumented service on its own task).
+///
+/// Every request the layer instruments enters its own scope, also when it
+/// collects nothing (`collector` is `None`): a nested request then never
+/// writes into the request that is driving it, and its operations never
+/// take that request's operation as their parent. The current operation is
+/// cleared for the scope's duration for the same reason.
 pub(crate) struct RequestScope {
     previous: Option<Arc<Collector>>,
+    previous_operation: crate::operation::ActiveOperation,
 }
 
 impl RequestScope {
-    pub(crate) fn enter(collector: &Arc<Collector>) -> Self {
+    pub(crate) fn enter(collector: Option<&Arc<Collector>>) -> Self {
         let previous = ACTIVE_REQUEST
-            .try_with(|active| active.replace(Some(Arc::clone(collector))))
+            .try_with(|active| active.replace(collector.cloned()))
             .ok()
             .flatten();
-        Self { previous }
+        let previous_operation = crate::operation::replace_active_operation(None);
+        Self {
+            previous,
+            previous_operation,
+        }
     }
 }
 
@@ -422,6 +434,7 @@ impl Drop for RequestScope {
     fn drop(&mut self) {
         let previous = self.previous.take();
         let _ = ACTIVE_REQUEST.try_with(|active| active.replace(previous));
+        crate::operation::replace_active_operation(self.previous_operation.take());
     }
 }
 

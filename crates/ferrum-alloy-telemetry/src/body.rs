@@ -90,8 +90,7 @@ where
         let _scope = this
             .finalizer
             .as_ref()
-            .and_then(Finalizer::collector)
-            .map(crate::evidence::RequestScope::enter);
+            .map(|finalizer| crate::evidence::RequestScope::enter(finalizer.collector()));
         let mut inner = this.inner;
         let result = inner.as_mut().poll_frame(cx);
         let finalize = |finalizer: &mut Option<Finalizer>, outcome| {

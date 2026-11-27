@@ -268,7 +268,17 @@ impl AlloyClient {
         // Kept in the request's diagnostic evidence when it collects any;
         // dropped unfinished (the caller gave up), it records a cancelled
         // operation.
-        let recorder = OperationRecorder::start("http.client", OperationKind::Client, &span);
+        // With a context the span's parent is the request's server span, not
+        // the current span; the live evidence records the same parent.
+        let recorder = match context {
+            Some(context) => OperationRecorder::start_with_parent(
+                "http.client",
+                OperationKind::Client,
+                &span,
+                context.span_id,
+            ),
+            None => OperationRecorder::start("http.client", OperationKind::Client, &span),
+        };
         if propagate && let Some(context) = context {
             let span_id = recorder.span_id().unwrap_or_else(|| {
                 ferrum_alloy_telemetry::exported_ids(&span)

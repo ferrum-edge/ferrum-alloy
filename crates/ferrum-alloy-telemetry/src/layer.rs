@@ -640,7 +640,7 @@ where
         };
         let inner = {
             let _entered = span.enter();
-            let _scope = finalizer.collector().map(RequestScope::enter);
+            let _scope = RequestScope::enter(finalizer.collector());
             self.inner.call(request)
         };
         ResponseFuture {
@@ -699,7 +699,7 @@ where
         };
         let result = {
             let _entered = state.span.enter();
-            let _scope = state.finalizer.collector().map(RequestScope::enter);
+            let _scope = RequestScope::enter(state.finalizer.collector());
             ready!(this.inner.poll(cx))
         };
         let Some(mut state) = this.state.take() else {
