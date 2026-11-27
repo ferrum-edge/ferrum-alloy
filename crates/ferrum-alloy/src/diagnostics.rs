@@ -65,7 +65,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::rejection::PathRejection;
 use axum::extract::{ConnectInfo, Path, Request};
@@ -73,13 +73,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use ferrum_alloy_diagnostics::catalog;
 use ferrum_alloy_diagnostics::model::{
-    Availability, Boundaries, ClockDomain, Collection, CollectionMethod, DiagnosticReport, Leg,
-    Observation, ObservationKind, Producer, ProducerKind, Scope, SpanRef, Trust, Unit,
-    Verification,
+    Availability, Boundaries, ClockDomain, Collection, CollectionMethod, DiagnosticReport,
+    Interval, Leg, Observation, ObservationKind, Producer, ProducerKind, Scope, SpanRef, Trust,
+    Unit, Verification,
 };
 use ferrum_alloy_telemetry::evidence::{
-    EvidenceSink, RequestEvidence, RequestIdOrigin, valid_tenant,
+    EvidenceSink, MAX_OPERATIONS_PER_REQUEST, OperationEvidence, RequestEvidence, RequestIdOrigin,
+    valid_tenant,
 };
+use ferrum_alloy_telemetry::operation::OperationKind;
 use ferrum_alloy_telemetry::trace_context::{SpanId, TraceId};
 use ferrum_alloy_telemetry::{PeerInfo, RequestId, TraceDecision};
 use futures_util::FutureExt as _;
@@ -265,6 +267,12 @@ struct Stored {
     outcome: &'static str,
     trace_decision: TraceDecision,
     peer_trust: &'static str,
+    /// Middleware entry on the wall clock, which anchors the intervals.
+    started_at: SystemTime,
+    admission_wait: Option<Duration>,
+    /// At most `MAX_OPERATIONS_PER_REQUEST`, enforced by the telemetry layer.
+    operations: Vec<OperationEvidence>,
+    operations_dropped: u32,
     /// Estimated retained bytes.
     bytes: usize,
     /// When the record was admitted, on the monotonic clock. It never
@@ -821,6 +829,9 @@ pub(crate) struct EvidenceStore {
     skipped: [AtomicU64; 4],
     retrievals: [AtomicU64; 2],
     authorizer_failures: [AtomicU64; 2],
+    /// This process's producer instance in reports, so readers compare its
+    /// intervals only with each other (they share one clock).
+    instance: String,
 }
 
 impl EvidenceStore {
@@ -837,6 +848,7 @@ impl EvidenceStore {
             skipped: Default::default(),
             retrievals: Default::default(),
             authorizer_failures: Default::default(),
+            instance: format!("alloy-{}", RequestId::generate()),
         }
     }
 
@@ -1037,12 +1049,16 @@ fn estimate(
     request_id: &RequestId,
     diagnostic_id: &RequestId,
     route: Option<&str>,
+    operations: usize,
 ) -> usize {
+    // Operation names are `&'static str`: they live in the binary, so only
+    // each operation's fixed-size entry is retained per record.
     RECORD_OVERHEAD_BYTES
         .saturating_add(tenant.len())
         .saturating_add(request_id.allocation_bytes().saturating_mul(2))
         .saturating_add(diagnostic_id.allocation_bytes().saturating_mul(3))
         .saturating_add(route.map_or(0, str::len))
+        .saturating_add(operations.saturating_mul(size_of::<OperationEvidence>()))
 }
 
 impl EvidenceSink for EvidenceStore {
@@ -1053,11 +1069,21 @@ impl EvidenceSink for EvidenceStore {
             return;
         };
         let route = evidence.route.filter(|r| r.len() <= MAX_ROUTE_BYTES);
+        // The telemetry layer keeps at most this many; the bound is applied
+        // again so the byte estimate holds whatever sink fed the store.
+        let mut operations = evidence.operations;
+        let excess = operations.len().saturating_sub(MAX_OPERATIONS_PER_REQUEST);
+        operations.truncate(MAX_OPERATIONS_PER_REQUEST);
+        operations.shrink_to_fit();
+        let operations_dropped = evidence
+            .operations_dropped
+            .saturating_add(u32::try_from(excess).unwrap_or(u32::MAX));
         let bytes = estimate(
             &tenant,
             &evidence.request_id,
             &diagnostic_id,
             route.as_deref(),
+            operations.len(),
         );
         self.insert(Stored {
             tenant,
@@ -1074,6 +1100,10 @@ impl EvidenceSink for EvidenceStore {
             outcome: evidence.outcome.as_str(),
             trace_decision: evidence.trace_decision,
             peer_trust: evidence.peer_trust,
+            started_at: evidence.started_at,
+            admission_wait: evidence.admission_wait,
+            operations,
+            operations_dropped,
             bytes,
             inserted: Instant::now(),
         });
@@ -1173,7 +1203,7 @@ impl Retrieval {
             self.store.count_retrieval(Retrieved::NotFound);
             return not_found();
         }
-        let report = report(&self.service, &found);
+        let report = report(&self.service, &self.store.instance, &found);
         match serde_json::to_vec(&report) {
             Ok(body) => {
                 self.store.count_retrieval(Retrieved::Served);
@@ -1187,12 +1217,23 @@ impl Retrieval {
 }
 
 /// Builds the report for what a lookup of one tenant and request id found.
-fn report(service: &str, found: &Found) -> DiagnosticReport {
+fn report(service: &str, instance: &str, found: &Found) -> DiagnosticReport {
     let records = &found.records;
     let mut notes = vec![
         "assembled by the service from its own request telemetry; a reader cannot authenticate the producer".to_owned(),
-        "server-level timing only; instrumented operations are not retained".to_owned(),
+        format!(
+            "operations are those explicitly instrumented on the request's own task, at most {MAX_OPERATIONS_PER_REQUEST} per request; work moved to other tasks is not attributed"
+        ),
     ];
+    let operations_dropped: u64 = records
+        .iter()
+        .map(|record| u64::from(record.operations_dropped))
+        .sum();
+    if operations_dropped > 0 {
+        notes.push(format!(
+            "{operations_dropped} operation(s) beyond the per-request limit are not retained"
+        ));
+    }
     if let Some(first) = records.first() {
         notes.push(format!(
             "local diagnostic lookup id: {}; remote correlation ids and traces do not establish request ownership",
@@ -1232,14 +1273,40 @@ fn report(service: &str, found: &Found) -> DiagnosticReport {
         .iter()
         .find_map(|record| record.route.as_deref().map(str::to_owned));
     for record in records {
-        observations(service, record, &mut report.observations);
+        observations(service, instance, record, &mut report.observations);
     }
     report
+}
+
+/// Unix nanoseconds of `offset` after `start`, when representable.
+fn unix_nanos(start: SystemTime, offset: Duration) -> Option<u64> {
+    let since = start
+        .checked_add(offset)?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    u64::try_from(since.as_nanos()).ok()
+}
+
+/// The wall-clock interval from `offset` to `offset + length` after
+/// middleware entry. Every interval of one record shares that anchor and
+/// this process's clock (the producer instance says so).
+fn interval(record: &Stored, offset: Duration, length: Duration) -> Option<Interval> {
+    let start = unix_nanos(record.started_at, offset)?;
+    let end = unix_nanos(record.started_at, offset.checked_add(length)?)?;
+    (start > 0).then(|| Interval::new(start, end))
+}
+
+/// Alloy's telemetry as the producer, on this process's `instance`.
+fn producer(instance: &str) -> Producer {
+    let mut producer = Producer::new(ProducerKind::Alloy, "ferrum-alloy-telemetry");
+    producer.instance = Some(instance.to_owned());
+    producer
 }
 
 /// An observation of `record` with everything but its value.
 fn base(
     service: &str,
+    instance: &str,
     record: &Stored,
     suffix: &str,
     name: &str,
@@ -1250,7 +1317,7 @@ fn base(
     scope.service = Some(service.to_owned());
     let mut observation = Observation::new(
         format!("alloy:{span_id}:{suffix}"),
-        Producer::new(ProducerKind::Alloy, "ferrum-alloy-telemetry"),
+        producer(instance),
         kind,
         name,
         Availability::Unknown,
@@ -1282,20 +1349,27 @@ fn duration(
     observation
 }
 
-fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
+fn observations(service: &str, instance: &str, record: &Stored, out: &mut Vec<Observation>) {
     use ObservationKind::{Event, Measurement};
     let head = base(
         service,
+        instance,
         record,
         "time_to_headers",
         catalog::ALLOY_TIME_TO_HEADERS,
         Measurement,
     );
     // Headers that were never produced have no time: unavailable, not zero.
-    let head = duration(head, record.time_to_headers, Availability::Unavailable);
+    let mut head = duration(head, record.time_to_headers, Availability::Unavailable);
+    // The header phase on this process's clock, so readers can place the
+    // request's operations inside or after it.
+    head.interval = record
+        .time_to_headers
+        .and_then(|time_to_headers| interval(record, Duration::ZERO, time_to_headers));
     out.push(head);
     let body = base(
         service,
+        instance,
         record,
         "body",
         catalog::ALLOY_BODY_DURATION,
@@ -1308,6 +1382,7 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
     out.push(body);
     let whole = base(
         service,
+        instance,
         record,
         "duration",
         catalog::ALLOY_SERVER_DURATION,
@@ -1315,7 +1390,14 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
     );
     let whole = duration(whole, Some(record.duration), Availability::Unknown);
     out.push(whole);
-    let mut response = base(service, record, "response", catalog::ALLOY_RESPONSE, Event);
+    let mut response = base(
+        service,
+        instance,
+        record,
+        "response",
+        catalog::ALLOY_RESPONSE,
+        Event,
+    );
     response.availability = Availability::Measured;
     let attributes = &mut response.attributes;
     if let Some(status) = record.status {
@@ -1330,13 +1412,91 @@ fn observations(service: &str, record: &Stored, out: &mut Vec<Observation>) {
     let origin = record.origin.as_str().to_owned();
     attributes.insert("request_id_origin".to_owned(), origin);
     out.push(response);
+    if let Some(wait) = record.admission_wait {
+        let admission = base(
+            service,
+            instance,
+            record,
+            "admission",
+            catalog::ALLOY_ADMISSION_WAIT,
+            Measurement,
+        );
+        out.push(duration(admission, Some(wait), Availability::Unknown));
+    }
+    for operation in &record.operations {
+        operation_observations(service, instance, record, operation, out);
+    }
+}
+
+/// `alloy.operation.duration` for `operation`, and `alloy.db.pool_wait` when
+/// it recorded one, linked to the operation's span under the request's trace.
+fn operation_observations(
+    service: &str,
+    instance: &str,
+    record: &Stored,
+    operation: &OperationEvidence,
+    out: &mut Vec<Observation>,
+) {
+    let span_id = operation.span_id.to_hex();
+    // As the OTLP importer reads operation spans: database and outbound
+    // calls (CLIENT spans) are on the dependency leg.
+    let leg = match operation.kind {
+        OperationKind::Internal => Leg::Service,
+        _ => Leg::ServiceToDependency,
+    };
+    let mut span = SpanRef::new(record.trace_id.to_hex(), span_id.clone());
+    span.parent_span_id = Some(operation.parent_span_id.to_hex());
+    let observation = |suffix: &str, name: &str, value: Duration| {
+        let mut scope = Scope::new(leg.clone());
+        scope.service = Some(service.to_owned());
+        let mut observation = Observation::new(
+            format!("alloy:{span_id}:{suffix}"),
+            producer(instance),
+            ObservationKind::Measurement,
+            name,
+            Availability::Measured,
+            scope,
+            Trust::Unverified,
+        );
+        observation.value = Some(value.as_secs_f64() * 1_000.0);
+        observation.unit = Some(Unit::Milliseconds);
+        observation.clock = Some(ClockDomain::MonotonicLocal);
+        observation.boundaries =
+            catalog::entry(name).map(|entry| Boundaries::new(entry.start, entry.end));
+        observation.span = Some(span.clone());
+        observation.evidence_ref = Some(format!("alloy:operation/{span_id}"));
+        observation
+    };
+    let mut measured = observation(
+        "operation",
+        catalog::ALLOY_OPERATION_DURATION,
+        operation.duration,
+    );
+    measured.interval = interval(record, operation.started, operation.duration);
+    let attributes = &mut measured.attributes;
+    attributes.insert("operation.name".to_owned(), operation.name.to_owned());
+    attributes.insert(
+        "operation.kind".to_owned(),
+        operation.kind.label().to_owned(),
+    );
+    attributes.insert(
+        "operation.outcome".to_owned(),
+        operation.outcome.as_str().to_owned(),
+    );
+    out.push(measured);
+    if let Some(wait) = operation.pool_wait {
+        out.push(observation("pool_wait", catalog::ALLOY_DB_POOL_WAIT, wait));
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use ferrum_alloy_diagnostics::model::Confidence;
     use ferrum_alloy_diagnostics::parse::{Limits, parse_offline};
+    use ferrum_alloy_diagnostics::rules::{Thresholds, analyze};
     use ferrum_alloy_telemetry::BodyOutcome;
+    use ferrum_alloy_telemetry::evidence::OperationOutcome;
     use http::header::AUTHORIZATION;
 
     use super::*;
@@ -1664,7 +1824,7 @@ mod tests {
         }
         store.record(evidence(Some("else"), "quiet"));
         assert_eq!(store.retained().1, (MAX_RECORDS_PER_REQUEST_ID + 1) * each);
-        let quiet = report("test", &store.find("else", id("quiet")));
+        let quiet = report("test", "alloy-test", &store.find("else", id("quiet")));
         let mut larger = first;
         larger.route = Some(Arc::from("/".repeat(100)));
         larger.span_id = SpanId::random();
@@ -1674,7 +1834,10 @@ mod tests {
         assert_eq!(found.records.len(), MAX_RECORDS_PER_REQUEST_ID - 1);
         assert_eq!(found.records[0].status, Some(2));
         assert_eq!(found.records.last().unwrap().span_id, latest_span);
-        assert_eq!(report("test", &store.find("else", id("quiet"))), quiet);
+        assert_eq!(
+            report("test", "alloy-test", &store.find("else", id("quiet"))),
+            quiet
+        );
         let limited = r#"ferrum_alloy_diagnostics_evicted_total{reason="request_id_limit"}"#;
         let bytes = r#"ferrum_alloy_diagnostics_evicted_total{reason="bytes"}"#;
         assert_eq!(metric(&store, limited), 1);
@@ -2275,7 +2438,7 @@ mod tests {
         let by_owner = store.find("acme", owner.clone());
         assert_eq!(by_owner.records.len(), 3);
         assert_eq!(by_owner.alias, None);
-        let notes = report("test", &by_owner).collection.notes;
+        let notes = report("test", "alloy-test", &by_owner).collection.notes;
         let dropped = format!(
             "{} earlier attempt(s) of this request are no longer retained",
             MAX_RECORDS_PER_REQUEST_ID - 1
@@ -2286,7 +2449,7 @@ mod tests {
 
         let by_alias = store.find("acme", id("edge-1"));
         assert_eq!(by_alias.alias, Some(RequestIdOrigin::TrustedPeer));
-        let notes = report("test", &by_alias).collection.notes;
+        let notes = report("test", "alloy-test", &by_alias).collection.notes;
         let resolved = "resolved as a correlation alias (request_id_origin trusted_peer)";
         let noted = notes.iter().any(|note| note.starts_with(resolved));
         assert!(noted, "{notes:?}");
@@ -2304,7 +2467,7 @@ mod tests {
         assert_eq!(found_now.records.len(), 1);
         assert_eq!(found_now.records[0].diagnostic_id, reuse_owner);
         assert_eq!(found_now.alias, Some(RequestIdOrigin::UntrustedCaller));
-        let notes = report("test", &found_now).collection.notes;
+        let notes = report("test", "alloy-test", &found_now).collection.notes;
         let resolved = "resolved as a correlation alias (request_id_origin untrusted_caller)";
         let noted = notes.iter().any(|note| note.starts_with(resolved));
         assert!(noted, "{notes:?}");
@@ -2350,7 +2513,9 @@ mod tests {
             assert_eq!(store.retained(), (6, 6 * each));
             let before: Vec<_> = originals
                 .iter()
-                .map(|(tenant, owner)| report("test", &store.find(tenant, owner.clone())))
+                .map(|(tenant, owner)| {
+                    report("test", "alloy-test", &store.find(tenant, owner.clone()))
+                })
                 .collect();
             let mut larger = evidence(Some("t0"), &"l".repeat(id_length + 20));
             larger.route = Some(Arc::from(format!("{short_route}{}", "/".repeat(80))));
@@ -2363,7 +2528,10 @@ mod tests {
             assert!(store.find("t0", owner).records.is_empty());
             assert_eq!(store.retained(), (6, 6 * each));
             for ((tenant, owner), expected) in originals.iter().zip(before) {
-                assert_eq!(report("test", &store.find(tenant, owner.clone())), expected);
+                assert_eq!(
+                    report("test", "alloy-test", &store.find(tenant, owner.clone())),
+                    expected
+                );
             }
             let dropped = r#"ferrum_alloy_diagnostics_skipped_total{reason="fair_share"}"#;
             let evicted = r#"ferrum_alloy_diagnostics_evicted_total{reason="bytes"}"#;
@@ -2550,6 +2718,157 @@ mod tests {
         assert_eq!(records[0].route, None);
     }
 
+    /// A request's operations, pool wait, and admission wait reach the live
+    /// report linked to its server span and placed on one clock, so the rules
+    /// can attribute the time to headers to the dominant operation.
+    #[test]
+    fn live_reports_carry_operation_pool_and_admission_evidence() {
+        let mut request = evidence(Some("acme"), "req-ops");
+        let server_span = request.span_id;
+        request.started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        request.status = Some(200);
+        request.time_to_headers = Some(Duration::from_millis(100));
+        request.body_duration = Some(Duration::from_millis(5));
+        request.duration = Duration::from_millis(105);
+        request.outcome = BodyOutcome::Completed;
+        request.admission_wait = Some(Duration::from_millis(4));
+        let load_span = SpanId::random();
+        let mut load = OperationEvidence::new(
+            "orders.load",
+            OperationKind::Db,
+            OperationOutcome::Completed,
+            load_span,
+            server_span,
+        );
+        load.started = Duration::from_millis(10);
+        load.duration = Duration::from_millis(80);
+        load.pool_wait = Some(Duration::from_millis(30));
+        let mut decode = OperationEvidence::new(
+            "orders.decode",
+            OperationKind::Internal,
+            OperationOutcome::Error,
+            SpanId::random(),
+            load_span,
+        );
+        decode.started = Duration::from_millis(60);
+        decode.duration = Duration::from_millis(20);
+        request.operations = vec![decode, load];
+        request.operations_dropped = 3;
+        let store = EvidenceStore::new(&DiagnosticsSettings::default());
+        store.record(request);
+        let found = store.find("acme", id("req-ops"));
+        let json = serde_json::to_vec(&report("orders", "alloy-test", &found)).unwrap();
+        let parsed = parse_offline(&json, &Limits::default()).unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let report = parsed.report;
+        // Four server observations, the admission wait, two operations and
+        // one pool wait.
+        assert_eq!(report.observations.len(), 8);
+        let notes = &report.collection.notes;
+        let noted = notes
+            .iter()
+            .any(|note| note.starts_with("3 operation(s) beyond the per-request limit"));
+        assert!(noted, "{notes:?}");
+        for observation in &report.observations {
+            assert!(catalog::is_known(&observation.name), "{}", observation.name);
+            assert_eq!(observation.producer.instance.as_deref(), Some("alloy-test"));
+        }
+        let server = server_span.to_hex();
+        let head = report
+            .observation(&format!("alloy:{server}:time_to_headers"))
+            .unwrap();
+        let start = 1_790_000_000_000_000_000;
+        assert_eq!(
+            head.interval,
+            Some(Interval::new(start, start + 100_000_000))
+        );
+        let admission = report
+            .observation(&format!("alloy:{server}:admission"))
+            .unwrap();
+        assert_eq!(admission.name, catalog::ALLOY_ADMISSION_WAIT);
+        assert_eq!(admission.duration_ms(), Some(4.0));
+
+        let load_id = load_span.to_hex();
+        let operation = report
+            .observation(&format!("alloy:{load_id}:operation"))
+            .unwrap();
+        assert_eq!(operation.name, catalog::ALLOY_OPERATION_DURATION);
+        assert_eq!(operation.duration_ms(), Some(80.0));
+        assert_eq!(operation.scope.leg, Leg::ServiceToDependency);
+        assert_eq!(operation.attr("operation.name"), Some("orders.load"));
+        assert_eq!(operation.attr("operation.kind"), Some("db"));
+        assert_eq!(operation.attr("operation.outcome"), Some("completed"));
+        let span = operation.span.as_ref().unwrap();
+        assert_eq!(span.span_id, load_id);
+        assert_eq!(span.parent_span_id.as_deref(), Some(server.as_str()));
+        assert_eq!(
+            operation.interval,
+            Some(Interval::new(start + 10_000_000, start + 90_000_000))
+        );
+        let pool = report
+            .observation(&format!("alloy:{load_id}:pool_wait"))
+            .unwrap();
+        assert_eq!(pool.name, catalog::ALLOY_DB_POOL_WAIT);
+        assert_eq!(pool.duration_ms(), Some(30.0));
+        assert_eq!(pool.span, operation.span);
+        let decode = report
+            .observations
+            .iter()
+            .find(|o| o.attr("operation.name") == Some("orders.decode"))
+            .unwrap();
+        assert_eq!(decode.scope.leg, Leg::Service);
+        assert_eq!(decode.attr("operation.outcome"), Some("error"));
+        let parent = decode.span.as_ref().unwrap().parent_span_id.as_deref();
+        assert_eq!(parent, Some(load_id.as_str()), "nested under orders.load");
+
+        // The 80 ms database call inside the 100 ms header phase dominates.
+        let findings = analyze(&report, &Thresholds::default());
+        let dominates = findings
+            .iter()
+            .find(|f| f.code == "alloy.service.operation_dominates")
+            .unwrap_or_else(|| panic!("{findings:#?}"));
+        assert_eq!(dominates.confidence, Confidence::Likely);
+        assert!(
+            dominates.explanation.contains("orders.load"),
+            "{}",
+            dominates.explanation
+        );
+    }
+
+    /// Operation entries count toward the store's byte bound.
+    #[test]
+    fn operations_count_toward_the_byte_estimate() {
+        let mut request = evidence(Some("acme"), "req-sized");
+        let bare = estimate(
+            "acme",
+            &request.request_id,
+            request.diagnostic_id(),
+            None,
+            0,
+        );
+        request.operations = (0..40)
+            .map(|_| {
+                OperationEvidence::new(
+                    "orders.load",
+                    OperationKind::Db,
+                    OperationOutcome::Completed,
+                    SpanId::random(),
+                    request.span_id,
+                )
+            })
+            .collect();
+        let store = EvidenceStore::new(&DiagnosticsSettings::default());
+        store.record(request);
+        let ring = store.ring();
+        let record = ring.records.values().next().unwrap();
+        assert_eq!(record.operations.len(), MAX_OPERATIONS_PER_REQUEST);
+        assert_eq!(record.operations_dropped, 8);
+        assert_eq!(
+            record.bytes,
+            bare + MAX_OPERATIONS_PER_REQUEST * size_of::<OperationEvidence>()
+        );
+    }
+
     #[test]
     fn reports_round_trip_through_the_offline_parser() {
         let trace = TraceId::random();
@@ -2575,7 +2894,7 @@ mod tests {
         store.record(second);
         let found_now = store.find("acme", id("req-7"));
         let records = &found_now.records;
-        let json = serde_json::to_vec(&report("orders", &found_now)).unwrap();
+        let json = serde_json::to_vec(&report("orders", "alloy-test", &found_now)).unwrap();
         let parsed = parse_offline(&json, &Limits::default()).unwrap();
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         assert_eq!(parsed.claimed_verification, Verification::Unverified);
@@ -2622,7 +2941,7 @@ mod tests {
         assert_eq!(response.attr("status"), None);
 
         // Ownership is described without adding fields to the wire schema.
-        let report = super::report("orders", &found_now);
+        let report = super::report("orders", "alloy-test", &found_now);
         let notes = &report.collection.notes;
         assert_eq!(notes.len(), 4, "{notes:?}");
         let resolved = "resolved as a correlation alias (request_id_origin trusted_peer)";

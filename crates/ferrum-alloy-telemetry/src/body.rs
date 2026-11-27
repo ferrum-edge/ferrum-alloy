@@ -86,6 +86,12 @@ where
         let this = self.project();
         // A synchronous guard scoped to this poll: never held across an await.
         let _entered = this.span.as_ref().map(tracing::Span::enter);
+        // Operations run while producing the body belong to this request.
+        let _scope = this
+            .finalizer
+            .as_ref()
+            .and_then(Finalizer::collector)
+            .map(crate::evidence::RequestScope::enter);
         let mut inner = this.inner;
         let result = inner.as_mut().poll_frame(cx);
         let finalize = |finalizer: &mut Option<Finalizer>, outcome| {

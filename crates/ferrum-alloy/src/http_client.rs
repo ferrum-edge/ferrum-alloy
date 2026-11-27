@@ -16,10 +16,12 @@
 //! span when a [`RequestContext`] is supplied.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ferrum_alloy_telemetry::RequestContext;
+use ferrum_alloy_telemetry::evidence::OperationOutcome;
 use ferrum_alloy_telemetry::metrics::method_label;
+use ferrum_alloy_telemetry::operation::{OperationKind, OperationRecorder};
 use ferrum_alloy_telemetry::trace_context::{SpanId, TRACEPARENT, TRACESTATE};
 use reqwest::redirect;
 use tracing::Instrument;
@@ -263,9 +265,15 @@ impl AlloyClient {
         request.headers_mut().remove(TRACEPARENT);
         request.headers_mut().remove(TRACESTATE);
         request.headers_mut().remove("baggage");
+        // Kept in the request's diagnostic evidence when it collects any;
+        // dropped unfinished (the caller gave up), it records a cancelled
+        // operation.
+        let recorder = OperationRecorder::start("http.client", OperationKind::Client, &span);
         if propagate && let Some(context) = context {
-            let span_id = ferrum_alloy_telemetry::exported_ids(&span)
-                .map_or_else(SpanId::random, |(_, span_id, _)| span_id);
+            let span_id = recorder.span_id().unwrap_or_else(|| {
+                ferrum_alloy_telemetry::exported_ids(&span)
+                    .map_or_else(SpanId::random, |(_, span_id, _)| span_id)
+            });
             let traceparent = context.child_traceparent(span_id).to_header_value();
             if let Ok(value) = http::HeaderValue::from_str(&traceparent) {
                 request.headers_mut().insert(TRACEPARENT, value);
@@ -279,11 +287,16 @@ impl AlloyClient {
             }
         }
 
-        let started = Instant::now();
         let result = self.client.execute(request).instrument(span.clone()).await;
+        let outcome = if result.is_ok() {
+            OperationOutcome::Completed
+        } else {
+            OperationOutcome::Error
+        };
+        let elapsed = recorder.finish(outcome);
         span.record(
             "alloy.operation.duration_ms",
-            started.elapsed().as_secs_f64() * 1_000.0,
+            elapsed.as_secs_f64() * 1_000.0,
         );
         match &result {
             Ok(response) => {

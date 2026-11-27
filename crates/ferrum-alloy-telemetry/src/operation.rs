@@ -21,15 +21,27 @@
 //! A database operation's duration is the time the application waited for
 //! the call. It includes pool wait, network transfer, and driver work, and is
 //! not database server execution time.
+//!
+//! When the telemetry layer has an evidence sink, each operation is also
+//! kept in its request's [`RequestEvidence`](crate::RequestEvidence) (see
+//! [`crate::evidence`] for which request an operation belongs to). Code
+//! that times an operation itself, without [`Operation::run`], records it
+//! with an [`OperationRecorder`].
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pin_project_lite::pin_project;
 use tracing::Span;
 use tracing::field::Empty;
+
+use crate::evidence::{Collector, OperationEvidence, OperationOutcome, current_request};
+use crate::trace_context::SpanId;
 
 /// Kind of operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +56,8 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    fn label(self) -> &'static str {
+    /// Stable label (`alloy.operation.kind`).
+    pub fn label(self) -> &'static str {
         match self {
             Self::Internal => "internal",
             Self::Db => "db",
@@ -147,7 +160,7 @@ impl Operation {
             inner: future,
             operation: self,
             span: None,
-            start: None,
+            recorder: None,
             done: false,
             is_error: never::<F::Output>,
         }
@@ -166,7 +179,7 @@ impl Operation {
             inner: future,
             operation: self,
             span: None,
-            start: None,
+            recorder: None,
             done: false,
             is_error: is_err::<T, E>,
         }
@@ -183,6 +196,165 @@ impl Operation {
 /// very many acquires the last value present may not be the last wait.
 pub fn record_pool_wait(duration: std::time::Duration) {
     Span::current().record("alloy.db.pool_wait_ms", duration.as_secs_f64() * 1_000.0);
+    if let Ok(Some(slot)) = ACTIVE_OPERATION.try_with(|active| active.borrow().clone()) {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(NO_POOL_WAIT - 1);
+        slot.pool_wait_nanos.store(nanos, Ordering::Relaxed);
+    }
+}
+
+/// `pool_wait_nanos` before any pool wait is recorded.
+const NO_POOL_WAIT: u64 = u64::MAX;
+
+/// What a running operation gathers for its request's evidence.
+#[derive(Debug)]
+struct OperationSlot {
+    span_id: SpanId,
+    /// The last recorded pool wait, or [`NO_POOL_WAIT`].
+    pool_wait_nanos: AtomicU64,
+}
+
+thread_local! {
+    /// The operation whose future this thread is polling.
+    static ACTIVE_OPERATION: RefCell<Option<Arc<OperationSlot>>> = const { RefCell::new(None) };
+}
+
+/// Makes an operation current on this thread until dropped, so pool waits
+/// and nested operations attach to it. Returned by
+/// [`OperationRecorder::enter`]; keep it only for the duration of one poll.
+#[derive(Debug)]
+#[must_use = "the operation is current only while the guard is alive"]
+pub struct OperationGuard {
+    previous: Option<Option<Arc<OperationSlot>>>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            let _ = ACTIVE_OPERATION.try_with(|active| active.replace(previous));
+        }
+    }
+}
+
+/// Times one operation for its request's evidence, for code that measures
+/// an operation without [`Operation::run`] (Alloy's outbound HTTP client
+/// does). [`Operation::run`] uses it internally.
+///
+/// Start it when the operation starts, on the request's task, and call
+/// [`OperationRecorder::finish`] when it ends. A recorder dropped unfinished
+/// records the operation as [`OperationOutcome::Cancelled`]. Without an
+/// evidence sink on the current request it only measures the duration.
+#[derive(Debug)]
+pub struct OperationRecorder {
+    name: &'static str,
+    kind: OperationKind,
+    start: Instant,
+    /// Present while the operation belongs to a request that collects
+    /// evidence.
+    evidence: Option<RecorderEvidence>,
+    finished: bool,
+}
+
+#[derive(Debug)]
+struct RecorderEvidence {
+    request: Arc<Collector>,
+    slot: Arc<OperationSlot>,
+    parent_span_id: SpanId,
+}
+
+impl OperationRecorder {
+    /// Starts timing operation `name` of `kind`, whose span is `span`.
+    pub fn start(name: &'static str, kind: OperationKind, span: &Span) -> Self {
+        let start = Instant::now();
+        let evidence = current_request().map(|request| {
+            let span_id =
+                crate::otel_bridge::exported_ids(span).map_or_else(SpanId::random, |ids| ids.1);
+            let parent_span_id = ACTIVE_OPERATION
+                .try_with(|active| active.borrow().as_ref().map(|slot| slot.span_id))
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| request.span_id());
+            RecorderEvidence {
+                request,
+                slot: Arc::new(OperationSlot {
+                    span_id,
+                    pool_wait_nanos: AtomicU64::new(NO_POOL_WAIT),
+                }),
+                parent_span_id,
+            }
+        });
+        Self {
+            name,
+            kind,
+            start,
+            evidence,
+            finished: false,
+        }
+    }
+
+    /// Makes this operation current on this thread until the guard drops,
+    /// so [`record_pool_wait`] and nested operations attach to it.
+    pub fn enter(&self) -> OperationGuard {
+        let previous = self.evidence.as_ref().and_then(|evidence| {
+            ACTIVE_OPERATION
+                .try_with(|active| active.replace(Some(Arc::clone(&evidence.slot))))
+                .ok()
+        });
+        OperationGuard { previous }
+    }
+
+    /// Time since the operation started.
+    pub fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// The span id this operation is recorded under in its request's
+    /// evidence, when the request collects evidence. Use it as the parent
+    /// id of an outbound `traceparent`, so a downstream service's spans link
+    /// to this operation.
+    pub fn span_id(&self) -> Option<SpanId> {
+        self.evidence.as_ref().map(|evidence| evidence.slot.span_id)
+    }
+
+    /// Ends the operation with `outcome` and returns its duration.
+    pub fn finish(mut self, outcome: OperationOutcome) -> Duration {
+        self.record(outcome)
+    }
+
+    fn record(&mut self, outcome: OperationOutcome) -> Duration {
+        let duration = self.start.elapsed();
+        if self.finished {
+            return duration;
+        }
+        self.finished = true;
+        if let Some(evidence) = self.evidence.take() {
+            let pool_wait = match evidence.slot.pool_wait_nanos.load(Ordering::Relaxed) {
+                NO_POOL_WAIT => None,
+                nanos => Some(Duration::from_nanos(nanos)),
+            };
+            let mut operation = OperationEvidence::new(
+                self.name,
+                self.kind,
+                outcome,
+                evidence.slot.span_id,
+                evidence.parent_span_id,
+            );
+            operation.started = self
+                .start
+                .saturating_duration_since(evidence.request.start());
+            operation.duration = duration;
+            operation.pool_wait = pool_wait;
+            evidence.request.push(operation);
+        }
+        duration
+    }
+}
+
+impl Drop for OperationRecorder {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.record(OperationOutcome::Cancelled);
+        }
+    }
 }
 
 pin_project! {
@@ -195,7 +367,7 @@ pin_project! {
         inner: F,
         operation: Operation,
         span: Option<Span>,
-        start: Option<Instant>,
+        recorder: Option<OperationRecorder>,
         done: bool,
         is_error: fn(&F::Output) -> bool,
     }
@@ -208,11 +380,12 @@ pin_project! {
             let this = this.project();
             if !*this.done
                 && let Some(span) = this.span
-                && let Some(start) = this.start
+                && let Some(recorder) = this.recorder.take()
             {
                 let _entered = span.enter();
-                span.record("alloy.operation.duration_ms", start.elapsed().as_secs_f64() * 1_000.0);
-                span.record("alloy.operation.outcome", "cancelled");
+                let duration = recorder.finish(OperationOutcome::Cancelled);
+                span.record("alloy.operation.duration_ms", duration.as_secs_f64() * 1_000.0);
+                span.record("alloy.operation.outcome", OperationOutcome::Cancelled.as_str());
             }
         }
     }
@@ -233,20 +406,33 @@ impl<F: Future> Future for OperationFuture<F> {
                 this.span.insert(span)
             }
         };
-        let start = *this.start.get_or_insert_with(Instant::now);
         let _entered = span.enter();
-        let output = std::task::ready!(this.inner.poll(cx));
+        let recorder = this.recorder.get_or_insert_with(|| {
+            OperationRecorder::start(this.operation.name, this.operation.kind, span)
+        });
+        let output = {
+            let _current = recorder.enter();
+            std::task::ready!(this.inner.poll(cx))
+        };
         *this.done = true;
+        let failed = (this.is_error)(&output);
+        let outcome = if failed {
+            OperationOutcome::Error
+        } else {
+            OperationOutcome::Completed
+        };
+        let duration = match this.recorder.take() {
+            Some(recorder) => recorder.finish(outcome),
+            None => Duration::ZERO,
+        };
         span.record(
             "alloy.operation.duration_ms",
-            start.elapsed().as_secs_f64() * 1_000.0,
+            duration.as_secs_f64() * 1_000.0,
         );
-        if (this.is_error)(&output) {
-            span.record("alloy.operation.outcome", "error");
+        span.record("alloy.operation.outcome", outcome.as_str());
+        if failed {
             span.record("otel.status_code", "error");
             span.record("error.type", "operation_error");
-        } else {
-            span.record("alloy.operation.outcome", "completed");
         }
         Poll::Ready(output)
     }
