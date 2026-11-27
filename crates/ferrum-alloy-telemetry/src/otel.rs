@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct GateState {
+    struct ControlGateState {
         exporting: bool,
         open: bool,
         exported: usize,
@@ -1327,9 +1327,9 @@ mod tests {
 
     /// Blocks every export until the gate opens and counts lifecycle calls.
     #[derive(Debug, Clone, Default)]
-    struct GatedExporter(Arc<(Mutex<GateState>, std::sync::Condvar)>);
+    struct ControlGatedExporter(Arc<(Mutex<ControlGateState>, std::sync::Condvar)>);
 
-    impl GatedExporter {
+    impl ControlGatedExporter {
         fn wait_until_exporting(&self) {
             let (state, changed) = &*self.0;
             let guard = state.lock().unwrap();
@@ -1351,7 +1351,7 @@ mod tests {
         }
     }
 
-    impl SpanExporter for GatedExporter {
+    impl SpanExporter for ControlGatedExporter {
         fn export(
             &self,
             batch: Vec<SpanData>,
@@ -1379,7 +1379,7 @@ mod tests {
     // rather than in tests/otel_export.rs.
     #[test]
     fn a_flush_and_a_shutdown_queued_behind_a_blocked_export_both_complete() {
-        let exporter = GatedExporter::default();
+        let exporter = ControlGatedExporter::default();
         let shared = exporter.clone();
         let config = OtlpConfig {
             enabled: true,
