@@ -453,3 +453,47 @@ fn strip<B>(request: &mut Request<B>, present: bool, stats: &EdgeStats) {
         .fetch_add(1, Ordering::Relaxed);
     tracing::debug!(target: "ferrum_alloy::edge", "removed gateway-asserted headers from a request without a verified gateway identity");
 }
+
+/// Parity with a real Ferrum Edge: CI sends each chain of
+/// `contracts/fixtures/edge-parity/forwarded-for.json` through Edge with the
+/// same trusted proxies and checks that Edge forwards `forwarded` and
+/// resolves `client`. Alloy must resolve the same client from `forwarded`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod edge_parity_tests {
+    use super::*;
+
+    #[test]
+    fn the_edge_parity_fixture_resolves_like_edge() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contracts/fixtures/edge-parity/forwarded-for.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let trusted: Vec<IpNet> = fixture["trusted_proxies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cidr| cidr.as_str().unwrap().parse().unwrap())
+            .collect();
+        let peer_address: IpAddr = fixture["edge_peer"].as_str().unwrap().parse().unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "{}", cases.len());
+        for case in cases {
+            let forwarded = case["forwarded"].as_str().unwrap();
+            let inbound = case["x_forwarded_for"].as_str().unwrap();
+            assert_eq!(
+                forwarded.strip_suffix(&format!(", {peer_address}")),
+                Some(inbound),
+                "Edge appends its trusted peer to the inbound chain"
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_str(forwarded).unwrap());
+            let entries = forwarded_for_entries(&headers);
+            let peer = edge_peer(&entries);
+            assert_eq!(peer, Some(peer_address), "{forwarded}");
+            let client = resolved_client(&entries, &trusted, peer);
+            let expected: IpAddr = case["client"].as_str().unwrap().parse().unwrap();
+            assert_eq!(client, Some(expected), "{forwarded}");
+        }
+    }
+}

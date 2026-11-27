@@ -5,7 +5,7 @@ name: Edge main drift
 # "Checking against Edge main" in ferrum-contracts). ci.yml's "Generated Edge
 # configuration validates" job runs Alloy's generated Edge configuration
 # through each supported Edge release (docs/compatibility.json); this workflow
-# runs the same three steps, copied verbatim (ci/tests/test_edge_main_drift.py
+# runs the same four steps, copied verbatim (ci/tests/test_edge_main_drift.py
 # keeps the copies equal), against the newest signed Edge `main` image.
 #
 # It runs weekly and by hand, is never a required check, and uses no secrets:
@@ -321,6 +321,23 @@ jobs:
             echo "::error::expected $expected from Edge $EDGE_RELEASE"
             exit 1
           fi
+      - name: Edge main agrees with Alloy's request-path and forwarded-client rules
+        id: parity
+        continue-on-error: true
+        # Alloy repeats two Edge decisions: the canonical policy path
+        # (crates/ferrum-alloy-edge/src/policy_path.rs) and the client resolved
+        # from X-Forwarded-For with FERRUM_TRUSTED_PROXIES
+        # (GatewayContext::client_address). contracts/fixtures/edge-parity/
+        # records the verdicts Alloy's unit tests reach; ci/edge_parity.py
+        # sends every fixture path and chain through this Edge in front of an
+        # echo backend and compares what the backend receives and what Edge's
+        # access log resolves.
+        env:
+          EDGE_IMAGE: ${{ steps.edge.outputs.image }}
+          EDGE_RELEASE: ${{ steps.edge.outputs.release }}
+        run: |
+          set -euo pipefail
+          python3 -I ci/edge_parity.py --image "$EDGE_IMAGE" --release "$EDGE_RELEASE"
 
       - name: Write the report
         # Always, so a run that could not check anything still reaches the
@@ -338,6 +355,7 @@ jobs:
           VALIDATE: ${{ steps.validate.outcome }}
           TRACE: ${{ steps.trace.outcome }}
           API_SPECS: ${{ steps.api-specs.outcome }}
+          PARITY: ${{ steps.parity.outcome }}
           SETUP: >-
             checkout=${{ steps.checkout.outcome }}
             install-cosign=${{ steps.cosign.outcome }}
@@ -357,7 +375,7 @@ jobs:
             [ "${entry#*=}" = success ] || failed_setup="$failed_setup ${entry%%=*}"
           done
           outcome=clean
-          for result in "$VALIDATE" "$TRACE" "$API_SPECS"; do
+          for result in "$VALIDATE" "$TRACE" "$API_SPECS" "$PARITY"; do
             [ "$result" = success ] || outcome=drift
           done
           [ -z "$failed_setup" ] || outcome=error
@@ -385,6 +403,7 @@ jobs:
             echo "| \`ferrum-edge validate\` on the plain-HTTP and minimal fixtures | $(verdict "$VALIDATE") |"
             echo "| Edge strips a caller's trace context through the minimal fixture | $(verdict "$TRACE") |"
             echo "| \`POST /api-specs\` accepts the exported agent-tool document | $(verdict "$API_SPECS") |"
+            echo "| Edge agrees with Alloy's request-path and forwarded-client rules | $(verdict "$PARITY") |"
             echo
             echo "These are the steps of CI's \"Generated Edge configuration validates\" job; the run log has each failure. A clean scheduled run closes this issue."
           } > "$report"

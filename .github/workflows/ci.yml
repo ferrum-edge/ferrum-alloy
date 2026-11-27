@@ -920,3 +920,18 @@ jobs:
             echo "::error::expected $expected from Edge $EDGE_RELEASE"
             exit 1
           fi
+      - name: Edge (${{ matrix.edge.release }}) agrees with Alloy's request-path and forwarded-client rules
+        # Alloy repeats two Edge decisions: the canonical policy path
+        # (crates/ferrum-alloy-edge/src/policy_path.rs) and the client resolved
+        # from X-Forwarded-For with FERRUM_TRUSTED_PROXIES
+        # (GatewayContext::client_address). contracts/fixtures/edge-parity/
+        # records the verdicts Alloy's unit tests reach; ci/edge_parity.py
+        # sends every fixture path and chain through this Edge in front of an
+        # echo backend and compares what the backend receives and what Edge's
+        # access log resolves.
+        env:
+          EDGE_IMAGE: ${{ matrix.edge.image }}
+          EDGE_RELEASE: ${{ matrix.edge.release }}
+        run: |
+          set -euo pipefail
+          python3 -I ci/edge_parity.py --image "$EDGE_IMAGE" --release "$EDGE_RELEASE"

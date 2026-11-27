@@ -1,0 +1,280 @@
+{
+  "description": "Request paths submitted to a real Ferrum Edge (CI edge-config and Edge main drift jobs) and compared with Alloy's port of Edge's canonicalize_policy_path (crates/ferrum-alloy-edge/src/policy_path.rs), which policy_path::tests::the_edge_parity_fixture_matches_the_port checks against this file. A canonical case must reach the backend with exactly that path; a rejection must get Edge's 400 with the error body for that reason. Only origin-form targets an HTTP/1.1 client can send are listed: a literal backslash, space, or non-ASCII byte is refused by the HTTP parser before Edge's canonicalizer, so the literal_backslash reason is checked only by the unit tests. Edge serves the paths through one catch-all proxy with allow_path_parameters, so the per-proxy ';' rule does not apply.",
+  "edge_rejection_errors": {
+    "invalid_escape": "Request path contains an incomplete percent-escape",
+    "double_encoding": "Request path contains a double-encoded percent-escape",
+    "encoded_separator": "Request path contains an encoded path separator",
+    "encoded_backslash": "Request path contains an encoded backslash",
+    "encoded_control": "Request path contains an encoded control character",
+    "unrepresentable_escape": "Request path contains an unrepresentable percent-escape",
+    "ambiguous_dot_segment": "Request path contains an encoded dot segment",
+    "literal_dot_segment": "Request path contains a dot segment",
+    "empty_segment": "Request path contains an empty path segment"
+  },
+  "cases": [
+    {
+      "path": "/",
+      "canonical": "/"
+    },
+    {
+      "path": "/admin",
+      "canonical": "/admin"
+    },
+    {
+      "path": "/api/v1/users/42",
+      "canonical": "/api/v1/users/42"
+    },
+    {
+      "path": "/api/v1/",
+      "canonical": "/api/v1/"
+    },
+    {
+      "path": "/a/.hidden/b",
+      "canonical": "/a/.hidden/b"
+    },
+    {
+      "path": "/a/..hidden/b",
+      "canonical": "/a/..hidden/b"
+    },
+    {
+      "path": "/a/b./c",
+      "canonical": "/a/b./c"
+    },
+    {
+      "path": "/v1.0/users",
+      "canonical": "/v1.0/users"
+    },
+    {
+      "path": "/weird!$&'()*+,;=:@chars",
+      "canonical": "/weird!$&'()*+,;=:@chars"
+    },
+    {
+      "path": "/a;b",
+      "canonical": "/a;b"
+    },
+    {
+      "path": "/v1;version=2",
+      "canonical": "/v1;version=2"
+    },
+    {
+      "path": "/a/b;../c",
+      "canonical": "/a/b;../c"
+    },
+    {
+      "path": "/ctx/;jsessionid=abc",
+      "canonical": "/ctx/;jsessionid=abc"
+    },
+    {
+      "path": "/%61dmin",
+      "canonical": "/admin"
+    },
+    {
+      "path": "/%41DMIN",
+      "canonical": "/ADMIN"
+    },
+    {
+      "path": "/api/%76%31/users",
+      "canonical": "/api/v1/users"
+    },
+    {
+      "path": "/%2Dx",
+      "canonical": "/-x"
+    },
+    {
+      "path": "/%2Ex",
+      "canonical": "/.x"
+    },
+    {
+      "path": "/%7Ex",
+      "canonical": "/~x"
+    },
+    {
+      "path": "/%21x",
+      "canonical": "/!x"
+    },
+    {
+      "path": "/%27x",
+      "canonical": "/'x"
+    },
+    {
+      "path": "/%2Ax",
+      "canonical": "/*x"
+    },
+    {
+      "path": "/%3Dx",
+      "canonical": "/=x"
+    },
+    {
+      "path": "/%3Ax",
+      "canonical": "/:x"
+    },
+    {
+      "path": "/%40x",
+      "canonical": "/@x"
+    },
+    {
+      "path": "/a%3bb",
+      "canonical": "/a;b"
+    },
+    {
+      "path": "/api/%2ehidden",
+      "canonical": "/api/.hidden"
+    },
+    {
+      "path": "/api/%2e%2ehidden",
+      "canonical": "/api/..hidden"
+    },
+    {
+      "path": "/%61/",
+      "canonical": "/a/"
+    },
+    {
+      "path": "/ctx/%3Bjsessionid=abc",
+      "canonical": "/ctx/;jsessionid=abc"
+    },
+    {
+      "path": "/a/%2e%2ea%3bb",
+      "canonical": "/a/..a;b"
+    },
+    {
+      "path": "/api%",
+      "rejection": "invalid_escape"
+    },
+    {
+      "path": "/api%2",
+      "rejection": "invalid_escape"
+    },
+    {
+      "path": "/api%zz",
+      "rejection": "invalid_escape"
+    },
+    {
+      "path": "/api%g0/more",
+      "rejection": "invalid_escape"
+    },
+    {
+      "path": "/api%252Fadmin",
+      "rejection": "double_encoding"
+    },
+    {
+      "path": "/%2561dmin",
+      "rejection": "double_encoding"
+    },
+    {
+      "path": "/a%25b",
+      "rejection": "double_encoding"
+    },
+    {
+      "path": "/api%2Fadmin",
+      "rejection": "encoded_separator"
+    },
+    {
+      "path": "/api%2fadmin",
+      "rejection": "encoded_separator"
+    },
+    {
+      "path": "/api%3Fquery",
+      "rejection": "encoded_separator"
+    },
+    {
+      "path": "/api%23fragment",
+      "rejection": "encoded_separator"
+    },
+    {
+      "path": "/api%5Cadmin",
+      "rejection": "encoded_backslash"
+    },
+    {
+      "path": "/api%5cadmin",
+      "rejection": "encoded_backslash"
+    },
+    {
+      "path": "/api%00",
+      "rejection": "encoded_control"
+    },
+    {
+      "path": "/api%0A",
+      "rejection": "encoded_control"
+    },
+    {
+      "path": "/api%7F",
+      "rejection": "encoded_control"
+    },
+    {
+      "path": "/api%20name",
+      "rejection": "unrepresentable_escape"
+    },
+    {
+      "path": "/api%7bname",
+      "rejection": "unrepresentable_escape"
+    },
+    {
+      "path": "/caf%C3%A9",
+      "rejection": "unrepresentable_escape"
+    },
+    {
+      "path": "/%FF",
+      "rejection": "unrepresentable_escape"
+    },
+    {
+      "path": "/api/%2e%2e/admin",
+      "rejection": "ambiguous_dot_segment"
+    },
+    {
+      "path": "/api/.%2e/admin",
+      "rejection": "ambiguous_dot_segment"
+    },
+    {
+      "path": "/api/%2e/admin",
+      "rejection": "ambiguous_dot_segment"
+    },
+    {
+      "path": "/a/..%3b/b",
+      "rejection": "ambiguous_dot_segment"
+    },
+    {
+      "path": "/a/%2e%2e;/b",
+      "rejection": "ambiguous_dot_segment"
+    },
+    {
+      "path": "/api/../admin",
+      "rejection": "literal_dot_segment"
+    },
+    {
+      "path": "/api/./admin",
+      "rejection": "literal_dot_segment"
+    },
+    {
+      "path": "/..",
+      "rejection": "literal_dot_segment"
+    },
+    {
+      "path": "/public/..;/admin",
+      "rejection": "literal_dot_segment"
+    },
+    {
+      "path": "/a/.;x/b",
+      "rejection": "literal_dot_segment"
+    },
+    {
+      "path": "//admin",
+      "rejection": "empty_segment"
+    },
+    {
+      "path": "/a//b",
+      "rejection": "empty_segment"
+    },
+    {
+      "path": "/;x/admin",
+      "rejection": "empty_segment"
+    },
+    {
+      "path": "/a/;/b",
+      "rejection": "empty_segment"
+    },
+    {
+      "path": "/%3Bx/admin",
+      "rejection": "empty_segment"
+    }
+  ]
+}
