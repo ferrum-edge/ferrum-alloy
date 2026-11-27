@@ -1143,6 +1143,7 @@ impl Default for DiagnosticsSettings {
 
 /// What kind of value an environment variable holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EnvKind {
     /// Free text.
     Str,
@@ -1160,6 +1161,7 @@ pub enum EnvKind {
 
 /// One supported `FERRUM_ALLOY_*` variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnvVar {
     /// Variable name.
     pub name: &'static str,
@@ -1244,6 +1246,7 @@ env_vars! {
 
 /// Configuration errors.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// The file could not be read.
     #[error("cannot read configuration file {path}: {message}")]
@@ -1451,6 +1454,7 @@ fn redact_schema_message(message: &str, path: &[&str]) -> String {
 
 /// Where configuration values came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConfigSources {
     /// The file that was read, if any.
     pub file: Option<PathBuf>,
@@ -1509,7 +1513,7 @@ fn merge(base: &mut toml::Table, overlay: toml::Table) {
 }
 
 /// Reads and parses a configuration file.
-pub fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
+pub(crate) fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
     let read_error = |message: String| ConfigError::Read {
         path: path.to_owned(),
         message,
@@ -1521,7 +1525,7 @@ pub fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
 }
 
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
-pub fn env_table<I>(vars: I) -> Result<(toml::Table, Vec<&'static str>), ConfigError>
+pub(crate) fn env_table<I>(vars: I) -> Result<(toml::Table, Vec<&'static str>), ConfigError>
 where
     I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 {
@@ -1662,6 +1666,7 @@ where
 
 /// A validation finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConfigIssue {
     /// `true` for errors that prevent startup.
     pub error: bool,

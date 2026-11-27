@@ -82,10 +82,9 @@ fn request_from(
         request = request.header(*name, *value);
     }
     let mut request = request.body(Empty::new()).unwrap();
-    request.extensions_mut().insert(PeerInfo {
-        remote_addr: Some(addr.parse::<SocketAddr>().unwrap()),
-        tls,
-    });
+    let mut peer = PeerInfo::new(addr.parse::<SocketAddr>().unwrap());
+    peer.tls = tls;
+    request.extensions_mut().insert(peer);
     request
 }
 
@@ -170,10 +169,10 @@ async fn ipv4_mapped_ipv6_peers_match_ipv4_networks() {
 
 #[tokio::test]
 async fn verified_spiffe_identity_is_trusted_but_unverified_certificates_are_not() {
-    let identity = |verified| TlsPeer {
-        client_cert_verified: verified,
-        spiffe_id: Some("spiffe://ferrum.test/ns/edge/sa/gateway".into()),
-        dns_names: vec![],
+    let identity = |verified| {
+        let mut tls = TlsPeer::new(verified);
+        tls.spiffe_id = Some("spiffe://ferrum.test/ns/edge/sa/gateway".into());
+        tls
     };
     let request = request_from(
         "198.51.100.4:4000",
@@ -202,11 +201,9 @@ async fn verified_spiffe_identity_is_trusted_but_unverified_certificates_are_not
 
 #[tokio::test]
 async fn wrong_gateway_identity_is_untrusted() {
-    let tls = TlsPeer {
-        client_cert_verified: true,
-        spiffe_id: Some("spiffe://ferrum.test/ns/other/sa/impostor".into()),
-        dns_names: vec!["gateway".into()],
-    };
+    let mut tls = TlsPeer::new(true);
+    tls.spiffe_id = Some("spiffe://ferrum.test/ns/other/sa/impostor".into());
+    tls.dns_names = vec!["gateway".into()];
     let request = request_from("198.51.100.4:4000", Some(tls), &[("traceparent", INCOMING)]);
     let (seen, _) = run(trusted_layer(TelemetryConfig::default()), request, &[]).await;
     assert_eq!(seen.context.peer_trust, PeerTrust::Untrusted);

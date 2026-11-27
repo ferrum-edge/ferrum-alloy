@@ -174,56 +174,35 @@ fn a_malformed_reference_is_unknown_and_never_offered_for_lookup() {
 }
 
 fn client() -> Producer {
-    Producer {
-        kind: ProducerKind::Client,
-        name: "test".into(),
-        version: None,
-        instance: None,
-        unrecognized: std::collections::BTreeMap::new(),
-    }
+    Producer::new(ProducerKind::Client, "test")
 }
 
 /// The fixture's two headers as a report that claims a verified collection
 /// and verified producers, bypassing the offline parser's downgrade.
 fn verified_report(value: &str) -> DiagnosticReport {
-    let mut report = DiagnosticReport::new(Collection {
-        unrecognized: std::collections::BTreeMap::new(),
-        collector: client(),
-        method: CollectionMethod::LiveExport,
-        verification: Verification::Verified,
-        notes: Vec::new(),
-    });
+    let mut report = DiagnosticReport::new(Collection::new(
+        client(),
+        CollectionMethod::LiveExport,
+        Verification::Verified,
+    ));
     for (id, header, value) in [
         ("token", "X-Gateway-Error", "connection_failure"),
         ("reference", HEADER, value),
     ] {
-        report.observations.push(Observation {
-            id: id.into(),
-            producer: client(),
-            kind: ObservationKind::Event,
-            name: catalog::CLIENT_RESPONSE_HEADER.into(),
-            availability: Availability::Measured,
-            value: None,
-            unit: None,
-            boundaries: None,
-            clock: None,
-            interval: None,
-            scope: Scope {
-                leg: Leg::ClientToGateway,
-                service: None,
-                gateway: None,
-                attempt: None,
-                unrecognized: std::collections::BTreeMap::new(),
-            },
-            span: None,
-            attributes: BTreeMap::from([
-                ("header".to_owned(), header.to_owned()),
-                ("value".to_owned(), value.to_owned()),
-            ]),
-            trust: Trust::Verified,
-            evidence_ref: None,
-            unrecognized: BTreeMap::new(),
-        });
+        let mut observation = Observation::new(
+            id,
+            client(),
+            ObservationKind::Event,
+            catalog::CLIENT_RESPONSE_HEADER,
+            Availability::Measured,
+            Scope::new(Leg::ClientToGateway),
+            Trust::Verified,
+        );
+        observation.attributes = BTreeMap::from([
+            ("header".to_owned(), header.to_owned()),
+            ("value".to_owned(), value.to_owned()),
+        ]);
+        report.observations.push(observation);
     }
     report
 }

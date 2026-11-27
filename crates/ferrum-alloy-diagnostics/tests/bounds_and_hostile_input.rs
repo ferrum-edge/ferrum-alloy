@@ -52,10 +52,8 @@ fn validation_messages(error: ReportError) -> Vec<String> {
 
 #[test]
 fn oversized_input_is_rejected_before_parsing() {
-    let limits = Limits {
-        max_bytes: 64,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_bytes = 64;
     let input = vec![b' '; 65];
     assert!(matches!(
         parse_offline(&input, &limits),
@@ -172,10 +170,8 @@ fn supplied_findings_are_discarded_and_still_bounded() {
     let findings = analyze(&parsed.report, &Thresholds::default());
     assert!(findings.iter().all(|f| f.title != "Forged conclusion"));
 
-    let limits = Limits {
-        max_findings: 2,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_findings = 2;
     let error = parse_offline(&serde_json::to_vec(&report).unwrap(), &limits).unwrap_err();
     assert!(
         validation_messages(error)
@@ -187,10 +183,8 @@ fn supplied_findings_are_discarded_and_still_bounded() {
 #[test]
 fn too_many_observations_are_rejected() {
     let mut report = base();
-    let limits = Limits {
-        max_observations: 3,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_observations = 3;
     report["observations"] = json!(
         (0..4)
             .map(|i| observation(&format!("o{i}")))
@@ -688,10 +682,8 @@ fn warning_bounds_omit_long_text_without_retaining_secret_prefixes() {
 
 #[test]
 fn max_depth_above_the_parser_limit_is_clamped() {
-    let limits = Limits {
-        max_depth: 10_000,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_depth = 10_000;
     let mut input = String::from("{\"schema\":");
     input.push_str(&"[".repeat(200));
     input.push_str(&"]".repeat(200));
@@ -708,10 +700,8 @@ fn max_depth_above_the_parser_limit_is_clamped() {
 /// parser's own nesting error, not a raw parser failure.
 #[test]
 fn nesting_at_the_parser_boundary_is_accepted_and_beyond_it_rejected_cleanly() {
-    let limits = Limits {
-        max_depth: 10_000,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_depth = 10_000;
     let nested = |arrays: usize| -> Vec<u8> {
         let mut report = base();
         let mut value = json!(0);

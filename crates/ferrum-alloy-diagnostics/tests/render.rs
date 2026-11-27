@@ -49,10 +49,9 @@ fn taint(finding: &mut Finding, text: &str) {
     ] {
         list.push(format!("item{text}"));
     }
-    finding.remediation.push(Remediation {
-        text: format!("action{text}"),
-        owner: Owner::Unknown,
-    });
+    finding
+        .remediation
+        .push(Remediation::new(format!("action{text}"), Owner::Unknown));
 }
 
 /// Renders the unattributed-interval fixture with `text` in every report
@@ -73,10 +72,7 @@ fn render_with(text: &str) -> String {
         taint(finding, text);
     }
     let mut warnings = parsed.warnings;
-    warnings.push(Issue {
-        path: format!("/path{text}"),
-        message: format!("message{text}"),
-    });
+    warnings.push(Issue::new(format!("/path{text}"), format!("message{text}")));
     render_text(&parsed.report, &findings, &warnings)
 }
 

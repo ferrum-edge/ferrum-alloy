@@ -15,7 +15,11 @@ use crate::model::{
 
 /// Input bounds. Every limit applies before or during parsing so a hostile
 /// file cannot force unbounded work.
+///
+/// Start from [`Limits::default`] and assign the bounds to change; a later
+/// release may add a bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Limits {
     /// Maximum input size in bytes.
     pub max_bytes: usize,
@@ -52,6 +56,7 @@ impl Default for Limits {
 
 /// Why a report could not be accepted at all.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReportError {
     /// The input exceeds a hard bound.
     #[error("report exceeds limit: {0}")]
@@ -166,6 +171,7 @@ fn warn(warnings: &mut Vec<Issue>, path: &str, message: String) {
 
 /// A validation problem.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Issue {
     /// JSON-pointer-like location.
     pub path: String,
@@ -173,8 +179,19 @@ pub struct Issue {
     pub message: String,
 }
 
+impl Issue {
+    /// A problem at `path`.
+    pub fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
 /// A successfully parsed report plus everything the reader had to adjust.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ParsedReport {
     /// The report, with provenance downgraded for offline reading. Its
     /// `findings` are always empty: supplied findings are discarded, and

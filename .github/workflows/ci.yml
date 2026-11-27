@@ -193,6 +193,64 @@ jobs:
       # API to document.
       - run: cargo doc --workspace --exclude ferrum-alloy-cli --all-features --no-deps --locked
 
+  semver:
+    name: Semver checks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The tags and the history between them: the baseline is the newest
+          # v1.* release tag reachable from the commit under test.
+          fetch-depth: 0
+      - name: Find the baseline release
+        id: baseline
+        # Semantic versioning of the library crates' public API starts with
+        # 1.0.0. Until a v1.* release tag exists there is no released 1.x API
+        # to compare with, and the 0.x API is not covered, so the comparison
+        # is skipped with a notice. It starts with the v1.0.0 tag, without
+        # editing this workflow.
+        run: |
+          set -euo pipefail
+          tag=$(git tag --merged HEAD --list 'v1.*' \
+            | grep -E '^v1\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::notice title=Semver checks skipped::No v1.* release tag is reachable from $(git rev-parse --short HEAD), so there is no released 1.x API to compare with. The check starts with the v1.0.0 tag."
+          else
+            echo "Baseline: $tag at $(git rev-list -n 1 "$tag")"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.baseline.outputs.tag != ''
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: steps.baseline.outputs.tag != ''
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        if: steps.baseline.outputs.tag != ''
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - name: Library crates against ${{ steps.baseline.outputs.tag }}
+        if: steps.baseline.outputs.tag != ''
+        # A change merged to main must be releasable as a 1.x minor release:
+        # breaking changes need a new major version. Every crate is
+        # `publish = false`, which --workspace skips, so the libraries are
+        # named; the CLI is a binary with no library API.
+        env:
+          BASELINE: ${{ steps.baseline.outputs.tag }}
+        run: |
+          cargo semver-checks \
+            --package ferrum-alloy-diagnostics \
+            --package ferrum-alloy-telemetry \
+            --package ferrum-alloy-edge \
+            --package ferrum-alloy \
+            --baseline-rev "$BASELINE" \
+            --release-type minor \
+            --all-features
+
   generator:
     name: Generated projects
     runs-on: ubuntu-26.04

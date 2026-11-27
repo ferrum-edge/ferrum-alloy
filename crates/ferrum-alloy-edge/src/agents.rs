@@ -228,7 +228,15 @@ fn location(path: &str, method: &str) -> String {
 /// Invalid or unsafe AI-agent tool metadata. Every problem is listed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("invalid AI-agent tool metadata (x-ferrum-mcp):\n  - {}", .0.join("\n  - "))]
+#[non_exhaustive]
 pub struct AgentToolError(pub Vec<String>);
+
+impl AgentToolError {
+    /// Every problem, one per entry.
+    pub fn reasons(&self) -> &[String] {
+        &self.0
+    }
+}
 
 /// The MCP tool annotations Edge derives from an operation's method
 /// (`BridgeMethod::default_annotations`), keyed by the lower-case OpenAPI

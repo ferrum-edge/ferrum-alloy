@@ -33,6 +33,7 @@ use tracing::field::Empty;
 
 /// Kind of operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OperationKind {
     /// In-process work.
     Internal,

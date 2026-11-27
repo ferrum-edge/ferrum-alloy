@@ -36,6 +36,7 @@ use crate::server::{self, ServeOptions, ServerStats};
 
 /// Who owns the global tracing subscriber.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TelemetryInit {
     /// Alloy installs a subscriber (logs, and OTLP export when configured)
     /// unless one is already installed. If the application already installed
@@ -960,16 +961,15 @@ impl TelemetryGuard {
         }
         #[cfg(feature = "otel")]
         if config.otlp.enabled {
-            let resource = ferrum_alloy_telemetry::otel::ServiceResource {
-                name: config
+            let mut resource = ferrum_alloy_telemetry::otel::ServiceResource::new(
+                config
                     .service
                     .name
                     .clone()
                     .unwrap_or_else(|| name.to_owned()),
-                version: config.service.version.clone(),
-                instance_id: None,
-                environment: Some(config.service.environment.clone()),
-            };
+            );
+            resource.version = config.service.version.clone();
+            resource.environment = Some(config.service.environment.clone());
             let mut otlp = ferrum_alloy_telemetry::otel::OtlpConfig::default();
             otlp.enabled = true;
             otlp.endpoint = config.otlp.endpoint.clone();

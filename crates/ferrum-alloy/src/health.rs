@@ -25,6 +25,7 @@ use crate::lifecycle::Lifecycle;
 /// A readiness check failure. The message is shown only on the protected
 /// management listener; keep it free of secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CheckError(pub String);
 
 impl CheckError {
@@ -34,6 +35,16 @@ impl CheckError {
     }
 }
 
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// `CheckError` deliberately does not implement `std::error::Error`: this
+// conversion from every error type would then overlap the reflexive
+// `From<CheckError> for CheckError`, and `?` on any error in a check is the
+// point of it.
 impl<E: std::error::Error> From<E> for CheckError {
     fn from(error: E) -> Self {
         Self(error.to_string())
@@ -61,6 +72,7 @@ where
 
 /// Result of one check.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct CheckResult {
     /// Check name.
     pub name: String,

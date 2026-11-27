@@ -427,10 +427,7 @@ async fn finished_connection(body_size: usize, write_stall_timeout: Duration) ->
         }),
     );
     let drain = CancellationToken::new();
-    let peer = PeerInfo {
-        remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
-        tls: None,
-    };
+    let peer = PeerInfo::new(SocketAddr::from(([127, 0, 0, 1], 12345)));
     let (mut client, server) = tokio::io::duplex(CAPACITY);
     let task = tokio::spawn(async move {
         serve_io(server, peer, active, builder, routes, &options, &drain).await;
@@ -727,10 +724,7 @@ async fn repeated_http2_control_backpressure_is_idle_and_releases_its_slot() {
         }),
     );
     let drain = CancellationToken::new();
-    let peer = PeerInfo {
-        remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 12345))),
-        tls: None,
-    };
+    let peer = PeerInfo::new(SocketAddr::from(([127, 0, 0, 1], 12345)));
     let blocked = Arc::new(AtomicBool::new(false));
     let (mut client, server) = tokio::io::duplex(CONTROL_CAPACITY);
     let io = ObservedIo {

@@ -1114,10 +1114,7 @@ fn peer(request: &Request) -> Option<PeerInfo> {
         return Some(peer.clone());
     }
     let ConnectInfo(addr) = extensions.get::<ConnectInfo<SocketAddr>>()?;
-    Some(PeerInfo {
-        remote_addr: Some(*addr),
-        ..PeerInfo::default()
-    })
+    Some(PeerInfo::new(*addr))
 }
 
 /// Asks `authorizer` about `request`, within [`AUTHORIZER_TIMEOUT`]. A panic,
@@ -1220,19 +1217,13 @@ fn report(service: &str, found: &Found) -> DiagnosticReport {
             "{dropped} earlier attempt(s) of this request are no longer retained"
         ));
     }
-    let mut report = DiagnosticReport::new(Collection {
-        unrecognized: std::collections::BTreeMap::new(),
-        collector: Producer {
-            kind: ProducerKind::Alloy,
-            name: "ferrum-alloy".to_owned(),
-            version: None,
-            instance: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        },
-        method: CollectionMethod::LiveExport,
-        verification: Verification::Unverified,
-        notes,
-    });
+    let mut collection = Collection::new(
+        Producer::new(ProducerKind::Alloy, "ferrum-alloy"),
+        CollectionMethod::LiveExport,
+        Verification::Unverified,
+    );
+    collection.notes = notes;
+    let mut report = DiagnosticReport::new(collection);
     let first = records.first();
     report.subject.request_id = first.map(|record| record.request_id.as_str().to_owned());
     report.subject.service = Some(service.to_owned());
@@ -1255,45 +1246,22 @@ fn base(
     kind: ObservationKind,
 ) -> Observation {
     let span_id = record.span_id.to_hex();
-    Observation {
-        id: format!("alloy:{span_id}:{suffix}"),
-        producer: Producer {
-            unrecognized: std::collections::BTreeMap::new(),
-            kind: ProducerKind::Alloy,
-            name: "ferrum-alloy-telemetry".to_owned(),
-            version: None,
-            instance: None,
-        },
+    let mut scope = Scope::new(Leg::Service);
+    scope.service = Some(service.to_owned());
+    let mut observation = Observation::new(
+        format!("alloy:{span_id}:{suffix}"),
+        Producer::new(ProducerKind::Alloy, "ferrum-alloy-telemetry"),
         kind,
-        name: name.to_owned(),
-        availability: Availability::Unknown,
-        value: None,
-        unit: None,
-        boundaries: catalog::entry(name).map(|entry| Boundaries {
-            start: entry.start.to_owned(),
-            end: entry.end.to_owned(),
-            unrecognized: std::collections::BTreeMap::new(),
-        }),
-        clock: None,
-        interval: None,
-        scope: Scope {
-            leg: Leg::Service,
-            service: Some(service.to_owned()),
-            gateway: None,
-            attempt: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        },
-        span: Some(SpanRef {
-            trace_id: record.trace_id.to_hex(),
-            span_id: span_id.clone(),
-            parent_span_id: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        }),
-        attributes: BTreeMap::new(),
-        trust: Trust::Unverified,
-        evidence_ref: Some(format!("alloy:request/{span_id}")),
-        unrecognized: BTreeMap::new(),
-    }
+        name,
+        Availability::Unknown,
+        scope,
+        Trust::Unverified,
+    );
+    observation.boundaries =
+        catalog::entry(name).map(|entry| Boundaries::new(entry.start, entry.end));
+    observation.span = Some(SpanRef::new(record.trace_id.to_hex(), span_id.clone()));
+    observation.evidence_ref = Some(format!("alloy:request/{span_id}"));
+    observation
 }
 
 /// A duration measurement, or `missing` when there is no value.

@@ -44,10 +44,7 @@ async fn call(parts: &AlloyParts, peer: IpAddr, path: &str, headers: &[(&str, &s
         builder = builder.header(*name, *value);
     }
     let mut request = builder.body(Body::empty()).unwrap();
-    let info = PeerInfo {
-        remote_addr: Some(SocketAddr::new(peer, 40_000)),
-        ..PeerInfo::default()
-    };
+    let info = PeerInfo::new(SocketAddr::new(peer, 40_000));
     request.extensions_mut().insert(info);
     let response = router.oneshot(request).await.unwrap();
     let status = response.status();

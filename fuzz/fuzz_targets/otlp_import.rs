@@ -9,13 +9,7 @@ use ferrum_alloy_diagnostics::{Thresholds, analyze};
 use libfuzzer_sys::fuzz_target;
 
 fn collector() -> Producer {
-    Producer {
-        kind: ProducerKind::Collector,
-        name: "ferrum-alloy-fuzz".into(),
-        version: None,
-        instance: None,
-        unrecognized: std::collections::BTreeMap::new(),
-    }
+    Producer::new(ProducerKind::Collector, "ferrum-alloy-fuzz")
 }
 
 fuzz_target!(|data: &[u8]| {

@@ -113,6 +113,7 @@ impl Default for OtlpConfig {
 
 /// Resource identity attached to every exported span.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ServiceResource {
     /// `service.name`.
     pub name: String,
@@ -124,8 +125,22 @@ pub struct ServiceResource {
     pub environment: Option<String>,
 }
 
+impl ServiceResource {
+    /// The resource of service `name`, with no version or environment and a
+    /// generated instance id.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: None,
+            instance_id: None,
+            environment: None,
+        }
+    }
+}
+
 /// Why the OpenTelemetry pipeline could not start.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OtelError {
     /// Invalid configuration value.
     #[error("invalid OpenTelemetry configuration: {0}")]
@@ -562,10 +577,10 @@ impl BoundedSpanProcessor {
         })
     }
 
-    /// Flush and shutdown requests accepted into the queue so far. A test
-    /// observable, not a stable API.
-    #[doc(hidden)]
-    pub fn controls_queued(&self) -> usize {
+    /// Flush and shutdown requests accepted into the queue so far (a test
+    /// observable).
+    #[cfg(test)]
+    pub(crate) fn controls_queued(&self) -> usize {
         self.controls_queued.load(Ordering::SeqCst)
     }
 
@@ -1299,5 +1314,117 @@ mod tests {
             Err(mpsc::TryRecvError::Disconnected)
         ));
         drop(sender);
+    }
+
+    #[derive(Debug, Default)]
+    struct GateState {
+        exporting: bool,
+        open: bool,
+        exported: usize,
+        shutdowns: usize,
+        resources: usize,
+    }
+
+    /// Blocks every export until the gate opens and counts lifecycle calls.
+    #[derive(Debug, Clone, Default)]
+    struct GatedExporter(Arc<(Mutex<GateState>, std::sync::Condvar)>);
+
+    impl GatedExporter {
+        fn wait_until_exporting(&self) {
+            let (state, changed) = &*self.0;
+            let guard = state.lock().unwrap();
+            let (_guard, wait) = changed
+                .wait_timeout_while(guard, Duration::from_secs(5), |s| !s.exporting)
+                .unwrap();
+            assert!(!wait.timed_out(), "the export never started");
+        }
+
+        fn open(&self) {
+            let (state, changed) = &*self.0;
+            state.lock().unwrap().open = true;
+            changed.notify_all();
+        }
+
+        fn counts(&self) -> (usize, usize, usize) {
+            let state = self.0.0.lock().unwrap();
+            (state.exported, state.shutdowns, state.resources)
+        }
+    }
+
+    impl SpanExporter for GatedExporter {
+        fn export(
+            &self,
+            batch: Vec<SpanData>,
+        ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+            let (state, changed) = &*self.0;
+            let mut guard = state.lock().unwrap();
+            guard.exporting = true;
+            changed.notify_all();
+            guard = changed.wait_while(guard, |s| !s.open).unwrap();
+            guard.exported += batch.len();
+            std::future::ready(Ok(()))
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+            self.0.0.lock().unwrap().shutdowns += 1;
+            Ok(())
+        }
+
+        fn set_resource(&mut self, _resource: &Resource) {
+            self.0.0.lock().unwrap().resources += 1;
+        }
+    }
+
+    // Uses `controls_queued`, a crate-private observable, so it lives here
+    // rather than in tests/otel_export.rs.
+    #[test]
+    fn a_flush_and_a_shutdown_queued_behind_a_blocked_export_both_complete() {
+        let exporter = GatedExporter::default();
+        let shared = exporter.clone();
+        let config = OtlpConfig {
+            enabled: true,
+            scheduled_delay_ms: 50,
+            max_queue_spans: 8,
+            max_export_batch: 1,
+            ..OtlpConfig::default()
+        };
+        let metrics = Arc::new(Metrics::default());
+        let factory = move || Ok(shared);
+        let spawned = BoundedSpanProcessor::spawn(factory, &config, Arc::clone(&metrics));
+        let mut processor = spawned.unwrap();
+
+        processor.on_end(new_test_export_span_data());
+        exporter.wait_until_exporting();
+        // Queued behind the blocked export, ahead of the controls.
+        let resource = Resource::builder_empty()
+            .with_service_name("orders-api")
+            .build();
+        processor.set_resource(&resource);
+
+        let processor = &processor;
+        let timeout = Duration::from_secs(5);
+        let (flush, shutdown) = std::thread::scope(|scope| {
+            let flush = scope.spawn(|| processor.force_flush());
+            let shutdown = scope.spawn(|| processor.shutdown_with_timeout(timeout));
+            // Release the export only once both controls are queued behind
+            // it. Whichever is handled first must not swallow the other.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while processor.controls_queued() < 2 {
+                assert!(Instant::now() < deadline, "the controls were never queued");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            exporter.open();
+            (flush.join().unwrap(), shutdown.join().unwrap())
+        });
+
+        assert!(flush.is_ok(), "flush: {flush:?}");
+        assert!(shutdown.is_ok(), "shutdown: {shutdown:?}");
+        let (exported, shutdowns, resources) = exporter.counts();
+        assert_eq!(exported, 1);
+        assert_eq!(shutdowns, 1, "the exporter is shut down exactly once");
+        assert_eq!(resources, 1, "the resource update was applied");
+        assert_eq!(metrics.telemetry_spans_exported.load(Ordering::Relaxed), 1);
+        let after = processor.force_flush();
+        assert!(matches!(after, Err(OTelSdkError::AlreadyShutdown)));
     }
 }

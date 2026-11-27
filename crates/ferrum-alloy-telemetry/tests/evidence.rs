@@ -80,10 +80,9 @@ async fn send_from(
         .body(Body::empty())
         .unwrap();
     if let Some(peer) = peer {
-        request.extensions_mut().insert(PeerInfo {
-            remote_addr: Some(peer.parse().unwrap()),
-            ..PeerInfo::default()
-        });
+        request
+            .extensions_mut()
+            .insert(PeerInfo::new(peer.parse().unwrap()));
     }
     let response = service.oneshot(request).await.unwrap();
     let status = response.status();

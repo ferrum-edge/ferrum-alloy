@@ -90,6 +90,7 @@ fn valid(value: &str) -> bool {
 
 /// How the request id for a request was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequestIdSource {
     /// A valid incoming id was accepted.
     Accepted,

@@ -7,6 +7,7 @@ use crate::config::ConfigError;
 
 /// Errors from building or running an Alloy application.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AlloyError {
     /// Configuration is invalid.
     #[error(transparent)]
@@ -55,6 +56,7 @@ pub enum AlloyError {
 /// An application route that a path Alloy serves on the application listener
 /// would shadow.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RouteConflict {
     /// The application route's pattern, or `None` for a `nest_service` whose
     /// prefix contains `path` (axum reports no pattern for it).

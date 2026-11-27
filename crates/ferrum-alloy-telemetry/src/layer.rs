@@ -47,6 +47,7 @@ use crate::trace_context::{
 /// Whose propagation metadata is honored.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AcceptPolicy {
     /// Never honor incoming values.
     Never,
@@ -102,6 +103,7 @@ pub struct TraceContextConfig {
 /// `Server-Timing` response header policy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ServerTimingPolicy {
     /// Never emit.
     #[default]
@@ -156,6 +158,7 @@ impl Default for TelemetryConfig {
 
 /// Invalid telemetry configuration.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TelemetryConfigError {
     /// The request id header name is invalid or reserved.
     #[error("invalid request id header {0:?}: {1}")]
@@ -740,6 +743,7 @@ where
 
 /// How a response ended from Alloy's point of view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BodyOutcome {
     /// The body yielded its final frame to Hyper (not proof of delivery).
     Completed,

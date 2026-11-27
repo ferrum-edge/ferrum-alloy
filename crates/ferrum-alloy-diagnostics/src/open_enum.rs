@@ -3,6 +3,10 @@
 //! Report producers may be newer than this reader. A value this version does not
 //! know is preserved as `Unrecognized(String)` and is never mapped onto a known
 //! variant, so rules cannot silently treat an unrecognized value as a known one.
+//!
+//! The enums are `#[non_exhaustive]`: a later version may recognize a value
+//! that this one preserves as `Unrecognized`, and adding that variant is not a
+//! breaking change.
 
 /// Declares a string-valued enum with an `Unrecognized(String)` catch-all variant.
 macro_rules! open_enum {
@@ -14,6 +18,7 @@ macro_rules! open_enum {
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[non_exhaustive]
         pub enum $name {
             $( $(#[$vmeta])* $variant, )+
             /// A value this reader does not recognize. It is preserved verbatim.

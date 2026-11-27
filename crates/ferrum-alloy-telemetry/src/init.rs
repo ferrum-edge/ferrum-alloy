@@ -13,6 +13,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Log output format.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LogFormat {
     /// One JSON object per line (production default).
     #[default]
@@ -47,6 +48,7 @@ pub struct LoggingConfig {
 
 /// Why initialization did not happen.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum InitError {
     /// A global subscriber is already installed by the application or a
     /// library. Alloy will not replace it.

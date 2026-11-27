@@ -37,6 +37,7 @@ use crate::contract::{
 
 /// How the service relates to Ferrum Edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeploymentMode {
     /// No gateway assumptions.
     #[default]
@@ -70,6 +71,7 @@ pub struct EdgePolicyConfig {
 
 /// Counters for gateway handling.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct EdgeStats {
     /// Requests with a verified gateway identity.
     pub verified_gateway_requests: AtomicU64,
@@ -119,6 +121,7 @@ impl EdgePolicy {
 
 /// Whether the request arrived through a verified gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GatewayVerification {
     /// The direct peer presented a verified identity the service trusts.
     Verified {
@@ -367,7 +370,9 @@ where
                 identity: identity.clone(),
             },
             PeerTrust::NetworkBoundary(_) => GatewayVerification::NetworkTrusted,
-            PeerTrust::Untrusted => GatewayVerification::Unverified,
+            // Untrusted, and any trust a later telemetry release adds that
+            // this adapter does not know: never gateway trust.
+            _ => GatewayVerification::Unverified,
         };
 
         if policy.config.mode == DeploymentMode::GatewayRequired

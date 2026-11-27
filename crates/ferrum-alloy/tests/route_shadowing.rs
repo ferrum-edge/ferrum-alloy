@@ -38,21 +38,23 @@ fn assert_shadowed(
     result: Result<(), AlloyError>,
     expected: &[(Option<&str>, &str, &'static str)],
 ) {
-    let expected: Vec<RouteConflict> = expected
-        .iter()
-        .map(|&(route, path, setting)| RouteConflict {
-            route: route.map(str::to_owned),
-            path: path.to_owned(),
-            setting,
-        })
-        .collect();
     match result {
         Err(AlloyError::ShadowedRoute { conflicts }) => {
             let message = AlloyError::ShadowedRoute {
                 conflicts: conflicts.clone(),
             }
             .to_string();
-            assert_eq!(conflicts, expected, "{message}");
+            let found: Vec<(Option<&str>, &str, &'static str)> = conflicts
+                .iter()
+                .map(|conflict: &RouteConflict| {
+                    (
+                        conflict.route.as_deref(),
+                        conflict.path.as_str(),
+                        conflict.setting,
+                    )
+                })
+                .collect();
+            assert_eq!(found, expected, "{message}");
             for conflict in &conflicts {
                 assert!(message.contains(&conflict.to_string()), "{message}");
             }

@@ -479,7 +479,8 @@ fn gateway_auth_refuses_export() {
     let text = fixture.replace("mode = \"service\"", "mode = \"gateway\"");
     assert_ne!(text, fixture);
     let manifest = ServiceManifest::from_toml(&text).unwrap();
-    let ExportError(reasons) = resources(&manifest).unwrap_err();
+    let error: ExportError = resources(&manifest).unwrap_err();
+    let reasons = error.reasons();
     assert_eq!(reasons.len(), 1, "{reasons:?}");
     assert!(
         reasons[0].contains("auth.mode is \"gateway\""),
@@ -490,7 +491,7 @@ fn gateway_auth_refuses_export() {
     // A manifest that skipped validation still fails closed.
     let mut manifest = manifest;
     manifest.auth.mode = Some("Gateway".into());
-    let ExportError(reasons) = resources(&manifest).unwrap_err();
+    let reasons = resources(&manifest).unwrap_err().reasons().to_vec();
     assert!(reasons[0].contains("\"Gateway\""), "{reasons:?}");
 }
 

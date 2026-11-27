@@ -8,6 +8,14 @@
 //! (`contracts/schemas/DiagnosticFinding.schema.json` in ferrum-anvil): every
 //! Anvil field is present with the same meaning and values, and Alloy adds
 //! `supporting_observations` and `missing_evidence` as additional properties.
+//!
+//! Every struct and enum here is `#[non_exhaustive]`, so a schema minor
+//! version can add an optional field or a recognized value without a
+//! breaking Rust release. Code outside this crate builds a value with its
+//! constructor (for example [`Observation::new`]), which takes the required
+//! fields, or with `Default` ([`Subject`]), and then assigns the optional
+//! public fields it needs. [`Finding`]s come from
+//! [`analyze`](crate::rules::analyze). Serialized output is unaffected.
 
 use std::collections::BTreeMap;
 
@@ -25,6 +33,7 @@ pub const SCHEMA_MINOR: u32 = 0;
 
 /// A complete diagnostic report: collected observations plus derived findings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DiagnosticReport {
     /// Always [`SCHEMA_NAME`].
     pub schema: String,
@@ -83,6 +92,7 @@ impl DiagnosticReport {
 
 /// Collection provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Collection {
     /// The component that assembled this report.
     pub collector: Producer,
@@ -101,8 +111,22 @@ pub struct Collection {
     pub unrecognized: BTreeMap<String, Value>,
 }
 
+impl Collection {
+    /// Collection provenance with no notes.
+    pub fn new(collector: Producer, method: CollectionMethod, verification: Verification) -> Self {
+        Self {
+            collector,
+            method,
+            verification,
+            notes: Vec::new(),
+            unrecognized: BTreeMap::new(),
+        }
+    }
+}
+
 /// The component that produced an observation or assembled a report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Producer {
     /// Producer family.
     pub kind: ProducerKind,
@@ -121,8 +145,22 @@ pub struct Producer {
     pub unrecognized: BTreeMap<String, Value>,
 }
 
+impl Producer {
+    /// A producer of `kind` named `name`, with unknown version and instance.
+    pub fn new(kind: ProducerKind, name: impl Into<String>) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            version: None,
+            instance: None,
+            unrecognized: BTreeMap::new(),
+        }
+    }
+}
+
 /// What the report is about.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Subject {
     /// W3C trace id (32 lowercase hex characters) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +182,7 @@ pub struct Subject {
 
 /// One collected fact: a measurement or an event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Observation {
     /// Unique within the report: `[A-Za-z0-9._:-]{1,64}`.
     pub id: String,
@@ -190,6 +229,38 @@ pub struct Observation {
 }
 
 impl Observation {
+    /// An observation with its required fields. Every optional field
+    /// (`value`, `unit`, `boundaries`, `clock`, `interval`, `span`,
+    /// `attributes`, `evidence_ref`) starts empty; assign the ones that apply.
+    pub fn new(
+        id: impl Into<String>,
+        producer: Producer,
+        kind: ObservationKind,
+        name: impl Into<String>,
+        availability: Availability,
+        scope: Scope,
+        trust: Trust,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            producer,
+            kind,
+            name: name.into(),
+            availability,
+            value: None,
+            unit: None,
+            boundaries: None,
+            clock: None,
+            interval: None,
+            scope,
+            span: None,
+            attributes: BTreeMap::new(),
+            trust,
+            evidence_ref: None,
+            unrecognized: BTreeMap::new(),
+        }
+    }
+
     /// The measured value converted to milliseconds, when this observation is
     /// usable duration evidence: its kind is `measurement`, its availability
     /// is `measured`, its unit is a time unit, and its value is finite and not
@@ -225,6 +296,7 @@ impl Observation {
 
 /// Measurement boundaries, named from the catalog (e.g. `alloy.middleware_entry`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Boundaries {
     /// Where the measurement starts.
     pub start: String,
@@ -236,8 +308,20 @@ pub struct Boundaries {
     pub unrecognized: BTreeMap<String, Value>,
 }
 
+impl Boundaries {
+    /// Boundaries from `start` to `end`.
+    pub fn new(start: impl Into<String>, end: impl Into<String>) -> Self {
+        Self {
+            start: start.into(),
+            end: end.into(),
+            unrecognized: BTreeMap::new(),
+        }
+    }
+}
+
 /// Wall-clock interval in Unix nanoseconds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Interval {
     /// Start, Unix epoch nanoseconds.
     pub start_unix_nano: u64,
@@ -250,6 +334,15 @@ pub struct Interval {
 }
 
 impl Interval {
+    /// The interval from `start_unix_nano` to `end_unix_nano`.
+    pub fn new(start_unix_nano: u64, end_unix_nano: u64) -> Self {
+        Self {
+            start_unix_nano,
+            end_unix_nano,
+            unrecognized: BTreeMap::new(),
+        }
+    }
+
     /// Returns `true` when `self` lies within `outer`, allowing `slack_nanos`
     /// of clock-reading jitter at either edge.
     pub fn within(&self, outer: &Interval, slack_nanos: u64) -> bool {
@@ -261,6 +354,7 @@ impl Interval {
 
 /// Position on the request path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Scope {
     /// Connection leg.
     pub leg: Leg,
@@ -280,8 +374,22 @@ pub struct Scope {
     pub unrecognized: BTreeMap<String, Value>,
 }
 
+impl Scope {
+    /// A position on `leg` with no service, gateway, or attempt.
+    pub fn new(leg: Leg) -> Self {
+        Self {
+            leg,
+            service: None,
+            gateway: None,
+            attempt: None,
+            unrecognized: BTreeMap::new(),
+        }
+    }
+}
+
 /// Trace linkage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SpanRef {
     /// 32 lowercase hex characters.
     pub trace_id: String,
@@ -296,8 +404,21 @@ pub struct SpanRef {
     pub unrecognized: BTreeMap<String, Value>,
 }
 
+impl SpanRef {
+    /// Linkage to span `span_id` of trace `trace_id`, with no parent.
+    pub fn new(trace_id: impl Into<String>, span_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            span_id: span_id.into(),
+            parent_span_id: None,
+            unrecognized: BTreeMap::new(),
+        }
+    }
+}
+
 /// A derived conclusion (Anvil `DiagnosticFinding` superset).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Finding {
     /// Stable finding code, e.g. `alloy.service.operation_dominates`.
     pub code: String,
@@ -337,6 +458,7 @@ pub struct Finding {
 
 /// One cited piece of evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Evidence {
     /// Evidence source family.
     pub source: EvidenceSource,
@@ -349,13 +471,36 @@ pub struct Evidence {
     pub attempt: Option<u32>,
 }
 
+impl Evidence {
+    /// Evidence from `source` with no attempt index.
+    pub fn new(source: EvidenceSource, key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            source,
+            key: key.into(),
+            value: value.into(),
+            attempt: None,
+        }
+    }
+}
+
 /// A suggested action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Remediation {
     /// What to do. Plain text; never an executable command.
     pub text: String,
     /// Who can do it.
     pub owner: Owner,
+}
+
+impl Remediation {
+    /// A suggested action for `owner`.
+    pub fn new(text: impl Into<String>, owner: Owner) -> Self {
+        Self {
+            text: text.into(),
+            owner,
+        }
+    }
 }
 
 open_enum! {

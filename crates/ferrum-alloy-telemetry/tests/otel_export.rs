@@ -41,12 +41,11 @@ const INCOMING_TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 const INCOMING_PARENT: &str = "00f067aa0ba902b7";
 
 fn resource() -> ServiceResource {
-    ServiceResource {
-        name: "orders-api".into(),
-        version: Some("1.2.3".into()),
-        instance_id: Some("orders-1".into()),
-        environment: Some("test".into()),
-    }
+    let mut resource = ServiceResource::new("orders-api");
+    resource.version = Some("1.2.3".into());
+    resource.instance_id = Some("orders-1".into());
+    resource.environment = Some("test".into());
+    resource
 }
 
 fn config() -> OtlpConfig {
@@ -91,10 +90,9 @@ fn request(uri: &str, peer: &str, traceparent: Option<&str>) -> Request<Body> {
         builder = builder.header("traceparent", value);
     }
     let mut request = builder.body(Body::empty()).unwrap();
-    request.extensions_mut().insert(PeerInfo {
-        remote_addr: Some(peer.parse::<SocketAddr>().unwrap()),
-        tls: None,
-    });
+    request
+        .extensions_mut()
+        .insert(PeerInfo::new(peer.parse::<SocketAddr>().unwrap()));
     request
 }
 
@@ -592,58 +590,6 @@ impl SpanExporter for GatedExporter {
 }
 
 #[test]
-fn a_flush_and_a_shutdown_queued_behind_a_blocked_export_both_complete() {
-    let exporter = GatedExporter::default();
-    let shared = exporter.clone();
-    let mut config = config();
-    config.max_queue_spans = 8;
-    config.max_export_batch = 1;
-    let metrics = Arc::new(Metrics::default());
-    let factory = move || Ok(shared);
-    let spawned = BoundedSpanProcessor::spawn(factory, &config, Arc::clone(&metrics));
-    let mut processor = spawned.unwrap();
-
-    processor.on_end(new_test_export_span_data());
-    exporter.wait_until_exporting();
-    // Queued behind the blocked export, ahead of the controls.
-    let resource = Resource::builder_empty()
-        .with_service_name("orders-api")
-        .build();
-    processor.set_resource(&resource);
-
-    let processor = &processor;
-    let timeout = Duration::from_secs(5);
-    let (flush, shutdown) = std::thread::scope(|scope| {
-        let flush = scope.spawn(|| processor.force_flush());
-        let shutdown = scope.spawn(|| processor.shutdown_with_timeout(timeout));
-        // Release the export only once both controls are queued behind it.
-        // Whichever is handled first must not swallow the other.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while processor.controls_queued() < 2 {
-            assert!(Instant::now() < deadline, "the controls were never queued");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        exporter.open();
-        (flush.join().unwrap(), shutdown.join().unwrap())
-    });
-
-    assert!(flush.is_ok(), "flush: {flush:?}");
-    assert!(shutdown.is_ok(), "shutdown: {shutdown:?}");
-    let (exported, shutdowns, resources) = exporter.counts();
-    assert_eq!(exported, 1);
-    assert_eq!(shutdowns, 1, "the exporter is shut down exactly once");
-    assert_eq!(resources, 1, "the resource update was applied");
-    assert_eq!(
-        metrics
-            .telemetry_spans_exported
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-    let after = processor.force_flush();
-    assert!(matches!(after, Err(OTelSdkError::AlreadyShutdown)));
-}
-
-#[test]
 fn a_timed_out_shutdown_does_not_count_spans_the_worker_still_owns() {
     let exporter = GatedExporter::default();
     let shared = exporter.clone();
@@ -687,6 +633,11 @@ fn a_timed_out_shutdown_does_not_count_spans_the_worker_still_owns() {
             .telemetry_spans_exported
             .load(std::sync::atomic::Ordering::Relaxed),
         1
+    );
+    assert_eq!(
+        exporter.counts().0,
+        1,
+        "the exporter received the span once"
     );
     assert_eq!(metrics.telemetry_spans_lost.get("shutdown"), 0);
     assert_eq!(metrics.telemetry_spans_lost.get("export_failed"), 0);

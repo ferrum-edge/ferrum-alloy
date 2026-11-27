@@ -45,6 +45,7 @@ use crate::server::ServerStats;
 
 /// TLS configuration errors.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TlsError {
     /// A certificate, key, or CRL file could not be read or parsed.
     #[error("{what} {path}: {message}")]

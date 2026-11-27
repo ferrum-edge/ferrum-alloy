@@ -63,12 +63,7 @@ impl SpanExporter for DiscardExporter {
 }
 
 fn resource() -> ServiceResource {
-    ServiceResource {
-        name: "bench".into(),
-        version: None,
-        instance_id: None,
-        environment: None,
-    }
+    ServiceResource::new("bench")
 }
 
 fn otlp(sampling_ratio: f64) -> OtlpConfig {

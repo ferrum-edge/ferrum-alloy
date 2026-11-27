@@ -218,73 +218,35 @@ fn route_protocol_admission_is_a_pre_upstream_rejection() {
 }
 
 fn verified_rejection_report(with_service_span: bool) -> DiagnosticReport {
-    let mut report = DiagnosticReport::new(Collection {
-        unrecognized: std::collections::BTreeMap::new(),
-        collector: Producer {
-            kind: ProducerKind::Collector,
-            name: "in-process".into(),
-            version: None,
-            instance: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        },
-        method: CollectionMethod::LiveExport,
-        verification: Verification::Verified,
-        notes: vec![],
-    });
+    let mut report = DiagnosticReport::new(Collection::new(
+        Producer::new(ProducerKind::Collector, "in-process"),
+        CollectionMethod::LiveExport,
+        Verification::Verified,
+    ));
     let edge_span = "00f067aa0ba902b7";
-    report.observations.push(Observation {
-        id: "edge-rejected".into(),
-        producer: Producer {
-            unrecognized: std::collections::BTreeMap::new(),
-            kind: ProducerKind::Edge,
-            name: "ferrum-edge".into(),
-            version: Some("0.9.7".into()),
-            instance: None,
-        },
-        kind: ObservationKind::Event,
-        name: "edge.request.rejected".into(),
-        availability: Availability::Measured,
-        value: None,
-        unit: None,
-        boundaries: None,
-        clock: None,
-        interval: None,
-        scope: Scope {
-            leg: Leg::Gateway,
-            service: None,
-            gateway: None,
-            attempt: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        },
-        span: Some(SpanRef {
-            trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
-            span_id: edge_span.into(),
-            parent_span_id: None,
-            unrecognized: std::collections::BTreeMap::new(),
-        }),
-        attributes: [("phase".to_owned(), "before_proxy".to_owned())].into(),
-        trust: Trust::Verified,
-        evidence_ref: None,
-        unrecognized: Default::default(),
-    });
+    let mut edge = Producer::new(ProducerKind::Edge, "ferrum-edge");
+    edge.version = Some("0.9.7".into());
+    let mut rejected = Observation::new(
+        "edge-rejected",
+        edge,
+        ObservationKind::Event,
+        "edge.request.rejected",
+        Availability::Measured,
+        Scope::new(Leg::Gateway),
+        Trust::Verified,
+    );
+    rejected.span = Some(SpanRef::new("4bf92f3577b34da6a3ce929d0e0e4736", edge_span));
+    rejected.attributes = [("phase".to_owned(), "before_proxy".to_owned())].into();
+    report.observations.push(rejected);
     if with_service_span {
         let mut service = report.observations[0].clone();
         service.id = "alloy-response".into();
-        service.producer = Producer {
-            unrecognized: std::collections::BTreeMap::new(),
-            kind: ProducerKind::Alloy,
-            name: "ferrum-alloy-telemetry".into(),
-            version: None,
-            instance: None,
-        };
+        service.producer = Producer::new(ProducerKind::Alloy, "ferrum-alloy-telemetry");
         service.name = "alloy.response".into();
         service.attributes.clear();
-        service.span = Some(SpanRef {
-            trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
-            span_id: "b7ad6b7169203331".into(),
-            parent_span_id: Some(edge_span.into()),
-            unrecognized: std::collections::BTreeMap::new(),
-        });
+        let mut span = SpanRef::new("4bf92f3577b34da6a3ce929d0e0e4736", "b7ad6b7169203331");
+        span.parent_span_id = Some(edge_span.into());
+        service.span = Some(span);
         report.observations.push(service);
     }
     report

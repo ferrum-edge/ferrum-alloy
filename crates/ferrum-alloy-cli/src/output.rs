@@ -66,24 +66,13 @@ mod tests {
     #[test]
     fn report_values_cannot_add_lines_to_printed_diagnoses() {
         let render = |value: &str| {
-            let mut report = DiagnosticReport::new(Collection {
-                unrecognized: std::collections::BTreeMap::new(),
-                collector: Producer {
-                    kind: ProducerKind::Collector,
-                    name: value.into(),
-                    version: None,
-                    instance: None,
-                    unrecognized: std::collections::BTreeMap::new(),
-                },
-                method: CollectionMethod::Fixture,
-                verification: Verification::Unverified,
-                notes: vec![],
-            });
+            let mut report = DiagnosticReport::new(Collection::new(
+                Producer::new(ProducerKind::Collector, value),
+                CollectionMethod::Fixture,
+                Verification::Unverified,
+            ));
             report.subject.request_id = Some(value.into());
-            let warning = Issue {
-                path: format!("/{value}"),
-                message: value.into(),
-            };
+            let warning = Issue::new(format!("/{value}"), value);
             printable(&render_text(&report, &[], &[warning]))
         };
         let plain = render("plain");

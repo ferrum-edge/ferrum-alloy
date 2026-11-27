@@ -495,13 +495,7 @@ fn otlp_value(value: &Value) -> Value {
 }
 
 fn diagnose(capture: &Capture) -> DiagnosticReport {
-    let collector = Producer {
-        unrecognized: std::collections::BTreeMap::new(),
-        kind: ProducerKind::Collector,
-        name: "ferrum-alloy-test".into(),
-        version: None,
-        instance: None,
-    };
+    let collector = Producer::new(ProducerKind::Collector, "ferrum-alloy-test");
     import(
         &capture.otlp_json(),
         Some(TRACE_ID),

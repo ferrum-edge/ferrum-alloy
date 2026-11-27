@@ -43,28 +43,17 @@ fn request(path: &str, peer: PeerInfo, headers: &[(&str, &str)]) -> Request<Body
 }
 
 fn verified() -> PeerInfo {
-    PeerInfo {
-        remote_addr: Some("198.51.100.2:443".parse::<SocketAddr>().unwrap()),
-        tls: Some(TlsPeer {
-            client_cert_verified: true,
-            spiffe_id: Some(GATEWAY.into()),
-            dns_names: vec![],
-        }),
-    }
+    let mut tls = TlsPeer::new(true);
+    tls.spiffe_id = Some(GATEWAY.into());
+    PeerInfo::new("198.51.100.2:443".parse::<SocketAddr>().unwrap()).with_tls(tls)
 }
 
 fn network_trusted() -> PeerInfo {
-    PeerInfo {
-        remote_addr: Some("10.1.2.3:443".parse::<SocketAddr>().unwrap()),
-        tls: None,
-    }
+    PeerInfo::new("10.1.2.3:443".parse::<SocketAddr>().unwrap())
 }
 
 fn untrusted() -> PeerInfo {
-    PeerInfo {
-        remote_addr: Some("203.0.113.5:443".parse::<SocketAddr>().unwrap()),
-        tls: None,
-    }
+    PeerInfo::new("203.0.113.5:443".parse::<SocketAddr>().unwrap())
 }
 
 #[derive(Debug, Clone)]
@@ -687,14 +676,10 @@ async fn cached_trust_from_another_classifier_does_not_satisfy_a_stricter_policy
     let broader: ferrum_alloy_telemetry::peer::SharedClassifier =
         Arc::new(TrustedPeers::new(&broad_config).unwrap());
 
-    let service_peer = PeerInfo {
-        remote_addr: Some("198.51.100.7:443".parse::<SocketAddr>().unwrap()),
-        tls: Some(TlsPeer {
-            client_cert_verified: true,
-            spiffe_id: Some(SERVICE.into()),
-            dns_names: vec![],
-        }),
-    };
+    let mut service_tls = TlsPeer::new(true);
+    service_tls.spiffe_id = Some(SERVICE.into());
+    let service_peer =
+        PeerInfo::new("198.51.100.7:443".parse::<SocketAddr>().unwrap()).with_tls(service_tls);
     let mut preclassified = request("/x", service_peer, IDENTITY);
     preclassified.extensions_mut().insert(ClassifiedPeer::new(
         broader,
