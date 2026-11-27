@@ -112,7 +112,7 @@ Crate versions are the minimum requirements in `Cargo.toml`; `Cargo.lock` at the
 | sqlx | 0.9.0 | PostgreSQL, runtime queries, `migrate!` |
 | utoipa / utoipa-axum | 6.0.0 / 0.3.0 | OpenAPI 3.1 documents |
 | Swagger UI (`swagger-ui-dist`) | 5.33.0 | Feature `openapi-ui`. JavaScript and CSS vendored in `crates/ferrum-alloy/assets/swagger-ui/5.33.0/` (Apache-2.0), checked against the npm `dist.integrity` and pinned by SHA-256. Not a Cargo dependency, so `cargo deny` does not cover it. |
-| jsonwebtoken | 11.1.0 | `rust_crypto` backend. See the advisory note in [security.md](security.md). |
+| jsonwebtoken | 12.0.0 | `rust_crypto` backend. |
 | reqwest | 0.13.5 | `rustls-no-provider` with an explicit ring configuration |
 | OpenTelemetry Collector | contrib 0.161.0, `otel/opentelemetry-collector-contrib@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1` | e2e only |
 | PostgreSQL | 17 (`postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24`) | CI service container and local run |

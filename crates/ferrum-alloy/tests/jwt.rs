@@ -386,11 +386,30 @@ async fn valid_tokens_are_accepted_and_invalid_ones_rejected() {
     wrong_iss["iss"] = json!("https://evil.test");
     let mut no_exp = claims();
     no_exp.as_object_mut().unwrap().remove("exp");
+    // Wrongly typed registered claims are refused, never skipped.
+    let mut numeric_aud = claims();
+    numeric_aud["aud"] = json!(1234);
+    let mut numeric_iss = claims();
+    numeric_iss["iss"] = json!(1234);
+    let mut string_exp = claims();
+    string_exp["exp"] = json!((now() + 300).to_string());
+    let mut string_nbf = claims();
+    string_nbf["nbf"] = json!(now().to_string());
+    let mut numeric_sub = claims();
+    numeric_sub["sub"] = json!(42);
+    let mut null_sub = claims();
+    null_sub["sub"] = Value::Null;
     for (name, claims) in [
         ("expired", expired),
         ("audience", wrong_aud),
         ("issuer", wrong_iss),
         ("no exp", no_exp),
+        ("numeric audience", numeric_aud),
+        ("numeric issuer", numeric_iss),
+        ("string exp", string_exp),
+        ("string nbf", string_nbf),
+        ("numeric subject", numeric_sub),
+        ("null subject", null_sub),
     ] {
         let (status, _, headers) = call(&router, Some(&key.sign(&claims, Some("k1")))).await;
         assert_eq!(status, 401, "{name}");
@@ -405,6 +424,27 @@ async fn valid_tokens_are_accepted_and_invalid_ones_rejected() {
     let (status, _, _) = call(&router, Some(&impostor.sign(&claims(), Some("k1")))).await;
     assert_eq!(status, 401);
     assert_eq!(jwks.fetches.load(Ordering::SeqCst), 1, "keys are cached");
+}
+
+/// `sub` is optional: a token without one authenticates, with no subject.
+#[tokio::test]
+async fn a_token_without_a_subject_is_accepted() {
+    let key = SigningKey::new("k1");
+    let jwks = jwks_server(&[&key]).await;
+    let verifier = JwtVerifier::new(&settings(jwks.addr, 60_000)).unwrap();
+    let router = Router::new()
+        .route(
+            "/me",
+            get(|principal: Principal| async move {
+                format!("{:?} {:?}", principal.subject, principal.scopes)
+            }),
+        )
+        .route_layer(verifier.layer());
+    let mut anonymous = claims();
+    anonymous.as_object_mut().unwrap().remove("sub");
+    let (status, body, _) = call(&router, Some(&key.sign(&anonymous, Some("k1")))).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"None ["orders:read"]"#);
 }
 
 async fn call_with(router: &Router, authorization: &[&str]) -> (StatusCode, http::HeaderMap) {
@@ -481,7 +521,7 @@ async fn algorithm_confusion_and_unsigned_tokens_are_rejected() {
     let hs = encode(
         &header,
         &claims(),
-        &EncodingKey::from_secret(key.pair.public_key_raw()),
+        &EncodingKey::from_secret(key.pair.public_key_raw()).unwrap(),
     )
     .unwrap();
     assert_eq!(call(&router, Some(&hs)).await.0, 401);
@@ -1062,6 +1102,31 @@ async fn rsa_keys_are_bound_to_their_declared_scheme() {
             assert_eq!(status, expected, "{declared:?} {alg:?}: {body}");
         }
     }
+}
+
+/// The public modulus of a static RSA-768 test key, base64url without
+/// padding. Test material only; the key was generated for this test and
+/// protects nothing.
+const RSA_768_N: &str = "276VMJjb_P9TDGlgXevgSfSpWQKZx7W0bUmuXF3cKI8d93eJ_aaY-N7pDqtuPjcXwmARQEL72p3B7hf0cPjz39p4x5UZAI6vf4jX_N5Eo8tENogjtEfsA8OumXZIBNyL";
+
+/// An RS256 token signed with the RSA-768 key (`kid` `small`), with the
+/// claims the test verifier expects and `exp` in 2100.
+const RSA_768_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InNtYWxsIn0.eyJpc3MiOiJodHRwczovL2lzc3Vlci50ZXN0IiwiYXVkIjoib3JkZXJzLWFwaSIsInN1YiI6InVzZXItMSIsImV4cCI6NDEwMjQ0NDgwMH0.kU-2d-SIZHSLHg3BosGlv0H9aCWNm697hdl3TtAHdP9mVv4oAe7p7lCMGZBziAECGs_1cw9fj3rbTScxlV0b2LtoNtz2ZxEQ93Sy0jo52ld1Uy9ngOV6oJwZGDfvv-EV";
+
+/// RSA keys below 1,024 bits are refused (jsonwebtoken 12's `rsa` 0.10
+/// backend), even for a correctly signed token.
+#[tokio::test]
+async fn undersized_rsa_keys_are_refused() {
+    let jwks = jwks_server(&[]).await;
+    jwks.serve_jwks(&[json!({
+        "kty": "RSA", "use": "sig", "alg": "RS256", "kid": "small", "n": RSA_768_N, "e": "AQAB",
+    })]);
+    let mut config = settings(jwks.addr, 0);
+    config.algorithms = vec!["RS256".into()];
+    let verifier = JwtVerifier::new(&config).unwrap();
+    let (status, _, headers) = call(&protected(&verifier), Some(RSA_768_TOKEN)).await;
+    assert_eq!(status, 401);
+    assert_eq!(headers["www-authenticate"], INVALID_TOKEN);
 }
 
 #[tokio::test]
