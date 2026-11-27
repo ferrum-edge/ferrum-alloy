@@ -19,9 +19,13 @@ unused-ignored-advisory = "deny"
 ignore = [
     # rsa 0.9.10 (via jsonwebtoken 11.1.0's rust_crypto backend, feature
     # `jwt`): timing side channel (Marvin) in RSA *private-key* operations
-    # (decryption and signing). Alloy's JWT support only verifies signatures
-    # with public keys from a configured JWKS; it never loads private keys or
-    # signs.
+    # (decryption and signing). In production code, Alloy's JWT support only
+    # verifies signatures with public keys from a configured JWKS; it never
+    # loads private keys or signs. The only RSA private-key operation in the
+    # workspace is test signing: crates/ferrum-alloy/tests/jwt.rs signs RS256
+    # and PS256 tokens with a static, published RSA-2048 fixture (jsonwebtoken
+    # 11.1.0's own test key), which protects nothing. The generated `jwt`
+    # starter's tests do not use RSA.
     # Re-reviewed 2026-11-27 (renewal pending owner acceptance): the advisory
     # now lists rsa >= 0.10.0 as patched (rsa 0.10.0, 2026-11-08), but there
     # is no fixed 0.9.x, and jsonwebtoken 11.x requires rsa ^0.9.
@@ -33,7 +37,7 @@ ignore = [
     # unchanged. Exit: remove this entry with the jsonwebtoken 12 upgrade.
     # The expiry is shorter than 90 days because that exit now exists.
     # [expires:2027-01-31]
-    { id = "RUSTSEC-2023-0071", reason = "public-key verification only; re-reviewed 2026-11-27, renewal pending owner acceptance; exit is jsonwebtoken 12 (rsa 0.10); see comment [expires:2027-01-31]" },
+    { id = "RUSTSEC-2023-0071", reason = "production code verifies with public keys only; RSA signing only in JWT tests with a published fixture key; re-reviewed 2026-11-27, renewal pending owner acceptance; exit is jsonwebtoken 12 (rsa 0.10); see comment [expires:2027-01-31]" },
     # crypto-bigint 0.5.5 (via jsonwebtoken 11.1.0's rust_crypto backend ->
     # p256 0.13.2 / p384 0.13.1 -> elliptic-curve 0.13.8): RUSTSEC-2026-0387,
     # timing variability in operations meant to be constant-time. Fixed only in
