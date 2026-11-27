@@ -120,6 +120,11 @@ impl EdgePolicy {
 }
 
 /// Whether the request arrived through a verified gateway.
+///
+/// Later releases may add values. Code that grants anything on the basis of
+/// gateway verification must match the variants it accepts by name and treat
+/// every other value, including variants it does not know, as unverified
+/// (fail closed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GatewayVerification {

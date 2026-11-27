@@ -944,12 +944,10 @@ fn negative_residual_is_preserved_as_conflicting_evidence() {
 #[test]
 fn unsupported_major_version_is_rejected() {
     let error = parse_offline(&fixture("unsupported-major.json"), &Limits::default()).unwrap_err();
-    assert_eq!(
-        error,
-        ReportError::UnsupportedVersion {
-            found: "2.0".into()
-        }
-    );
+    match error {
+        ReportError::UnsupportedVersion { found, .. } => assert_eq!(found, "2.0"),
+        other => panic!("expected an unsupported version, got {other:?}"),
+    }
 }
 
 #[test]

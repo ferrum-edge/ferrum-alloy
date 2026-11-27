@@ -66,6 +66,7 @@ pub enum ReportError {
     InvalidJson(String),
     /// The `schema` field is missing or names a different schema.
     #[error("unsupported schema {found:?}; expected {SCHEMA_NAME:?}")]
+    #[non_exhaustive]
     WrongSchema {
         /// What the report declared.
         found: Option<String>,
@@ -74,6 +75,7 @@ pub enum ReportError {
     #[error(
         "unsupported schema_version {found:?}; this reader supports major version {SCHEMA_MAJOR}"
     )]
+    #[non_exhaustive]
     UnsupportedVersion {
         /// What the report declared.
         found: String,

@@ -38,12 +38,12 @@ fn assert_shadowed(
     result: Result<(), AlloyError>,
     expected: &[(Option<&str>, &str, &'static str)],
 ) {
+    let message = match &result {
+        Err(error) => error.to_string(),
+        Ok(()) => String::new(),
+    };
     match result {
-        Err(AlloyError::ShadowedRoute { conflicts }) => {
-            let message = AlloyError::ShadowedRoute {
-                conflicts: conflicts.clone(),
-            }
-            .to_string();
+        Err(AlloyError::ShadowedRoute { conflicts, .. }) => {
             let found: Vec<(Option<&str>, &str, &'static str)> = conflicts
                 .iter()
                 .map(|conflict: &RouteConflict| {

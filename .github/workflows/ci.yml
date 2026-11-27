@@ -193,10 +193,12 @@ jobs:
       # API to document.
       - run: cargo doc --workspace --exclude ferrum-alloy-cli --all-features --no-deps --locked
 
-  semver:
-    name: Semver checks
+  semver-baseline:
+    name: Semver baseline
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.baseline.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -209,47 +211,111 @@ jobs:
         # Semantic versioning of the library crates' public API starts with
         # 1.0.0. Until a v1.* release tag exists there is no released 1.x API
         # to compare with, and the 0.x API is not covered, so the comparison
-        # is skipped with a notice. It starts with the v1.0.0 tag, without
-        # editing this workflow.
+        # jobs are skipped with a notice. They start with the v1.0.0 tag,
+        # without editing this workflow. A lookup that cannot see the history
+        # or the tags fails instead of looking like "no release yet".
         run: |
           set -euo pipefail
-          tag=$(git tag --merged HEAD --list 'v1.*' \
-            | grep -E '^v1\.[0-9]+\.[0-9]+$' \
-            | sort -V \
-            | tail -n 1 || true)
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "::error::the checkout is shallow, so release tags cannot be looked up"
+            exit 1
+          fi
+          # Every release so far is reachable from main (v0.1.0 at least), so
+          # an empty list means the tags were not fetched.
+          releases=$(git tag --merged HEAD --list 'v[0-9]*')
+          if [ -z "$releases" ]; then
+            echo "::error::no release tag is reachable from $(git rev-parse --short HEAD); the checkout did not fetch tags"
+            exit 1
+          fi
+          tag=$(printf '%s\n' "$releases" | awk '/^v1\.[0-9]+\.[0-9]+$/' | sort -V | tail -n 1)
           if [ -z "$tag" ]; then
             echo "::notice title=Semver checks skipped::No v1.* release tag is reachable from $(git rev-parse --short HEAD), so there is no released 1.x API to compare with. The check starts with the v1.0.0 tag."
           else
             echo "Baseline: $tag at $(git rev-list -n 1 "$tag")"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  semver:
+    name: Semver checks (${{ matrix.package }})
+    needs: semver-baseline
+    if: needs.semver-baseline.outputs.tag != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        # The library crates. The CLI is a binary with no library API.
+        package:
+          - ferrum-alloy-diagnostics
+          - ferrum-alloy-telemetry
+          - ferrum-alloy-edge
+          - ferrum-alloy
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        if: steps.baseline.outputs.tag != ''
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        if: steps.baseline.outputs.tag != ''
       - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
-        if: steps.baseline.outputs.tag != ''
         with:
           tool: cargo-semver-checks@0.51.0
-      - name: Library crates against ${{ steps.baseline.outputs.tag }}
-        if: steps.baseline.outputs.tag != ''
-        # A change merged to main must be releasable as a 1.x minor release:
-        # breaking changes need a new major version. Every crate is
-        # `publish = false`, which --workspace skips, so the libraries are
-        # named; the CLI is a binary with no library API.
+      - name: Every feature configuration against ${{ needs.semver-baseline.outputs.tag }}
+        # The public API is covered under every combination of documented
+        # Cargo features. This compares default features, no default
+        # features, all features, and each feature alone (except `full`,
+        # which --all-features covers); a feature added since the baseline
+        # is compared only within --all-features. A change merged to main
+        # must be releasable as a 1.x minor release: breaking changes need a
+        # new major version. Every crate is `publish = false`, which
+        # --workspace skips, so the crate is named.
         env:
-          BASELINE: ${{ steps.baseline.outputs.tag }}
+          BASELINE: ${{ needs.semver-baseline.outputs.tag }}
+          PACKAGE: ${{ matrix.package }}
         run: |
-          cargo semver-checks \
-            --package ferrum-alloy-diagnostics \
-            --package ferrum-alloy-telemetry \
-            --package ferrum-alloy-edge \
-            --package ferrum-alloy \
-            --baseline-rev "$BASELINE" \
-            --release-type minor \
-            --all-features
+          set -euo pipefail
+          manifest="crates/$PACKAGE/Cargo.toml"
+          if ! git cat-file -e "$BASELINE:$manifest" 2> /dev/null; then
+            echo "::notice title=Semver checks ($PACKAGE)::$PACKAGE is not in $BASELINE, so it has no released API to compare with."
+            exit 0
+          fi
+          features() {
+            python3 -I -c 'import sys, tomllib; f = tomllib.load(sys.stdin.buffer).get("features", {}); print(" ".join(sorted(k for k in f if k not in ("default", "full"))))'
+          }
+          has_default_features() {
+            python3 -I -c 'import sys, tomllib; sys.exit(0 if tomllib.load(sys.stdin.buffer).get("features", {}).get("default") else 1)'
+          }
+          current=$(features < "$manifest")
+          released=$(git show "$BASELINE:$manifest" | features)
+          configs=("--default-features" "--all-features")
+          if has_default_features < "$manifest"; then
+            configs+=("--only-explicit-features")
+          fi
+          for feature in $current; do
+            if [[ " $released " == *" $feature "* ]]; then
+              configs+=("--only-explicit-features --features $feature")
+            else
+              echo "::notice title=Semver checks ($PACKAGE)::feature $feature is new since $BASELINE; it is compared only within --all-features"
+            fi
+          done
+          failed=()
+          for config in "${configs[@]}"; do
+            echo "::group::$PACKAGE $config"
+            # Word splitting of $config is intended: it holds the flags.
+            # shellcheck disable=SC2086
+            if ! cargo semver-checks --package "$PACKAGE" --baseline-rev "$BASELINE" --release-type minor $config; then
+              failed+=("$config")
+            fi
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            for config in "${failed[@]}"; do
+              echo "::error title=Semver checks ($PACKAGE)::not releasable as a 1.x minor release with $config"
+            done
+            exit 1
+          fi
 
   generator:
     name: Generated projects

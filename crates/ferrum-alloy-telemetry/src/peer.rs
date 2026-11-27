@@ -77,6 +77,13 @@ impl TlsPeer {
 }
 
 /// Why a peer is trusted.
+///
+/// Later releases may add classifications. Code that grants anything on
+/// the basis of trust must match the trusted variants it accepts by name
+/// and treat every other value, including variants it does not know, as
+/// untrusted (fail closed), as [`PeerTrust::is_trusted`] and
+/// [`PeerTrust::is_verified_identity`] do. Never write a wildcard arm that
+/// grants trust.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerTrust {
@@ -89,9 +96,14 @@ pub enum PeerTrust {
 }
 
 impl PeerTrust {
-    /// Returns `true` for either trusted variant.
+    /// Returns `true` for either trusted variant. Each variant is decided
+    /// by name, so a classification added later is untrusted until this
+    /// predicate is deliberately extended.
     pub fn is_trusted(&self) -> bool {
-        !matches!(self, Self::Untrusted)
+        match self {
+            Self::VerifiedIdentity(_) | Self::NetworkBoundary(_) => true,
+            Self::Untrusted => false,
+        }
     }
 
     /// Returns `true` only for a verified transport identity.

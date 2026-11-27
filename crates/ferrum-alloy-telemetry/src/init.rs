@@ -59,6 +59,7 @@ pub enum InitError {
     AlreadyInitialized,
     /// The filter directives are invalid.
     #[error("invalid log filter {filter:?}: {message}")]
+    #[non_exhaustive]
     Filter {
         /// The directives.
         filter: String,

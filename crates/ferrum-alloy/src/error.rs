@@ -20,6 +20,7 @@ pub enum AlloyError {
     Telemetry(String),
     /// A listener could not bind.
     #[error("cannot bind {listener} listener to {addr}: {source}")]
+    #[non_exhaustive]
     Bind {
         /// Which listener.
         listener: &'static str,
@@ -41,6 +42,7 @@ pub enum AlloyError {
         "Alloy serves paths on the application listener ahead of the application's router: {}; change the settings named or the routes",
         conflict_list(.conflicts)
     )]
+    #[non_exhaustive]
     ShadowedRoute {
         /// Every conflict, in the order Alloy's paths are served.
         conflicts: Vec<RouteConflict>,

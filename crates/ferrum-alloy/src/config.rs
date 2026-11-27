@@ -1250,6 +1250,7 @@ env_vars! {
 pub enum ConfigError {
     /// The file could not be read.
     #[error("cannot read configuration file {path}: {message}")]
+    #[non_exhaustive]
     Read {
         /// File path.
         path: PathBuf,
@@ -1262,6 +1263,7 @@ pub enum ConfigError {
         "configuration file {path} is not valid TOML{}: {message}",
         location_suffix(.line, .column)
     )]
+    #[non_exhaustive]
     Syntax {
         /// File path.
         path: PathBuf,
@@ -1274,6 +1276,7 @@ pub enum ConfigError {
     },
     /// An environment variable is unknown or invalid.
     #[error("environment variable {name}: {message}")]
+    #[non_exhaustive]
     Env {
         /// Variable name.
         name: String,

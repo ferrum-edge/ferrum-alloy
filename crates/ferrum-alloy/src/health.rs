@@ -33,6 +33,17 @@ impl CheckError {
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
+
+    /// A failure described by `error`'s message, for
+    /// `.map_err(CheckError::from_error)` in a check.
+    pub fn from_error(error: impl std::error::Error) -> Self {
+        Self(error.to_string())
+    }
+
+    /// The failure message.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for CheckError {
@@ -41,15 +52,7 @@ impl std::fmt::Display for CheckError {
     }
 }
 
-// `CheckError` deliberately does not implement `std::error::Error`: this
-// conversion from every error type would then overlap the reflexive
-// `From<CheckError> for CheckError`, and `?` on any error in a check is the
-// point of it.
-impl<E: std::error::Error> From<E> for CheckError {
-    fn from(error: E) -> Self {
-        Self(error.to_string())
-    }
-}
+impl std::error::Error for CheckError {}
 
 /// Boxed check future.
 pub type CheckFuture = Pin<Box<dyn Future<Output = Result<(), CheckError>> + Send>>;

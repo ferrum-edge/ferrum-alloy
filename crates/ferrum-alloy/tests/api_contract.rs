@@ -5,6 +5,7 @@ use ferrum_alloy::config::ConfigError;
 use ferrum_alloy::error::AlloyError;
 use ferrum_alloy::extract::ValidationErrors;
 use ferrum_alloy::files::ReadError;
+use ferrum_alloy::health::CheckError;
 
 fn assert_error<E: std::error::Error + Send + Sync + 'static>() {}
 
@@ -14,16 +15,19 @@ fn public_errors_are_send_sync_static_errors() {
     assert_error::<ConfigError>();
     assert_error::<ReadError>();
     assert_error::<ValidationErrors>();
+    assert_error::<CheckError>();
     #[cfg(feature = "jwt")]
     assert_error::<ferrum_alloy::jwt::AuthError>();
     #[cfg(feature = "tls")]
     assert_error::<ferrum_alloy::tls::TlsError>();
 }
 
-/// `CheckError` is not a `std::error::Error` (see its `From` conversion), but
-/// it crosses the readiness task boundary.
+/// A readiness check's error propagates as a boxed error, and any error
+/// converts into one explicitly.
 #[test]
-fn check_errors_cross_tasks() {
-    fn assert_send_sync<T: std::fmt::Display + Send + Sync + 'static>() {}
-    assert_send_sync::<ferrum_alloy::health::CheckError>();
+fn check_errors_are_errors() {
+    let error = CheckError::from_error(std::io::Error::other("connection refused"));
+    assert_eq!(error.message(), "connection refused");
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+    assert_eq!(boxed.to_string(), "connection refused");
 }

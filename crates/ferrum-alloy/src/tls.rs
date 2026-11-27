@@ -49,6 +49,7 @@ use crate::server::ServerStats;
 pub enum TlsError {
     /// A certificate, key, or CRL file could not be read or parsed.
     #[error("{what} {path}: {message}")]
+    #[non_exhaustive]
     Pem {
         /// Which file.
         what: &'static str,
