@@ -410,6 +410,72 @@ fn default_reload_interval_ms() -> u64 {
 /// day.
 const TLS_RELOAD_INTERVAL_MS: std::ops::RangeInclusive<u64> = 100..=24 * 60 * 60 * 1000;
 
+/// What is wrong with the TLS settings at `name` (`server.tls` or
+/// `management.tls`); `feature` says whether the `tls` feature is compiled
+/// in.
+fn tls_errors(name: &str, tls: &TlsSettings, feature: bool) -> Vec<String> {
+    let mut errors = Vec::new();
+    if !feature {
+        errors.push(format!(
+            "{name} is configured but the `tls` feature is not enabled"
+        ));
+    }
+    if tls.client_auth != ClientAuth::None && tls.client_ca_path.is_none() {
+        errors.push(format!("{name}.client_auth requires {name}.client_ca_path"));
+    }
+    if tls.client_auth == ClientAuth::None && tls.client_ca_path.is_some() {
+        errors.push(format!(
+            "{name}.client_ca_path is set but client_auth is none"
+        ));
+    }
+    if tls.client_auth == ClientAuth::None && !tls.client_crl_paths.is_empty() {
+        errors.push(format!(
+            "{name}.client_crl_paths is set but client_auth is none"
+        ));
+    }
+    if tls.handshake_timeout_ms == 0 {
+        errors.push(format!(
+            "{name}.handshake_timeout_ms must be greater than zero"
+        ));
+    }
+    if tls.handshake_timeout_ms > MAX_TIMEOUT_MS {
+        errors.push(format!(
+            "{name}.handshake_timeout_ms must not exceed 24 hours ({MAX_TIMEOUT_MS})"
+        ));
+    }
+    let interval = tls.reload_interval_ms;
+    if interval != 0 && !TLS_RELOAD_INTERVAL_MS.contains(&interval) {
+        errors.push(format!(
+            "{name}.reload_interval_ms must be 0 (disabled) or between {} and {}",
+            TLS_RELOAD_INTERVAL_MS.start(),
+            TLS_RELOAD_INTERVAL_MS.end()
+        ));
+    }
+    if tls.client_crl_paths.is_empty() {
+        for (setting, changed) in [
+            (
+                "client_crl_depth",
+                tls.client_crl_depth != CrlDepth::default(),
+            ),
+            (
+                "client_crl_unknown_status",
+                tls.client_crl_unknown_status != CrlUnknownStatus::default(),
+            ),
+            (
+                "client_crl_expiration",
+                tls.client_crl_expiration != CrlExpiration::default(),
+            ),
+        ] {
+            if changed {
+                errors.push(format!(
+                    "{name}.{setting} has no effect without client_crl_paths"
+                ));
+            }
+        }
+    }
+    errors
+}
+
 /// Graceful shutdown budgets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -449,6 +515,10 @@ pub struct ManagementConfig {
     pub token: Option<Secret>,
     /// Request rate limits.
     pub rate_limit: ManagementRateLimit,
+    /// TLS termination on the management listener (feature `tls`), with the
+    /// same settings and reloading as `server.tls`. Required, together with
+    /// `token`, to serve diagnostic retrieval off loopback.
+    pub tls: Option<TlsSettings>,
 }
 
 impl Default for ManagementConfig {
@@ -458,6 +528,7 @@ impl Default for ManagementConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 9090)),
             token: None,
             rate_limit: ManagementRateLimit::default(),
+            tls: None,
         }
     }
 }
@@ -1218,6 +1289,15 @@ env_vars! {
     "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS" => ["management", "rate_limit", "max_clients"]: Uint,
     "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN" => ["management", "rate_limit", "ipv6_prefix_len"]: Uint,
     "FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS" => ["management", "rate_limit", "exempt_networks"]: List,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CERT_PATH" => ["management", "tls", "cert_path"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_KEY_PATH" => ["management", "tls", "key_path"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CA_PATH" => ["management", "tls", "client_ca_path"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_AUTH" => ["management", "tls", "client_auth"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_PATHS" => ["management", "tls", "client_crl_paths"]: List,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_DEPTH" => ["management", "tls", "client_crl_depth"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_UNKNOWN_STATUS" => ["management", "tls", "client_crl_unknown_status"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_EXPIRATION" => ["management", "tls", "client_crl_expiration"]: Str,
+    "FERRUM_ALLOY_MANAGEMENT_TLS_RELOAD_INTERVAL_MS" => ["management", "tls", "reload_interval_ms"]: Uint,
     "FERRUM_ALLOY_LOG_FORMAT" => ["logging", "format"]: Str,
     "FERRUM_ALLOY_LOG_FILTER" => ["logging", "filter"]: Str,
     "FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES" => ["logging", "non_blocking_queue_lines"]: Uint,
@@ -1836,53 +1916,13 @@ impl AlloyConfig {
         }
 
         if let Some(tls) = &server.tls {
-            if !has("tls") {
-                error("server.tls is configured but the `tls` feature is not enabled".into());
+            for message in tls_errors("server.tls", tls, has("tls")) {
+                error(message);
             }
-            if tls.client_auth != ClientAuth::None && tls.client_ca_path.is_none() {
-                error("server.tls.client_auth requires server.tls.client_ca_path".into());
-            }
-            if tls.client_auth == ClientAuth::None && tls.client_ca_path.is_some() {
-                error("server.tls.client_ca_path is set but client_auth is none".into());
-            }
-            if tls.client_auth == ClientAuth::None && !tls.client_crl_paths.is_empty() {
-                error("server.tls.client_crl_paths is set but client_auth is none".into());
-            }
-            if tls.handshake_timeout_ms == 0 {
-                error("server.tls.handshake_timeout_ms must be greater than zero".into());
-            }
-            if tls.handshake_timeout_ms > MAX_TIMEOUT_MS {
-                error(format!(
-                    "server.tls.handshake_timeout_ms must not exceed 24 hours ({MAX_TIMEOUT_MS})"
-                ));
-            }
-            let interval = tls.reload_interval_ms;
-            if interval != 0 && !TLS_RELOAD_INTERVAL_MS.contains(&interval) {
-                error(format!(
-                    "server.tls.reload_interval_ms must be 0 (disabled) or between {} and {}",
-                    TLS_RELOAD_INTERVAL_MS.start(),
-                    TLS_RELOAD_INTERVAL_MS.end()
-                ));
-            }
-            if tls.client_crl_paths.is_empty() {
-                for (name, changed) in [
-                    (
-                        "server.tls.client_crl_depth",
-                        tls.client_crl_depth != CrlDepth::default(),
-                    ),
-                    (
-                        "server.tls.client_crl_unknown_status",
-                        tls.client_crl_unknown_status != CrlUnknownStatus::default(),
-                    ),
-                    (
-                        "server.tls.client_crl_expiration",
-                        tls.client_crl_expiration != CrlExpiration::default(),
-                    ),
-                ] {
-                    if changed {
-                        error(format!("{name} has no effect without client_crl_paths"));
-                    }
-                }
+        }
+        if let Some(tls) = &self.management.tls {
+            for message in tls_errors("management.tls", tls, has("tls")) {
+                error(message);
             }
         }
 
@@ -2201,23 +2241,32 @@ impl AlloyConfig {
                     .into(),
             );
         }
-        if management.enabled && !management.bind.ip().is_loopback() {
+        if management.enabled && !management.bind.ip().is_loopback() && management.tls.is_none() {
             warn(format!(
-                "management.bind {} is not loopback: the management listener has no TLS, so its token crosses the network in cleartext on every request; bind to loopback or reach it through a same-host TLS-terminating proxy",
+                "management.bind {} is not loopback and management.tls is not set, so the management token crosses the network in cleartext on every request; set management.tls, bind to loopback, or reach it through a same-host TLS-terminating proxy",
                 management.bind
             ));
         }
         if self.trust.identities.is_empty() && !self.trust.networks.is_empty() {
             warn("trust relies on network boundaries only; prefer verified mTLS identities for gateway metadata".into());
         }
-        if let Some(tls) = &server.tls
-            && !tls.client_crl_paths.is_empty()
-        {
-            if tls.client_crl_unknown_status == CrlUnknownStatus::Allow {
-                warn("server.tls.client_crl_unknown_status = allow accepts client certificates that no configured CRL covers".into());
-            }
-            if tls.client_crl_expiration == CrlExpiration::Ignore {
-                warn("server.tls.client_crl_expiration = ignore keeps using CRLs past their nextUpdate time".into());
+        for (name, tls) in [
+            ("server.tls", server.tls.as_ref()),
+            ("management.tls", management.tls.as_ref()),
+        ] {
+            if let Some(tls) = tls
+                && !tls.client_crl_paths.is_empty()
+            {
+                if tls.client_crl_unknown_status == CrlUnknownStatus::Allow {
+                    warn(format!(
+                        "{name}.client_crl_unknown_status = allow accepts client certificates that no configured CRL covers"
+                    ));
+                }
+                if tls.client_crl_expiration == CrlExpiration::Ignore {
+                    warn(format!(
+                        "{name}.client_crl_expiration = ignore keeps using CRLs past their nextUpdate time"
+                    ));
+                }
             }
         }
         if self.openapi.ui && self.openapi.public {

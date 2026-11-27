@@ -529,6 +529,15 @@ impl AlloyApp {
             .map(crate::tls::load)
             .transpose()
             .map_err(|e| AlloyError::Tls(e.to_string()))?;
+        #[cfg(feature = "tls")]
+        let management_tls = config
+            .management
+            .tls
+            .as_ref()
+            .filter(|_| config.management.enabled)
+            .map(crate::tls::load)
+            .transpose()
+            .map_err(|e| AlloyError::Tls(format!("management.tls: {e}")))?;
 
         Ok(AlloyParts {
             router: app,
@@ -547,6 +556,8 @@ impl AlloyApp {
             diagnostics_retrieval,
             #[cfg(feature = "tls")]
             tls,
+            #[cfg(feature = "tls")]
+            management_tls,
         })
     }
 
@@ -633,6 +644,9 @@ pub struct AlloyParts {
     diagnostics_retrieval: bool,
     #[cfg(feature = "tls")]
     tls: Option<crate::tls::TlsServer>,
+    /// TLS of the management listener (`management.tls`).
+    #[cfg(feature = "tls")]
+    management_tls: Option<crate::tls::TlsServer>,
 }
 
 impl std::fmt::Debug for AlloyParts {
@@ -656,8 +670,8 @@ impl AlloyParts {
     /// `listener`, by the address it is actually bound to: any loopback
     /// address is accepted, and another address only with a management
     /// token. With diagnostic retrieval installed (feature `diagnostics`),
-    /// only a loopback address is accepted, token or not. An address that
-    /// cannot be read is refused.
+    /// another address also needs `management.tls`. An address that cannot
+    /// be read is refused.
     ///
     /// [`AlloyParts::serve_on`] calls this before serving. Call it yourself
     /// before serving the management router on your own listener.
@@ -674,7 +688,11 @@ impl AlloyParts {
         }
         #[cfg(feature = "diagnostics")]
         if self.diagnostics_retrieval
-            && let Err(message) = crate::diagnostics::check_listener(addr)
+            && let Err(message) = crate::diagnostics::check_listener(
+                addr,
+                self.config.management.tls.is_some(),
+                self.management_token,
+            )
         {
             errors.push(message);
         }
@@ -716,8 +734,8 @@ impl AlloyParts {
     /// `management.bind`, but it gets the same access policy, checked against
     /// the address it is actually bound to before either listener serves:
     /// off loopback, a management token is required, and diagnostic
-    /// retrieval (feature `diagnostics`) is refused. It fails with
-    /// [`AlloyError::Config`] otherwise.
+    /// retrieval (feature `diagnostics`) also needs `management.tls`. It
+    /// fails with [`AlloyError::Config`] otherwise.
     ///
     /// After shutdown it returns only once no HTTP/2 stream handler is still
     /// running and every TCP connection on both listeners is shut down:
@@ -774,6 +792,7 @@ impl AlloyParts {
             listen = ?app_addr,
             management = ?management_addr,
             tls = config.server.tls.is_some(),
+            management_tls = config.management.tls.is_some(),
             features = ?crate::enabled_features(),
             "serving"
         );
@@ -806,6 +825,26 @@ impl AlloyParts {
                 }
             });
         }
+        #[cfg(feature = "tls")]
+        if management_listener.is_some()
+            && let Some(tls) = self.management_tls.clone()
+        {
+            let stats = Arc::clone(&self.management_stats);
+            let stop_accepting = self.lifecycle.stop_accepting().clone();
+            tokio::spawn(async move {
+                let reload = std::panic::AssertUnwindSafe(crate::tls::reload_until(
+                    tls,
+                    stats,
+                    stop_accepting,
+                ));
+                if reload.catch_unwind().await.is_err() {
+                    tracing::error!(
+                        target: "ferrum_alloy::tls",
+                        "management TLS reload task panicked; certificate reloads have stopped"
+                    );
+                }
+            });
+        }
         let mut management_task = match (management_listener, self.management_router.clone()) {
             (Some(listener), Some(router)) => Some(tokio::spawn(server::serve(
                 listener,
@@ -818,7 +857,7 @@ impl AlloyParts {
                     // application classifier for its connections.
                     classifier: None,
                     #[cfg(feature = "tls")]
-                    tls: None,
+                    tls: self.management_tls.clone(),
                     ..options
                 },
                 self.lifecycle.clone(),

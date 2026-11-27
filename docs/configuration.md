@@ -81,6 +81,15 @@ Which management routes require `management.token`, why loopback is not authenti
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_MAX_CLIENTS` | `management.rate_limit.max_clients` | integer |
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_IPV6_PREFIX_LEN` | `management.rate_limit.ipv6_prefix_len` | integer |
 | `FERRUM_ALLOY_MANAGEMENT_RATE_LIMIT_EXEMPT_NETWORKS` | `management.rate_limit.exempt_networks` | comma list of CIDRs (empty for none) |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CERT_PATH` | `management.tls.cert_path` | path |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_KEY_PATH` | `management.tls.key_path` | path |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CA_PATH` | `management.tls.client_ca_path` | path |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_AUTH` | `management.tls.client_auth` | `none` / `optional` / `required` |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_PATHS` | `management.tls.client_crl_paths` | comma list of paths |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_DEPTH` | `management.tls.client_crl_depth` | `chain` / `end_entity` |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_UNKNOWN_STATUS` | `management.tls.client_crl_unknown_status` | `deny` / `allow` |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_EXPIRATION` | `management.tls.client_crl_expiration` | `enforce` / `ignore` |
+| `FERRUM_ALLOY_MANAGEMENT_TLS_RELOAD_INTERVAL_MS` | `management.tls.reload_interval_ms` | `0`, or 100 to 86400000 |
 | `FERRUM_ALLOY_LOG_FORMAT` | `logging.format` | `json` / `pretty` / `compact` |
 | `FERRUM_ALLOY_LOG_FILTER` | `logging.filter` | `EnvFilter` directives |
 | `FERRUM_ALLOY_LOG_NON_BLOCKING_QUEUE_LINES` | `logging.non_blocking_queue_lines` | integer |
@@ -203,7 +212,8 @@ Each section below shows a key, its default, and its meaning.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Serve the management listener. |
-| `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`, and is refused while diagnostic retrieval is installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)). `AlloyParts::serve_on` applies the same bind rules to the address a listener is actually bound to, which may differ from this setting: any loopback address is accepted, and a non-loopback address requires a token. Diagnostic retrieval is allowed only on loopback. If you serve `AlloyParts::management_router` yourself, call `AlloyParts::check_management_listener` first. The listener has no TLS, so off loopback the token crosses the network in cleartext; `check` warns about a non-loopback bind. Prefer loopback plus a port-forward, or a same-host TLS-terminating proxy. |
+| `bind` | `127.0.0.1:9090` | Must differ from `server.bind`. A non-loopback bind **requires** `token`; with diagnostic retrieval installed ([`[diagnostics]`](#diagnostics-feature-diagnostics)) it also requires `tls`. `AlloyParts::serve_on` applies the same bind rules to the address a listener is actually bound to, which may differ from this setting: any loopback address is accepted, and a non-loopback address requires a token (and, for retrieval, TLS). If you serve `AlloyParts::management_router` yourself, call `AlloyParts::check_management_listener` first. Without `tls`, off loopback the token crosses the network in cleartext, and startup and `check` warn about it. |
+| `tls` | none | TLS termination on the management listener (feature `tls`): the same keys, validation, and reloading as [`server.tls`](#servertls-feature-tls), applied separately (the listener can use its own certificate and client CA). Reload metrics carry `listener="management"`. With TLS and `token`, the listener may serve diagnostic retrieval off loopback. |
 | `token` | none | Operator bearer token (at least 32 characters). Detailed health, metrics, and management OpenAPI/UI always require it; absent tokens deny access even on loopback. Minimal probes remain token-free; diagnostics has a separate authorizer. |
 
 #### `[management.rate_limit]`
@@ -249,7 +259,7 @@ scrape_configs:
       - targets: ["127.0.0.1:9090"]
 ```
 
-The credentials file holds the token and nothing else; point it at the same file the service reads through `FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE` (Alloy ignores a trailing CR/LF) and keep it readable only by the Prometheus service account. The management listener has no TLS, so scrape it over loopback or a trusted network; a non-loopback `management.bind` already requires the token. A scrape with no token, or a wrong one, gets `401` and counts against the endpoint rate-limit budget before any metrics handler runs.
+The credentials file holds the token and nothing else; point it at the same file the service reads through `FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE` (Alloy ignores a trailing CR/LF) and keep it readable only by the Prometheus service account. Without `management.tls` the management listener speaks plain HTTP, so scrape it over loopback or a trusted network, or configure `management.tls` and scrape over HTTPS; a non-loopback `management.bind` already requires the token. A scrape with no token, or a wrong one, gets `401` and counts against the endpoint rate-limit budget before any metrics handler runs.
 
 ### `[health]`
 
@@ -452,7 +462,7 @@ Alias owner tables are rebuilt at half-load when their allocation high-water cap
 
 Retention does not change HTTP request/response correlation-id behavior or accepted trace propagation. Reports keep the actual correlation id in `subject.request_id`, the actual trace/span identities and existing provenance fields, and describe the local lookup id in collection notes; they do not claim that the local id was transmitted. Trusted transport establishes who delivered correlation bits, not who generated them. Trace ids are correlation hints, never lookup ownership or authenticated caller identity.
 
-Retrieval also requires `management.enabled`, `management.rate_limit.enabled`, and a loopback `management.bind`, and `management.rate_limit.exempt_networks` does not apply to the retrieval route. `/metrics` reports `ferrum_alloy_diagnostics_records` and `ferrum_alloy_diagnostics_bytes` (current retention), `ferrum_alloy_diagnostics_stored_total`, `ferrum_alloy_diagnostics_evicted_total{reason="count"|"bytes"|"request_id_limit"|"age"}`, `ferrum_alloy_diagnostics_skipped_total{reason="untagged"|"too_large"|"request_id_conflict"|"fair_share"}`, `ferrum_alloy_diagnostics_retrievals_total{outcome="served"|"not_found"}` (denials count as `not_found`, like the response they get), `ferrum_alloy_diagnostics_authorizer_failures_total{reason="timeout"|"panic"}`, and `ferrum_alloy_diagnostics_resets_total` (times the store discarded all retained evidence because a panic poisoned its lock, which may have left its indexes inconsistent). A sustained rise in `skipped_total{reason="fair_share"}` means tenants that need room arrive faster than retained sole records reach the 1 second takeover age, so evidence is refused to protect other tenants' records; raise the bounds or lower `max_age_ms`.
+Retrieval also requires `management.enabled`, `management.rate_limit.enabled`, and a loopback `management.bind` or, off loopback, both `management.tls` and `management.token`, and `management.rate_limit.exempt_networks` does not apply to the retrieval route. `/metrics` reports `ferrum_alloy_diagnostics_records` and `ferrum_alloy_diagnostics_bytes` (current retention), `ferrum_alloy_diagnostics_stored_total`, `ferrum_alloy_diagnostics_evicted_total{reason="count"|"bytes"|"request_id_limit"|"age"}`, `ferrum_alloy_diagnostics_skipped_total{reason="untagged"|"too_large"|"request_id_conflict"|"fair_share"}`, `ferrum_alloy_diagnostics_retrievals_total{outcome="served"|"not_found"}` (denials count as `not_found`, like the response they get), `ferrum_alloy_diagnostics_authorizer_failures_total{reason="timeout"|"panic"}`, and `ferrum_alloy_diagnostics_resets_total` (times the store discarded all retained evidence because a panic poisoned its lock, which may have left its indexes inconsistent). A sustained rise in `skipped_total{reason="fair_share"}` means tenants that need room arrive faster than retained sole records reach the 1 second takeover age, so evidence is refused to protect other tenants' records; raise the bounds or lower `max_age_ms`.
 
 The diagnostic retrieval command, `ferrum-alloy diagnose --url`, reads its credential from `FERRUM_ALLOY_DIAGNOSTICS_TOKEN` or `--token-file`. That variable belongs to the command, not to service configuration: it is listed in `config::CLI_ENV_VARS`, and loading service configuration ignores it rather than rejecting it as an unknown `FERRUM_ALLOY_*` variable.
 
