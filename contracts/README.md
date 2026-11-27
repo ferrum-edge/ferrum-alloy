@@ -25,12 +25,22 @@ Owner and consumer qualification, the shared v1 freeze and the adoption history
 
 `ferrum-contracts/` vendors the gateway vocabularies, diagnostic-report and
 diagnostic-ref schemas, and diagnostic-finding, diagnostic-ref, and service-manifest fixtures from the tag recorded
-in `ferrum-contracts/PIN`: `contracts-edge-0.9.21` at
+in `ferrum-contracts/PIN`. The PIN uses the canonical consumer format of
+ferrum-contracts' [consumer-pins.md](https://github.com/ferrum-edge/ferrum-contracts/blob/main/docs/consumer-pins.md):
+plain text with `tag`, `commit` and `edge_version` lines, then one
+`<sha256>  <path>` row per vendored file, paths relative to
+`ferrum-contracts/` and sorted byte by byte (`sha256sum -c` checks it from that
+directory). The pairing test parses it strictly by line position and runs every
+required check (strict parse, headers, sorted unique rows, tree equality with
+no symbolic links, content hashes). The pin is `contracts-edge-0.9.21` at
 `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` (SSH-signed tag object
 `3e7e10ef6d4aefa9874319326943ec2186b29981`). Both shared v1 contracts are now
 EXISTING/implemented; their metadata records Alloy owner availability as
 `unreleased`, the provenance of the original freeze, which the vendored bytes
-keep even though Alloy has since been released as `v0.1.0`. The
+keep even though Alloy has since been released as `v0.1.0`. Alloy's own copy,
+`diagnostics/diagnostic-report.v1.schema.json`, records `availability:
+released` in `v0.1.0` (`c949978d7e90be33bac6a16e23744bcdd4ee3924`); its wire
+is unchanged since the qualified owner commit. The
 vendored files are byte-verified and never edited or line-ending converted
 (`.gitattributes` marks them `-text`). The pairing tests in
 `crates/ferrum-alloy-edge/tests/pairing.rs` verify every vendored file's
@@ -47,8 +57,9 @@ pinned meanings separately so that a pin bump that changes one fails until
 Alloy's explanations are re-reviewed.
 
 To bump the pin, select a released `contracts-edge-*` tag, download the adopted
-files from that tag into the same paths, update the tag, commit SHA, and file
-hashes in `ferrum-contracts/PIN` and the pinned tag/commit assertion in
+files from that tag into the same paths, update the `tag`, `commit`,
+`edge_version` and file rows in `ferrum-contracts/PIN` (keeping the rows
+sorted) and the pinned tag/commit assertion in
 `crates/ferrum-alloy-edge/tests/pairing.rs`, then run CI. Update local
 vocabulary copies to match and review any reported drift, including the
 recorded pinned meanings.
@@ -58,8 +69,10 @@ in `x-contract`. Its `coordinated_release.contracts_tag` records the original
 v0.9.11 freeze, while local `contracts_tag`/`contracts_commit` track this adoption.
 All 12 diagnostic fixtures remain byte-identical. Canonical deployment
 schemas/fixtures are outside this 16-file scope and grant Alloy no deployment
-capability. (The pin has since grown to 28 files: #319 vendored the 12
-`service-manifest` fixtures of the `contracts-edge-0.9.20` tag, and the PIN has selected the same 28 files since.) All descriptions outside `$id`/`x-contract`, including historical
+capability. (The pin has since grown to 29 files: #319 vendored the 12
+`service-manifest` fixtures of the `contracts-edge-0.9.20` tag, and the
+`service-manifest` v1 schema was added from `contracts-edge-0.9.21` for the
+endpoint parity test.) All descriptions outside `$id`/`x-contract`, including historical
 PROPOSED/incomplete-import wording, remain exactly paired with the qualified owner. Current status is in `x-contract`; the
 tagged metadata's prepared/pending-publication text records the pre-publication
 state, superseded by the [actual release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.11)
@@ -113,8 +126,14 @@ ferrum-contracts publishes `schemas/service-manifest/v1.schema.json` (EXISTING/i
 transcribed from `manifest.rs`, with `additionalProperties: false` at the top
 level. The shared schema includes the optional `[agents]` section (`enabled`,
 `endpoint_path`, `namespace`) as of ferrum-contracts #8, released in
-`contracts-edge-0.9.9-r2`, retained unchanged in `contracts-edge-0.9.15`. Alloy does
-not vendor the service-manifest schema; Alloy's own parser accepts manifests with
-or without `[agents]`. The canonical schema is a transcription, not an owner-exported
+`contracts-edge-0.9.9-r2`, retained unchanged in `contracts-edge-0.9.15`. Alloy
+vendors it byte-exact from `contracts-edge-0.9.21` at
+`ferrum-contracts/schemas/service-manifest/v1.schema.json` (listed in the PIN).
+`every_accepted_otel_endpoint_validates_against_service_manifest_v1` in
+`crates/ferrum-alloy-edge/tests/export.rs` runs every `gateway.otel_endpoint`
+case Alloy's tests use through matchers of the schema's two patterns (and checks
+that the vendored patterns are the ones implemented), so nothing Alloy accepts
+there is refused by v1. Alloy's own parser accepts manifests with or without
+`[agents]`. The canonical schema is a transcription, not an owner-exported
 schema: post-default validation, derived resource ID lengths and endpoint relationships
 still belong to the owner parser. Consumer presentation bounds do not redefine them.

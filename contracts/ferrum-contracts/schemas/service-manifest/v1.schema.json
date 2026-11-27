@@ -1,0 +1,400 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ferrum-edge/ferrum-contracts/schemas/service-manifest/v1.schema.json",
+  "title": "ferrum.service_manifest v1",
+  "description": "A versioned, reviewable description of how a service is published behind Ferrum Edge, written as TOML (ferrum-service.toml) and described here as its JSON data model. Alloy implements the producer/parser; Nexus and Foundry implement qualified read-only JSON previews. Shared v1 freeze is accepted in the canonical release candidate; publication remains pending.",
+  "x-contract": {
+    "name": "service-manifest",
+    "version": 1,
+    "status": "implemented",
+    "owner": "ferrum-edge/ferrum-alloy",
+    "wire_version": "ferrum.service_manifest 1.x",
+    "provenance": [
+      {
+        "repo": "ferrum-edge/ferrum-alloy",
+        "ref": "main",
+        "commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e",
+        "availability": "unreleased",
+        "path": "crates/ferrum-alloy-edge/src/manifest.rs",
+        "symbols": [
+          "ServiceManifest",
+          "ManifestService",
+          "ManifestApi",
+          "ManifestUpstream",
+          "ManifestHealth",
+          "ManifestTimeouts",
+          "ManifestGateway",
+          "ManifestAuth",
+          "ManifestAgents",
+          "ServiceManifest::validate"
+        ],
+        "note": "Alloy publishes no JSON Schema for the manifest. This schema transcribes the serde structs (deny_unknown_fields, defaults) and the checks in validate(). Cross-field rules validate() applies after defaults (for example the proxy_id default and agents.endpoint_path being below api.public_path) are not all expressible here. Re-read at the qualified 81cbb410 owner: field/bound transcription is retained; validate() also checks derived resource ID lengths after defaults, outside this schema's existing assertions. api.public_path, api.service_base_path, health.path and agents.endpoint_path share one pattern transcribing valid_path at 81cbb410: a literal absolute path with no {, }, *, ~, space, ?, #, ;, % or \\, no // and no . or .. segment. Alloy main conforms again: #210 (5fe4daa) replaced valid_path with an ASCII pchar allow-list that briefly admitted ~ and *, and Alloy refuses ~ and * again since ferrum-alloy#303 (bcd0ac55af5e334f24fbef3539895842081f3968; decision in ferrum-contracts#58), so every path Alloy main accepts matches this pattern. The allow-list still refuses some characters this pattern accepts (for example \", <, [, | and non-ASCII), which keeps Alloy inside v1. This pattern is unchanged; invalid fixtures public-path-tilde.json and public-path-star.json cover ~ and *."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-alloy",
+        "ref": "main",
+        "commit": "db412da37564ffbe869e2b40530dbebf5afe7ac8",
+        "availability": "unreleased",
+        "path": "crates/ferrum-alloy-edge/src/manifest.rs",
+        "symbols": [
+          "ServiceManifest::validate",
+          "is_loopback_ip_literal_authority"
+        ],
+        "note": "Alloy main's validate() (ferrum-alloy#313, unchanged on Alloy main at 0e8a96a24c149432f0c3583732d8a3875db756ce) refuses an http:// gateway.otel_endpoint unless its host is a loopback IP literal, because the export writes the endpoint into Edge's otel_tracing config without allow_plaintext and Edge drops that exporter (ferrum-contracts#82). Alloy's own fixture contracts/fixtures/manifests/orders-api.toml uses https://otel-collector:4318/v1/traces since ferrum-alloy d6e437169c15b67a8b9e218b54b4135f9a0dcc5e. Alloy and v1 share the refusal of an @ before the first / of gateway.otel_endpoint. Alloy also refuses an api.service_base_path over 2048 bytes including its trailing /, and a bare IPv4 loopback authority without a port followed directly by ? or # (for example http://127.0.0.1#frag), which Edge admits; both are stricter than this schema, so Alloy stays inside v1. Alloy's loopback check is looser than Edge's in places: it admits a few loopback spellings Edge drops (for example an expanded IPv6 loopback or a non-numeric port), which yield an exported otel_tracing config Edge omits. This schema follows Edge's canonical spelling, and ferrum-alloy#319 tracks aligning Alloy."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.9",
+        "commit": "234717ce41965cd1e2b5c6c761a25475c5d7628c",
+        "path": "docs/api_specs.md",
+        "symbols": [
+          "x-ferrum-mcp (optional)"
+        ],
+        "note": "Edge v0.9.9 documents the MCP namespace character and length rule and requires the MCP endpoint to sit under the proxy listen path."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.20",
+        "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+        "path": "openapi.yaml",
+        "symbols": [
+          "OtelTracingConfig.endpoint",
+          "OtelTracingConfig.allow_plaintext"
+        ],
+        "note": "gateway.otel_endpoint transcribes Edge's cleartext rule from its published OtelTracingConfig schema, which src/plugins/otel_tracing.rs (validate_endpoint_for_provider, screen_cleartext_endpoint) and src/plugins/utils/socket_host.rs (is_loopback_ip_literal_endpoint) enforce: without allow_plaintext, an http:// URL is admitted only to a loopback IP literal spelled as a dotted-quad 127.d.d.d or [::1], with an optional numeric port, its authority ending at /, ? or #, or at the end of the URL after any trailing whitespace (Edge trims the configured value first). Alloy's export never writes allow_plaintext, so the manifest admits cleartext only to such a host; https:// URLs are unaffected. This is the only new constraint: whitespace, a path, ?query and #fragment are as v1 already allowed them, and v1's base pattern still refuses an @ before the first /. Two Edge runtime checks cover what this schema cannot judge, and Edge then omits the optional otel_tracing plugin. First, the url crate's parse fails for an empty host (https://:4318/...), a port that is non-numeric or out of range, a malformed IPv4 literal (an octet above 255, or a leading-zero octet that is not valid octal such as 09), or a forbidden control character in the host such as NUL. The parser first discards tab, LF and CR anywhere in the URL, so those alone do not make it fail (https://otel-<tab>collector:43<tab>18/... parses as https://otel-collector:4318/...); Edge's raw cleartext check above still reads the configured spelling. Second, after a successful parse Edge refuses a URL whose parsed username or password is non-empty; the parser skips any run of / and \\ after the scheme, so https:// followed by \\, / and user@collector.example/v1/traces parses with username user although v1's base pattern sees no @ before its first /. The cleartext pattern checks only the shape of the port; Edge checks its range. The schema is never stricter than Edge there. The rules are identical at v0.9.19 (510ce7121c3d9754110d330a30a3bd9b7a7b278e) and on Edge main at 812bbd1a01677525d7b664ba46ba574f546efe6b."
+      },
+      {
+        "repo": "ferrum-edge/ferrum-edge",
+        "ref": "v0.9.20",
+        "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+        "path": "src/config/types.rs",
+        "symbols": [
+          "MAX_LISTEN_PATH_LENGTH",
+          "MAX_BACKEND_HOST_LENGTH",
+          "MAX_BACKEND_PATH_LENGTH",
+          "MAX_TIMEOUT_MS",
+          "MAX_HEALTH_CHECK_INTERVAL",
+          "contains_control_chars",
+          "validate_string_field",
+          "Proxy::validate_fields",
+          "Upstream::validate_fields",
+          "HealthCheckConfig::validate_fields"
+        ],
+        "note": "Upper bounds and control-character rules for the Edge fields Alloy's edge export (crates/ferrum-alloy-edge/src/export.rs) writes from the manifest (ferrum-contracts#74, ferrum-alloy#309). public_path is the proxy listen_path (500 bytes); service_base_path, without its trailing /, the proxy backend_path (2048 bytes); upstream.host the proxy backend_host, or upstream targets[].host when health is set (255 bytes); health.path the active http_path (2048 bytes); timeouts the backend_*_timeout_ms (at most 86400000); health.interval_seconds at most 3600 and health.timeout_ms at most 86400000. Edge measures string lengths in UTF-8 bytes and JSON Schema maxLength counts characters, so each maxLength is the byte limit as a character count: never stricter than Edge, exact for ASCII, and Edge itself refuses a non-ASCII value that fits the characters but not the bytes. upstream.host refuses exactly what Edge's contains_control_chars refuses (bytes below 0x20 other than tab, LF and CR). Alloy main's host rule is stricter and stays inside v1: since ferrum-alloy#313 (db412da37564ffbe869e2b40530dbebf5afe7ac8) it refuses every control and whitespace character. The four path fields (api.public_path, api.service_base_path, health.path and agents.endpoint_path) refuse every C0 control and DEL, which Alloy's valid_path already refuses (it admits only ASCII pchar bytes). The control rules are anchored lookahead patterns ([\\s\\S], so no line terminator ends the scan), and use only keywords the Nexus and Foundry preview compilers support. The bounds and src/config/types.rs rules are unchanged on Edge main at 6ad7cfe8c03fac254ab348691056d428bc2543a6."
+      }
+    ],
+    "shared_status": "EXISTING shared v1 in the contracts-edge-0.9.11 release candidate. Root accepted the unchanged wire freeze after qualified owner/consumer review (ferrum-alloy#27); canonical tag/publication remains pending.",
+    "coordinated_release": {
+      "contracts_tag": "contracts-edge-0.9.11",
+      "state": "shared v1 freeze accepted by root; canonical tag/publication pending",
+      "qualified_owner_commit": "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e",
+      "owner_main_push_run": "https://github.com/ferrum-edge/ferrum-alloy/actions/runs/37238543236",
+      "decision": "Root accepted the unchanged shared v1 wire contracts on 2026-10-04 after reviewed owner/consumer qualification. This records the authorized canonical metadata decision, not a prior separate human approval or Alloy crate publishing approval. Alloy remains unpublished.",
+      "adoption": "Existing consumer pins and historical r2 bytes are unchanged. After canonical tag publication, update owner/consumer pins, checksums and local annotations together with full hosted parity."
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "service",
+    "api",
+    "upstream"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ferrum.service_manifest"
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^0*1(\\.|$)",
+      "description": "Major version 1; Alloy writes 1.0."
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+        },
+        "version": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "public_path"
+      ],
+      "properties": {
+        "public_path": {
+          "type": "string",
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))/[^{}*~ ?#;%\\\\]*$",
+          "allOf": [
+            {
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1F\\x7F])"
+            }
+          ],
+          "maxLength": 500,
+          "description": "Gateway listen path prefix, a literal absolute path. Exported as the Edge proxy listen_path, which Edge limits to 500 UTF-8 bytes (MAX_LISTEN_PATH_LENGTH). maxLength counts characters, so it equals the byte limit only for ASCII; Edge enforces the bytes. No C0 control character or DEL, as Alloy's valid_path refuses them."
+        },
+        "service_base_path": {
+          "type": "string",
+          "default": "/",
+          "allOf": [
+            {
+              "pattern": "^(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))/[^{}*~ ?#;%\\\\]*$"
+            },
+            {
+              "pattern": "/$"
+            },
+            {
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1F\\x7F])"
+            }
+          ],
+          "maxLength": 2049,
+          "description": "Backend path prefix ending in /. Exported, without its trailing /, as the Edge proxy backend_path, which Edge limits to 2048 UTF-8 bytes (MAX_BACKEND_PATH_LENGTH): at most 2049 characters with the /. This Edge-derived boundary is the v1 bound (ferrum-contracts#82); Alloy main, Foundry and Nexus currently refuse more than 2048 characters, which is stricter and inside v1. maxLength counts characters; Edge enforces the bytes. No C0 control character or DEL, as Alloy's valid_path refuses them."
+        },
+        "strip_public_path": {
+          "type": "boolean",
+          "default": true
+        },
+        "openapi": {
+          "type": "string",
+          "description": "Path to the exported OpenAPI document, relative to the manifest."
+        }
+      }
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "port",
+        "scheme"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "pattern": "^[^/ @]+$",
+          "allOf": [
+            {
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F])"
+            }
+          ],
+          "maxLength": 255,
+          "description": "Bare host name or address, no scheme. Exported as the Edge proxy backend_host, or upstream targets[].host when health is set, which Edge limits to 255 UTF-8 bytes (MAX_BACKEND_HOST_LENGTH). maxLength counts characters, so it equals the byte limit only for ASCII; Edge enforces the bytes of a longer non-ASCII host. Refuses exactly the control bytes Edge's contains_control_chars refuses: below 0x20 except tab, LF and CR."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "scheme": {
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        "protocols": {
+          "type": "array",
+          "minItems": 1,
+          "default": [
+            "http1",
+            "http2"
+          ],
+          "items": {
+            "enum": [
+              "http1",
+              "http2"
+            ]
+          }
+        },
+        "gateway_client_cert_path": {
+          "type": "string"
+        },
+        "gateway_client_key_path": {
+          "type": "string"
+        },
+        "server_ca_path": {
+          "type": "string"
+        }
+      },
+      "dependentRequired": {
+        "gateway_client_cert_path": [
+          "gateway_client_key_path"
+        ],
+        "gateway_client_key_path": [
+          "gateway_client_cert_path"
+        ]
+      },
+      "if": {
+        "anyOf": [
+          {
+            "required": [
+              "gateway_client_cert_path"
+            ]
+          },
+          {
+            "required": [
+              "server_ca_path"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "scheme": {
+            "const": "https"
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))/[^{}*~ ?#;%\\\\]*$",
+          "allOf": [
+            {
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1F\\x7F])"
+            }
+          ],
+          "maxLength": 2048,
+          "description": "Exported as the Edge upstream active health check http_path, which Edge limits to 2048 UTF-8 bytes (MAX_BACKEND_PATH_LENGTH). maxLength counts characters; Edge enforces the bytes. No C0 control character or DEL, as Alloy's valid_path refuses them."
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 10,
+          "description": "Exported as active.interval_seconds; Edge allows 1 to 3600 (MAX_HEALTH_CHECK_INTERVAL)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000,
+          "default": 2000,
+          "description": "Exported as active.timeout_ms; Edge allows 1 to 86400000 (MAX_TIMEOUT_MS, 24 hours)."
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "connect_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000,
+          "default": 2000,
+          "description": "Exported as backend_connect_timeout_ms; Edge allows at most 86400000 (MAX_TIMEOUT_MS, 24 hours)."
+        },
+        "read_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 30000,
+          "description": "0 disables the read timeout for long-lived streams. Exported as backend_read_timeout_ms; Edge allows at most 86400000 (MAX_TIMEOUT_MS, 24 hours)."
+        },
+        "write_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000,
+          "default": 30000,
+          "description": "Exported as backend_write_timeout_ms; Edge allows at most 86400000 (MAX_TIMEOUT_MS, 24 hours)."
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "maxLength": 254,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "default": "ferrum"
+        },
+        "proxy_id": {
+          "type": "string",
+          "maxLength": 254,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "description": "Defaults to service.name."
+        },
+        "correlation_id": {
+          "type": "boolean",
+          "default": true
+        },
+        "otel_endpoint": {
+          "type": "string",
+          "pattern": "^https?://[^/@]+(/.*)?$",
+          "allOf": [
+            {
+              "pattern": "^(?:https://|http://(?:127(?:\\.[0-9]{1,3}){3}|\\[::1\\])(?::[0-9]*)?(?:[/?#]|[\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*(?![\\s\\S])))"
+            }
+          ],
+          "description": "OTLP/HTTP traces URL without credentials, written into Edge's otel_tracing config without allow_plaintext. https:// to any host, or http:// only to a loopback IP literal (127.d.d.d or [::1], optional numeric port), the only cleartext exporter Edge v0.9.19 and later keep without allow_plaintext. No @ before the first /. A path, ?query and #fragment are allowed, as Edge allows them; a consumer may refuse more. Edge trims surrounding whitespace first. It also refuses an endpoint its URL parser rejects (for example an empty host or an out-of-range port) and, after parsing, one whose parsed userinfo is non-empty (for example extra / or \\ characters before user@host); this pattern does not judge either."
+        },
+        "otel_root_sampling_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "none",
+            "gateway",
+            "service"
+          ]
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "endpoint_path": {
+          "type": "string",
+          "pattern": "^(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))/[^{}*~ ?#;%\\\\]*$",
+          "allOf": [
+            {
+              "pattern": "^(?![\\s\\S]*[\\x00-\\x1F\\x7F])"
+            }
+          ],
+          "description": "Literal absolute MCP endpoint path below api.public_path. No C0 control character or DEL, as Alloy's valid_path refuses them."
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$",
+          "description": "MCP tool-name prefix; defaults to service.name."
+        }
+      }
+    }
+  }
+}
