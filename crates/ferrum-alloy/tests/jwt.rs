@@ -386,11 +386,21 @@ async fn valid_tokens_are_accepted_and_invalid_ones_rejected() {
     wrong_iss["iss"] = json!("https://evil.test");
     let mut no_exp = claims();
     no_exp.as_object_mut().unwrap().remove("exp");
+    // Wrongly typed registered claims are refused, never skipped.
+    let mut numeric_aud = claims();
+    numeric_aud["aud"] = json!(1234);
+    let mut numeric_iss = claims();
+    numeric_iss["iss"] = json!(1234);
+    let mut string_exp = claims();
+    string_exp["exp"] = json!((now() + 300).to_string());
     for (name, claims) in [
         ("expired", expired),
         ("audience", wrong_aud),
         ("issuer", wrong_iss),
         ("no exp", no_exp),
+        ("numeric audience", numeric_aud),
+        ("numeric issuer", numeric_iss),
+        ("string exp", string_exp),
     ] {
         let (status, _, headers) = call(&router, Some(&key.sign(&claims, Some("k1")))).await;
         assert_eq!(status, 401, "{name}");
@@ -481,7 +491,7 @@ async fn algorithm_confusion_and_unsigned_tokens_are_rejected() {
     let hs = encode(
         &header,
         &claims(),
-        &EncodingKey::from_secret(key.pair.public_key_raw()),
+        &EncodingKey::from_secret(key.pair.public_key_raw()).unwrap(),
     )
     .unwrap();
     assert_eq!(call(&router, Some(&hs)).await.0, 401);

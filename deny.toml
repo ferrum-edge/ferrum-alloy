@@ -16,43 +16,7 @@ unused-ignored-advisory = "deny"
 # token; ci/check_advisory_expiry.py does, before cargo-deny in the CI
 # dependency-policy job and the weekly advisories workflow, and fails on a
 # missing, malformed, or past date.
-ignore = [
-    # rsa 0.9 (via jsonwebtoken's rust_crypto backend, feature `jwt`):
-    # timing side channel in RSA *private-key* operations (decryption and
-    # signing). Alloy's JWT support only verifies signatures with public
-    # keys from a configured JWKS; it never loads private keys or signs.
-    # No patched release exists. Re-evaluate by the expiry date or when
-    # jsonwebtoken offers a backend without this crate. [expires:2026-12-26]
-    { id = "RUSTSEC-2023-0071", reason = "public-key verification only; see comment [expires:2026-12-26]" },
-    # crypto-bigint 0.5.5 (via jsonwebtoken 11.1.0's rust_crypto backend ->
-    # p256 0.13.2 / p384 0.13.1 -> elliptic-curve 0.13.8): RUSTSEC-2026-0387,
-    # timing variability in operations meant to be constant-time. Fixed only in
-    # >= 0.7.6; there is no patched 0.5.x, and jsonwebtoken 11.1.0 (latest)
-    # still requires p256 ^0.13. Time-boxed risk acceptance, accepted by the
-    # owner on 2026-11-14 (#294): only public-key verification and throwaway
-    # test keys reach the crate. It is reached in two ways:
-    #   - The optional `jwt` feature (also in `full`, and enabled by
-    #     `ferrum-alloy new --with jwt` projects). It is not in the CLI binary
-    #     or the default features. src/jwt.rs only builds `DecodingKey`s from
-    #     JWKS and verifies ES256/ES384 signatures, so crypto-bigint only sees
-    #     public keys and signatures.
-    #   - Tests that sign ES256/ES384 with throwaway keys they generate
-    #     themselves: the ferrum-alloy dev-dependency and the dev-dependency
-    #     in the generated `jwt` starter.
-    # No private key from a deployment ever reaches this code, so no
-    # secret-dependent use is reachable in Alloy or in generated services.
-    # Exit: jsonwebtoken moves to p256/p384 0.14 (elliptic-curve 0.14 /
-    # crypto-bigint >= 0.7.6), or Alloy switches its backend. Revisit when a
-    # jsonwebtoken release adopts p256/p384 0.14, and re-review by the expiry
-    # (aligned with RUSTSEC-2023-0071, which has the same exit).
-    # jsonwebtoken's only other backend, `aws_lc_rs`, would remove the crate
-    # today, but `aws-lc-sys` is banned below (the crypto stack stays on
-    # ring), so that is a policy change for the owner, not a drop-in fix.
-    # Installing a ring-backed jsonwebtoken CryptoProvider instead would mean
-    # a process-global install from library code, which AGENTS.md forbids.
-    # [expires:2026-12-26]
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via jsonwebtoken rust_crypto (p256/p384 0.13); no patched 0.5.x; verification with public keys only, signing only with throwaway test keys; owner-accepted 2026-11-14 (#294); revisit when jsonwebtoken adopts p256/p384 0.14; see comment [expires:2026-12-26]" },
-]
+ignore = []
 
 [licenses]
 version = 2
@@ -98,32 +62,24 @@ ignore = true
 multiple-versions = "deny"
 multiple-versions-include-dev = true
 skip = [
-    # RustCrypto generation split: jsonwebtoken's rust_crypto backend (rsa,
-    # p256/p384 0.13, ed25519-dalek), sha1 and sqlx-core stay on digest
-    # 0.10, sha2 0.10, hmac 0.12 and hkdf 0.12; sqlx-postgres (feature
-    # `postgres`) uses digest 0.11, sha2 0.11, hmac 0.13 and hkdf 0.13.
-    { crate = "block-buffer:0.10", reason = "digest 0.10 generation (jsonwebtoken rust_crypto, sha1, sqlx-core); sqlx-postgres on digest 0.11" },
-    { crate = "cpufeatures:0.2", reason = "digest 0.10 generation (curve25519-dalek, sha1, sha2 0.10); sha2 0.11 and chacha20 on 0.3" },
-    { crate = "crypto-common:0.1", reason = "digest 0.10 generation (jsonwebtoken rust_crypto, sha1, sqlx-core); sqlx-postgres on digest 0.11" },
-    { crate = "digest:0.10", reason = "jsonwebtoken rust_crypto, sha1 and sqlx-core on digest 0.10; sqlx-postgres on 0.11" },
-    { crate = "hkdf:0.12", reason = "elliptic-curve 0.13 (jsonwebtoken p256/p384) on hkdf 0.12; sqlx-postgres on 0.13" },
-    { crate = "hmac:0.12", reason = "jsonwebtoken, rfc6979 and hkdf 0.12 on hmac 0.12; sqlx-postgres on 0.13" },
-    { crate = "sha2:0.10", reason = "jsonwebtoken, ed25519-dalek, p256/p384 and sqlx-core on sha2 0.10; sqlx-postgres on 0.11" },
-    # rand generation split: jsonwebtoken and rsa on rand 0.8, opentelemetry
-    # and tungstenite (via axum) on 0.9, sqlx-postgres and proptest on 0.10;
-    # Alloy itself uses getrandom 0.4.
-    { crate = "getrandom:0.2", reason = "jsonwebtoken, ring and rand_core 0.6 on getrandom 0.2; Alloy and rand 0.10 on 0.4" },
+    # digest 0.10 generation: sha1 0.10 (axum's WebSocket support, a
+    # dev-dependency, and tungstenite) stays on digest 0.10; jsonwebtoken's
+    # rust_crypto backend, sqlx-postgres and sha1 0.11 use digest 0.11.
+    { crate = "block-buffer:0.10", reason = "digest 0.10 generation (sha1 0.10 via axum ws and tungstenite); digest 0.11 on 0.12" },
+    { crate = "cpufeatures:0.2", reason = "sha1 0.10 (axum ws, tungstenite) on cpufeatures 0.2; sha2 0.11 and chacha20 on 0.3" },
+    { crate = "crypto-common:0.1", reason = "digest 0.10 generation (sha1 0.10 via axum ws and tungstenite); digest 0.11 on 0.2" },
+    { crate = "digest:0.10", reason = "sha1 0.10 (axum ws, tungstenite) on digest 0.10; jsonwebtoken rust_crypto, sqlx-postgres and sha1 0.11 on 0.11" },
+    # rand generation split: opentelemetry and tungstenite (via axum) on rand
+    # 0.9, sqlx-postgres and proptest on 0.10; Alloy itself uses getrandom 0.4.
+    { crate = "getrandom:0.2", reason = "ring on getrandom 0.2; Alloy and rand 0.10 on 0.4" },
     { crate = "getrandom:0.3", reason = "rand_core 0.9 (opentelemetry, tungstenite) on getrandom 0.3; Alloy and rand 0.10 on 0.4" },
     { crate = "r-efi:5", reason = "getrandom 0.3 on r-efi 5; getrandom 0.4 on 6" },
-    { crate = "rand:0.8", reason = "jsonwebtoken and rsa on rand 0.8; sqlx-postgres and proptest on 0.10" },
     { crate = "rand:0.9", reason = "opentelemetry_sdk and tungstenite on rand 0.9; sqlx-postgres and proptest on 0.10" },
-    { crate = "rand_chacha:0.3", reason = "rand 0.8 on rand_chacha 0.3; rand 0.9 on 0.9" },
-    { crate = "rand_core:0.6", reason = "rand 0.8 and older RustCrypto on rand_core 0.6; rand 0.10 on 0.10" },
     { crate = "rand_core:0.9", reason = "rand 0.9 on rand_core 0.9; rand 0.10 on 0.10" },
     # Proc-macro crates still on syn 2 while most derives use syn 3.
     { crate = "syn:2", reason = "ASN.1, SQLx, tracing and other derives on syn 2; serde, clap, tokio and others on 3" },
     { crate = "synstructure:0.13", reason = "asn1-rs-derive and yoke-derive on synstructure 0.13; zerofrom-derive on 0.14" },
-    { crate = "base64:0.22", reason = "axum, jsonwebtoken and SQLx on base64 0.22; hyper-util, reqwest and pem (rcgen) on 0.23" },
+    { crate = "base64:0.22", reason = "axum and SQLx on base64 0.22; jsonwebtoken, hyper-util, reqwest and pem (rcgen) on 0.23" },
     { crate = "hashbrown:0.16", reason = "sqlx-core and its hashlink on hashbrown 0.16; indexmap on 0.17" },
     { crate = "tower-http:0.6", reason = "reqwest (also via opentelemetry-otlp) on tower-http 0.6; Alloy on 0.7" },
     { crate = "io-lifetimes:2", reason = "fs-set-times (via cap-primitives) on io-lifetimes 2; cap-std crates on 3" },
