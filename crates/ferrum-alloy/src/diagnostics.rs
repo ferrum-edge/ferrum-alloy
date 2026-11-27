@@ -3282,9 +3282,10 @@ mod tests {
             violations(&schema, &schema, &bad, "", &mut out);
             assert!(!out.is_empty(), "{pointer} accepted");
         }
+        // The body phase, which has a `body.outcome` attribute.
         let mut bad = good.clone();
         let attributes = bad
-            .pointer_mut("/observations/0/attributes")
+            .pointer_mut("/observations/1/attributes")
             .unwrap()
             .as_object_mut()
             .unwrap();
