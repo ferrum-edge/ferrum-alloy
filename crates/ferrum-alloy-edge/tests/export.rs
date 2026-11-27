@@ -575,11 +575,11 @@ fn yaml_escapes_characters_yaml_cannot_carry_verbatim() {
         "k: \"a\\u007Fb\\u0085c\\u2028d\\uFEFFe\\uFFFEf\\uFFFFg\u{e9}\"\n"
     );
     let mut manifest = manifest();
-    manifest.gateway.otel_endpoint = Some("HTTPS://collector.example/traces\u{fffe}".to_owned());
+    manifest.gateway.otel_endpoint = Some("https://collector.example/traces\u{fffe}".to_owned());
     manifest.validate().unwrap();
     let yaml = file_mode_yaml(&resources(&manifest).unwrap());
     assert!(
-        yaml.contains(r#""HTTPS://collector.example/traces\uFFFE""#),
+        yaml.contains(r#""https://collector.example/traces\uFFFE""#),
         "{yaml}"
     );
     assert!(!yaml.contains('\u{fffe}'), "{yaml}");
