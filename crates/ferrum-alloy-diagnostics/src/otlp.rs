@@ -612,9 +612,14 @@ fn bounded_identity(value: &str) -> String {
 /// prefix that could split a credential before downstream redaction. Use
 /// the full value's digest rather than one shared omission marker so
 /// distinct long service names, request ids, and attribute keys stay distinct.
-/// Instance identities additionally use [`identity`] to separate literal
-/// and digested identity domains.
-fn bounded_text(value: &str) -> String {
+/// Instance identities are additionally digested when they start with
+/// the digest prefix, to separate literal and digested identity domains.
+///
+/// Text of at most 512 bytes is returned unchanged; longer text becomes a
+/// fixed-length digest of the whole value, so equal inputs stay equal and
+/// the result always fits the report's 2,048-byte string limit. Live
+/// reports apply the same policy to their own text, so both paths agree.
+pub fn bounded_text(value: &str) -> String {
     if value.len() <= MAX_ATTR_BYTES {
         return value.to_owned();
     }

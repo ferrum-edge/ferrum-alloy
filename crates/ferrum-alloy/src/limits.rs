@@ -164,10 +164,10 @@ where
                     .ok()
                     .and_then(Result::ok),
             };
-            tracing::Span::current().record(
-                "alloy.admission.wait_ms",
-                started.elapsed().as_secs_f64() * 1_000.0,
-            );
+            let waited = started.elapsed();
+            tracing::Span::current()
+                .record("alloy.admission.wait_ms", waited.as_secs_f64() * 1_000.0);
+            ferrum_alloy_telemetry::evidence::record_admission_wait(waited);
             let Some(permit) = permit else {
                 return Ok(Problem::new(ProblemKind::Overloaded)
                     .with_detail("The service is at its concurrent request limit.")
