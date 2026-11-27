@@ -60,7 +60,8 @@ main PUSH [Validate contracts run 37320780987](https://github.com/ferrum-edge/fe
 succeeded. All 16 existing adopted paths match that immutable Git tree. The
 report and all 12 diagnostic fixtures are byte-identical to the v0.9.11 pin;
 the diagnostic-ref schema refreshes only provenance. The report's original
-v0.9.11 coordinated-release metadata and owner-unreleased status remain intact.
+v0.9.11 coordinated-release metadata and its freeze-time owner `unreleased`
+availability remain intact (Alloy has since been released as `v0.1.0`).
 The two gateway vocabularies refresh Edge provenance, and admin ETag/If-Match
 wording adds deployment-v1. Alloy consumes no new admin deployment surface or
 schema. The [inventory](edge-contract-inventory.md#historical-re-audits) records

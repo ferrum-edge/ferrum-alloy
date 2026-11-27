@@ -29,6 +29,21 @@ Alloy is released from Git tags (the first is `v0.1.0`) and is not published
 to crates.io or any other registry. Security fixes land on `main` and ship in
 the next tagged release; earlier tags receive no backports.
 
+From 1.0.0 onward, the [stability policy](docs/release.md#stability-policy)
+sets the support window:
+
+- The latest 1.x release is supported. A security fix ships in a new 1.x
+  release, a patch release when the fix changes no covered surface. Earlier
+  1.x releases receive no backports, because upgrading within 1.x is
+  compatible.
+- After 2.0.0 is released, the last 1.x minor line receives security fixes,
+  as patch releases, for six months from the 2.0.0 release date.
+- 0.x tags receive no fixes once 1.0.0 is released.
+- If a vulnerability cannot be fixed without a breaking change (including an
+  upgrade of a public dependency across an incompatible version), the fix may
+  ship in a 1.x minor release, and its advisory and release notes state what
+  breaks and how to migrate.
+
 ## Security model
 
 What Alloy trusts, and what it deliberately does not protect against, is
