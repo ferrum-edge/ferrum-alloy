@@ -1564,7 +1564,12 @@ fn operation_observations(
     );
     out.push(measured);
     if let Some(wait) = operation.pool_wait {
-        out.push(observation("pool_wait", catalog::ALLOY_DB_POOL_WAIT, wait));
+        let mut pool = observation("pool_wait", catalog::ALLOY_DB_POOL_WAIT, wait);
+        // The wait ended when it was recorded, so it spans `wait` before.
+        pool.interval = operation
+            .pool_wait_ended
+            .and_then(|ended| clock.interval(record, ended.saturating_sub(wait), wait));
+        out.push(pool);
     }
 }
 
@@ -2840,6 +2845,7 @@ mod tests {
         load.started = Duration::from_millis(10);
         load.duration = Duration::from_millis(80);
         load.pool_wait = Some(Duration::from_millis(30));
+        load.pool_wait_ended = Some(Duration::from_millis(45));
         let mut decode = OperationEvidence::new(
             "orders.decode",
             OperationKind::Internal,
@@ -2908,6 +2914,11 @@ mod tests {
         assert_eq!(pool.name, catalog::ALLOY_DB_POOL_WAIT);
         assert_eq!(pool.duration_ms(), Some(30.0));
         assert_eq!(pool.span, operation.span);
+        assert_eq!(
+            pool.interval,
+            Some(Interval::new(start + 15_000_000, start + 45_000_000)),
+            "the acquire, placed inside orders.load"
+        );
         let decode = report
             .observations
             .iter()
@@ -3357,6 +3368,7 @@ mod tests {
         request.admission_wait = Some(Duration::from_millis(4));
         let mut load = op("orders.load", request.span_id, 10, 80);
         load.pool_wait = Some(Duration::from_millis(30));
+        load.pool_wait_ended = Some(Duration::from_millis(45));
         let decode = op("orders.decode", load.span_id, 60, 20);
         request.operations = vec![decode, load];
         store.record(request);

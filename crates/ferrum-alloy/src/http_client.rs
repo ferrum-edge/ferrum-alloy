@@ -268,10 +268,13 @@ impl AlloyClient {
         // Kept in the request's diagnostic evidence when it collects any;
         // dropped unfinished (the caller gave up), it records a cancelled
         // operation.
-        // With a context the span's parent is the request's server span, not
-        // the current span; the live evidence records the same parent.
+        // With a context the span's parent is that request's server span,
+        // not the current span; the live evidence records the same parent,
+        // and keeps the operation only when that request is the one being
+        // polled (a context carried into a nested request belongs to the
+        // outer request's trace). Propagation still follows the context.
         let recorder = match context {
-            Some(context) => OperationRecorder::start_with_parent(
+            Some(context) => OperationRecorder::start_in_request(
                 "http.client",
                 OperationKind::Client,
                 &span,

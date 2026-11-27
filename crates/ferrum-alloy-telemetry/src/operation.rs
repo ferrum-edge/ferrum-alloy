@@ -31,8 +31,7 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -197,20 +196,20 @@ impl Operation {
 pub fn record_pool_wait(duration: std::time::Duration) {
     Span::current().record("alloy.db.pool_wait_ms", duration.as_secs_f64() * 1_000.0);
     if let Ok(Some(slot)) = ACTIVE_OPERATION.try_with(|active| active.borrow().clone()) {
-        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(NO_POOL_WAIT - 1);
-        slot.pool_wait_nanos.store(nanos, Ordering::Relaxed);
+        let mut last = slot
+            .pool_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *last = Some((duration, Instant::now()));
     }
 }
-
-/// `pool_wait_nanos` before any pool wait is recorded.
-const NO_POOL_WAIT: u64 = u64::MAX;
 
 /// What a running operation gathers for its request's evidence.
 #[derive(Debug)]
 pub(crate) struct OperationSlot {
     span_id: SpanId,
-    /// The last recorded pool wait, or [`NO_POOL_WAIT`].
-    pool_wait_nanos: AtomicU64,
+    /// The last recorded pool wait and when it was recorded.
+    pool_wait: Mutex<Option<(Duration, Instant)>>,
 }
 
 thread_local! {
@@ -232,11 +231,13 @@ pub(crate) fn replace_active_operation(operation: ActiveOperation) -> ActiveOper
 }
 
 /// Makes an operation current on this thread until dropped, so pool waits
-/// and nested operations attach to it. Returned by
-/// [`OperationRecorder::enter`]; keep it only for the duration of one poll.
+/// and nested operations attach to it. Private, and only ever held for a
+/// synchronous stretch ([`OperationRecorder::in_scope`], one poll of an
+/// [`OperationFuture`]), so guards drop in reverse order of entry on the
+/// thread that entered them and each restores exactly what it replaced.
 #[derive(Debug)]
 #[must_use = "the operation is current only while the guard is alive"]
-pub struct OperationGuard {
+pub(crate) struct OperationGuard {
     previous: Option<Option<Arc<OperationSlot>>>,
 }
 
@@ -283,45 +284,51 @@ impl OperationRecorder {
         Self::start_inner(name, kind, span, None)
     }
 
-    /// Like [`OperationRecorder::start`], for a span created with an
-    /// explicit parent (`parent: &context.span`): `parent` is that span's id
-    /// (for the request's server span, `RequestContext::span_id`), so live
-    /// evidence and exported spans agree on the parent.
-    pub fn start_with_parent(
+    /// Like [`OperationRecorder::start`], for a span created with the
+    /// server span of a request as its explicit parent
+    /// (`parent: &context.span`), where `server_span_id` is
+    /// `RequestContext::span_id`. The operation is kept, with that parent,
+    /// only when the request whose future or body this thread is polling is
+    /// that same request. Otherwise (a context carried into another
+    /// instrumented request) it is not kept in any evidence, since it
+    /// belongs to the other request's trace; it is still timed.
+    pub fn start_in_request(
         name: &'static str,
         kind: OperationKind,
         span: &Span,
-        parent: SpanId,
+        server_span_id: SpanId,
     ) -> Self {
-        Self::start_inner(name, kind, span, Some(parent))
+        Self::start_inner(name, kind, span, Some(server_span_id))
     }
 
     fn start_inner(
         name: &'static str,
         kind: OperationKind,
         span: &Span,
-        parent: Option<SpanId>,
+        server_span_id: Option<SpanId>,
     ) -> Self {
         let start = Instant::now();
-        let evidence = current_request().map(|request| {
-            let span_id =
-                crate::otel_bridge::exported_ids(span).map_or_else(SpanId::random, |ids| ids.1);
-            let parent_span_id = parent.unwrap_or_else(|| {
-                ACTIVE_OPERATION
-                    .try_with(|active| active.borrow().as_ref().map(|slot| slot.span_id))
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| request.span_id())
+        let evidence = current_request()
+            .filter(|request| server_span_id.is_none_or(|id| id == request.span_id()))
+            .map(|request| {
+                let span_id =
+                    crate::otel_bridge::exported_ids(span).map_or_else(SpanId::random, |ids| ids.1);
+                let parent_span_id = server_span_id.unwrap_or_else(|| {
+                    ACTIVE_OPERATION
+                        .try_with(|active| active.borrow().as_ref().map(|slot| slot.span_id))
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| request.span_id())
+                });
+                RecorderEvidence {
+                    request,
+                    slot: Arc::new(OperationSlot {
+                        span_id,
+                        pool_wait: Mutex::new(None),
+                    }),
+                    parent_span_id,
+                }
             });
-            RecorderEvidence {
-                request,
-                slot: Arc::new(OperationSlot {
-                    span_id,
-                    pool_wait_nanos: AtomicU64::new(NO_POOL_WAIT),
-                }),
-                parent_span_id,
-            }
-        });
         Self {
             name,
             kind,
@@ -331,9 +338,18 @@ impl OperationRecorder {
         }
     }
 
-    /// Makes this operation current on this thread until the guard drops,
-    /// so [`record_pool_wait`] and nested operations attach to it.
-    pub fn enter(&self) -> OperationGuard {
+    /// Runs `f` with this operation current on this thread, so
+    /// [`record_pool_wait`] calls and operations started inside `f` attach
+    /// to it. The previous operation is current again when `f` returns or
+    /// unwinds. `f` is synchronous: for asynchronous work use
+    /// [`Operation::run`], which makes its operation current on every poll.
+    pub fn in_scope<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _current = self.enter();
+        f()
+    }
+
+    /// Makes this operation current on this thread until the guard drops.
+    pub(crate) fn enter(&self) -> OperationGuard {
         let previous = self.evidence.as_ref().and_then(|evidence| {
             ACTIVE_OPERATION
                 .try_with(|active| active.replace(Some(Arc::clone(&evidence.slot))))
@@ -367,10 +383,11 @@ impl OperationRecorder {
         }
         self.finished = true;
         if let Some(evidence) = self.evidence.take() {
-            let pool_wait = match evidence.slot.pool_wait_nanos.load(Ordering::Relaxed) {
-                NO_POOL_WAIT => None,
-                nanos => Some(Duration::from_nanos(nanos)),
-            };
+            let last_wait = *evidence
+                .slot
+                .pool_wait
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let mut operation = OperationEvidence::new(
                 self.name,
                 self.kind,
@@ -382,7 +399,11 @@ impl OperationRecorder {
                 .start
                 .saturating_duration_since(evidence.request.start());
             operation.duration = duration;
-            operation.pool_wait = pool_wait;
+            if let Some((wait, at)) = last_wait {
+                operation.pool_wait = Some(wait);
+                operation.pool_wait_ended =
+                    Some(at.saturating_duration_since(evidence.request.start()));
+            }
             evidence.request.push(operation);
         }
         duration

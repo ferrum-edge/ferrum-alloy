@@ -245,6 +245,9 @@ pub struct OperationEvidence {
     /// The last pool wait recorded inside the operation
     /// (`alloy.db.pool_wait`, see [`crate::operation::record_pool_wait`]).
     pub pool_wait: Option<Duration>,
+    /// When that pool wait was recorded (the acquire ended), measured from
+    /// middleware entry. The wait spans `pool_wait` before it.
+    pub pool_wait_ended: Option<Duration>,
 }
 
 impl OperationEvidence {
@@ -266,6 +269,7 @@ impl OperationEvidence {
             started: Duration::ZERO,
             duration: Duration::ZERO,
             pool_wait: None,
+            pool_wait_ended: None,
         }
     }
 }

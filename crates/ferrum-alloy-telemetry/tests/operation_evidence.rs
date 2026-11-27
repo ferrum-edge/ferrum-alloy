@@ -339,3 +339,164 @@ async fn interleaved_requests_on_one_task_keep_their_own_evidence() {
     }
     assert_ne!(records[0].operations[0].name, records[1].operations[0].name);
 }
+
+/// A body that ends while it still owns a pending operation: the stream
+/// stopped (a `take_until`-style cutoff) before the operation finished.
+struct StopsWhilePending {
+    operation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    stop: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+impl http_body::Body for StopsWhilePending {
+    type Data = bytes::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        // Starts the operation on the first poll; it never completes.
+        let _ = std::future::Future::poll(self.operation.as_mut(), cx);
+        match std::future::Future::poll(self.stop.as_mut(), cx) {
+            std::task::Poll::Ready(()) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_operation_still_owned_by_an_ended_body_is_kept_as_cancelled() {
+    let evidence = evidence_of(Router::new().route(
+        "/",
+        get(|| async {
+            Body::new(StopsWhilePending {
+                operation: Box::pin(
+                    Operation::new("stream.pending").run(std::future::pending::<()>()),
+                ),
+                stop: Box::pin(tokio::time::sleep(Duration::from_millis(5))),
+            })
+        }),
+    ))
+    .await;
+    let names: Vec<&str> = evidence.operations.iter().map(|o| o.name).collect();
+    assert_eq!(
+        names,
+        ["stream.pending"],
+        "recorded before the evidence closed"
+    );
+    let pending = &evidence.operations[0];
+    assert_eq!(pending.outcome, OperationOutcome::Cancelled);
+    assert_eq!(pending.parent_span_id, evidence.span_id);
+}
+
+#[tokio::test]
+async fn a_recorder_scope_is_stack_ordered_and_places_its_pool_wait() {
+    let evidence = evidence_of(Router::new().route(
+        "/",
+        get(|| async {
+            let span = tracing::Span::current();
+            let outer = OperationRecorder::start("outer", OperationKind::Db, &span);
+            outer.in_scope(|| {
+                std::thread::sleep(Duration::from_millis(2));
+                record_pool_wait(Duration::from_millis(1));
+                let inner = OperationRecorder::start("inner", OperationKind::Db, &span);
+                inner.in_scope(|| record_pool_wait(Duration::from_millis(7)));
+                inner.finish(OperationOutcome::Completed);
+                // Back in `outer` once the inner scope returned.
+                let sibling = OperationRecorder::start("sibling", OperationKind::Internal, &span);
+                sibling.finish(OperationOutcome::Completed);
+            });
+            // Nothing is current after the outer scope returned.
+            record_pool_wait(Duration::from_millis(99));
+            let after = OperationRecorder::start("after", OperationKind::Internal, &span);
+            after.finish(OperationOutcome::Completed);
+            outer.finish(OperationOutcome::Completed);
+            "ok"
+        }),
+    ))
+    .await;
+    let by_name = |name: &str| {
+        evidence
+            .operations
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap_or_else(|| panic!("{name}: {:?}", evidence.operations))
+    };
+    let (outer, inner, sibling, after) = (
+        by_name("outer"),
+        by_name("inner"),
+        by_name("sibling"),
+        by_name("after"),
+    );
+    assert_eq!(outer.parent_span_id, evidence.span_id);
+    assert_eq!(inner.parent_span_id, outer.span_id);
+    assert_eq!(sibling.parent_span_id, outer.span_id, "outer restored");
+    assert_eq!(after.parent_span_id, evidence.span_id, "nothing current");
+    assert_eq!(inner.pool_wait, Some(Duration::from_millis(7)));
+    assert_eq!(outer.pool_wait, Some(Duration::from_millis(1)), "not 99");
+    // The wait was recorded inside the operation, after its 2 ms of work.
+    let ended = outer.pool_wait_ended.expect("placed");
+    assert!(
+        ended >= outer.started + Duration::from_millis(2),
+        "{outer:?}"
+    );
+    assert!(ended <= outer.started + outer.duration, "{outer:?}");
+}
+
+#[tokio::test]
+async fn a_context_from_another_request_is_not_recorded_in_this_one() {
+    let inner_sink = Arc::new(Collect::default());
+    let sink = inner_sink.clone();
+    let evidence = evidence_of(Router::new().route(
+        "/",
+        get(move |outer: ferrum_alloy_telemetry::RequestContext| {
+            let sink = sink.clone();
+            async move {
+                let outer_span = outer.span_id;
+                let inner = TelemetryLayer::new(TelemetryConfig::default())
+                    .unwrap()
+                    .with_evidence_sink(sink)
+                    .layer(Router::new().route(
+                        "/",
+                        get(
+                            move |own: ferrum_alloy_telemetry::RequestContext| async move {
+                                let span = tracing::Span::current();
+                                // Carried in from the outer request: its trace,
+                                // not this one's.
+                                let foreign = OperationRecorder::start_in_request(
+                                    "http.client",
+                                    OperationKind::Client,
+                                    &span,
+                                    outer_span,
+                                );
+                                assert_eq!(foreign.span_id(), None);
+                                foreign.finish(OperationOutcome::Completed);
+                                let local = OperationRecorder::start_in_request(
+                                    "http.client",
+                                    OperationKind::Client,
+                                    &span,
+                                    own.span_id,
+                                );
+                                assert!(local.span_id().is_some());
+                                local.finish(OperationOutcome::Completed);
+                                "inner"
+                            },
+                        ),
+                    ));
+                let response = inner
+                    .oneshot(Request::get("/").body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                response.into_body().collect().await.unwrap();
+                "outer"
+            }
+        }),
+    ))
+    .await;
+    assert!(evidence.operations.is_empty(), "{:?}", evidence.operations);
+    let inner_records = inner_sink.0.lock().unwrap();
+    assert_eq!(inner_records.len(), 1);
+    let inner = &inner_records[0];
+    assert_eq!(inner.operations.len(), 1, "{:?}", inner.operations);
+    assert_eq!(inner.operations[0].parent_span_id, inner.span_id);
+}

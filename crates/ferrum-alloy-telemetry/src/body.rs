@@ -19,8 +19,11 @@ use crate::layer::{BodyOutcome, Finalizer};
 pin_project! {
     /// A response body that finalizes request telemetry when it ends.
     pub struct InstrumentedBody<B> {
+        // `None` once the body ended or failed: it is dropped before the
+        // request is finalized, so operations it still owned record their
+        // cancellation in this request's evidence.
         #[pin]
-        inner: B,
+        inner: Option<B>,
         // `None` once finalized, or for pass-through (duplicate layer).
         finalizer: Option<Finalizer>,
         // Entered while polling so the span's end time tracks the last body
@@ -36,7 +39,7 @@ impl<B> InstrumentedBody<B> {
     {
         let span = finalizer.as_ref().map(|f| f.span().clone());
         let mut body = Self {
-            inner,
+            inner: Some(inner),
             finalizer,
             span,
         };
@@ -49,7 +52,7 @@ impl<B> InstrumentedBody<B> {
             .and_then(Finalizer::protocol_body_outcome);
         if let Some(outcome) = protocol_outcome {
             body.finish(outcome);
-        } else if body.inner.is_end_stream() {
+        } else if body.inner.as_ref().is_some_and(Body::is_end_stream) {
             body.finish(BodyOutcome::Completed);
         }
         body
@@ -58,7 +61,7 @@ impl<B> InstrumentedBody<B> {
     /// A body without accounting (the request is counted by an outer layer).
     pub(crate) fn passthrough(inner: B) -> Self {
         Self {
-            inner,
+            inner: Some(inner),
             finalizer: None,
             span: None,
         }
@@ -92,13 +95,11 @@ where
             .as_ref()
             .map(|finalizer| crate::evidence::RequestScope::enter(finalizer.collector()));
         let mut inner = this.inner;
-        let result = inner.as_mut().poll_frame(cx);
-        let finalize = |finalizer: &mut Option<Finalizer>, outcome| {
-            if let Some(mut f) = finalizer.take() {
-                f.finish(outcome);
-            }
+        let Some(body) = inner.as_mut().as_pin_mut() else {
+            return Poll::Ready(None);
         };
-        match &result {
+        let result = body.poll_frame(cx);
+        let terminal = match &result {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(finalizer) = this.finalizer.as_mut() {
                     if let Some(data) = frame.data_ref() {
@@ -107,13 +108,25 @@ where
                         finalizer.saw_trailers();
                     }
                 }
-                if inner.is_end_stream() {
-                    finalize(&mut *this.finalizer, BodyOutcome::Completed);
-                }
+                inner
+                    .as_ref()
+                    .get_ref()
+                    .as_ref()
+                    .is_some_and(Body::is_end_stream)
+                    .then_some(BodyOutcome::Completed)
             }
-            Poll::Ready(Some(Err(_))) => finalize(&mut *this.finalizer, BodyOutcome::Error),
-            Poll::Ready(None) => finalize(&mut *this.finalizer, BodyOutcome::Completed),
-            Poll::Pending => {}
+            Poll::Ready(Some(Err(_))) => Some(BodyOutcome::Error),
+            Poll::Ready(None) => Some(BodyOutcome::Completed),
+            Poll::Pending => None,
+        };
+        if let Some(outcome) = terminal {
+            // Drop the inner body first: an operation it still owns (a
+            // stream stopped while awaiting one) records its cancellation
+            // before the evidence is closed.
+            inner.set(None);
+            if let Some(mut finalizer) = this.finalizer.take() {
+                finalizer.finish(outcome);
+            }
         }
         if this.finalizer.is_none() {
             drop(_entered);
@@ -123,11 +136,13 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.inner.as_ref().is_none_or(Body::is_end_stream)
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
+        self.inner
+            .as_ref()
+            .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
     }
 }
 
