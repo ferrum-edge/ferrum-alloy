@@ -226,16 +226,21 @@ impl AlloyApp {
             // Clone, do not take: when validation or telemetry setup
             // fails, a retry must use the same explicit configuration
             // instead of silently loading a file or the environment.
-            let config = match self.explicit_config.clone() {
+            let (config, source_warnings) = match self.explicit_config.clone() {
                 Some(mut config) => {
                     if config.service.name.is_none() {
                         config.service.name = Some(self.name.clone());
                     }
-                    config
+                    (config, Vec::new())
                 }
-                None => AlloyConfig::load(self.config_file.as_deref(), &self.overrides)?.0,
+                None => {
+                    let (config, sources) =
+                        AlloyConfig::load(self.config_file.as_deref(), &self.overrides)?;
+                    (config, sources.warnings)
+                }
             };
-            let warnings = config.validate(crate::enabled_features())?;
+            let mut warnings = config.validate(crate::enabled_features())?;
+            warnings.extend(source_warnings.into_iter().map(ConfigIssue::warning));
             let metrics = Arc::new(Metrics::default());
             let telemetry = TelemetryGuard::init(
                 self.telemetry_init,

@@ -168,10 +168,16 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
         .filter(|i| i.error)
         .map(|i| i.message.as_str())
         .collect();
-    let warnings: Vec<&str> = issues
+    let warnings: Vec<&str> = sources
+        .warnings
         .iter()
-        .filter(|i| !i.error)
-        .map(|i| i.message.as_str())
+        .map(String::as_str)
+        .chain(
+            issues
+                .iter()
+                .filter(|i| !i.error)
+                .map(|i| i.message.as_str()),
+        )
         .collect();
     let capabilities = capabilities(&config);
 

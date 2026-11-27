@@ -1545,6 +1545,10 @@ pub struct ConfigSources {
     pub env: Vec<&'static str>,
     /// Builder override paths that were applied.
     pub overrides: Vec<String>,
+    /// Warnings about the sources themselves, such as a `*_FILE` secret file
+    /// that others could replace. [`AlloyConfig::validate`] reports the
+    /// rest.
+    pub warnings: Vec<String>,
 }
 
 /// Builder overrides (highest precedence).
@@ -1608,12 +1612,18 @@ pub(crate) fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
 }
 
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
-pub(crate) fn env_table<I>(vars: I) -> Result<(toml::Table, Vec<&'static str>), ConfigError>
+/// Also returns a warning for each `*_FILE` secret file others could
+/// replace ([`crate::files::secret_file_permission_warning`]).
+#[allow(clippy::type_complexity)]
+pub(crate) fn env_table<I>(
+    vars: I,
+) -> Result<(toml::Table, Vec<&'static str>, Vec<String>), ConfigError>
 where
     I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 {
     let mut table = toml::Table::new();
     let mut applied = Vec::new();
+    let mut warnings = Vec::new();
     let mut seen: BTreeMap<&'static str, String> = BTreeMap::new();
     for (name, value) in vars {
         let Some(name) = name.to_str() else {
@@ -1656,6 +1666,9 @@ where
             let bytes =
                 crate::files::read_sensitive_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
                     .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
+            if let Some(warning) = crate::files::secret_file_permission_warning(Path::new(&value)) {
+                warnings.push(format!("{name}: {warning}"));
+            }
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
             text.trim_end_matches(['\n', '\r']).to_owned()
@@ -1698,7 +1711,7 @@ where
         applied.push(spec.name);
     }
     applied.sort_unstable();
-    Ok((table, applied))
+    Ok((table, applied, warnings))
 }
 
 /// Loads configuration from an optional file, an environment snapshot, and
@@ -1733,7 +1746,7 @@ where
         Some(path) => read_file(path)?,
         None => toml::Table::new(),
     };
-    let (env_values, env_applied) = env_table(env)?;
+    let (env_values, env_applied, warnings) = env_table(env)?;
     merge(&mut merged, env_values);
     merge(&mut merged, overrides.values.clone());
     let config: AlloyConfig = toml::Value::Table(merged)
@@ -1743,6 +1756,7 @@ where
         file: file_path,
         env: env_applied,
         overrides: overrides.applied.clone(),
+        warnings,
     };
     Ok((config, sources))
 }
@@ -1755,6 +1769,16 @@ pub struct ConfigIssue {
     pub error: bool,
     /// Message.
     pub message: String,
+}
+
+impl ConfigIssue {
+    /// A warning that does not prevent startup.
+    pub(crate) fn warning(message: String) -> Self {
+        Self {
+            error: false,
+            message,
+        }
+    }
 }
 
 impl AlloyConfig {
@@ -2254,6 +2278,11 @@ impl AlloyConfig {
             ("server.tls", server.tls.as_ref()),
             ("management.tls", management.tls.as_ref()),
         ] {
+            if let Some(tls) = tls
+                && let Some(warning) = crate::files::secret_file_permission_warning(&tls.key_path)
+            {
+                warn(format!("{name}.key_path: {warning}"));
+            }
             if let Some(tls) = tls
                 && !tls.client_crl_paths.is_empty()
             {

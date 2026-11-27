@@ -43,6 +43,9 @@ pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliErro
         Some(path) => {
             let bytes = read_regular_file_bounded(path, MAX_TOKEN_FILE_BYTES)
                 .map_err(|e| invalid(path, e))?;
+            if let Some(warning) = ferrum_alloy::files::secret_file_permission_warning(path) {
+                crate::eprint(&format!("warning: {warning}\n"));
+            }
             String::from_utf8(bytes)
                 .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?
         }
