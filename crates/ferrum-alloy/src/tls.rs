@@ -1303,8 +1303,7 @@ mod tests {
         std::fs::write(&key_path, &new_key).unwrap();
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o620)).unwrap();
         assert_eq!(reloader.reload(now).await, Outcome::Swapped);
-        assert_eq!(reloader.reload(now).await, Outcome::Unchanged);
-        let warnings: Vec<String> = capture
+        let warnings_after_swap: Vec<String> = capture
             .0
             .lock()
             .unwrap()
@@ -1312,8 +1311,25 @@ mod tests {
             .filter(|m| m.contains("reloaded TLS private key"))
             .cloned()
             .collect();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("(mode 620)"), "{warnings:?}");
+        assert_eq!(warnings_after_swap.len(), 1, "{warnings_after_swap:?}");
+        assert!(
+            warnings_after_swap[0].contains("(mode 620)"),
+            "{warnings_after_swap:?}"
+        );
+        assert_eq!(reloader.reload(now).await, Outcome::Unchanged);
+        let warnings_after_unchanged: Vec<String> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("reloaded TLS private key"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            warnings_after_unchanged.len(),
+            1,
+            "{warnings_after_unchanged:?}"
+        );
     }
 
     #[tokio::test]
@@ -1410,7 +1426,7 @@ mod tests {
 
         let fingerprint = server.changed().unwrap().unwrap();
         let settled = server.swap_if_settled(fingerprint, now).unwrap();
-        assert!(matches!(settled, Settled::Swapped), "{settled:?}");
+        assert!(matches!(settled, Settled::Swapped(_)), "{settled:?}");
         assert!(!Arc::ptr_eq(&initial, &serving(&server)));
         assert_eq!(server.changed().unwrap(), None);
     }

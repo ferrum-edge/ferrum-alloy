@@ -952,25 +952,43 @@ fn secret_files_others_could_replace_are_warned_about() {
         assert!(!warning.contains("0123456789abcdef"), "quoted: {warning}");
     }
 
-    // A secret reflected in its own file path is redacted from config warnings.
-    let token_val = "reflected-secret-value-0123456789abcdef";
-    let nested = dir.path().join(token_val);
-    std::fs::create_dir(&nested).unwrap();
-    let reflected = nested.join("token");
-    std::fs::write(&reflected, format!("{token_val}\n")).unwrap();
-    std::fs::set_permissions(&reflected, std::fs::Permissions::from_mode(0o666)).unwrap();
-    let vars = env(&[(
-        "FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE",
-        reflected.to_str().unwrap(),
-    )]);
-    let (_, sources) = load_from(None, vars, &Overrides::default()).unwrap();
-    assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
-    let warning = &sources.warnings[0];
-    assert!(warning.contains("[REDACTED]"), "{warning}");
-    assert!(
-        !warning.contains(token_val),
-        "secret leaked via path: {warning}"
-    );
+    // A secret reflected in its own file path (including characters that
+    // change under Rust debug escaping, such as quotes and backslashes) is
+    // redacted from config warnings.
+    for (dir_name, token_val) in [
+        (
+            "reflected-secret-value-0123456789abcdef",
+            "reflected-secret-value-0123456789abcdef",
+        ),
+        (
+            r#"reflected"secret\value-0123456789abcdef"#,
+            r#"reflected"secret\value-0123456789abcdef"#,
+        ),
+    ] {
+        let nested = dir.path().join(dir_name);
+        std::fs::create_dir(&nested).unwrap();
+        let reflected = nested.join("token");
+        std::fs::write(&reflected, format!("{token_val}\n")).unwrap();
+        std::fs::set_permissions(&reflected, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let vars = env(&[(
+            "FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE",
+            reflected.to_str().unwrap(),
+        )]);
+        let (_, sources) = load_from(None, vars, &Overrides::default()).unwrap();
+        assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
+        let warning = &sources.warnings[0];
+        assert!(warning.contains("[REDACTED]"), "{warning}");
+        assert!(
+            !warning.contains(token_val),
+            "secret leaked via path: {warning}"
+        );
+        let debug = format!("{token_val:?}");
+        let escaped = &debug[1..debug.len() - 1];
+        assert!(
+            !warning.contains(escaped),
+            "debug-escaped secret leaked via path: {warning}"
+        );
+    }
 
     // TLS private keys are warned about where they are read: by the TLS
     // load at startup (tests/management_tls.rs) and, offline, by
