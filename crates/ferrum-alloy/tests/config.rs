@@ -954,22 +954,25 @@ fn secret_files_others_could_replace_are_warned_about() {
 
     // A secret reflected in its own file path (including characters that
     // change under Rust debug escaping, such as quotes and backslashes, and
-    // secrets that collide with the `[REDACTED]` marker itself) is never
+    // secrets that collide with both `[REDACTED]` and `[]` markers) is never
     // disclosed in config warnings.
     let marker_secret = "[REDACTED]".repeat(4);
     let marker_dir = "[REDACTED]".repeat(7);
-    for (dir_name, token_val, expect_redacted_marker) in [
+    let bracket_secret = "]".repeat(32);
+    let bracket_dir = "]".repeat(63);
+    for (dir_name, token_val, expect_kind) in [
         (
             "reflected-secret-value-0123456789abcdef",
             "reflected-secret-value-0123456789abcdef",
-            true,
+            "redacted",
         ),
         (
             r#"reflected"secret\value-0123456789abcdef"#,
             r#"reflected"secret\value-0123456789abcdef"#,
-            true,
+            "redacted",
         ),
-        (marker_dir.as_str(), marker_secret.as_str(), false),
+        (marker_dir.as_str(), marker_secret.as_str(), "diagnostic"),
+        (bracket_dir.as_str(), bracket_secret.as_str(), "path_free"),
     ] {
         let nested = dir.path().join(dir_name);
         std::fs::create_dir(&nested).unwrap();
@@ -983,13 +986,25 @@ fn secret_files_others_could_replace_are_warned_about() {
         let (_, sources) = load_from(None, vars, &Overrides::default()).unwrap();
         assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
         let warning = &sources.warnings[0];
-        if expect_redacted_marker {
-            assert!(warning.contains("[REDACTED]"), "{warning}");
-        } else {
-            assert!(
-                warning.contains("writable by its group or by everyone"),
+        match expect_kind {
+            "redacted" => assert!(warning.contains("[REDACTED]"), "{warning}"),
+            "diagnostic" => assert!(
+                warning.contains("is writable by its group or by everyone (mode 666)"),
                 "permission warning lost diagnostic detail: {warning}"
-            );
+            ),
+            "path_free" => {
+                assert!(
+                    warning.contains(
+                        "secret file (path redacted) is writable by its group or by everyone (mode 666)"
+                    ),
+                    "path-free fallback lost exact permission diagnostic: {warning}"
+                );
+                assert!(
+                    !warning.contains(']'),
+                    "path-free fallback retained path characters: {warning}"
+                );
+            }
+            _ => unreachable!(),
         }
         assert!(
             !warning.contains(token_val),

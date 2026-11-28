@@ -1614,7 +1614,11 @@ pub(crate) fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
 /// Removes `secret` (both its raw form and its Rust debug-escaped form, as
 /// emitted inside `{:?}` path formatting) from a permission warning so a secret
 /// reflected in its own file path is never disclosed in logs or `check` output.
-fn redact_secret_in_warning(warning: &str, secret: &str) -> String {
+fn redact_secret_in_warning(
+    warning: &str,
+    warning_without_path: Option<&str>,
+    secret: &str,
+) -> String {
     if secret.is_empty() {
         return warning.to_owned();
     }
@@ -1636,17 +1640,13 @@ fn redact_secret_in_warning(warning: &str, secret: &str) -> String {
         }
     }
     // Neither replacement marker can safely scrub the path (for example, a
-    // secret built from repeated markers adjacent to matching path text). Drop
-    // the file path from the warning while keeping the permission diagnostic.
-    if let Some((_, suffix)) = warning.split_once(" has mode ") {
-        let without_path = format!("secret file (path redacted) has mode {suffix}");
-        if !contains_secret(&without_path) {
-            return without_path;
-        }
-    }
-    let generic = "secret file permissions are too broad; restrict it to the owner (0600)";
-    if !contains_secret(generic) {
-        return generic.to_owned();
+    // secret built from repeated closing brackets adjacent to matching path
+    // text). Use the structured path-free diagnostic built from the file's
+    // actual permission and ownership checks.
+    if let Some(without_path) = warning_without_path
+        && !contains_secret(without_path)
+    {
+        return without_path.to_owned();
     }
     "secret file permission warning redacted".to_owned()
 }
@@ -1712,7 +1712,11 @@ where
             // From the file that was read, not the path inspected again.
             // Redact the credential itself if the file path happens to contain it.
             if let Some(warning) = &secret.permission_warning {
-                let redacted = redact_secret_in_warning(warning, &decoded);
+                let redacted = redact_secret_in_warning(
+                    warning,
+                    secret.permission_warning_without_path.as_deref(),
+                    &decoded,
+                );
                 warnings.push(format!("{name}: {redacted}"));
             }
             decoded

@@ -74,6 +74,10 @@ pub struct SecretFile {
     /// the metadata of the opened handle, so a file swapped in after the
     /// read cannot change it.
     pub permission_warning: Option<String>,
+    /// The same permission warning with the file path omitted, for callers
+    /// that must drop the path when redacting a reflected secret would still
+    /// recreate it.
+    pub(crate) permission_warning_without_path: Option<String>,
 }
 
 /// [`read_sensitive_file_bounded`], with the permission warning of the file
@@ -86,14 +90,27 @@ pub fn read_secret_file_bounded(path: &Path, max: u64) -> Result<SecretFile, Rea
     check(&std::fs::metadata(path).map_err(ReadError::Io)?, max)?;
     let mut bytes = sensitive_buffer(max)?;
     let metadata = read_opened_into(path, max, &mut bytes)?;
+    let (permission_warning, permission_warning_without_path) =
+        permission_warnings(path, &metadata);
     Ok(SecretFile {
         bytes,
-        permission_warning: permission_warning(path, &metadata),
+        permission_warning,
+        permission_warning_without_path,
     })
 }
 
 /// The warning for the file at `path` whose metadata is `metadata`.
+#[cfg(unix)]
 fn permission_warning(path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
+    permission_warnings(path, metadata).0
+}
+
+/// The warning with the formatted path and the same diagnostic with the path
+/// omitted.
+fn permission_warnings(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> (Option<String>, Option<String>) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -103,20 +120,25 @@ fn permission_warning(path: &Path, metadata: &std::fs::Metadata) -> Option<Strin
             effective_uid(),
         );
         if problems.is_empty() {
-            return None;
+            return (None, None);
         }
+        let reasons = problems.join(" and ");
         // Debug formatting quotes the path and escapes control and format
         // characters, so the warning stays one line in text output.
-        Some(format!(
-            "secret file {:?} {}; restrict it so only the service account (or root) can change it",
-            path.to_string_lossy(),
-            problems.join(" and ")
-        ))
+        (
+            Some(format!(
+                "secret file {:?} {reasons}; restrict it so only the service account (or root) can change it",
+                path.to_string_lossy(),
+            )),
+            Some(format!(
+                "secret file (path redacted) {reasons}; restrict it so only the service account (or root) can change it",
+            )),
+        )
     }
     #[cfg(not(unix))]
     {
         let _ = (path, metadata);
-        None
+        (None, None)
     }
 }
 
