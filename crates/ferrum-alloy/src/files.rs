@@ -80,6 +80,19 @@ pub struct SecretFile {
     pub(crate) permission_warning_without_path: Option<String>,
 }
 
+impl SecretFile {
+    /// The permission warning with the file path omitted, if the opened file
+    /// had overly permissive permissions.
+    ///
+    /// Intended for callers whose redaction markers collide with a secret that
+    /// also appears in the file's path, so they can retain the exact mode and
+    /// ownership diagnostic without disclosing the path.
+    #[must_use]
+    pub fn permission_warning_without_path(&self) -> Option<&str> {
+        self.permission_warning_without_path.as_deref()
+    }
+}
+
 /// [`read_sensitive_file_bounded`], with the permission warning of the file
 /// it read, taken from the opened handle.
 ///

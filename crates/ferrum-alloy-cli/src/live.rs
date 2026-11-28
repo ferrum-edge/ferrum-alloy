@@ -56,11 +56,15 @@ pub(crate) fn token(
         Some(path) => {
             let secret = ferrum_alloy::files::read_secret_file_bounded(path, MAX_TOKEN_FILE_BYTES)
                 .map_err(|e| invalid(path, e))?;
+            let without_path = secret
+                .permission_warning_without_path()
+                .unwrap_or_default()
+                .to_owned();
             warning = secret
                 .permission_warning
                 .map(|with_path| PermissionWarning {
                     with_path,
-                    without_path: secret.permission_warning_without_path.unwrap_or_default(),
+                    without_path,
                 });
             std::str::from_utf8(&secret.bytes)
                 .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?
