@@ -183,6 +183,58 @@ fn a_reflected_token_file_credential_is_redacted_everywhere() {
     assert!(written.contains("[REDACTED]"), "{written}");
 }
 
+/// When `--token-file` has overly permissive permissions and its credential
+/// collides with both redaction markers (`[REDACTED]` and `[]`) via the path,
+/// `diagnose` must still emit the structured path-free permission diagnostic
+/// without printing a bare `warning:` or leaking the token or path.
+#[cfg(unix)]
+#[test]
+fn token_file_permission_warning_preserves_diagnostic_on_redaction_marker_collision() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let colliding_dir = dir.path().join("]".repeat(63));
+    std::fs::create_dir(&colliding_dir).unwrap();
+    let token_file = colliding_dir.join("token");
+    let token = "]".repeat(32);
+    std::fs::write(&token_file, format!("{token}\n")).unwrap();
+    std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    let (url, server) = serve(report());
+    let output = bin()
+        .env_remove(TOKEN_ENV)
+        .args([
+            "diagnose",
+            "--url",
+            &url,
+            "--request-id",
+            "req-1",
+            "--token-file",
+            token_file.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("warning: secret file (path redacted)"),
+        "expected structured path-free warning, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("(mode 666)"),
+        "expected exact mode diagnostic to be preserved, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(']'),
+        "warning must not contain colliding bracket token or path: {stderr}"
+    );
+    assert!(!stderr.contains(&token), "{stderr}");
+}
+
 /// Parser bounds must never turn a complete reflected token into a
 /// fragment that exact credential redaction cannot recognize.
 #[test]

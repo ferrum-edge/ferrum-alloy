@@ -20,7 +20,7 @@ use reqwest::Url;
 use reqwest::header::{ACCEPT, RETRY_AFTER};
 
 use crate::error::CliError;
-use crate::input::{invalid, read_regular_file_bounded};
+use crate::input::invalid;
 
 /// Environment variable holding the credential for `--url`. Service
 /// configuration knows it as the command's own and ignores it.
@@ -36,19 +36,43 @@ const NOT_FOUND: &str =
 /// Longest time to set up the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Permission warning for a credential file, carrying both the path-bearing
+/// message and the structured path-free fallback for redaction marker
+/// collisions.
+pub(crate) struct PermissionWarning {
+    pub(crate) with_path: String,
+    pub(crate) without_path: String,
+}
+
 /// The credential: read from `token_file` when given, otherwise from
-/// [`TOKEN_ENV`]. Errors never repeat it.
-pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliError> {
+/// [`TOKEN_ENV`], with the permission warning of the file it read, if any.
+/// Errors never repeat it. The caller prints the warning only after it can
+/// redact the credential from it.
+pub(crate) fn token(
+    token_file: Option<&Path>,
+) -> Result<(Option<String>, Option<PermissionWarning>), CliError> {
+    let mut warning = None;
     let raw = match token_file {
         Some(path) => {
-            let bytes = read_regular_file_bounded(path, MAX_TOKEN_FILE_BYTES)
+            let secret = ferrum_alloy::files::read_secret_file_bounded(path, MAX_TOKEN_FILE_BYTES)
                 .map_err(|e| invalid(path, e))?;
-            String::from_utf8(bytes)
+            let without_path = secret
+                .permission_warning_without_path()
+                .unwrap_or_default()
+                .to_owned();
+            warning = secret
+                .permission_warning
+                .map(|with_path| PermissionWarning {
+                    with_path,
+                    without_path,
+                });
+            std::str::from_utf8(&secret.bytes)
                 .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?
+                .to_owned()
         }
         None => match std::env::var(TOKEN_ENV) {
             Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(std::env::VarError::NotPresent) => return Ok((None, None)),
             Err(std::env::VarError::NotUnicode(_)) => {
                 return Err(CliError::Invalid(format!("{TOKEN_ENV} is not UTF-8")));
             }
@@ -60,7 +84,7 @@ pub(crate) fn token(token_file: Option<&Path>) -> Result<Option<String>, CliErro
             "the diagnostics credential must be non-empty printable ASCII without spaces".into(),
         ));
     }
-    Ok(Some(token.to_owned()))
+    Ok((Some(token.to_owned()), warning))
 }
 
 /// The report URL of `request_id` under the management listener at `base`.

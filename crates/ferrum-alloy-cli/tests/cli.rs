@@ -716,6 +716,131 @@ fn diagnose_url_reads_a_token_file_and_keeps_escapes_off_the_terminal() {
     assert!(!text.contains("file-secret-credential"));
 }
 
+/// A token or secret file others could replace (writable by its group or
+/// everyone) is still used, with a warning; the credential is never quoted.
+#[cfg(unix)]
+#[test]
+fn secret_files_others_could_replace_are_warned_about() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let token = write(dir.path(), "token", "file-secret-credential-0123456789\n");
+    let writable = |mode: u32| {
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+
+    // `check` with a `_FILE` secret, in JSON and human output.
+    let check = |format: &str| {
+        bin()
+            .env("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", &token)
+            .args(["check", "--features", "default", "--format", format])
+            .output()
+            .unwrap()
+    };
+    writable(0o600);
+    let output = check("json");
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let quiet = value["warnings"].as_array().unwrap().iter().all(|warning| {
+        !warning
+            .as_str()
+            .unwrap()
+            .contains("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE")
+    });
+    assert!(quiet, "{value:#}");
+    writable(0o666);
+    let output = check("json");
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["valid"], true);
+    let warned = value["warnings"].as_array().unwrap().iter().any(|warning| {
+        let warning = warning.as_str().unwrap();
+        warning.starts_with("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE: secret file ")
+            && warning.contains("writable by its group or by everyone (mode 666)")
+    });
+    assert!(warned, "{value:#}");
+    let human = check("human");
+    assert_eq!(code(&human), 0, "{}", stderr(&human));
+    let text = stdout(&human);
+    assert!(
+        text.contains("warning: FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE: secret file "),
+        "{text}"
+    );
+    assert!(!text.contains("file-secret-credential"), "{text}");
+
+    // A TLS private key, inspected by path offline.
+    let key = write(dir.path(), "server.key", "not read by check");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o620)).unwrap();
+    let toml = format!("[server.tls]\ncert_path = \"cert.pem\"\nkey_path = {key:?}\n");
+    let config_path = write(dir.path(), "tls.toml", &toml);
+    let output = run(&[
+        "check",
+        "--no-env",
+        "--config",
+        &config_path,
+        "--features",
+        "tls",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(code(&output), 0, "{}", stdout(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warned = value["warnings"].as_array().unwrap().iter().any(|warning| {
+        let warning = warning.as_str().unwrap();
+        warning.starts_with("server.tls.key_path: secret file ") && warning.contains("(mode 620)")
+    });
+    assert!(warned, "{value:#}");
+
+    // `diagnose --token-file`, from a path that itself names the credential:
+    // the warning is redacted like every other output.
+    let nested = dir.path().join("file-secret-credential-0123456789");
+    std::fs::create_dir(&nested).unwrap();
+    let reflected = write(&nested, "token", "file-secret-credential-0123456789\n");
+    std::fs::set_permissions(&reflected, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let (port, server) = serve_once("200 OK", live_report());
+    let url = format!("http://127.0.0.1:{port}/");
+    let args = [
+        "diagnose",
+        "--url",
+        &url,
+        "--request-id",
+        "req-7",
+        "--token-file",
+        &reflected,
+    ];
+    let output = bin().env_remove(TOKEN_ENV).args(args).output().unwrap();
+    server.join().unwrap();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let error = stderr(&output);
+    assert!(error.contains("warning: secret file "), "{error}");
+    assert!(error.contains("(mode 666)"), "{error}");
+    assert!(error.contains("[REDACTED]"), "{error}");
+    assert!(!error.contains("file-secret-credential"), "{error}");
+
+    // `check` (human and JSON with `--show-effective`) also redacts a secret
+    // reflected in its own `_FILE` path.
+    for format in ["human", "json"] {
+        let output = bin()
+            .env("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", &reflected)
+            .args([
+                "check",
+                "--features",
+                "default",
+                "--format",
+                format,
+                "--show-effective",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        let text = stdout(&output);
+        assert!(text.contains("[REDACTED]"), "{format}: {text}");
+        assert!(
+            !text.contains("file-secret-credential"),
+            "{format} leaked secret via path: {text}"
+        );
+    }
+}
+
 #[test]
 fn diagnose_url_reports_a_refusal_without_details() {
     let problem = r#"{"title":"Not found","status":404}"#;

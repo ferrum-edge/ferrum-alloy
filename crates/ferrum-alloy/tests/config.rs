@@ -912,6 +912,128 @@ fn special_configuration_files_are_refused() {
     }
 }
 
+/// A `_FILE` secret that others could replace (writable by its group or
+/// everyone) is loaded, with a warning naming its source; one readable by
+/// everyone is not reported.
+#[cfg(unix)]
+#[test]
+fn secret_files_others_could_replace_are_warned_about() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let secret = write(&dir, "token", "0123456789abcdef0123456789abcdef\n");
+    let file = secret.to_str().unwrap();
+    let load = || {
+        let vars = env(&[("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", file)]);
+        load_from(None, vars, &Overrides::default()).unwrap()
+    };
+    for mode in [0o600, 0o644] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (_, sources) = load();
+        assert!(
+            sources.warnings.is_empty(),
+            "{mode:o}: {:?}",
+            sources.warnings
+        );
+    }
+    for mode in [0o620, 0o666] {
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (config, sources) = load();
+        assert!(config.management.token.is_some(), "still loaded");
+        assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
+        let warning = &sources.warnings[0];
+        assert!(
+            warning.starts_with("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE: secret file "),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("writable by its group or by everyone"),
+            "{warning}"
+        );
+        assert!(!warning.contains("0123456789abcdef"), "quoted: {warning}");
+    }
+
+    // A secret reflected in its own file path (including characters that
+    // change under Rust debug escaping, such as quotes and backslashes, and
+    // secrets that collide with both `[REDACTED]` and `[]` markers) is never
+    // disclosed in config warnings.
+    let marker_secret = "[REDACTED]".repeat(4);
+    let marker_dir = "[REDACTED]".repeat(7);
+    let bracket_secret = "]".repeat(32);
+    let bracket_dir = "]".repeat(63);
+    for (dir_name, token_val, expect_kind) in [
+        (
+            "reflected-secret-value-0123456789abcdef",
+            "reflected-secret-value-0123456789abcdef",
+            "redacted",
+        ),
+        (
+            r#"reflected"secret\value-0123456789abcdef"#,
+            r#"reflected"secret\value-0123456789abcdef"#,
+            "redacted",
+        ),
+        (marker_dir.as_str(), marker_secret.as_str(), "diagnostic"),
+        (bracket_dir.as_str(), bracket_secret.as_str(), "path_free"),
+    ] {
+        let nested = dir.path().join(dir_name);
+        std::fs::create_dir(&nested).unwrap();
+        let reflected = nested.join("token");
+        std::fs::write(&reflected, format!("{token_val}\n")).unwrap();
+        std::fs::set_permissions(&reflected, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let vars = env(&[(
+            "FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE",
+            reflected.to_str().unwrap(),
+        )]);
+        let (_, sources) = load_from(None, vars, &Overrides::default()).unwrap();
+        assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
+        let warning = &sources.warnings[0];
+        match expect_kind {
+            "redacted" => assert!(warning.contains("[REDACTED]"), "{warning}"),
+            "diagnostic" => assert!(
+                warning.contains("is writable by its group or by everyone (mode 666)"),
+                "permission warning lost diagnostic detail: {warning}"
+            ),
+            "path_free" => {
+                assert!(
+                    warning.contains(
+                        "secret file (path redacted) is writable by its group or by everyone (mode 666)"
+                    ),
+                    "path-free fallback lost exact permission diagnostic: {warning}"
+                );
+                assert!(
+                    !warning.contains(']'),
+                    "path-free fallback retained path characters: {warning}"
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !warning.contains(token_val),
+            "secret leaked via path: {warning}"
+        );
+        let debug = format!("{token_val:?}");
+        let escaped = &debug[1..debug.len() - 1];
+        assert!(
+            !warning.contains(escaped),
+            "debug-escaped secret leaked via path: {warning}"
+        );
+    }
+
+    // TLS private keys are warned about where they are read: by the TLS
+    // load at startup (tests/management_tls.rs) and, offline, by
+    // `ferrum-alloy check`. Validation reads no files.
+    let key = write(&dir, "key.pem", "not checked here");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o602)).unwrap();
+    let mut config = AlloyConfig::default();
+    config.server.tls = Some(TlsSettings::new("cert.pem", key));
+    let warnings = config.validate(&["tls"]).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|issue| !issue.message.contains("key_path")),
+        "{warnings:?}"
+    );
+}
+
 /// A `_FILE` secret read stops at its limit, and the refusal names the
 /// variable without quoting the file.
 #[test]

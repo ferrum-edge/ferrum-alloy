@@ -164,8 +164,9 @@ impl Expiry {
 #[derive(Debug)]
 enum Settled {
     /// The files still had the fingerprint of the first read, and their
-    /// material was swapped in.
-    Swapped,
+    /// material was swapped in, carrying any key permission warning from the
+    /// swapped-in key handle.
+    Swapped(Option<String>),
     /// The files changed again since the first read.
     Changing,
     /// The files still had the fingerprint of the first read, and their
@@ -224,7 +225,8 @@ impl TlsServer {
             .write()
             .unwrap_or_else(PoisonError::into_inner);
         *serving = current;
-        Ok(Settled::Swapped)
+        drop(serving);
+        Ok(Settled::Swapped(sources.key_warning))
     }
 
     /// Logs the earliest CRL `nextUpdate` time of the serving material, as
@@ -348,7 +350,15 @@ impl Reloader {
         let tls = self.tls.clone();
         let settled = tokio::task::spawn_blocking(move || tls.swap_if_settled(fingerprint, now));
         match settled.await {
-            Ok(Ok(Settled::Swapped)) => {
+            Ok(Ok(Settled::Swapped(key_warning))) => {
+                // The key just swapped in, as read: warn once per swap, not on
+                // every comparison read or rejected reload.
+                if let Some(warning) = key_warning {
+                    tracing::warn!(
+                        target: "ferrum_alloy::tls",
+                        "reloaded TLS private key: {warning}"
+                    );
+                }
                 self.last_failure = None;
                 Outcome::Swapped
             }
@@ -504,6 +514,9 @@ pub(crate) struct Sources<'a> {
     cert: Vec<u8>,
     /// Zeroed when dropped.
     key: Zeroizing<Vec<u8>>,
+    /// Why others could replace the key file that was read
+    /// ([`crate::files::read_secret_file_bounded`]).
+    key_warning: Option<String>,
     client_ca: Option<Vec<u8>>,
     crls: Vec<(&'a Path, Vec<u8>)>,
 }
@@ -511,8 +524,10 @@ pub(crate) struct Sources<'a> {
 impl<'a> Sources<'a> {
     pub(crate) fn read(settings: &'a TlsSettings) -> Result<Self, TlsError> {
         let cert = read_file(CHAIN, &settings.cert_path, MAX_PEM_FILE_BYTES)?;
-        let key = crate::files::read_sensitive_file_bounded(&settings.key_path, MAX_PEM_FILE_BYTES)
+        let key = crate::files::read_secret_file_bounded(&settings.key_path, MAX_PEM_FILE_BYTES)
             .map_err(|e| pem_error(KEY, &settings.key_path, e))?;
+        let key_warning = key.permission_warning;
+        let key = key.bytes;
         let client_auth = settings.client_auth != ClientAuth::None;
         let client_ca = match &settings.client_ca_path {
             Some(path) if client_auth => Some(read_file(CLIENT_CA, path, MAX_PEM_FILE_BYTES)?),
@@ -528,6 +543,7 @@ impl<'a> Sources<'a> {
         Ok(Self {
             cert,
             key,
+            key_warning,
             client_ca,
             crls,
         })
@@ -573,11 +589,19 @@ fn certificates(
 
 /// Loads certificates, key, and client verification policy.
 pub fn load(settings: &TlsSettings) -> Result<TlsServer, TlsError> {
+    load_at(settings, UnixTime::now()).map(|(server, _)| server)
+}
+
+/// [`load`], also returning why others could replace the private key file
+/// it read ([`crate::files::read_secret_file_bounded`]).
+pub(crate) fn load_reporting_key(
+    settings: &TlsSettings,
+) -> Result<(TlsServer, Option<String>), TlsError> {
     load_at(settings, UnixTime::now())
 }
 
-/// [`load`], with `now` deciding whether a CRL has expired.
-fn load_at(settings: &TlsSettings, now: UnixTime) -> Result<TlsServer, TlsError> {
+/// [`load_reporting_key`], with `now` deciding whether a CRL has expired.
+fn load_at(settings: &TlsSettings, now: UnixTime) -> Result<(TlsServer, Option<String>), TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let sources = Sources::read(settings)?;
     let current = build(settings, &sources, &provider, now)?;
@@ -595,7 +619,7 @@ fn load_at(settings: &TlsSettings, now: UnixTime) -> Result<TlsServer, TlsError>
         reload_interval,
     };
     server.log_crl_next_update(now, false);
-    Ok(server)
+    Ok((server, sources.key_warning))
 }
 
 /// Parses and validates `sources` into a server configuration: every
@@ -1040,7 +1064,7 @@ mod tests {
             // September 2020, while the CRL is current.
             let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
 
-            let config = serving(&load_at(&settings, startup).unwrap());
+            let config = serving(&load_at(&settings, startup).unwrap().0);
             assert!(!config.session_storage.can_cache(), "{case}");
             assert_eq!(config.send_tls13_tickets, 0, "{case}");
             assert!(!config.ticketer.enabled(), "{case}");
@@ -1105,7 +1129,7 @@ mod tests {
             let clock = Arc::new(Clock(AtomicU64::new(before)));
             let time: Arc<dyn TimeProvider> = Arc::<Clock>::clone(&clock);
             let startup = UnixTime::since_unix_epoch(Duration::from_secs(before));
-            let server = load_at(&settings, startup).unwrap();
+            let server = load_at(&settings, startup).unwrap().0;
             let mut config = rustls::ServerConfig::clone(&serving(&server));
             config.time_provider = Arc::clone(&time);
             let config = Arc::new(config);
@@ -1211,6 +1235,103 @@ mod tests {
         assert_eq!(reloader.reload(now).await, Outcome::Unchanged);
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_warns_once_when_swapping_in_a_permissive_private_key() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visitor(String);
+                impl tracing::field::Visit for Visitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut visitor = Visitor(String::new());
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.0);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let (server, cert_path, key_path) = reloadable(dir.path(), ca_path, &issuer);
+        let mut reloader = Reloader::new(server.clone(), Duration::ZERO);
+        let now = UnixTime::now();
+
+        let capture = Capture::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+        // A rejected mismatched key emits no swap warning even if permissive.
+        let (_, wrong_key) = server_pem(&issuer);
+        std::fs::write(&key_path, &wrong_key).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+        assert!(matches!(
+            reloader.reload(now).await,
+            Outcome::Unconfirmed(_)
+        ));
+        assert!(matches!(reloader.reload(now).await, Outcome::Failed(_)));
+        assert!(
+            capture
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|m| !m.contains("reloaded TLS private key")),
+            "rejected reload must not warn"
+        );
+
+        // Swapping in a valid cert+key pair with mode 0620 warns exactly once,
+        // and subsequent comparison-only reads emit no further warning.
+        let (new_cert, new_key) = server_pem(&issuer);
+        std::fs::write(&cert_path, &new_cert).unwrap();
+        std::fs::write(&key_path, &new_key).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+        assert_eq!(reloader.reload(now).await, Outcome::Swapped);
+        let warnings_after_swap: Vec<String> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("reloaded TLS private key"))
+            .cloned()
+            .collect();
+        assert_eq!(warnings_after_swap.len(), 1, "{warnings_after_swap:?}");
+        assert!(
+            warnings_after_swap[0].contains("(mode 620)"),
+            "{warnings_after_swap:?}"
+        );
+        assert_eq!(reloader.reload(now).await, Outcome::Unchanged);
+        let warnings_after_unchanged: Vec<String> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("reloaded TLS private key"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            warnings_after_unchanged.len(),
+            1,
+            "{warnings_after_unchanged:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_certificate_read_before_its_key_is_neither_swapped_in_nor_counted() {
         let dir = tempfile::tempdir().unwrap();
@@ -1305,7 +1426,7 @@ mod tests {
 
         let fingerprint = server.changed().unwrap().unwrap();
         let settled = server.swap_if_settled(fingerprint, now).unwrap();
-        assert!(matches!(settled, Settled::Swapped), "{settled:?}");
+        assert!(matches!(settled, Settled::Swapped(_)), "{settled:?}");
         assert!(!Arc::ptr_eq(&initial, &serving(&server)));
         assert_eq!(server.changed().unwrap(), None);
     }
@@ -1411,7 +1532,7 @@ mod tests {
         // Loaded in September 2020, while the CRL was current. It has
         // expired since, so handshakes fail.
         let startup = UnixTime::since_unix_epoch(Duration::from_secs(1_600_000_000));
-        let server = load_at(&settings, startup).unwrap();
+        let server = load_at(&settings, startup).unwrap().0;
         let refused = handshake(serving(&server), Arc::clone(&client));
         let refused = refused.unwrap_err().to_string();
         assert!(refused.contains("revocation list expired"), "{refused}");

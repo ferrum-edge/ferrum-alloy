@@ -226,16 +226,21 @@ impl AlloyApp {
             // Clone, do not take: when validation or telemetry setup
             // fails, a retry must use the same explicit configuration
             // instead of silently loading a file or the environment.
-            let config = match self.explicit_config.clone() {
+            let (config, source_warnings) = match self.explicit_config.clone() {
                 Some(mut config) => {
                     if config.service.name.is_none() {
                         config.service.name = Some(self.name.clone());
                     }
-                    config
+                    (config, Vec::new())
                 }
-                None => AlloyConfig::load(self.config_file.as_deref(), &self.overrides)?.0,
+                None => {
+                    let (config, sources) =
+                        AlloyConfig::load(self.config_file.as_deref(), &self.overrides)?;
+                    (config, sources.warnings)
+                }
             };
-            let warnings = config.validate(crate::enabled_features())?;
+            let mut warnings = config.validate(crate::enabled_features())?;
+            warnings.extend(source_warnings.into_iter().map(ConfigIssue::warning));
             let metrics = Arc::new(Metrics::default());
             let telemetry = TelemetryGuard::init(
                 self.telemetry_init,
@@ -521,30 +526,50 @@ impl AlloyApp {
             )
         });
 
+        #[allow(unused_mut)]
+        let mut warnings = prepared.warnings;
+        // A private key others could replace is warned about from the file
+        // the load actually read.
         #[cfg(feature = "tls")]
-        let tls = config
-            .server
-            .tls
-            .as_ref()
-            .map(crate::tls::load)
-            .transpose()
-            .map_err(|e| AlloyError::Tls(e.to_string()))?;
+        let mut key_warning = |name: &str, warning: Option<String>| {
+            if let Some(warning) = warning {
+                let message = format!("{name}.key_path: {warning}");
+                tracing::warn!(target: "ferrum_alloy::config", "{message}");
+                warnings.push(ConfigIssue::warning(message));
+            }
+        };
         #[cfg(feature = "tls")]
-        let management_tls = config
+        let tls = match config.server.tls.as_ref() {
+            Some(settings) => {
+                let (server, warning) = crate::tls::load_reporting_key(settings)
+                    .map_err(|e| AlloyError::Tls(e.to_string()))?;
+                key_warning("server.tls", warning);
+                Some(server)
+            }
+            None => None,
+        };
+        #[cfg(feature = "tls")]
+        let management_tls = match config
             .management
             .tls
             .as_ref()
             .filter(|_| config.management.enabled)
-            .map(crate::tls::load)
-            .transpose()
-            .map_err(|e| AlloyError::Tls(format!("management.tls: {e}")))?;
+        {
+            Some(settings) => {
+                let (server, warning) = crate::tls::load_reporting_key(settings)
+                    .map_err(|e| AlloyError::Tls(format!("management.tls: {e}")))?;
+                key_warning("management.tls", warning);
+                Some(server)
+            }
+            None => None,
+        };
 
         Ok(AlloyParts {
             router: app,
             management_router,
             lifecycle,
             config,
-            warnings: prepared.warnings,
+            warnings,
             telemetry: prepared.telemetry,
             service_name,
             shutdown_signal: self.shutdown_signal.take(),
@@ -725,17 +750,23 @@ impl AlloyParts {
             }
             errors.push(message);
         }
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = tls;
         if errors.is_empty() {
-            if !tls && !addr.ip().is_loopback() && self.config.management.tls.is_some() {
-                tracing::warn!(
-                    bind = %addr,
-                    "management listener is not loopback and is served outside Alloy; \
-                     management.tls applies only to listeners Alloy serves itself \
-                     (AlloyParts::serve or serve_on), so supply TLS on your custom listener \
-                     or the management token will cross the network in cleartext"
-                );
+            // Any off-loopback listener served without Alloy's own TLS speaks
+            // plain TCP unless the application wraps it in TLS itself.
+            if !tls && !addr.ip().is_loopback() {
+                if self.config.management.tls.is_some() {
+                    tracing::warn!(
+                        target: "ferrum_alloy::config",
+                        bind = %addr,
+                        "the management listener on {addr} is served as plain TCP: management.tls applies only to a listener Alloy serves itself (AlloyParts::serve or serve_on), so supply TLS on your custom listener or the management token crosses the network in cleartext on every request"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "ferrum_alloy::config",
+                        bind = %addr,
+                        "the management listener on {addr} is off loopback and served as plain TCP without Alloy TLS; supply TLS on your listener or terminate TLS on the same host, or the management token crosses the network in cleartext on every request"
+                    );
+                }
             }
             Ok(())
         } else {

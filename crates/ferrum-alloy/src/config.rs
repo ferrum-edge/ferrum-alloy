@@ -1545,6 +1545,10 @@ pub struct ConfigSources {
     pub env: Vec<&'static str>,
     /// Builder override paths that were applied.
     pub overrides: Vec<String>,
+    /// Warnings about the sources themselves, such as a `*_FILE` secret file
+    /// that others could replace. [`AlloyConfig::validate`] reports the
+    /// rest.
+    pub warnings: Vec<String>,
 }
 
 /// Builder overrides (highest precedence).
@@ -1607,13 +1611,59 @@ pub(crate) fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
     toml::from_str(&text).map_err(|e| syntax_error(path, &text, &e))
 }
 
+/// Removes `secret` (both its raw form and its Rust debug-escaped form, as
+/// emitted inside `{:?}` path formatting) from a permission warning so a secret
+/// reflected in its own file path is never disclosed in logs or `check` output.
+fn redact_secret_in_warning(
+    warning: &str,
+    warning_without_path: Option<&str>,
+    secret: &str,
+) -> String {
+    if secret.is_empty() {
+        return warning.to_owned();
+    }
+    let debug = format!("{secret:?}");
+    let escaped = &debug[1..debug.len().saturating_sub(1)];
+    let contains_secret =
+        |text: &str| text.contains(secret) || (!escaped.is_empty() && text.contains(escaped));
+    for marker in ["[REDACTED]", "[]"] {
+        let mut out = if escaped.is_empty() {
+            warning.to_owned()
+        } else {
+            warning.replace(escaped, marker)
+        };
+        if escaped != secret {
+            out = out.replace(secret, marker);
+        }
+        if !contains_secret(&out) {
+            return out;
+        }
+    }
+    // Neither replacement marker can safely scrub the path (for example, a
+    // secret built from repeated closing brackets adjacent to matching path
+    // text). Use the structured path-free diagnostic built from the file's
+    // actual permission and ownership checks.
+    if let Some(without_path) = warning_without_path
+        && !contains_secret(without_path)
+    {
+        return without_path.to_owned();
+    }
+    "secret file permission warning redacted".to_owned()
+}
+
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
-pub(crate) fn env_table<I>(vars: I) -> Result<(toml::Table, Vec<&'static str>), ConfigError>
+/// Also returns a warning for each `*_FILE` secret file others could
+/// replace, from the file read ([`crate::files::read_secret_file_bounded`]).
+#[allow(clippy::type_complexity)]
+pub(crate) fn env_table<I>(
+    vars: I,
+) -> Result<(toml::Table, Vec<&'static str>, Vec<String>), ConfigError>
 where
     I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 {
     let mut table = toml::Table::new();
     let mut applied = Vec::new();
+    let mut warnings = Vec::new();
     let mut seen: BTreeMap<&'static str, String> = BTreeMap::new();
     for (name, value) in vars {
         let Some(name) = name.to_str() else {
@@ -1653,12 +1703,23 @@ where
             .map_err(|_| env_error("value is not valid UTF-8".into()))?;
         let value = if from_file {
             // The file's bytes are zeroized once the trimmed value is copied.
-            let bytes =
-                crate::files::read_sensitive_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
+            let secret =
+                crate::files::read_secret_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
                     .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
-            let text = std::str::from_utf8(&bytes)
+            let text = std::str::from_utf8(&secret.bytes)
                 .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
-            text.trim_end_matches(['\n', '\r']).to_owned()
+            let decoded = text.trim_end_matches(['\n', '\r']).to_owned();
+            // From the file that was read, not the path inspected again.
+            // Redact the credential itself if the file path happens to contain it.
+            if let Some(warning) = &secret.permission_warning {
+                let redacted = redact_secret_in_warning(
+                    warning,
+                    secret.permission_warning_without_path.as_deref(),
+                    &decoded,
+                );
+                warnings.push(format!("{name}: {redacted}"));
+            }
+            decoded
         } else {
             value
         };
@@ -1698,7 +1759,7 @@ where
         applied.push(spec.name);
     }
     applied.sort_unstable();
-    Ok((table, applied))
+    Ok((table, applied, warnings))
 }
 
 /// Loads configuration from an optional file, an environment snapshot, and
@@ -1733,7 +1794,7 @@ where
         Some(path) => read_file(path)?,
         None => toml::Table::new(),
     };
-    let (env_values, env_applied) = env_table(env)?;
+    let (env_values, env_applied, warnings) = env_table(env)?;
     merge(&mut merged, env_values);
     merge(&mut merged, overrides.values.clone());
     let config: AlloyConfig = toml::Value::Table(merged)
@@ -1743,6 +1804,7 @@ where
         file: file_path,
         env: env_applied,
         overrides: overrides.applied.clone(),
+        warnings,
     };
     Ok((config, sources))
 }
@@ -1755,6 +1817,16 @@ pub struct ConfigIssue {
     pub error: bool,
     /// Message.
     pub message: String,
+}
+
+impl ConfigIssue {
+    /// A warning that does not prevent startup.
+    pub(crate) fn warning(message: String) -> Self {
+        Self {
+            error: false,
+            message,
+        }
+    }
 }
 
 impl AlloyConfig {

@@ -183,10 +183,29 @@ pub(crate) fn run(args: CheckArgs) -> Result<ExitCode, CliError> {
         .filter(|i| i.error)
         .map(|i| i.message.as_str())
         .collect();
-    let warnings: Vec<&str> = issues
+    // Offline, the TLS private keys are inspected by path; at startup the
+    // warning comes from the key file the TLS load reads.
+    let key_warnings: Vec<String> = [
+        ("server.tls", config.server.tls.as_ref()),
+        ("management.tls", config.management.tls.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, tls)| {
+        let warning = ferrum_alloy::files::secret_file_permission_warning(&tls?.key_path)?;
+        Some(format!("{name}.key_path: {warning}"))
+    })
+    .collect();
+    let warnings: Vec<&str> = sources
+        .warnings
         .iter()
-        .filter(|i| !i.error)
-        .map(|i| i.message.as_str())
+        .chain(&key_warnings)
+        .map(String::as_str)
+        .chain(
+            issues
+                .iter()
+                .filter(|i| !i.error)
+                .map(|i| i.message.as_str()),
+        )
         .collect();
     let capabilities = capabilities(&config);
 

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- On Unix, warn (at `AlloyApp` startup, on `ferrum-alloy check`, on
+  `diagnose --token-file`, and on TLS reloads that swap in a new key) when a
+  secret file or TLS private key is writable by its group or everyone, or owned
+  by a user other than the effective user and root. Computed from the opened
+  file handle for read secrets (metadata-only on Unix for offline `check` TLS
+  keys; skipped off Unix), with control-character escaping and path-reflected
+  secret redaction. New public API: `files::read_secret_file_bounded`,
+  `files::SecretFile`, `files::secret_file_permission_warning`,
+  `ConfigSources::warnings`.
 - Support TLS termination and hot reloading on the management listener
   (`management.tls`, feature `tls`, with reload metrics labelled
   `listener="management"`), and allow diagnostic retrieval off loopback on
@@ -9,8 +18,7 @@
   when both `management.token` and loaded `management.tls` are present (ADR
   0008). `AlloyParts::check_management_listener` continues to treat custom
   management listeners as plain TCP, refuses off-loopback diagnostic retrieval,
-  and warns when a non-loopback custom listener is checked with
-  `management.tls` configured.
+  and warns when a non-loopback custom listener is checked without Alloy TLS.
 - Pin Ferrum Edge v0.9.21 at `f9915358c8032214f4034a17c28cdf72d14006c3`
   (Cosign-verified multi-arch index), with v0.9.20 as the previous supported
   release; v0.9.19 leaves the window. Adopt `contracts-edge-0.9.21` at
