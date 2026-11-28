@@ -728,6 +728,15 @@ impl AlloyParts {
         #[cfg(not(feature = "diagnostics"))]
         let _ = tls;
         if errors.is_empty() {
+            if !tls && !addr.ip().is_loopback() && self.config.management.tls.is_some() {
+                tracing::warn!(
+                    bind = %addr,
+                    "management listener is not loopback and is served outside Alloy; \
+                     management.tls applies only to listeners Alloy serves itself \
+                     (AlloyParts::serve or serve_on), so supply TLS on your custom listener \
+                     or the management token will cross the network in cleartext"
+                );
+            }
             Ok(())
         } else {
             Err(ConfigError::Invalid(errors).into())
