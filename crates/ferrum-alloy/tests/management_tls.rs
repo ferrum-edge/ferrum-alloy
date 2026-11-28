@@ -357,4 +357,31 @@ async fn a_custom_listener_off_loopback_is_warned_about_as_cleartext() {
         1,
         "only the listener off loopback: {logged:?}"
     );
+
+    // Default loopback `management.bind` with `management.tls` unset also warns
+    // when a custom off-loopback listener is checked.
+    let mut plain_cfg = config();
+    plain_cfg.management.bind = "127.0.0.1:9090".parse().unwrap();
+    plain_cfg.management.tls = None;
+    let plain_parts = AlloyApp::new("custom-listener-plain")
+        .router(Router::new())
+        .config(plain_cfg)
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .into_parts()
+        .unwrap();
+    messages.0.lock().unwrap().clear();
+    plain_parts
+        .check_management_listener(&off_loopback)
+        .unwrap();
+    plain_parts.check_management_listener(&loopback).unwrap();
+    let plain_logged = messages.0.lock().unwrap().clone();
+    let plain_warned: Vec<&String> = plain_logged
+        .iter()
+        .filter(|m| m.contains("served as plain TCP") && m.contains("cleartext"))
+        .collect();
+    assert_eq!(
+        plain_warned.len(),
+        1,
+        "only the listener off loopback without management.tls: {plain_logged:?}"
+    );
 }

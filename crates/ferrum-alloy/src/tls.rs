@@ -164,8 +164,9 @@ impl Expiry {
 #[derive(Debug)]
 enum Settled {
     /// The files still had the fingerprint of the first read, and their
-    /// material was swapped in.
-    Swapped,
+    /// material was swapped in, carrying any key permission warning from the
+    /// swapped-in key handle.
+    Swapped(Option<String>),
     /// The files changed again since the first read.
     Changing,
     /// The files still had the fingerprint of the first read, and their
@@ -225,12 +226,7 @@ impl TlsServer {
             .unwrap_or_else(PoisonError::into_inner);
         *serving = current;
         drop(serving);
-        // The key just swapped in, as read: warn once per swap, not on every
-        // comparison read.
-        if let Some(warning) = &sources.key_warning {
-            tracing::warn!(target: "ferrum_alloy::tls", "reloaded TLS private key: {warning}");
-        }
-        Ok(Settled::Swapped)
+        Ok(Settled::Swapped(sources.key_warning))
     }
 
     /// Logs the earliest CRL `nextUpdate` time of the serving material, as
@@ -354,7 +350,15 @@ impl Reloader {
         let tls = self.tls.clone();
         let settled = tokio::task::spawn_blocking(move || tls.swap_if_settled(fingerprint, now));
         match settled.await {
-            Ok(Ok(Settled::Swapped)) => {
+            Ok(Ok(Settled::Swapped(key_warning))) => {
+                // The key just swapped in, as read: warn once per swap, not on
+                // every comparison read or rejected reload.
+                if let Some(warning) = key_warning {
+                    tracing::warn!(
+                        target: "ferrum_alloy::tls",
+                        "reloaded TLS private key: {warning}"
+                    );
+                }
                 self.last_failure = None;
                 Outcome::Swapped
             }
@@ -1229,6 +1233,87 @@ mod tests {
         assert_eq!(reloader.reload(now).await, Outcome::Swapped);
         assert!(!Arc::ptr_eq(&initial, &serving(&server)));
         assert_eq!(reloader.reload(now).await, Outcome::Unchanged);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reload_warns_once_when_swapping_in_a_permissive_private_key() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visitor(String);
+                impl tracing::field::Visit for Visitor {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut visitor = Visitor(String::new());
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.0);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ca_path, issuer) = ca(dir.path());
+        let (server, cert_path, key_path) = reloadable(dir.path(), ca_path, &issuer);
+        let mut reloader = Reloader::new(server.clone(), Duration::ZERO);
+        let now = UnixTime::now();
+
+        let capture = Capture::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+        // A rejected mismatched key emits no swap warning even if permissive.
+        let (_, wrong_key) = server_pem(&issuer);
+        std::fs::write(&key_path, &wrong_key).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+        assert!(matches!(
+            reloader.reload(now).await,
+            Outcome::Unconfirmed(_)
+        ));
+        assert!(matches!(reloader.reload(now).await, Outcome::Failed(_)));
+        assert!(
+            capture
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|m| !m.contains("reloaded TLS private key")),
+            "rejected reload must not warn"
+        );
+
+        // Swapping in a valid cert+key pair with mode 0620 warns exactly once,
+        // and subsequent comparison-only reads emit no further warning.
+        let (new_cert, new_key) = server_pem(&issuer);
+        std::fs::write(&cert_path, &new_cert).unwrap();
+        std::fs::write(&key_path, &new_key).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+        assert_eq!(reloader.reload(now).await, Outcome::Swapped);
+        assert_eq!(reloader.reload(now).await, Outcome::Unchanged);
+        let warnings: Vec<String> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains("reloaded TLS private key"))
+            .cloned()
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("(mode 620)"), "{warnings:?}");
     }
 
     #[tokio::test]

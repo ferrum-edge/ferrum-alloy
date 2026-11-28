@@ -1611,6 +1611,26 @@ pub(crate) fn read_file(path: &Path) -> Result<toml::Table, ConfigError> {
     toml::from_str(&text).map_err(|e| syntax_error(path, &text, &e))
 }
 
+/// Removes `secret` (both its raw form and its Rust debug-escaped form, as
+/// emitted inside `{:?}` path formatting) from a permission warning so a secret
+/// reflected in its own file path is never disclosed in logs or `check` output.
+fn redact_secret_in_warning(warning: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return warning.to_owned();
+    }
+    let debug = format!("{secret:?}");
+    let escaped = &debug[1..debug.len().saturating_sub(1)];
+    let mut out = if escaped.is_empty() {
+        warning.to_owned()
+    } else {
+        warning.replace(escaped, "[REDACTED]")
+    };
+    if escaped != secret {
+        out = out.replace(secret, "[REDACTED]");
+    }
+    out
+}
+
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.
 /// Also returns a warning for each `*_FILE` secret file others could
 /// replace, from the file read ([`crate::files::read_secret_file_bounded`]).
@@ -1666,13 +1686,16 @@ where
             let secret =
                 crate::files::read_secret_file_bounded(Path::new(&value), MAX_SECRET_FILE_BYTES)
                     .map_err(|e| env_error(format!("cannot read secret file: {e}")))?;
-            // From the file that was read, not the path inspected again.
-            if let Some(warning) = &secret.permission_warning {
-                warnings.push(format!("{name}: {warning}"));
-            }
             let text = std::str::from_utf8(&secret.bytes)
                 .map_err(|_| env_error("cannot read secret file: not valid UTF-8".into()))?;
-            text.trim_end_matches(['\n', '\r']).to_owned()
+            let decoded = text.trim_end_matches(['\n', '\r']).to_owned();
+            // From the file that was read, not the path inspected again.
+            // Redact the credential itself if the file path happens to contain it.
+            if let Some(warning) = &secret.permission_warning {
+                let redacted = redact_secret_in_warning(warning, &decoded);
+                warnings.push(format!("{name}: {redacted}"));
+            }
+            decoded
         } else {
             value
         };

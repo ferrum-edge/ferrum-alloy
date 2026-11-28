@@ -52,8 +52,16 @@ pub enum ReadError {
 /// Code that reads the secret uses [`read_secret_file_bounded`], whose
 /// warning describes the file it actually read.
 pub fn secret_file_permission_warning(path: &Path) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
-    permission_warning(path, &metadata)
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(path).ok()?;
+        permission_warning(path, &metadata)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// A secret read by [`read_secret_file_bounded`].
@@ -136,16 +144,21 @@ fn permission_problems(mode: u32, owner: u32, user: Option<u32>) -> Vec<String> 
 
 /// This process's effective user id, or `None` when it cannot be read.
 ///
-/// On Linux it is the second `Uid:` field of `/proc/self/status`: the owner
-/// of a new file or pipe there is the filesystem user, which can differ.
-/// Elsewhere on Unix, where there is no separate filesystem user, it is the
-/// owner of a pipe this process creates.
+/// On Linux it is the second `Uid:` field of `/proc/thread-self/status`
+/// (falling back to `/proc/self/status` on older kernels): the owner of a new
+/// file or pipe there is the filesystem user, which can differ, and reading as
+/// raw bytes avoids failing on a non-UTF-8 task name. When procfs is
+/// unavailable, `None` disables the ownership half while keeping the
+/// write-mode check. Elsewhere on Unix, where there is no separate filesystem
+/// user, it is the owner of a pipe this process creates.
 #[cfg(unix)]
 fn effective_uid() -> Option<u32> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        effective_uid_from_status(&status)
+        let status = std::fs::read("/proc/thread-self/status")
+            .or_else(|_| std::fs::read("/proc/self/status"))
+            .ok()?;
+        effective_uid_from_status_bytes(&status)
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
@@ -156,15 +169,18 @@ fn effective_uid() -> Option<u32> {
     }
 }
 
-/// The effective uid in a Linux `/proc/<pid>/status` text: the second of
+/// The effective uid in a Linux `/proc/<pid>/status` byte stream: the second of
 /// the real, effective, saved, and filesystem uids on its `Uid:` line.
 #[cfg(unix)]
 #[cfg_attr(
     not(any(target_os = "linux", target_os = "android", test)),
     allow(dead_code)
 )]
-fn effective_uid_from_status(status: &str) -> Option<u32> {
-    let line = status.lines().find_map(|line| line.strip_prefix("Uid:"))?;
+fn effective_uid_from_status_bytes(status: &[u8]) -> Option<u32> {
+    let line = status
+        .split(|&byte| byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"Uid:"))?;
+    let line = std::str::from_utf8(line).ok()?;
     line.split_ascii_whitespace().nth(1)?.parse().ok()
 }
 
@@ -215,6 +231,16 @@ fn read_opened_into(
     bytes: &mut Vec<u8>,
 ) -> Result<std::fs::Metadata, ReadError> {
     let file = open(path).map_err(ReadError::Io)?;
+    read_from_open_file(file, max, bytes)
+}
+
+/// Checks `file`'s metadata and reads at most `max` bytes from that same open
+/// handle into `bytes`.
+fn read_from_open_file(
+    file: std::fs::File,
+    max: u64,
+    bytes: &mut Vec<u8>,
+) -> Result<std::fs::Metadata, ReadError> {
     let metadata = file.metadata().map_err(ReadError::Io)?;
     check(&metadata, max)?;
 
@@ -308,6 +334,22 @@ mod tests {
                 .permission_warning
                 .is_none()
         );
+        // Swapping the pathname after the handle is opened does not change
+        // either the bytes read or the warning derived from that handle.
+        let replaced = dir.path().join("swapped-secret");
+        std::fs::write(&replaced, b"permissive-bytes")?;
+        std::fs::set_permissions(&replaced, std::fs::Permissions::from_mode(0o666))?;
+        let opened = open(&replaced)?;
+        let replacement = dir.path().join("replacement-secret");
+        std::fs::write(&replacement, b"restricted-bytes")?;
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&replacement, &replaced)?;
+        let mut buf = sensitive_buffer(64)?;
+        let metadata = read_from_open_file(opened, 64, &mut buf)?;
+        assert_eq!(buf.as_slice(), b"permissive-bytes");
+        let handle_warning = permission_warning(&replaced, &metadata).unwrap_or_default();
+        assert!(handle_warning.contains("(mode 666)"), "{handle_warning}");
+        assert_eq!(secret_file_permission_warning(&replaced), None);
         Ok(())
     }
 
@@ -328,15 +370,18 @@ mod tests {
     }
 
     /// The effective uid is the second `Uid:` field, not the filesystem uid
-    /// (the fourth) that owns new files and pipes on Linux.
+    /// (the fourth) that owns new files and pipes on Linux, and non-UTF-8
+    /// task names on other lines do not prevent reading `Uid:`.
     #[cfg(unix)]
     #[test]
     fn the_effective_uid_is_read_from_the_status_uid_line() -> Result<(), Box<dyn std::error::Error>>
     {
-        let status = "Name:\tservice\nUmask:\t0022\nUid:\t1000\t1001\t1001\t2000\nGid:\t1000\t1000\t1000\t1000\n";
-        assert_eq!(effective_uid_from_status(status), Some(1001));
-        assert_eq!(effective_uid_from_status("Name:\tx\n"), None);
-        assert_eq!(effective_uid_from_status("Uid:\t1000\n"), None);
+        let status = b"Name:\tservice\nUmask:\t0022\nUid:\t1000\t1001\t1001\t2000\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(effective_uid_from_status_bytes(status), Some(1001));
+        let non_utf8_name = b"Name:\t\xff\xfe\nUid:\t1000\t1002\t1002\t2000\n";
+        assert_eq!(effective_uid_from_status_bytes(non_utf8_name), Some(1002));
+        assert_eq!(effective_uid_from_status_bytes(b"Name:\tx\n"), None);
+        assert_eq!(effective_uid_from_status_bytes(b"Uid:\t1000\n"), None);
         // This process: on Linux, a file it creates is owned by its
         // filesystem uid, which equals the effective uid unless changed.
         use std::os::unix::fs::MetadataExt as _;

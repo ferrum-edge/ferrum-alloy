@@ -815,6 +815,30 @@ fn secret_files_others_could_replace_are_warned_about() {
     assert!(error.contains("(mode 666)"), "{error}");
     assert!(error.contains("[REDACTED]"), "{error}");
     assert!(!error.contains("file-secret-credential"), "{error}");
+
+    // `check` (human and JSON with `--show-effective`) also redacts a secret
+    // reflected in its own `_FILE` path.
+    for format in ["human", "json"] {
+        let output = bin()
+            .env("FERRUM_ALLOY_MANAGEMENT_TOKEN_FILE", &reflected)
+            .args([
+                "check",
+                "--features",
+                "default",
+                "--format",
+                format,
+                "--show-effective",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+        let text = stdout(&output);
+        assert!(text.contains("[REDACTED]"), "{format}: {text}");
+        assert!(
+            !text.contains("file-secret-credential"),
+            "{format} leaked secret via path: {text}"
+        );
+    }
 }
 
 #[test]
