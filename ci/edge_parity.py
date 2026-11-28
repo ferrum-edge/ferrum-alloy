@@ -221,10 +221,11 @@ def check_forwarded(fixture: dict, failures: list[str]) -> int:
         headers = [("X-Forwarded-For", line) for line in field_lines(case)]
         status, _ = send(f"/xff/{index}", headers, case.get("peer", fixture["edge_peer"]))
         reached = Echo.seen[before:]
-        got = ", ".join(reached[-1]["xff"]) if reached else None
-        if status != 200 or got != case["forwarded"]:
+        got = reached[-1]["xff"] if reached else None
+        expected = [case["forwarded"]]
+        if status != 200 or got != expected:
             failures.append(
-                f"{describe(case)}: expected Edge to forward {case['forwarded']!r}; "
+                f"{describe(case)}: expected Edge to forward {expected!r}; "
                 f"it answered {status} and forwarded {got!r}"
             )
     # The access log is written off the request path; wait for every record.

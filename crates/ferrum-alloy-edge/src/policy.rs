@@ -164,7 +164,11 @@ pub struct GatewayContext {
     /// address outside the trusted list is the client; a malformed entry
     /// there, or a chain of trusted addresses only, yields Edge's peer, as in
     /// Edge. With an empty list this is Edge's peer. It is not Edge's resolved
-    /// client when Edge uses `FERRUM_REAL_IP_HEADER`.
+    /// client when Edge uses `FERRUM_REAL_IP_HEADER`, or when a non-UTF-8
+    /// `X-Forwarded-For` field line holds the malformed entry at the deciding
+    /// boundary (Edge resolves its peer, drops the whole non-UTF-8 field line
+    /// when forwarding, and Alloy can then select an earlier untrusted address
+    /// that survived forwarding).
     pub client_address: Option<IpAddr>,
     /// Edge's immediate peer: the rightmost `X-Forwarded-For` hop, which Edge
     /// writes itself. It is the client only when nothing sits in front of
