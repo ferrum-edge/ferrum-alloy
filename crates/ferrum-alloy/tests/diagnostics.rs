@@ -707,7 +707,7 @@ fn startup_requires_the_management_listener_and_its_rate_limit() {
 
 #[test]
 fn startup_requires_a_loopback_management_listener() {
-    // The listener has no TLS; the authorizer's credentials would cross the
+    // Without management TLS the authorizer's credentials would cross the
     // network in cleartext.
     for bind in ["0.0.0.0:9090", "192.0.2.10:9090", "[::]:9090"] {
         let mut cfg = settings();
@@ -720,7 +720,7 @@ fn startup_requires_a_loopback_management_listener() {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("loopback management.bind"),
+            error.contains("requires management.tls;"),
             "{bind}: {error}"
         );
     }
@@ -773,8 +773,41 @@ async fn serving_refuses_retrieval_on_a_listener_off_loopback() {
     .await
     .expect("serve_on refused the listener instead of serving");
     let error = result.unwrap_err().to_string();
-    assert!(error.contains("loopback management listener"), "{error}");
+    assert!(error.contains("requires management.tls;"), "{error}");
     assert!(!error.contains("management.token"), "{error}");
+}
+
+/// `serve_on` counts management TLS only as the certificate loaded when the
+/// parts were composed: settings edited afterwards load nothing, so the
+/// off-loopback listener is refused instead of serving retrieval in
+/// cleartext.
+#[tokio::test]
+async fn serving_decides_from_the_loaded_management_tls() {
+    let mut parts = app()
+        .diagnostics_authorizer(authorize)
+        .config(settings())
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .shutdown_signal(std::future::pending())
+        .into_parts()
+        .unwrap();
+    parts.config.management.tls = Some(ferrum_alloy::config::TlsSettings::new(
+        "cert.pem", "key.pem",
+    ));
+    let off_loopback = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let error = parts
+        .check_management_listener(&off_loopback)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("requires management.tls;"), "{error}");
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        parts.serve_on(app_listener, Some(off_loopback)),
+    )
+    .await
+    .expect("serve_on refused the listener instead of serving");
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("requires management.tls;"), "{error}");
 }
 
 #[tokio::test]
@@ -786,9 +819,86 @@ async fn check_management_listener_refuses_retrieval_off_loopback() {
         .check_management_listener(&off_loopback)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("loopback management listener"), "{error}");
+    assert!(error.contains("requires management.tls;"), "{error}");
     let loopback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     parts.check_management_listener(&loopback).unwrap();
+}
+
+/// Off loopback, retrieval needs both management TLS and the management
+/// token; any other combination is refused at startup, naming what is
+/// missing, and loopback needs neither.
+#[test]
+fn retrieval_off_loopback_requires_tls_and_the_token() {
+    let refused = |cfg: AlloyConfig| {
+        app()
+            .diagnostics_authorizer(authorize)
+            .config(cfg)
+            .telemetry(TelemetryInit::ApplicationOwned)
+            .into_parts()
+            .unwrap_err()
+            .to_string()
+    };
+    let mut no_tls_no_token = settings();
+    no_tls_no_token.management.bind = "0.0.0.0:9090".parse().unwrap();
+    no_tls_no_token.management.token = None;
+    // Configuration validation already requires the token off loopback.
+    let error = refused(no_tls_no_token);
+    assert!(error.contains("set management.token"), "{error}");
+
+    let mut no_tls = settings();
+    no_tls.management.bind = "0.0.0.0:9090".parse().unwrap();
+    let error = refused(no_tls);
+    assert!(error.contains("requires management.tls;"), "{error}");
+
+    // Loopback needs neither.
+    let mut loopback = settings();
+    loopback.management.token = None;
+    let _loopback = parts(loopback);
+}
+
+/// With management TLS and the token, validation accepts retrieval off
+/// loopback, but the preflight for a listener the application serves itself
+/// still refuses it: Alloy applies the TLS only on listeners it serves.
+/// Without the token it is refused at startup.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn retrieval_off_loopback_is_allowed_with_tls_and_the_token() {
+    use ferrum_alloy::config::TlsSettings;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ca = support::pki::Ca::new("management-ca");
+    let server = ca.server();
+    let tls = TlsSettings::new(
+        support::pki::write(dir.path(), "management.pem", &server.cert_pem),
+        support::pki::write(dir.path(), "management.key", &server.key_pem),
+    );
+
+    let mut cfg = settings();
+    cfg.management.bind = "0.0.0.0:9090".parse().unwrap();
+    cfg.management.tls = Some(tls.clone());
+    let parts = parts(cfg);
+    let off_loopback = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let error = parts
+        .check_management_listener(&off_loopback)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("applies only to a listener Alloy serves itself"),
+        "{error}"
+    );
+
+    let mut without_token = settings();
+    without_token.management.bind = "0.0.0.0:9090".parse().unwrap();
+    without_token.management.tls = Some(tls);
+    without_token.management.token = None;
+    let error = app()
+        .diagnostics_authorizer(authorize)
+        .config(without_token)
+        .telemetry(TelemetryInit::ApplicationOwned)
+        .into_parts()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("set management.token"), "{error}");
 }
 
 #[tokio::test]

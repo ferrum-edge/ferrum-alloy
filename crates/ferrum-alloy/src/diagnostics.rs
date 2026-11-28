@@ -145,20 +145,21 @@ const RECORD_OVERHEAD_BYTES: usize = (2 * size_of::<u64>() + size_of::<Stored>()
     + 2 * ARC_HEADER_BYTES;
 
 /// Checks that retrieval can be served as ADR 0008 requires: on a loopback
-/// management listener, behind its rate limit.
+/// management listener, or off loopback only over `management.tls` with a
+/// `management.token`; behind its rate limit.
 pub(crate) fn check_config(config: &AlloyConfig) -> Result<(), ConfigError> {
     let management = &config.management;
     let mut errors: Vec<String> = Vec::new();
     if !management.enabled {
         errors.push("diagnostic retrieval requires management.enabled".into());
     }
-    // The management listener has no TLS, and the authorizer's credentials
-    // must not cross a network in cleartext.
-    if !management.bind.ip().is_loopback() {
-        errors.push(format!(
-            "diagnostic retrieval requires a loopback management.bind, not {}; terminate TLS in a proxy on the same host instead",
-            management.bind
-        ));
+    // The authorizer's credentials must not cross a network in cleartext.
+    if let Err(message) = check_bind(
+        management.bind,
+        management.tls.is_some(),
+        management.token.is_some(),
+    ) {
+        errors.push(message);
     }
     if !management.rate_limit.enabled {
         errors.push("diagnostic retrieval requires management.rate_limit.enabled".into());
@@ -170,16 +171,27 @@ pub(crate) fn check_config(config: &AlloyConfig) -> Result<(), ConfigError> {
     }
 }
 
-/// Applies the loopback rule of [`check_config`] to `addr`, the address the
-/// management listener is actually bound to, which a listener passed to
-/// `AlloyParts::serve_on` need not share with `management.bind`.
-pub(crate) fn check_listener(addr: SocketAddr) -> Result<(), String> {
-    if addr.ip().is_loopback() {
+/// The bind rule of retrieval: any loopback address, or another address
+/// only when the management listener has TLS and a management token.
+fn check_bind(addr: SocketAddr, tls: bool, token: bool) -> Result<(), String> {
+    if addr.ip().is_loopback() || (tls && token) {
         return Ok(());
     }
+    let missing = match (tls, token) {
+        (false, false) => "management.tls and management.token",
+        (false, true) => "management.tls",
+        _ => "management.token",
+    };
     Err(format!(
-        "diagnostic retrieval requires a loopback management listener, but it is bound to {addr}; terminate TLS in a proxy on the same host instead"
+        "diagnostic retrieval on the non-loopback management address {addr} requires {missing}; configure them, bind the management listener to loopback, or terminate TLS in a proxy on the same host"
     ))
+}
+
+/// Applies the bind rule of [`check_config`] to `addr`, the address the
+/// management listener is actually bound to, which a listener passed to
+/// `AlloyParts::serve_on` need not share with `management.bind`.
+pub(crate) fn check_listener(addr: SocketAddr, tls: bool, token: bool) -> Result<(), String> {
+    check_bind(addr, tls, token)
 }
 
 /// What the authorizer sees of a retrieval request.
@@ -1584,6 +1596,30 @@ mod tests {
     use http::header::AUTHORIZATION;
 
     use super::*;
+
+    /// Retrieval off loopback needs management TLS and the token; each
+    /// missing piece is named.
+    #[test]
+    fn retrieval_binds_need_loopback_or_tls_and_the_token() {
+        let on: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let off: SocketAddr = "192.0.2.1:9090".parse().unwrap();
+        for (tls, token) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(check_listener(on, tls, token).is_ok(), "{tls} {token}");
+        }
+        assert!(check_listener(off, true, true).is_ok());
+        for (tls, token, missing) in [
+            (
+                false,
+                false,
+                "requires management.tls and management.token;",
+            ),
+            (false, true, "requires management.tls;"),
+            (true, false, "requires management.token;"),
+        ] {
+            let error = check_listener(off, tls, token).unwrap_err();
+            assert!(error.contains(missing), "{tls} {token}: {error}");
+        }
+    }
 
     fn settings(max_records: usize, max_bytes: usize) -> DiagnosticsSettings {
         DiagnosticsSettings {

@@ -756,7 +756,7 @@ fn lists_and_secret_files_are_supported() {
     );
 }
 
-/// The management listener has no TLS, so a non-loopback bind with a
+/// Without management TLS, a non-loopback bind with a
 /// token is valid but warns that the token travels in cleartext.
 #[test]
 fn a_non_loopback_management_bind_warns_about_cleartext() {
@@ -773,6 +773,47 @@ fn a_non_loopback_management_bind_warns_about_cleartext() {
     );
 
     let warnings = AlloyConfig::default().validate(NO_FEATURES).unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|issue| !issue.message.contains("cleartext")),
+        "{warnings:?}"
+    );
+}
+
+/// `management.tls` is validated like `server.tls`, under its own name; with
+/// it, a non-loopback management bind no longer warns about cleartext.
+#[test]
+fn management_tls_is_validated_like_server_tls() {
+    let mut config = AlloyConfig::default();
+    config.management.tls = Some(TlsSettings::new("cert.pem", "key.pem"));
+    let error = config.validate(NO_FEATURES).unwrap_err().to_string();
+    assert!(
+        error.contains("management.tls is configured but the `tls` feature is not enabled"),
+        "{error}"
+    );
+    assert!(config.validate(&["tls"]).is_ok());
+
+    let mut tls = TlsSettings::new("cert.pem", "key.pem");
+    tls.client_auth = ClientAuth::Required;
+    tls.handshake_timeout_ms = 0;
+    config.management.tls = Some(tls);
+    let error = config.validate(&["tls"]).unwrap_err().to_string();
+    assert!(
+        error.contains("management.tls.client_auth requires management.tls.client_ca_path"),
+        "{error}"
+    );
+    assert!(
+        error.contains("management.tls.handshake_timeout_ms must be greater than zero"),
+        "{error}"
+    );
+    assert!(!error.contains("server.tls"), "{error}");
+
+    let mut config = AlloyConfig::default();
+    config.management.bind = "0.0.0.0:9090".parse().unwrap();
+    config.management.token = Some(Secret::new("x".repeat(32)));
+    config.management.tls = Some(TlsSettings::new("cert.pem", "key.pem"));
+    let warnings = config.validate(&["tls"]).unwrap();
     assert!(
         warnings
             .iter()
@@ -1566,10 +1607,15 @@ fn env_var_table_maps_to_real_config_paths() {
                 "FERRUM_ALLOY_TRACE_CONTEXT_ACCEPT" => "never",
                 "FERRUM_ALLOY_SERVER_TIMING" => "disabled",
                 "FERRUM_ALLOY_EDGE_MODE" => "standalone",
-                "FERRUM_ALLOY_TLS_CLIENT_AUTH" => "none",
-                "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH" => "end_entity",
-                "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS" => "allow",
-                "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION" => "ignore",
+                "FERRUM_ALLOY_TLS_CLIENT_AUTH" | "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_AUTH" => {
+                    "none"
+                }
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_DEPTH"
+                | "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_DEPTH" => "end_entity",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_UNKNOWN_STATUS"
+                | "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_UNKNOWN_STATUS" => "allow",
+                "FERRUM_ALLOY_TLS_CLIENT_CRL_EXPIRATION"
+                | "FERRUM_ALLOY_MANAGEMENT_TLS_CLIENT_CRL_EXPIRATION" => "ignore",
                 _ => "value",
             },
         };
@@ -1579,6 +1625,12 @@ fn env_var_table_maps_to_real_config_paths() {
             vars.extend([
                 ("FERRUM_ALLOY_TLS_CERT_PATH", "c"),
                 ("FERRUM_ALLOY_TLS_KEY_PATH", "k"),
+            ]);
+        }
+        if var.path.starts_with(&["management", "tls"]) {
+            vars.extend([
+                ("FERRUM_ALLOY_MANAGEMENT_TLS_CERT_PATH", "c"),
+                ("FERRUM_ALLOY_MANAGEMENT_TLS_KEY_PATH", "k"),
             ]);
         }
         if var.path.starts_with(&["auth", "jwt"]) {
