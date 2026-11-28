@@ -1620,15 +1620,35 @@ fn redact_secret_in_warning(warning: &str, secret: &str) -> String {
     }
     let debug = format!("{secret:?}");
     let escaped = &debug[1..debug.len().saturating_sub(1)];
-    let mut out = if escaped.is_empty() {
-        warning.to_owned()
-    } else {
-        warning.replace(escaped, "[REDACTED]")
-    };
-    if escaped != secret {
-        out = out.replace(secret, "[REDACTED]");
+    let contains_secret =
+        |text: &str| text.contains(secret) || (!escaped.is_empty() && text.contains(escaped));
+    for marker in ["[REDACTED]", "[]"] {
+        let mut out = if escaped.is_empty() {
+            warning.to_owned()
+        } else {
+            warning.replace(escaped, marker)
+        };
+        if escaped != secret {
+            out = out.replace(secret, marker);
+        }
+        if !contains_secret(&out) {
+            return out;
+        }
     }
-    out
+    // Neither replacement marker can safely scrub the path (for example, a
+    // secret built from repeated markers adjacent to matching path text). Drop
+    // the file path from the warning while keeping the permission diagnostic.
+    if let Some((_, suffix)) = warning.split_once(" has mode ") {
+        let without_path = format!("secret file (path redacted) has mode {suffix}");
+        if !contains_secret(&without_path) {
+            return without_path;
+        }
+    }
+    let generic = "secret file permissions are too broad; restrict it to the owner (0600)";
+    if !contains_secret(generic) {
+        return generic.to_owned();
+    }
+    "secret file permission warning redacted".to_owned()
 }
 
 /// Converts `FERRUM_ALLOY_*` variables into a TOML table.

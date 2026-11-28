@@ -953,17 +953,23 @@ fn secret_files_others_could_replace_are_warned_about() {
     }
 
     // A secret reflected in its own file path (including characters that
-    // change under Rust debug escaping, such as quotes and backslashes) is
-    // redacted from config warnings.
-    for (dir_name, token_val) in [
+    // change under Rust debug escaping, such as quotes and backslashes, and
+    // secrets that collide with the `[REDACTED]` marker itself) is never
+    // disclosed in config warnings.
+    let marker_secret = "[REDACTED]".repeat(4);
+    let marker_dir = "[REDACTED]".repeat(7);
+    for (dir_name, token_val, expect_redacted_marker) in [
         (
             "reflected-secret-value-0123456789abcdef",
             "reflected-secret-value-0123456789abcdef",
+            true,
         ),
         (
             r#"reflected"secret\value-0123456789abcdef"#,
             r#"reflected"secret\value-0123456789abcdef"#,
+            true,
         ),
+        (marker_dir.as_str(), marker_secret.as_str(), false),
     ] {
         let nested = dir.path().join(dir_name);
         std::fs::create_dir(&nested).unwrap();
@@ -977,7 +983,14 @@ fn secret_files_others_could_replace_are_warned_about() {
         let (_, sources) = load_from(None, vars, &Overrides::default()).unwrap();
         assert_eq!(sources.warnings.len(), 1, "{:?}", sources.warnings);
         let warning = &sources.warnings[0];
-        assert!(warning.contains("[REDACTED]"), "{warning}");
+        if expect_redacted_marker {
+            assert!(warning.contains("[REDACTED]"), "{warning}");
+        } else {
+            assert!(
+                warning.contains("writable by its group or by everyone"),
+                "permission warning lost diagnostic detail: {warning}"
+            );
+        }
         assert!(
             !warning.contains(token_val),
             "secret leaked via path: {warning}"
