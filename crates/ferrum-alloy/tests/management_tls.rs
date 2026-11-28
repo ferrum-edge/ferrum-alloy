@@ -22,13 +22,14 @@ use hyper_util::rt::TokioIo;
 use support::pki::{self, Ca};
 use support::{TOKEN, config, start};
 
-/// One HTTP/1.1 request over TLS to the management listener.
-async fn tls_get(
+/// One HTTP/1.1 request over TLS to the management listener, returning status,
+/// response headers, and body.
+async fn tls_get_with_headers(
     addr: SocketAddr,
     client: Arc<rustls::ClientConfig>,
     path: &str,
     token: Option<&str>,
-) -> (StatusCode, String) {
+) -> (StatusCode, http::HeaderMap, String) {
     let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
     let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
     let stream = tokio_rustls::TlsConnector::from(client)
@@ -48,8 +49,20 @@ async fn tls_get(
         .await
         .unwrap();
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8_lossy(&body).into_owned())
+    (status, headers, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// One HTTP/1.1 request over TLS to the management listener.
+async fn tls_get(
+    addr: SocketAddr,
+    client: Arc<rustls::ClientConfig>,
+    path: &str,
+    token: Option<&str>,
+) -> (StatusCode, String) {
+    let (status, _, body) = tls_get_with_headers(addr, client, path, token).await;
+    (status, body)
 }
 
 #[tokio::test]
@@ -197,8 +210,17 @@ async fn retrieval_is_served_off_loopback_over_the_loaded_management_tls() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("ferrum.diagnostic_report"), "{body}");
     assert!(body.contains(&request_id), "{body}");
-    let (status, _) = tls_get(addr, client, "/diagnostics/v1/requests/req-unknown", None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, headers, body) =
+        tls_get_with_headers(addr, client, "/diagnostics/v1/requests/req-unknown", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body.contains("route-not-found"), "{body}");
+    assert_eq!(
+        headers
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store"),
+        "diagnostic retrieval handler sets Cache-Control: no-store (unlike the generic fallback)"
+    );
 
     let plain = tokio::time::timeout(
         Duration::from_secs(5),

@@ -1,6 +1,6 @@
 """Tests that the Edge main drift workflow runs ci.yml's Edge configuration steps.
 
-.github/workflows/edge-main-drift.yml copies the three steps of ci.yml's
+.github/workflows/edge-main-drift.yml copies the four steps of ci.yml's
 "Generated Edge configuration validates" job and runs them against the signed
 Ferrum Edge `main` image (ferrum-edge/ferrum-contracts#76). A copy that drifts
 from ci.yml would warn about the wrong thing, so the scripts must stay equal.
@@ -59,7 +59,7 @@ class EdgeMainDriftTests(unittest.TestCase):
     def test_runs_ci_edge_configuration_steps_verbatim(self):
         pinned = copied_scripts(job(self.ci, "edge-config"))
         main = copied_scripts(job(self.drift, "check"))
-        self.assertEqual(len(pinned), 3)
+        self.assertEqual(len(pinned), 4)
         self.assertEqual(main, pinned)
 
     def test_only_the_issue_job_writes_and_never_for_pull_requests(self):

@@ -1,0 +1,104 @@
+{
+  "description": "X-Forwarded-For chains sent to a real Ferrum Edge with FERRUM_TRUSTED_PROXIES set to trusted_proxies (ci/edge_parity.py, run by CI's edge-config job for each supported release and by the Edge main drift check). A case sends `x_forwarded_for` as one field line, or `field_lines_latin1` as several field lines whose characters are the raw bytes (U+0000 to U+00FF), from `peer` (default edge_peer). Edge must forward exactly `forwarded` to the backend and log `client` as its resolved client_ip. Alloy's GatewayContext::client_address, reading `forwarded` with edge.trusted_proxies equal to trusted_proxies, must resolve `client` too (policy::edge_parity_tests), except in a case marked `known_divergence`, where it resolves `alloy_client`: the live check then requires Edge to behave exactly as recorded, so an Edge release that fixes the divergence fails it until the case requires equality.",
+  "trusted_proxies": [
+    "127.0.0.1/32",
+    "10.0.0.0/8",
+    "2001:db8::/32",
+    "::ffff:198.51.100.0/120"
+  ],
+  "edge_peer": "127.0.0.1",
+  "cases": [
+    {
+      "x_forwarded_for": "203.0.113.7",
+      "forwarded": "203.0.113.7, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "x_forwarded_for": "198.51.100.1, 203.0.113.7",
+      "forwarded": "198.51.100.1, 203.0.113.7, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "x_forwarded_for": "203.0.113.7, 10.1.2.3",
+      "forwarded": "203.0.113.7, 10.1.2.3, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "x_forwarded_for": "203.0.113.7, 198.51.100.9",
+      "forwarded": "203.0.113.7, 198.51.100.9, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "x_forwarded_for": "10.1.2.3, 10.4.5.6",
+      "forwarded": "10.1.2.3, 10.4.5.6, 127.0.0.1",
+      "client": "127.0.0.1"
+    },
+    {
+      "x_forwarded_for": "garbage, 203.0.113.7",
+      "forwarded": "garbage, 203.0.113.7, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "x_forwarded_for": "203.0.113.7, garbage",
+      "forwarded": "203.0.113.7, garbage, 127.0.0.1",
+      "client": "127.0.0.1"
+    },
+    {
+      "x_forwarded_for": "203.0.113.7, garbage, 10.0.0.1",
+      "forwarded": "203.0.113.7, garbage, 10.0.0.1, 127.0.0.1",
+      "client": "127.0.0.1"
+    },
+    {
+      "x_forwarded_for": "203.0.113.7:4711",
+      "forwarded": "203.0.113.7:4711, 127.0.0.1",
+      "client": "127.0.0.1"
+    },
+    {
+      "x_forwarded_for": "2600::1, 2001:db8::9",
+      "forwarded": "2600::1, 2001:db8::9, 127.0.0.1",
+      "client": "2600::1"
+    },
+    {
+      "x_forwarded_for": "203.0.113.7,10.1.2.3",
+      "forwarded": "203.0.113.7,10.1.2.3, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "field_lines_latin1": [
+        "198.51.100.1",
+        "203.0.113.7"
+      ],
+      "forwarded": "198.51.100.1, 203.0.113.7, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "field_lines_latin1": [
+        "\u00ff",
+        "203.0.113.7"
+      ],
+      "forwarded": "203.0.113.7, 127.0.0.1",
+      "client": "203.0.113.7"
+    },
+    {
+      "peer": "127.0.0.2",
+      "x_forwarded_for": "198.51.100.77",
+      "forwarded": "127.0.0.2",
+      "client": "127.0.0.2"
+    },
+    {
+      "peer": "127.0.0.2",
+      "forwarded": "127.0.0.2",
+      "client": "127.0.0.2"
+    },
+    {
+      "field_lines_latin1": [
+        "203.0.113.7",
+        "\u00ff"
+      ],
+      "forwarded": "203.0.113.7, 127.0.0.1",
+      "client": "127.0.0.1",
+      "alloy_client": "203.0.113.7",
+      "known_divergence": "The second field line is not a valid address, so Edge v0.9.20 and v0.9.21 resolve their peer; it is also not UTF-8, so they drop it from the chain they forward. Reading the forwarded chain, which is indistinguishable from a chain whose client is 203.0.113.7, Alloy resolves 203.0.113.7. Alloy cannot repeat Edge's decision until Edge's forwarded chain carries it."
+    }
+  ]
+}

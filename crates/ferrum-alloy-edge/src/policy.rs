@@ -164,7 +164,11 @@ pub struct GatewayContext {
     /// address outside the trusted list is the client; a malformed entry
     /// there, or a chain of trusted addresses only, yields Edge's peer, as in
     /// Edge. With an empty list this is Edge's peer. It is not Edge's resolved
-    /// client when Edge uses `FERRUM_REAL_IP_HEADER`.
+    /// client when Edge uses `FERRUM_REAL_IP_HEADER`, or when a non-UTF-8
+    /// `X-Forwarded-For` field line holds the malformed entry at the deciding
+    /// boundary (Edge resolves its peer, drops the whole non-UTF-8 field line
+    /// when forwarding, and Alloy can then select an earlier untrusted address
+    /// that survived forwarding).
     pub client_address: Option<IpAddr>,
     /// Edge's immediate peer: the rightmost `X-Forwarded-For` hop, which Edge
     /// writes itself. It is the client only when nothing sits in front of
@@ -452,4 +456,71 @@ fn strip<B>(request: &mut Request<B>, present: bool, stats: &EdgeStats) {
         .stripped_unverified_identity
         .fetch_add(1, Ordering::Relaxed);
     tracing::debug!(target: "ferrum_alloy::edge", "removed gateway-asserted headers from a request without a verified gateway identity");
+}
+
+/// Parity with a real Ferrum Edge: CI sends each case of
+/// `fixtures/edge-parity/forwarded-for.json` through Edge with the same
+/// trusted proxies and checks that Edge forwards `forwarded` and resolves
+/// `client`. Alloy must resolve the same client from `forwarded`, except in a
+/// recorded `known_divergence`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod edge_parity_tests {
+    use super::*;
+
+    #[test]
+    fn the_edge_parity_fixture_resolves_like_edge() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/edge-parity/forwarded-for.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let trusted: Vec<IpNet> = fixture["trusted_proxies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cidr| cidr.as_str().unwrap().parse().unwrap())
+            .collect();
+        let default_peer = fixture["edge_peer"].as_str().unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 15, "{}", cases.len());
+        let (mut untrusted_peers, mut divergences) = (0, 0);
+        for case in cases {
+            let forwarded = case["forwarded"].as_str().unwrap();
+            let peer_address: IpAddr = case["peer"]
+                .as_str()
+                .unwrap_or(default_peer)
+                .parse()
+                .unwrap();
+            if !trusted_proxy(&trusted, peer_address) {
+                // Edge drops an untrusted peer's chain and forwards the peer.
+                untrusted_peers += 1;
+                assert_eq!(forwarded, peer_address.to_string(), "{case}");
+            } else if let Some(inbound) = case["x_forwarded_for"].as_str() {
+                assert_eq!(
+                    forwarded.strip_suffix(&format!(", {peer_address}")),
+                    Some(inbound),
+                    "Edge appends its trusted peer to the inbound chain"
+                );
+            }
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_str(forwarded).unwrap());
+            let entries = forwarded_for_entries(&headers);
+            let peer = edge_peer(&entries);
+            assert_eq!(peer, Some(peer_address), "{forwarded}");
+            let client = resolved_client(&entries, &trusted, peer);
+            let edge_client: IpAddr = case["client"].as_str().unwrap().parse().unwrap();
+            match case["known_divergence"].as_str() {
+                None => assert_eq!(client, Some(edge_client), "{case}"),
+                Some(_) => {
+                    divergences += 1;
+                    let alloy_client: IpAddr =
+                        case["alloy_client"].as_str().unwrap().parse().unwrap();
+                    assert_eq!(client, Some(alloy_client), "{case}");
+                    assert_ne!(alloy_client, edge_client, "{case}");
+                }
+            }
+        }
+        assert!(untrusted_peers >= 2, "the untrusted-peer gate is exercised");
+        assert_eq!(divergences, 1, "documented in docs/configuration.md");
+    }
 }

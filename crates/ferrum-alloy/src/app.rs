@@ -750,19 +750,16 @@ impl AlloyParts {
             }
             errors.push(message);
         }
-        // Validation does not warn about cleartext when `management.tls` is
-        // set, but a listener the application serves itself gets none of it.
-        if errors.is_empty()
-            && !tls
-            && !addr.ip().is_loopback()
-            && self.config.management.tls.is_some()
-        {
-            tracing::warn!(
-                target: "ferrum_alloy::config",
-                "the management listener on {addr} is served as plain TCP: management.tls applies only to a listener Alloy serves itself (AlloyParts::serve or serve_on), so the management token crosses the network in cleartext on every request"
-            );
-        }
         if errors.is_empty() {
+            // Validation does not warn about cleartext when `management.tls` is
+            // set, but a listener the application serves itself gets none of it.
+            if !tls && !addr.ip().is_loopback() && self.config.management.tls.is_some() {
+                tracing::warn!(
+                    target: "ferrum_alloy::config",
+                    bind = %addr,
+                    "the management listener on {addr} is served as plain TCP: management.tls applies only to a listener Alloy serves itself (AlloyParts::serve or serve_on), so the management token crosses the network in cleartext on every request"
+                );
+            }
             Ok(())
         } else {
             Err(ConfigError::Invalid(errors).into())

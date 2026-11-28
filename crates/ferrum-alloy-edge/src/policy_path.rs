@@ -647,6 +647,54 @@ mod tests {
         assert_eq!(canonical("/api/a%2e/b"), "/api/a./b");
     }
 
+    /// CI submits every path of `fixtures/edge-parity/policy-paths.json`
+    /// to a real Ferrum Edge and checks the recorded verdicts there; this
+    /// checks that the port reaches the same ones.
+    #[test]
+    fn the_edge_parity_fixture_matches_the_port() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/edge-parity/policy-paths.json");
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{e}"));
+        let fixture: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}"));
+        let errors = fixture["edge_rejection_errors"]
+            .as_object()
+            .unwrap_or_else(|| panic!("edge_rejection_errors"));
+        let cases = fixture["cases"]
+            .as_array()
+            .unwrap_or_else(|| panic!("cases"));
+        let mut reasons = std::collections::BTreeSet::new();
+        for case in cases {
+            let raw = case["path"].as_str().unwrap_or_else(|| panic!("{case}"));
+            assert!(raw.starts_with('/'), "{raw:?}: origin form only");
+            match (case["canonical"].as_str(), case["rejection"].as_str()) {
+                (Some(expected), None) => assert_eq!(canonical(raw), expected, "{raw:?}"),
+                (None, Some(reason)) => {
+                    assert_eq!(rejection(raw).reason(), reason, "{raw:?}");
+                    assert!(errors.contains_key(reason), "{reason}");
+                    reasons.insert(reason);
+                }
+                _ => panic!("{case}: exactly one of canonical and rejection"),
+            }
+        }
+        // Every reason an HTTP/1.1 request target can reach is covered.
+        let covered: Vec<&str> = reasons.into_iter().collect();
+        assert_eq!(
+            covered,
+            [
+                "ambiguous_dot_segment",
+                "double_encoding",
+                "empty_segment",
+                "encoded_backslash",
+                "encoded_control",
+                "encoded_separator",
+                "invalid_escape",
+                "literal_dot_segment",
+                "unrepresentable_escape",
+            ]
+        );
+    }
+
     #[test]
     fn rejection_reasons_are_edges() {
         for (variant, reason) in [

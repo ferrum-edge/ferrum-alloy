@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- Support TLS termination and hot reloading on the management listener
+  (`management.tls`, feature `tls`, with reload metrics labelled
+  `listener="management"`), and allow diagnostic retrieval off loopback on
+  Alloy-served management listeners (`AlloyParts::serve` / `serve_on`) only
+  when both `management.token` and loaded `management.tls` are present (ADR
+  0008). `AlloyParts::check_management_listener` continues to treat custom
+  management listeners as plain TCP, refuses off-loopback diagnostic retrieval,
+  and warns when a non-loopback custom listener is checked with
+  `management.tls` configured.
 - Pin Ferrum Edge v0.9.21 at `f9915358c8032214f4034a17c28cdf72d14006c3`
   (Cosign-verified multi-arch index), with v0.9.20 as the previous supported
   release; v0.9.19 leaves the window. Adopt `contracts-edge-0.9.21` at
