@@ -130,6 +130,32 @@ impl CredentialRedactor {
         String::new()
     }
 
+    /// Scrub credentials from a warning that carries a structured path-free
+    /// fallback. When neither redaction marker can safely remove every
+    /// registered credential from `text`, returns `fallback` if it is non-empty
+    /// and contains no registered credential (or its debug-escaped form);
+    /// otherwise falls back to a credential-free generic notice.
+    pub(crate) fn redact_with_fallback(&self, text: &str, fallback: &str) -> String {
+        for marker in ["[REDACTED]", "[]"] {
+            let mut redacted = text.to_owned();
+            for token in &self.credentials {
+                redacted = redacted.replace(token, marker);
+            }
+            if !self.contains_credential(&redacted) {
+                return redacted;
+            }
+        }
+        if !fallback.is_empty() && !self.contains_credential(fallback) {
+            return fallback.to_owned();
+        }
+        let generic = "secret file permissions are too permissive; restrict it so only the service account (or root) can change it";
+        if !self.contains_credential(generic) {
+            generic.to_owned()
+        } else {
+            String::new()
+        }
+    }
+
     pub(crate) fn redact_error(&self, error: CliError) -> CliError {
         match error {
             CliError::Io(text) => CliError::Io(self.redact(&text)),

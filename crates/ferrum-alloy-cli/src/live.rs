@@ -36,19 +36,32 @@ const NOT_FOUND: &str =
 /// Longest time to set up the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Permission warning for a credential file, carrying both the path-bearing
+/// message and the structured path-free fallback for redaction marker
+/// collisions.
+pub(crate) struct PermissionWarning {
+    pub(crate) with_path: String,
+    pub(crate) without_path: String,
+}
+
 /// The credential: read from `token_file` when given, otherwise from
 /// [`TOKEN_ENV`], with the permission warning of the file it read, if any.
 /// Errors never repeat it. The caller prints the warning only after it can
 /// redact the credential from it.
 pub(crate) fn token(
     token_file: Option<&Path>,
-) -> Result<(Option<String>, Option<String>), CliError> {
+) -> Result<(Option<String>, Option<PermissionWarning>), CliError> {
     let mut warning = None;
     let raw = match token_file {
         Some(path) => {
             let secret = ferrum_alloy::files::read_secret_file_bounded(path, MAX_TOKEN_FILE_BYTES)
                 .map_err(|e| invalid(path, e))?;
-            warning = secret.permission_warning;
+            warning = secret
+                .permission_warning
+                .map(|with_path| PermissionWarning {
+                    with_path,
+                    without_path: secret.permission_warning_without_path.unwrap_or_default(),
+                });
             std::str::from_utf8(&secret.bytes)
                 .map_err(|_| CliError::Invalid(format!("{} is not UTF-8", path.display())))?
                 .to_owned()

@@ -126,7 +126,10 @@ pub(crate) fn run(args: DiagnoseArgs) -> Result<ExitCode, CliError> {
     // The warning names the credential file's path, so it is printed only
     // once the credential it holds can be redacted from it.
     if let Some(warning) = warning {
-        crate::eprint(&format!("warning: {}\n", redactor.redact(&warning)));
+        let message = redactor.redact_with_fallback(&warning.with_path, &warning.without_path);
+        if !message.is_empty() {
+            crate::eprint(&format!("warning: {message}\n"));
+        }
     }
     run_redacted(args, &redactor, service_token).map_err(|error| redactor.redact_error(error))
 }
